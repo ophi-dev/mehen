@@ -30,10 +30,13 @@ mehen-metrics = { workspace = true }
 # `bindgen 0.72` unconditionally and compiles vendored Prism C via
 # `cc`, so every release target needs `libclang` and a C toolchain
 # at build time. Linux/macOS GitHub-hosted runners have these
-# preinstalled; Windows runners need `LIBCLANG_PATH` (e.g.
-# `choco install llvm`); musl builds need `clang-dev`. The release
-# binary path means end users do not need any of this — only people
-# building `mehen` from source.
+# preinstalled, but the manylinux2014 (CentOS 7, yum) and
+# musllinux/`rust-musl-cross` (Debian, apt) containers that
+# `PyO3/maturin-action` uses to build wheels do NOT — release.yml
+# installs `clang-devel` / `libclang-dev` via `before-script-linux`.
+# Windows runners need `LIBCLANG_PATH` (e.g. `choco install llvm`).
+# The release binary path means end users do not need any of this —
+# only people building `mehen` from source.
 ruby-prism = "=1.9.0"
 smol_str = { workspace = true }
 

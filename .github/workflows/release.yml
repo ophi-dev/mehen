@@ -257,6 +257,20 @@ jobs:
           manylinux: auto
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           target: ${{ matrix.platform.rust_target }}
+          # `ruby-prism-sys` invokes `bindgen` at build time, which
+          # requires `libclang` at runtime. The manylinux2014 image
+          # (CentOS 7, yum) and the musllinux/`rust-musl-cross` image
+          # (Debian, apt) used by maturin do not ship it.
+          before-script-linux: |
+            if command -v yum >/dev/null 2>&1; then
+              yum install -y clang-devel
+            elif command -v apt-get >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y --no-install-recommends libclang-dev
+            else
+              echo "::error::No supported package manager found in build container"
+              exit 1
+            fi
 
       - name: Build npm binary
         shell: bash
