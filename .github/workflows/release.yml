@@ -254,16 +254,21 @@ jobs:
         with:
           command: build
           args: --release --out dist
-          manylinux: auto
+          # `manylinux: auto` selects manylinux2014 (CentOS 7), whose
+          # newest clang is 3.4.2 — far below the 9.0+ that
+          # `ruby-prism-sys` → `bindgen 0.72` requires. `2_28` is the
+          # current PyPA recommendation (AlmaLinux 8, glibc 2.28); pip
+          # ≥ 20.3 installs these wheels by default.
+          manylinux: 2_28
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           target: ${{ matrix.platform.rust_target }}
           # `ruby-prism-sys` invokes `bindgen` at build time, which
-          # requires `libclang` at runtime. The manylinux2014 image
-          # (CentOS 7, yum) and the musllinux/`rust-musl-cross` image
-          # (Debian, apt) used by maturin do not ship it.
+          # requires `libclang` at runtime. Neither manylinux_2_28
+          # (AlmaLinux 8, dnf) nor the musllinux/`rust-musl-cross`
+          # image (Debian, apt) ship it preinstalled.
           before-script-linux: |
-            if command -v yum >/dev/null 2>&1; then
-              yum install -y clang-devel
+            if command -v dnf >/dev/null 2>&1; then
+              dnf install -y clang-devel
             elif command -v apt-get >/dev/null 2>&1; then
               apt-get update
               apt-get install -y --no-install-recommends libclang-dev
