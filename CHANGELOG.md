@@ -1,5 +1,72 @@
 # Changelog
 
+## [1.0.0](https://github.com/ophi-dev/mehen/compare/v1.0.0...v1.0.0) (2026-06-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **metrics:** close class-metric gaps, remove --ops/--comments ([#65](https://github.com/ophi-dev/mehen/issues/65))
+* **diff:** `mehen diff --metrics mi` (and the action's `metrics:` / `thresholds:` keys referencing `mi`, `maintainability`, or `maintainabilityindex`) no longer resolve — pick an explicit variant (`mi.original`, `mi.sei`, `mi.visual_studio`). Users relying on the default automatically get `mi.visual_studio` now.
+
+### Features
+
+* **action:** retitle comment, add ABC default, auto-exclude tests ([#60](https://github.com/ophi-dev/mehen/issues/60)) ([67225e1](https://github.com/ophi-dev/mehen/commit/67225e1b8eaefae9a46f4d686daf2c0075998b29))
+* add `mehen diff` subcommand ([#24](https://github.com/ophi-dev/mehen/issues/24)) ([abcbd57](https://github.com/ophi-dev/mehen/commit/abcbd5777d4326429503e47f407aeef4127cd095))
+* add reusable mehen metrics action ([#55](https://github.com/ophi-dev/mehen/issues/55)) ([b30c91a](https://github.com/ophi-dev/mehen/commit/b30c91aa184a6d04c8e8e707c0a59ff26cfd67e3))
+* add Ruby language support ([#57](https://github.com/ophi-dev/mehen/issues/57)) ([a88bb87](https://github.com/ophi-dev/mehen/commit/a88bb8753859bacb704e0b46068d69197d6c6ed1))
+* align Go metrics with language semantics ([#59](https://github.com/ophi-dev/mehen/issues/59)) ([427393e](https://github.com/ophi-dev/mehen/commit/427393ed2535cff530cd1ef7068f66f64686a54e))
+* **cli:** add --version --json and surface version in action footer ([#77](https://github.com/ophi-dev/mehen/issues/77)) ([a233b3f](https://github.com/ophi-dev/mehen/commit/a233b3f5abf49a65aaf0b464c34ecade28528825))
+* **cli:** add top-offenders subcommand ([#71](https://github.com/ophi-dev/mehen/issues/71)) ([00e4bf0](https://github.com/ophi-dev/mehen/commit/00e4bf00ab254094c5b5e0a23cff23029b8fd05e))
+* **diff:** add Markdown Documentation Metrics section to PR comment (§39) ([#89](https://github.com/ophi-dev/mehen/issues/89)) ([2742bc4](https://github.com/ophi-dev/mehen/commit/2742bc4ffc7d48e0a964c1d699552469652f3451))
+* **diff:** split mi into mi.original/mi.sei/mi.visual_studio, default to Visual Studio ([#64](https://github.com/ophi-dev/mehen/issues/64)) ([7c8e4bc](https://github.com/ophi-dev/mehen/commit/7c8e4bc9c7b75bd5ed483017d7b0a598e4be55bc))
+* **langs:** add C language support ([#80](https://github.com/ophi-dev/mehen/issues/80)) ([954bb9b](https://github.com/ophi-dev/mehen/commit/954bb9b7da8d16c0733dc7a48ad428b67f16c655))
+* **langs:** route JavaScript/JSX through TypeScript/TSX grammars ([#79](https://github.com/ophi-dev/mehen/issues/79)) ([229f37d](https://github.com/ophi-dev/mehen/commit/229f37d0ae732025ddeb17ceeb21c6478c037356))
+* **markdown:** add EN+JA prose metric layer (Tier 0, §§29-38) ([#85](https://github.com/ophi-dev/mehen/issues/85)) ([3108e26](https://github.com/ophi-dev/mehen/commit/3108e266cbc3a61470ca6df94214e8b2fd9eb2a7))
+* **markdown:** add grounding, evidence, filler risk, RCI, section balance, good scaffold (§§15–21) ([#87](https://github.com/ophi-dev/mehen/issues/87)) ([6fba906](https://github.com/ophi-dev/mehen/commit/6fba9063cebbff4323548086aaee9d24cce1bb01))
+* **markdown:** add link debt, visual scaffold, table burden, and artifact debt (§§11–14, §19) ([#84](https://github.com/ophi-dev/mehen/issues/84)) ([8e86186](https://github.com/ophi-dev/mehen/commit/8e861861ee50b077dc35278ea9815b71b9f431cb))
+* **markdown:** add MRPC, MCC, Markdown Halstead, and DMI core (§§7–10) ([#83](https://github.com/ophi-dev/mehen/issues/83)) ([9e6eef0](https://github.com/ophi-dev/mehen/commit/9e6eef0a51468a80e5337fa60d73cf11a810c4d6))
+* **metrics:** add Kotlin language support ([#66](https://github.com/ophi-dev/mehen/issues/66)) ([f543cef](https://github.com/ophi-dev/mehen/commit/f543cefa1cb0afd1a01a2c7d3a2a07f04f565990))
+* **metrics:** add PowerShell language support ([#69](https://github.com/ophi-dev/mehen/issues/69)) ([47b17ac](https://github.com/ophi-dev/mehen/commit/47b17ac4494c9687937b57460be0cda8a1db749e))
+* **metrics:** close class-metric gaps, remove --ops/--comments ([#65](https://github.com/ophi-dev/mehen/issues/65)) ([cee0526](https://github.com/ophi-dev/mehen/commit/cee0526b59dc1c46258edae8e8f654749830a727))
+* **metrics:** gate wmc/npa/npm by language applicability ([#61](https://github.com/ophi-dev/mehen/issues/61)) ([e4c7cc9](https://github.com/ophi-dev/mehen/commit/e4c7cc959f0ef1f0c1a2878ad4965bd1c674b8c3))
+* **php:** add PHP language support ([3cddaf2](https://github.com/ophi-dev/mehen/commit/3cddaf227f7bc674829b5a10145b2de3b72502fd))
+* support cargo binstall via GitHub Release archives ([#122](https://github.com/ophi-dev/mehen/issues/122)) ([5f6ff3a](https://github.com/ophi-dev/mehen/commit/5f6ff3a3694dec2711d5886cc0aa3d46a24554ae))
+
+
+### Bug Fixes
+
+* address PR review comment ([62a7b95](https://github.com/ophi-dev/mehen/commit/62a7b9582fc1ee4cd6bef72823ba03d7d3c29761))
+* address PR review comment ([4af0199](https://github.com/ophi-dev/mehen/commit/4af0199ae644200c0fa5623016ad959c84ba1bd1))
+* address PR review comment ([e74731a](https://github.com/ophi-dev/mehen/commit/e74731a885eb672eebc00c97eb82a12995db1cc5))
+* address PR review comment ([a9d5571](https://github.com/ophi-dev/mehen/commit/a9d5571482a86191ffa3706ba02b4bec6cb5289c))
+* address PR review comment ([3dbcfb4](https://github.com/ophi-dev/mehen/commit/3dbcfb48e27a14fd020bdec3f3374886bb93d9a4))
+* address PR review comment ([ba68728](https://github.com/ophi-dev/mehen/commit/ba68728fecd66b786372a6aa2922f24d73ad6d19))
+* address PR review comment ([1b764e7](https://github.com/ophi-dev/mehen/commit/1b764e73824a16da7d1a333e123bb606d5de4632))
+* address PR review comment ([4a6eca8](https://github.com/ophi-dev/mehen/commit/4a6eca8914e971c54dfa82d146f8b3eff837aa63))
+* address PR review comments ([12eb0d5](https://github.com/ophi-dev/mehen/commit/12eb0d54c9b6db022858f48201d6fd453296bef2))
+* address PR review comments ([f9b0ee3](https://github.com/ophi-dev/mehen/commit/f9b0ee39e94e3624267d943b814a93d3affc9029))
+* check PR author instead of event actor in regeneration workflow ([62c82e4](https://github.com/ophi-dev/mehen/commit/62c82e45ee5cea86ae0e460d42ea0b3f4f990aa8))
+* **ci:** bump wheel build to manylinux_2_28 for modern libclang ([c5040d2](https://github.com/ophi-dev/mehen/commit/c5040d26a8be9b9604c0e270d62134f8ab13880c))
+* **ci:** install libclang in maturin wheel build container ([9645c9f](https://github.com/ophi-dev/mehen/commit/9645c9fa99f9b2f596be0918440e4d4ba5999dfe))
+* **ci:** remove broken npm@11 global install from static-analysis ([#48](https://github.com/ophi-dev/mehen/issues/48)) ([7f4cae8](https://github.com/ophi-dev/mehen/commit/7f4cae81b1f018de380d0f98419398489a894e1f))
+* handle unmapped Unicode chars in enum generator ([#15](https://github.com/ophi-dev/mehen/issues/15)) ([c972b1d](https://github.com/ophi-dev/mehen/commit/c972b1d451b0cf3bfc3df372213ded864034a056))
+* **metrics:** align cyclomatic and cognitive with language semantics ([#63](https://github.com/ophi-dev/mehen/issues/63)) ([e3f436d](https://github.com/ophi-dev/mehen/commit/e3f436d70794ea71d51d415189c723de7f7ab78f))
+* **npm:** restore +x on platform binaries and surface spawn errors ([#75](https://github.com/ophi-dev/mehen/issues/75)) ([b5f6104](https://github.com/ophi-dev/mehen/commit/b5f610476db964e999427c797bab4cd04ce9b43c))
+* Rust metric edge cases ([#73](https://github.com/ophi-dev/mehen/issues/73)) ([63238d2](https://github.com/ophi-dev/mehen/commit/63238d2729788ee9d7318a3af0ce53973233f1f5))
+* trigger on Cargo.lock ([24e216e](https://github.com/ophi-dev/mehen/commit/24e216e0571ab8fff247009ef4fa9d6b67c1c432))
+* update README.md ([87ea2b1](https://github.com/ophi-dev/mehen/commit/87ea2b1685d7436bcf9818064047ccb46e4a060c))
+* update typos config ([8b8bc9b](https://github.com/ophi-dev/mehen/commit/8b8bc9b3cc485bad5be4696d13bae6f88a64ba4b))
+* use GitHub App token in release-please workflow ([#20](https://github.com/ophi-dev/mehen/issues/20)) ([8db91a5](https://github.com/ophi-dev/mehen/commit/8db91a523d36fe949a4ff32e5e650c4a8fae7a09))
+
+
+### Miscellaneous Chores
+
+* release 0.1.1 ([8f32dba](https://github.com/ophi-dev/mehen/commit/8f32dba7a28775b7cf7f71e2f8c9e1d5fd5dc647))
+* release 0.3.0 ([7041e4c](https://github.com/ophi-dev/mehen/commit/7041e4cfdcd33a7e44bbe82d338c1f9f1016b362))
+* release 0.4.0 ([8b7a4d3](https://github.com/ophi-dev/mehen/commit/8b7a4d3ec847aa5d003aa5513aa6e893b6ab3851))
+* release 0.5.0 ([e0befc2](https://github.com/ophi-dev/mehen/commit/e0befc2e743a3be82f4eca7930146302d7d573d3))
+* release 1.0.0 ([285b16a](https://github.com/ophi-dev/mehen/commit/285b16aff747298d1ff3e3085fc2b949850f7ecb))
+
 ## [1.0.0](https://github.com/ophidiarium/mehen/compare/v0.7.0...v1.0.0) (2026-06-01)
 
 
