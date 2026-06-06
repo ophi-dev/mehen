@@ -23,7 +23,7 @@ num-traits = { workspace = true }
 # (sentence segmentation, script detection, identifier matching).
 regex = "^1.7"
 unicode-script = "^0.5"
-unicode-segmentation = "^1.12"
+unicode-segmentation = "^1.13"
 serde = { workspace = true }
 # `pulldown-cmark` is the Markdown parser backend. Default features are
 # disabled because the analyzer consumes parser events and byte offsets
