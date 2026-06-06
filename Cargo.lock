@@ -1821,9 +1821,9 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "mago-database"
-version = "1.29.0"
+version = "1.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "158a76ec7e5dd1ef1d17713ba65a3c295a7a8039cbe693b9eac72888d528c5da"
+checksum = "37272cb48a1cb50018b6587600817acff61d6b300b80d2b488c4d8d05c2036e2"
 dependencies = [
  "foldhash 0.2.0",
  "glob",
@@ -1832,7 +1832,6 @@ dependencies = [
  "notify",
  "rayon",
  "serde",
- "simdutf8",
  "tracing",
  "walkdir",
 ]
@@ -1872,9 +1871,9 @@ dependencies = [
 
 [[package]]
 name = "mago-span"
-version = "1.29.0"
+version = "1.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5c60dc85a6a26d3d66090774a40a47fb120c1c4c715f46acd7115a9939e5f56"
+checksum = "4aa372bc64400995cb0de2d90fa776a06d260e91cfd5801f8a2c46c572883673"
 dependencies = [
  "mago-database",
  "serde",
@@ -1901,9 +1900,9 @@ dependencies = [
 
 [[package]]
 name = "mago-syntax-core"
-version = "1.28.0"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c3386cb0dc12f22d0cba711546a4aa2db599267f7cb4633e1a741a2262463ca"
+checksum = "f40955657014793afd27b3dd3411b8cf8bd5c43ae9c14f689ed2be49a542b04b"
 dependencies = [
  "bumpalo",
  "mago-database",
@@ -3463,12 +3462,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "simdutf8"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "similar"
