@@ -1881,9 +1881,9 @@ dependencies = [
 
 [[package]]
 name = "mago-syntax"
-version = "1.28.0"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da026f94feacd573d70441ef39b3b32214840badb7894bfe9dcbbf677627626b"
+checksum = "266987ea49906ddacc4d06d61bc8c6dd78a8971d8ee969e8f51bd02691b09a28"
 dependencies = [
  "bumpalo",
  "mago-database",
@@ -1900,9 +1900,9 @@ dependencies = [
 
 [[package]]
 name = "mago-syntax-core"
-version = "1.29.0"
+version = "1.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f40955657014793afd27b3dd3411b8cf8bd5c43ae9c14f689ed2be49a542b04b"
+checksum = "79bddca61fe1416ade81704267e50530e74bfed453006cd4a61c0b1be6357d58"
 dependencies = [
  "bumpalo",
  "mago-database",
