@@ -12,7 +12,6 @@
     },
     "permissions": {
         "allow": [
-            "mcp__*",
             "Bash(gsed:*)",
             "Bash(git:*)",
             "Bash(git add:*)",
