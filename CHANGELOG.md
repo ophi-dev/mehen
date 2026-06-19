@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/ophi-dev/mehen/compare/v1.0.0...v1.0.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* **release:** repair PyPI license metadata and npm provenance repo URL ([da10411](https://github.com/ophi-dev/mehen/commit/da1041131c8a12e9c7701b7c24bc207b8057a758))
+
 ## [1.0.0](https://github.com/ophi-dev/mehen/compare/v1.0.0...v1.0.0) (2026-06-01)
 
 
