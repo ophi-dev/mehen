@@ -15,12 +15,12 @@
   "navbar": {
     "primary": {
       "type": "github",
-      "href": "https://github.com/ophidiarium/mehen"
+      "href": "https://github.com/ophi-dev/mehen"
     }
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/ophidiarium/mehen"
+      "github": "https://github.com/ophi-dev/mehen"
     }
   },
   "navigation": {

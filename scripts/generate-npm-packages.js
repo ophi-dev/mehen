@@ -148,7 +148,7 @@ This package contains the Mehen binary for ${nodeOs}-${nodeArch}.
 
 This package is automatically installed as an optional dependency when you install the main \`mehen\` package.
 
-For more information, visit: https://github.com/ophidiarium/mehen
+For more information, visit: https://github.com/ophi-dev/mehen
 `;
 
     fs.writeFileSync(path.join(pkgDir, 'README.md'), readmeContent);

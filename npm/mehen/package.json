@@ -16,10 +16,10 @@
   "homepage": "https://mehen.ophi.dev",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ophidiarium/mehen.git"
+    "url": "https://github.com/ophi-dev/mehen.git"
   },
   "bugs": {
-    "url": "https://github.com/ophidiarium/mehen/issues"
+    "url": "https://github.com/ophi-dev/mehen/issues"
   },
   "license": "AGPL-3.0-only",
   "author": {

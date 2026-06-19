@@ -17,7 +17,7 @@ publish = false
 
 # `cargo binstall` configuration. The crate is `publish = false`, so
 # users install via the `--git` form: `cargo binstall --git
-# https://github.com/ophidiarium/mehen mehen`. binstall reads this
+# https://github.com/ophi-dev/mehen mehen`. binstall reads this
 # metadata from the manifest at the resolved git ref and downloads
 # the matching pre-built archive from the GitHub Release.
 #

@@ -7,14 +7,14 @@ name = "mehen"
 dynamic = ["version"]
 description = "Tool to compute and export code metrics"
 authors = [{ name = "Konstantin Vyatkin", email = "tino@vtkn.io" }]
-license = { file = "LICENSE" }
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "LICENSE-THIRD-PARTY"]
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = []
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -26,10 +26,10 @@ classifiers = [
 keywords = ["metrics", "code-analysis", "complexity", "cyclomatic", "halstead"]
 
 [project.urls]
-Homepage      = "https://github.com/ophidiarium/mehen"
-Repository    = "https://github.com/ophidiarium/mehen"
+Homepage      = "https://github.com/ophi-dev/mehen"
+Repository    = "https://github.com/ophi-dev/mehen"
 Documentation = "https://mehen.ophi.dev"
-Issues        = "https://github.com/ophidiarium/mehen/issues"
+Issues        = "https://github.com/ophi-dev/mehen/issues"
 
 [tool.maturin]
 bindings      = "bin"

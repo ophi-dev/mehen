@@ -36,7 +36,7 @@ uv tool install mehen
 # or: pip install mehen
 
 # cargo binstall
-cargo binstall --git https://github.com/ophidiarium/mehen mehen
+cargo binstall --git https://github.com/ophi-dev/mehen mehen
 ```
 
 Full installation guide: <https://mehen.ophi.dev/installation>.
@@ -70,7 +70,7 @@ steps:
   - uses: actions/checkout@v6
     with:
       fetch-depth: 0
-  - uses: ophidiarium/mehen@v0
+  - uses: ophi-dev/mehen@v0
     with:
       paths: src
 ```
@@ -93,7 +93,7 @@ Everything else lives in the docs site:
 
 ## Contributing
 
-Issues and pull requests welcome at <https://github.com/ophidiarium/mehen/issues>.
+Issues and pull requests welcome at <https://github.com/ophi-dev/mehen/issues>.
 
 ## License
 

@@ -131,7 +131,7 @@ function main() {
         } else {
           console.error(`Error: mehen binary at ${binPath} is not executable.`);
           console.error('This is likely a packaging bug — please report it at:');
-          console.error('  https://github.com/ophidiarium/mehen/issues');
+          console.error('  https://github.com/ophi-dev/mehen/issues');
           console.error('');
           console.error(`Workaround: chmod +x "${binPath}"`);
         }

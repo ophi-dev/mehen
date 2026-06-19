@@ -945,7 +945,7 @@ fn print_markdown(
     // Source-code anchor (§39.1: sibling of the docs anchor).
     out.push_str("<!-- mehen-metrics -->\n");
     out.push_str(&format!(
-        "## [Mehen](https://github.com/ophidiarium/mehen) Summary (`{from}`..`{to}`)\n\n"
+        "## [Mehen](https://github.com/ophi-dev/mehen) Summary (`{from}`..`{to}`)\n\n"
     ));
 
     if diffs.is_empty() {

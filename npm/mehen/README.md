@@ -72,7 +72,7 @@ steps:
   - uses: actions/checkout@v6
     with:
       fetch-depth: 0
-  - uses: ophidiarium/mehen@v0
+  - uses: ophi-dev/mehen@v0
     with:
       paths: src
       thresholds: |
@@ -100,8 +100,8 @@ Requires Node.js >= 18.
 ## Links
 
 - [Documentation](https://mehen.ophi.dev)
-- [GitHub](https://github.com/ophidiarium/mehen)
-- [Issues](https://github.com/ophidiarium/mehen/issues)
+- [GitHub](https://github.com/ophi-dev/mehen)
+- [Issues](https://github.com/ophi-dev/mehen/issues)
 - [PyPI package](https://pypi.org/project/mehen/)
 
 ## License

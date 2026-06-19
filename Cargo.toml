@@ -36,7 +36,7 @@ version = "1.0.0"
 authors = ["Konstantin Vyatkin <tino@vtkn.io>"]
 edition = "2024"
 rust-version = "1.95.0"
-repository = "https://github.com/ophidiarium/mehen"
+repository = "https://github.com/ophi-dev/mehen"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
