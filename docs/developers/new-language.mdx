@@ -25,7 +25,8 @@ is available.
 | Parser style | Examples in mehen | When to pick |
 |---|---|---|
 | Language-specific | Ruff (Python), Oxc (TS/JS), Mago (PHP), Prism (Ruby), `ra_ap_syntax` (Rust), pulldown-cmark (Markdown) | A maintained Rust crate with a typed AST, semantic model, or rich grammar coverage exists. |
-| Tree-sitter | Go, Kotlin, C, PowerShell | No mature language-specific parser is available, or tree-sitter's grammar quality is the best fit. |
+| ANTLR | Kotlin (official Kotlin spec grammar) | A high-quality, maintained ANTLR v4 grammar exists but no Rust-native parser does. Generated via [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime); the CST is far more semantically named than tree-sitter's. |
+| Tree-sitter | Go, C, PowerShell | No mature language-specific or ANTLR parser is available, or tree-sitter's grammar quality is the best fit. |
 
 ## Adding a language-specific parser
 
@@ -50,6 +51,62 @@ is available.
   <Step title="Add tests">
     Per-metric integration tests under `crates/mehen-<lang>/tests/` — typically one file per metric
     family, snapshotting the rendered metric JSON via `insta`.
+  </Step>
+</Steps>
+
+## Adding an ANTLR-backed language
+
+ANTLR is a first-class backend (`AnalysisBackend::Antlr`), used when a high-quality ANTLR v4
+grammar exists but no Rust-native parser does. The shared crate `mehen-antlr` provides the runtime
+re-export, char-index→byte-offset span conversion, recovered-error diagnostics, and
+hidden-channel comment (CLOC) extraction. The Rust lexer/parser modules are generated **offline**
+from a vendored `.g4` grammar and checked in — a normal `cargo build` never needs Java or the
+ANTLR jar.
+
+<Steps>
+  <Step title="Vendor the grammar">
+    Copy the ANTLR `.g4` files (lexer, parser, and any `import`ed grammars like `UnicodeClasses`)
+    into `crates/mehen-<lang>/grammar/`. Record the upstream source, commit, and toolchain versions
+    in a `PROVENANCE.md` so regeneration is reproducible (see `crates/mehen-kotlin/grammar/`).
+  </Step>
+  <Step title="Register the codegen target">
+    Add an `AntlrTarget` to `xtask/src/antlr.rs::TARGETS` (slug, crate dir, grammar dir, lexer/parser
+    filenames).
+  </Step>
+  <Step title="Generate the parser modules">
+    ```bash
+    export MEHEN_ANTLR_JAR=/path/to/antlr-4.13.2-complete.jar
+    cargo install antlr-rust-runtime   # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN)
+    cargo xtask antlr generate <lang>
+    ```
+
+    The result lands in `crates/mehen-<lang>/src/generated/`. Wrap it in a
+    `#[rustfmt::skip] #[allow(warnings)] mod generated { … }` — ANTLR's deeply-nested output is not
+    rustfmt-stable, so it must not be formatted.
+
+    <Warning>
+    Never edit the generated modules. `cargo xtask antlr check-generated` guards drift in CI when the
+    toolchain is available (it skips, exit 0, where the tools are absent).
+    </Warning>
+  </Step>
+  <Step title="Add the runtime dependency">
+    Depend on `mehen-antlr` (the shared helpers) **and** `antlr4_runtime` (the generated modules
+    reference the runtime by its real crate name). Both reach the same workspace-pinned version, so
+    the pin stays in one place.
+  </Step>
+  <Step title="Implement the analyzer + walker">
+    Parse via the generated `<Lang>Lexer`/`<Lang>Parser`, then walk the `ParseTree` with your own
+    recursive `Visitor` (like `mehen-rust`/`mehen-ruby`). ANTLR rule contexts have **no parent
+    pointer**, so thread any parent-dependent context (e.g. else-if detection) top-down. Match
+    `rule_index()` against the generated `RULE_*` constants and terminal `token_type()` against the
+    token constants. Comments are on a hidden channel (absent from the tree) — recover CLOC from the
+    token stream via `mehen_antlr::comment_rows`.
+  </Step>
+  <Step title="Register the analyzer">
+    Same as the other backends: register in `crates/mehen-engine/src/registry.rs`.
+  </Step>
+  <Step title="Add tests">
+    Per-metric integration tests under `crates/mehen-<lang>/tests/`.
   </Step>
 </Steps>
 

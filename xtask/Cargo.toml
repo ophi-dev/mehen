@@ -21,12 +21,13 @@ tree-sitter = { workspace = true }
 # crate's `__grammar_language()` accessor (see
 # `xtask/src/tree_sitter.rs::TARGETS`). The analyzer's grammar pin is
 # the single source of truth, so xtask deliberately does NOT depend on
-# `tree-sitter-c`, `tree-sitter-go`, or `tree-sitter-kotlin` directly
-# — that keeps the codegen and
-# the runtime parser locked to the same revision by construction.
+# `tree-sitter-c` or `tree-sitter-go` directly — that keeps the codegen
+# and the runtime parser locked to the same revision by construction.
+# Kotlin is ANTLR-backed (`xtask antlr generate kotlin`), which shells
+# out to external tools rather than linking a grammar crate, so it needs
+# no dependency here.
 mehen-c = { workspace = true }
 mehen-go = { workspace = true }
-mehen-kotlin = { workspace = true }
 
 [lints]
 workspace = true

@@ -12,30 +12,27 @@ publish = false
 [dependencies]
 mehen-core = { workspace = true }
 mehen-metrics = { workspace = true }
-mehen-tree-sitter = { workspace = true }
-num = { workspace = true }
-num-derive = { workspace = true }
-# Required transitively by `num_derive::FromPrimitive` in `grammar.rs`
-# — the derive expansion references `num_traits::FromPrimitive` by
-# absolute path. Keep as a direct dependency and silence cargo-machete.
-num-traits = { workspace = true }
+# Kotlin is parsed by a parser generated from the official Kotlin spec
+# ANTLR grammar (vendored in `grammar/`) running on the ANTLR Rust runtime.
+# The runtime is reached through `mehen-antlr`, which owns the version pin
+# and the shared span/comment/diagnostic helpers, so this crate never
+# depends on `antlr4_runtime` directly. The generated parser/lexer modules
+# live in `src/generated/` and are produced by
+# `cargo xtask antlr generate kotlin`.
+mehen-antlr = { workspace = true }
+# The generated lexer/parser modules in `src/generated/` reference the
+# runtime by its real crate name (`use antlr4_runtime::…`), so the runtime
+# must be a direct dependency here in addition to being re-exported by
+# `mehen-antlr`. The version is still pinned in exactly one place — the
+# workspace `[workspace.dependencies]` `antlr4_runtime` entry — so there is
+# no risk of `mehen-kotlin` and `mehen-antlr` linking different revisions.
+antlr4_runtime = { workspace = true }
 smol_str = { workspace = true }
-tree-sitter = { workspace = true }
-# `tree-sitter-kotlin` is pinned here (not in `[workspace.dependencies]`)
-# because `mehen-kotlin` is the sole consumer. The crate is published
-# under the `tree-sitter-kotlin-sg` package name. xtask reaches the
-# grammar through `__grammar_language()` exported from this crate, so
-# the kind-enum generator and the analyzer parser are guaranteed to
-# link the same revision.
-tree-sitter-kotlin = { package = "tree-sitter-kotlin-sg", version = "=0.4.0" }
 
 [dev-dependencies]
 insta = { workspace = true }
 mehen-report = { workspace = true }
 serde_json = { workspace = true }
-
-[package.metadata.cargo-machete]
-ignored = ["num-traits"]
 
 [lints]
 workspace = true

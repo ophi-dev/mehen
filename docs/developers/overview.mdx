@@ -9,8 +9,11 @@ This section documents how to build mehen, run its tests, and contribute changes
 ## Prerequisites
 
 - A recent stable Rust toolchain. See [rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
-- For tree-sitter grammar regeneration (Go / Kotlin / C / PowerShell): a Linux or macOS shell, or
+- For tree-sitter grammar regeneration (Go / C / PowerShell): a Linux or macOS shell, or
   Windows via WSL.
+- For ANTLR grammar regeneration (Kotlin): a Java runtime, an `antlr-4.13.2-complete.jar`, and the
+  `antlr4-rust-gen` generator (`cargo install antlr-rust-runtime`). Only needed to *regenerate*
+  parsers — a normal build uses the checked-in modules and needs none of these.
 
 ## Clone
 
@@ -78,9 +81,11 @@ failures.
 | `crates/mehen-php` | PHP analyzer (Mago). |
 | `crates/mehen-ruby` | Ruby analyzer (Prism). |
 | `crates/mehen-rust` | Rust analyzer (`ra_ap_syntax`). |
-| `crates/mehen-go`, `mehen-kotlin`, `mehen-c`, `mehen-powershell` | Tree-sitter-backed analyzers. |
+| `crates/mehen-kotlin` | Kotlin analyzer (ANTLR — official Kotlin spec grammar). |
+| `crates/mehen-go`, `mehen-c`, `mehen-powershell` | Tree-sitter-backed analyzers. |
 | `crates/mehen-markdown` | Markdown analyzer (pulldown-cmark) with embedded-code dispatch via `LanguageDispatcher`. |
 | `crates/mehen-tree-sitter` | Shared tree-sitter wrapper and CST traversal helpers. |
+| `crates/mehen-antlr` | Shared ANTLR-runtime support (span conversion, diagnostics, comment LOC) for ANTLR-backed analyzers. |
 | `crates/mehen-git` | Git operations. |
 | `crates/mehen-report` | JSON, YAML, TOML, and GitHub-Markdown rendering. |
 | `xtask` | Developer-only commands (kind-enum codegen, AST dumps, audits). |

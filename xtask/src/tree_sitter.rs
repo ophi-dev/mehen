@@ -14,8 +14,9 @@
 //! `tree-sitter-go = "=0.25.x"` in `crates/mehen-go/Cargo.toml`
 //! propagates to xtask through the `mehen-go` path dep, so kind
 //! ordinals always match the grammar the analyzer links at runtime.
-//! Markdown is no longer listed here because `mehen-markdown` is backed
-//! by pulldown-cmark rather than tree-sitter.
+//! Markdown is not listed here because `mehen-markdown` is backed by
+//! pulldown-cmark; Kotlin is not listed because it moved to an ANTLR
+//! grammar (`xtask antlr generate kotlin`).
 //!
 //! The generator itself is a small askama template (see
 //! `xtask/templates/grammar.rs`); the heavy lifting is the kind-name
@@ -61,12 +62,8 @@ pub(crate) const TARGETS: &[GeneratorTarget] = &[
         crate_dir: "crates/mehen-go/src",
         language: mehen_go::__grammar_language,
     },
-    GeneratorTarget {
-        slug: "kotlin",
-        enum_name: "Kotlin",
-        crate_dir: "crates/mehen-kotlin/src",
-        language: mehen_kotlin::__grammar_language,
-    },
+    // Kotlin is no longer tree-sitter-backed — it moved to an ANTLR
+    // grammar (see `xtask antlr generate kotlin` and `crates/mehen-kotlin`).
 ];
 
 /// Resolve a generator target by slug. Returns `None` for unknown slugs;
@@ -399,7 +396,9 @@ mod tests {
     fn target_for_known_slugs() {
         assert!(target_for("c").is_some());
         assert!(target_for("go").is_some());
-        assert!(target_for("kotlin").is_some());
+        // Kotlin moved to the ANTLR backend; it's no longer a tree-sitter
+        // generator target.
+        assert!(target_for("kotlin").is_none());
         assert!(target_for("markdown").is_none());
         assert!(target_for("nonexistent").is_none());
     }

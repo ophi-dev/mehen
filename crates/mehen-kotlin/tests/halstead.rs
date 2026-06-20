@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Konstantin Vyatkin <tino@vtkn.io>
 
-//! Halstead tests for the tree-sitter-kotlin walker.
+//! Halstead tests for the ANTLR Kotlin walker.
+//!
+//! The ANTLR backend tokenizes Kotlin more completely than the former
+//! tree-sitter walker: every lexical token is classified, so closing
+//! delimiters (`)`, `}`) count as distinct Halstead operators alongside
+//! their opening forms. Operand counts are unchanged. These snapshots
+//! reflect the richer (and more classically Halstead-complete) operator
+//! vocabulary — an intentional improvement over the tree-sitter numbers,
+//! per the ANTLR migration's "improve where the grammar allows" policy.
 
 use mehen_core::{AnalysisConfig, Language, LanguageAnalyzer, SourceFile};
 use mehen_kotlin::KotlinAnalyzer;
@@ -15,13 +23,16 @@ fn analyze(source: &str) -> mehen_core::LanguageAnalysis {
 }
 
 /// Regression: `get`/`set` accessor keywords must be Halstead operators
-/// and `field` must be an operand. Mirrors legacy
-/// `getter.rs::kotlin_accessor_tokens_are_classified_for_halstead` —
-/// that test reached into the private `KotlinCode::get_op_type` table;
-/// the walker's `halstead_op_type` is also private, so we lock the
-/// assertion to the per-property accessor's full Halstead snapshot.
-/// A regression that drops `get`/`set` from the operator table or
-/// `field` from the operand table would visibly shift these counts.
+/// and `field` must be an operand. The ANTLR walker classifies a token
+/// reached via the `simpleIdentifier` rule as an operand, so Kotlin soft
+/// keywords used as names (`value`, `field`) count as operands while the
+/// `get`/`set` accessor keywords (reached via the `getter`/`setter` rules)
+/// stay operators.
+///
+/// Operands (distinct by text): `C`, `x`, `Int`, `0`, `field`, `value` = 6.
+/// Operators (distinct token types): `class`, `{`, `}`, `var`, `:`, `=`,
+/// `get`, `(`, `)`, `set` = 10. (The ANTLR lexer counts both opening and
+/// closing delimiters, unlike the former tree-sitter walker.)
 #[test]
 fn kotlin_accessor_tokens_contribute_to_halstead() {
     let a = analyze(
@@ -32,12 +43,9 @@ fn kotlin_accessor_tokens_contribute_to_halstead() {
          }",
     );
     let h = mehen_report::metrics_json::halstead(&a.root.metrics);
-    // Operators in this fragment: `class`, `var`, `=`, `get`, `set`,
-    // `(`, `{`, `.` (none here) — distinct keyword/punctuation kinds.
-    // Operands: `C`, `x`, `Int`, `0`, `value`, `field`.
-    assert_eq!(h.n1, 8.0, "distinct operators (class/var/=/get/set/(/{{/:)");
-    assert_eq!(h.big_n1, 12.0);
-    assert_eq!(h.n2, 6.0, "distinct operands (C/x/Int/0/value/field)");
+    assert_eq!(h.n1, 10.0, "distinct operators");
+    assert_eq!(h.big_n1, 16.0);
+    assert_eq!(h.n2, 6.0, "distinct operands (C/x/Int/0/field/value)");
     assert_eq!(h.big_n2, 8.0);
 }
 
@@ -65,14 +73,14 @@ fn kotlin_operators_and_operands() {
         },
         @r###"
     {
-      "n1": 7.0,
-      "N1": 9.0,
+      "n1": 9.0,
+      "N1": 11.0,
       "n2": 4.0,
       "N2": 8.0,
-      "length": 17.0,
+      "length": 19.0,
       "estimated_program_length": "[masked]",
       "purity_ratio": "[masked]",
-      "vocabulary": 11.0,
+      "vocabulary": 13.0,
       "volume": "[masked]",
       "difficulty": "[masked]",
       "level": "[masked]",

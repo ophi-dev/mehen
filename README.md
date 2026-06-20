@@ -19,7 +19,8 @@ complexity.
 - **Polyglot by design** — per-file language detection across nine source languages plus Markdown.
   Useful for monorepos.
 - **Real language parsers** — Ruff for Python, Oxc for TS/JS/JSX/TSX, Mago for PHP, Prism for Ruby,
-  `ra_ap_syntax` for Rust, pulldown-cmark for Markdown, tree-sitter for Go, C, Kotlin, PowerShell.
+  `ra_ap_syntax` for Rust, the official Kotlin spec ANTLR grammar for Kotlin, pulldown-cmark for
+  Markdown, tree-sitter for Go, C, PowerShell.
 - **Code and documentation in one tool** — source-code complexity *and* Markdown documentation health.
 - **Deterministic, no network** — pure static analysis. Same input → same output. Safe for air-gapped
   CI.

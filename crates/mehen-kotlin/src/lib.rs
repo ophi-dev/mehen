@@ -3,29 +3,54 @@
 
 //! `mehen-kotlin` — Kotlin language analyzer.
 //!
-//! Tree-sitter-kotlin walker that produces per-space metric output
-//! matching the pre-1.0 `legacy::metrics::*::compute for KotlinCode`
-//! arms. See [`walker`] for the metric coverage table.
+//! Kotlin is parsed by a parser generated from the **official Kotlin
+//! specification ANTLR grammar** (`Kotlin/kotlin-spec`, vendored in
+//! `grammar/`) running on the ANTLR Rust runtime via [`mehen_antlr`]. This
+//! replaces the earlier tree-sitter-kotlin backend; the ANTLR grammar is a
+//! richer, semantically-named CST (`whenEntry`, `elvisExpression`,
+//! `catchBlock`, `jumpExpression` with explicit `THROW`/`RETURN`/`CONTINUE`/
+//! `BREAK` alternatives, `safeNav`, …) that lets the metric walker ask
+//! direct structural questions instead of inferring them from anonymous
+//! punctuation and parent/sibling shape.
+//!
+//! The generated lexer/parser modules live in [`generated`]; they are
+//! produced by `cargo xtask antlr generate kotlin` and checked in verbatim
+//! (see `src/generated/README.md`). They are not hand-edited and are
+//! `#[rustfmt::skip]`-wrapped because ANTLR's deeply-nested output does not
+//! reach a rustfmt fixed point.
+//!
+//! Metric coverage follows the same SonarKotlin-aligned definitions the
+//! tree-sitter walker targeted (see [`walker`] for the per-metric table).
+//! Where the richer grammar makes a metric *more* correct than the
+//! tree-sitter approximation, the change is intentional and called out in
+//! the walker's docs.
 
 #![forbid(unsafe_code)]
 
-mod grammar;
 mod walker;
 
-use mehen_core::{
-    AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, ParseDiagnostic,
-    Result, SourceFile, SourceSpan, byte_offset_clamped,
-};
-use mehen_tree_sitter::{TreeSitterParser, collect_recovered_errors, empty_space};
-
-/// Tree-sitter `Language` accessor for `xtask tree-sitter generate`.
+/// ANTLR-generated Kotlin lexer and parser.
 ///
-/// Exposed so the kind-enum generator reaches the grammar through this
-/// crate instead of pinning `tree-sitter-kotlin` itself.
-#[doc(hidden)]
-pub fn __grammar_language() -> tree_sitter::Language {
-    tree_sitter_kotlin::LANGUAGE.into()
+/// `#[rustfmt::skip]` keeps `cargo fmt --all` from touching the generated
+/// modules (they are not rustfmt-stable); `#[allow(warnings)]` silences the
+/// lints the generator's machine output would otherwise trip. Regenerate
+/// with `cargo xtask antlr generate kotlin` — never hand-edit.
+#[rustfmt::skip]
+#[allow(warnings)]
+#[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
+mod generated {
+    pub mod kotlin_lexer;
+    pub mod kotlin_parser;
 }
+
+use mehen_antlr::runtime::{CommonTokenStream, InputStream};
+use mehen_core::{
+    AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
+    ParseDiagnostic, Result, SourceFile, SourceSpan, byte_offset_clamped,
+};
+
+use generated::kotlin_lexer::KotlinLexer;
+use generated::kotlin_parser::KotlinParser;
 
 pub struct KotlinAnalyzer;
 
@@ -47,48 +72,74 @@ impl LanguageAnalyzer for KotlinAnalyzer {
     }
 
     fn backend(&self) -> AnalysisBackend {
-        AnalysisBackend::TreeSitter
+        AnalysisBackend::Antlr
     }
 
     fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
-        let parser = match TreeSitterParser::new(
-            tree_sitter_kotlin::LANGUAGE.into(),
-            source.text.clone().into_bytes(),
-        ) {
-            Ok(p) => p,
-            Err(e) => {
+        let line_index = LineIndex::new(&source.text);
+
+        let lexer = KotlinLexer::new(InputStream::new(source.text.as_str()));
+        let token_stream = CommonTokenStream::new(lexer);
+        let tree = match KotlinParser::new(token_stream).kotlin_file() {
+            Ok(tree) => tree,
+            Err(err) => {
+                // A hard parse failure (the entry rule itself erroring) means
+                // we cannot produce any tree. Surface it as fatal and return
+                // an empty unit space, matching the other backends.
                 let span = SourceSpan {
                     start_byte: 0,
                     end_byte: byte_offset_clamped(source.text.len()),
                     start_line: 1,
-                    end_line: source.line_index.line_count(),
+                    end_line: line_index.line_count(),
                 };
                 return Ok(LanguageAnalysis {
                     language: Language::Kotlin,
-                    backend: AnalysisBackend::TreeSitter,
+                    backend: AnalysisBackend::Antlr,
                     diagnostics: vec![ParseDiagnostic::fatal(
                         "kotlin.parse_error",
-                        format!("tree-sitter-kotlin failed: {e}"),
+                        format!("kotlin ANTLR parse failed: {err}"),
                     )],
-                    root: empty_space(span),
+                    root: mehen_antlr::empty_space(span),
                     contributions: Vec::new(),
                 });
             }
         };
 
-        let root = walker::walk_program(parser.root(), parser.source(), &source.line_index);
-        // Tree-sitter recovers from syntax errors by inserting ERROR /
-        // missing nodes; surface them as `error` diagnostics so the
-        // metric output can't masquerade as clean (plan §9.3).
-        let diagnostics = collect_recovered_errors(parser.root(), "kotlin.syntax_error", 16);
+        // `KotlinParser::new` consumed the stream; recover the buffered
+        // tokens (including hidden-channel comments, which never appear in
+        // the parse tree) for CLOC. The parser fills the stream as it runs,
+        // so re-lexing here is the simplest way to get the full token list
+        // without threading the stream back out of the parser.
+        let comment_rows = collect_comment_rows(&source.text);
+
+        let root = walker::walk(&tree, &source.text, &line_index, &comment_rows);
+
+        // Recovered ANTLR error nodes are surfaced as `error` (not
+        // `warning`) so the diagnostic contract (plan §9.3) treats the
+        // analysis as incomplete: `mehen metrics` exits 1 and `mehen diff`
+        // records the file under `analysis_errors`.
+        let diagnostics = mehen_antlr::collect_errors(&tree, "kotlin.syntax_error", 16);
+
         Ok(LanguageAnalysis {
             language: Language::Kotlin,
-            backend: AnalysisBackend::TreeSitter,
+            backend: AnalysisBackend::Antlr,
             diagnostics,
             root,
             contributions: Vec::new(),
         })
     }
+}
+
+/// Re-lex `source` and return the row spans of every comment token
+/// (hidden-channel `LineComment` / `DelimitedComment`). Comments are absent
+/// from the parse tree, so CLOC comes from this token pass.
+fn collect_comment_rows(source: &str) -> Vec<mehen_antlr::CommentRows> {
+    use generated::kotlin_lexer::{DELIMITED_COMMENT, LINE_COMMENT};
+
+    let lexer = KotlinLexer::new(InputStream::new(source));
+    let mut stream = CommonTokenStream::new(lexer);
+    stream.fill();
+    mehen_antlr::comment_rows(stream.tokens(), &[LINE_COMMENT, DELIMITED_COMMENT])
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@
 //! - `audit-licenses` — Phase 11;
 //! - `update-ruff` — Phase 6.
 
+mod antlr;
 mod tree_sitter;
 
 use clap::{Parser, Subcommand};
@@ -27,6 +28,8 @@ struct Cli {
 enum Command {
     /// Tree-sitter generator commands.
     TreeSitter(TreeSitterArgs),
+    /// ANTLR → Rust parser generator commands.
+    Antlr(AntlrArgs),
     /// Dump a parsed AST for debugging.
     AstDump { path: String, language: String },
     /// Print metric contributions for a single file.
@@ -63,6 +66,33 @@ enum TreeSitterCommand {
     CheckGenerated,
 }
 
+#[derive(Debug, Parser)]
+struct AntlrArgs {
+    #[command(subcommand)]
+    command: AntlrCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AntlrCommand {
+    /// Regenerate the Rust lexer/parser modules for one ANTLR-backed
+    /// language into its `src/generated/` dir, or `--all` for every one.
+    ///
+    /// Requires the external toolchain (set `MEHEN_ANTLR_JAR`, install
+    /// `antlr4-rust-gen`, have Java on PATH). See `xtask/src/antlr.rs`.
+    Generate {
+        /// Language slug (e.g. `kotlin`). Required unless `--all` is set.
+        language: Option<String>,
+        /// Regenerate every checked-in ANTLR target.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Verify the checked-in generated modules match a fresh render from
+    /// the vendored grammar. Exits non-zero on drift. Skipped (exit 0)
+    /// when the external toolchain is unavailable, so CI only enforces
+    /// drift where the tools are installed.
+    CheckGenerated,
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -76,6 +106,20 @@ fn main() {
             TreeSitterCommand::CheckGenerated => {
                 if let Err(err) = run_check_generated() {
                     eprintln!("xtask tree-sitter check-generated: {err}");
+                    std::process::exit(1);
+                }
+            }
+        },
+        Command::Antlr(args) => match args.command {
+            AntlrCommand::Generate { language, all } => {
+                if let Err(err) = run_antlr_generate(language.as_deref(), all) {
+                    eprintln!("xtask antlr generate: {err}");
+                    std::process::exit(1);
+                }
+            }
+            AntlrCommand::CheckGenerated => {
+                if let Err(err) = run_antlr_check_generated() {
+                    eprintln!("xtask antlr check-generated: {err}");
                     std::process::exit(1);
                 }
             }
@@ -134,5 +178,62 @@ fn run_check_generated() -> Result<(), String> {
              Re-run `cargo xtask tree-sitter generate --all` and commit the result.",
             names.join(", ")
         ))
+    }
+}
+
+fn run_antlr_generate(language: Option<&str>, all: bool) -> Result<(), String> {
+    let workspace = antlr::workspace_root().map_err(|e| e.to_string())?;
+    let targets: Vec<_> = if all {
+        antlr::TARGETS.iter().collect()
+    } else {
+        let slug = language.ok_or_else(|| {
+            "specify a language slug or pass --all (e.g. `xtask antlr generate kotlin`)".to_string()
+        })?;
+        let target = antlr::target_for(slug).ok_or_else(|| {
+            let known = antlr::TARGETS
+                .iter()
+                .map(|t| t.slug)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("unknown language `{slug}`; known: {known}")
+        })?;
+        vec![target]
+    };
+
+    for target in targets {
+        let written = antlr::generate(&workspace, target)?;
+        for path in written {
+            let rel = path
+                .strip_prefix(&workspace)
+                .unwrap_or(path.as_path())
+                .display();
+            println!("wrote {rel}");
+        }
+    }
+    Ok(())
+}
+
+fn run_antlr_check_generated() -> Result<(), String> {
+    let workspace = antlr::workspace_root().map_err(|e| e.to_string())?;
+    match antlr::check_generated(&workspace)? {
+        None => {
+            println!(
+                "skipped: ANTLR toolchain unavailable (set MEHEN_ANTLR_JAR and install \
+                 antlr4-rust-gen to enable the drift check)"
+            );
+            Ok(())
+        }
+        Some(drifted) if drifted.is_empty() => {
+            println!("ok: every generated ANTLR module matches the vendored grammar");
+            Ok(())
+        }
+        Some(drifted) => {
+            let names: Vec<_> = drifted.iter().map(|t| t.slug).collect();
+            Err(format!(
+                "drift detected for: {}. \
+                 Re-run `cargo xtask antlr generate --all` and commit the result.",
+                names.join(", ")
+            ))
+        }
     }
 }

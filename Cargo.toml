@@ -4,6 +4,7 @@ members = [
     "crates/mehen-core",
     "crates/mehen-metrics",
     "crates/mehen-tree-sitter",
+    "crates/mehen-antlr",
     "crates/mehen-markdown",
     "crates/mehen-python",
     "crates/mehen-typescript",
@@ -44,6 +45,7 @@ license = "AGPL-3.0-only"
 mehen-core = { path = "crates/mehen-core" }
 mehen-metrics = { path = "crates/mehen-metrics" }
 mehen-tree-sitter = { path = "crates/mehen-tree-sitter" }
+mehen-antlr = { path = "crates/mehen-antlr" }
 mehen-markdown = { path = "crates/mehen-markdown" }
 mehen-python = { path = "crates/mehen-python" }
 mehen-typescript = { path = "crates/mehen-typescript" }
@@ -73,13 +75,25 @@ serde_json = "^1.0"
 smol_str = { version = "^0.3", features = ["serde"] }
 gix = { version = "^0.84", default-features = false, features = ["attributes", "max-performance-safe", "revision", "sha1"] }
 
+# ANTLR v4 Rust runtime (`ophi-dev/antlr-rust-runtime`). The package is
+# `antlr-rust-runtime`; its library is imported as `antlr4_runtime`, so we
+# alias it here via `package = …` and every consumer (`mehen-antlr`, and
+# xtask's `antlr generate` codegen path) refers to it as `antlr4_runtime`.
+# Pinned exactly so the checked-in generated Kotlin parser/lexer modules
+# (`crates/mehen-kotlin/src/generated/`) always link the runtime they were
+# generated against. Bump deliberately and regenerate via
+# `cargo xtask antlr generate --all`.
+antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.4.0" }
+
 tree-sitter = "=0.26.9"
 # Per-language grammars (`tree-sitter-c`, `tree-sitter-go`,
-# `tree-sitter-kotlin`, `tree-sitter-pwsh`)
+# `tree-sitter-pwsh`)
 # are pinned inline in their consuming analyzer crate. xtask reaches
 # each grammar through the analyzer's `__grammar_language()` accessor
 # instead of pinning grammars itself, so the kind-enum generator and
 # the runtime parser always link the same revision.
+# Kotlin is no longer tree-sitter-backed — it uses an ANTLR grammar
+# (see the `antlr4_runtime` pin above and `crates/mehen-kotlin`).
 # `tree-sitter-ruby` was removed in Phase 9 (Prism) — Ruby now flows
 # through `mehen-ruby` (ruby-prism) per plan §6.5.
 
