@@ -21,7 +21,7 @@ mehen-metrics = { workspace = true }
 # rustc_private. Pinned to a specific 0.0.x release because rust-analyzer
 # auto-publishes weekly and breaking changes at the AST level are not
 # semver-tracked. Bump deliberately.
-ra_ap_syntax = "=0.0.336"
+ra_ap_syntax = "=0.0.337"
 smol_str = { workspace = true }
 
 [dev-dependencies]
