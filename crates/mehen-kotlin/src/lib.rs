@@ -78,9 +78,25 @@ impl LanguageAnalyzer for KotlinAnalyzer {
     fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let line_index = LineIndex::new(&source.text);
 
+        // Kotlin scripts (`.kts`) allow top-level statements; the grammar
+        // has a dedicated `script` entry rule for them. Regular `.kt` files
+        // use `kotlinFile` (declarations after the import section). Picking
+        // the wrong entry rule recovers a script as a cascade of syntax
+        // errors and yields near-empty metrics.
+        let is_script = source
+            .path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("kts"));
+
         let lexer = KotlinLexer::new(InputStream::new(source.text.as_str()));
         let token_stream = CommonTokenStream::new(lexer);
-        let tree = match KotlinParser::new(token_stream).kotlin_file() {
+        let mut parser = KotlinParser::new(token_stream);
+        let parsed = if is_script {
+            parser.script()
+        } else {
+            parser.kotlin_file()
+        };
+        let tree = match parsed {
             Ok(tree) => tree,
             Err(err) => {
                 // A hard parse failure (the entry rule itself erroring) means
@@ -192,5 +208,39 @@ mod tests {
         assert_eq!(a.root.spaces.len(), 1);
         assert_eq!(a.root.spaces[0].kind, SpaceKind::Interface);
         assert_eq!(a.root.spaces[0].name.as_deref(), Some("I"));
+    }
+
+    /// `.kts` scripts allow top-level statements, which `kotlinFile` rejects.
+    /// The analyzer must select the `script` entry rule for `.kts` inputs so
+    /// a normal script parses cleanly and produces metrics rather than a
+    /// cascade of recovered syntax errors.
+    #[test]
+    fn kts_script_uses_script_entry_rule() {
+        let src = "val x = 1\nfun greet() { println(\"hi\") }\nfor (i in 1..10) { println(i) }\n";
+        // As a `.kts` script: parses cleanly (no error-node cascade) and
+        // sees the top-level function.
+        let script = analyze(src, "build.gradle.kts");
+        assert!(
+            script.diagnostics.len() <= 1,
+            "script should parse with at most a trailing diagnostic, got {}",
+            script.diagnostics.len()
+        );
+        assert!(
+            script
+                .root
+                .spaces
+                .iter()
+                .any(|s| s.kind == SpaceKind::Function),
+            "script's top-level `fun greet` should open a function space"
+        );
+
+        // The same top-level-statement content in a `.kt` file is invalid
+        // (declarations only after imports), so `kotlinFile` recovers many
+        // errors — confirming the entry rule is chosen by extension.
+        let file = analyze(src, "Main.kt");
+        assert!(
+            file.diagnostics.len() > script.diagnostics.len(),
+            "`.kt` should report more syntax errors than `.kts` for script content"
+        );
     }
 }
