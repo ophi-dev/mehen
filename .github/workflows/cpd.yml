@@ -9,6 +9,7 @@ on:
       # generated/test/template Rust files do not start a no-op job.
       - '**/*.rs'
       - '!crates/*/src/grammar.rs'
+      - '!**/src/generated/**'
       - '!**/tests/**'
       - '!**/snapshots/**'
       - '!**/fixtures/**'
@@ -46,7 +47,11 @@ jobs:
           set -euo pipefail
           BASE_SHA=$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)
           # Diff against the merge-base; restrict to .rs files; drop deletions.
-          # Strip generated grammar enums, tests, snapshots, fixtures, templates.
+          # Strip generated grammar enums, generated ANTLR modules, tests,
+          # snapshots, fixtures, templates.
+          # `src/generated/` holds the machine-generated ANTLR lexer/parser
+          # modules (e.g. `mehen-kotlin`); they are intentionally repetitive
+          # (one templated method per grammar rule) and must not be CPD-policed.
           # `tests/` matches both the top-level tests directory and per-crate
           # `crates/<name>/tests/` integration suites. Test boilerplate
           # (per-language `analyze()` helpers, metric-fact readers) is the
@@ -55,7 +60,7 @@ jobs:
           # where a thin per-suite harness is more readable than a shared
           # one. Mirrors the `paths:` filter on the workflow trigger.
           git diff --name-only --diff-filter=d "$BASE_SHA" HEAD -- '*.rs' \
-            | grep -Ev '^crates/[^/]+/src/grammar\.rs$|(^|/)tests/|/snapshots/|/fixtures/|/testdata/|^xtask/templates/|^target/' \
+            | grep -Ev '^crates/[^/]+/src/grammar\.rs$|/src/generated/|(^|/)tests/|/snapshots/|/fixtures/|/testdata/|^xtask/templates/|^target/' \
             > changed-files.txt || true
           COUNT=$(wc -l < changed-files.txt | tr -d ' ')
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
