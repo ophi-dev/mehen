@@ -33,8 +33,8 @@ cargo xtask antlr generate kotlin
 
 That command drives the same pipeline this directory was produced with:
 
-1. `java -jar antlr-4.13.2-complete.jar -Xexact-output-dir KotlinLexer.g4 KotlinParser.g4`
-   → `KotlinLexer.interp` + `KotlinParser.interp`
-2. `antlr4-rust-gen --lexer KotlinLexer.interp --parser KotlinParser.interp --out-dir ../src/generated`
+1. `java -jar antlr-4.13.2-complete.jar -o <interp-dir> -Xexact-output-dir KotlinLexer.g4 KotlinParser.g4`
+   → `<interp-dir>/KotlinLexer.interp` + `<interp-dir>/KotlinParser.interp`
+2. `antlr4-rust-gen --lexer <interp-dir>/KotlinLexer.interp --parser <interp-dir>/KotlinParser.interp --out-dir ../src/generated`
 
 The entry rule is `kotlinFile` (`KotlinParser::kotlin_file()`).

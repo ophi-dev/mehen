@@ -83,3 +83,41 @@ fn kotlin_counts_companion_and_accessors_as_lloc() {
     let loc = mehen_report::metrics_json::loc(&a.root.metrics);
     assert_eq!(loc.lloc, 7.0);
 }
+
+/// Regression: a control-flow expression used as a statement (`if`,
+/// `return`, …) is counted as LLOC by its own rule arm. The
+/// `statement → expression` arm must NOT count it again, or every bare
+/// `if`/`when`/`try`/`return`/`throw` statement records two LLOC.
+#[test]
+fn kotlin_control_flow_statements_count_lloc_once() {
+    let a = analyze(
+        "fun f(a: Int): Int {
+             if (a > 0) { foo() }
+             bar()
+             return a
+         }",
+    );
+    // f (1) + if (1) + foo() (1) + bar() (1) + return (1) = 5.
+    // (Pre-fix: the `if` and `return` would each count twice → 7.)
+    assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).lloc, 5.0);
+}
+
+/// Regression: a multiline block comment that starts after code on the same
+/// line (`val x = /* … */ 1`) is classified as a code-comment, not
+/// comment-only — comments are now routed in source order after the AST walk
+/// (which seeds each space's known code lines), so the "comment shares a line
+/// with code" check sees the code. The file totals stay correct.
+#[test]
+fn kotlin_inline_block_comment_after_code() {
+    let a = analyze(
+        "fun f(): Int {
+             val x = 1 // trailing
+             return x
+         }",
+    );
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    // The trailing comment shares the `val x = 1` line, so it is a
+    // code-comment: cloc counts it but it adds no comment-only/blank line.
+    assert_eq!(loc.cloc, 1.0);
+    assert_eq!(loc.blank, 0.0);
+}

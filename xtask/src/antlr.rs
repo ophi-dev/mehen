@@ -107,10 +107,41 @@ fn discover_toolchain() -> Result<Option<Toolchain>, String> {
         None => PathBuf::from("antlr4-rust-gen"),
     };
 
+    // The jar path existing is not enough — `java` and `antlr4-rust-gen`
+    // must actually be launchable, or the pipeline would fail mid-run.
+    // Probe both now so a missing executable reads as "toolchain
+    // unavailable" (→ skip for `check-generated`) rather than a hard error.
+    if !can_launch("java", "-version") || !can_launch(&rust_gen, "--help") {
+        return Ok(None);
+    }
+
     Ok(Some(Toolchain {
         antlr_jar,
         rust_gen,
     }))
+}
+
+/// Whether `program arg` can be launched and exits without an I/O error
+/// (the program exists and is executable). The exit *status* is ignored —
+/// some tools return non-zero for `--help`/`-version` — we only care that
+/// the executable is present.
+fn can_launch(program: impl AsRef<std::ffi::OsStr>, arg: &str) -> bool {
+    Command::new(program)
+        .arg(arg)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// A process-unique scratch directory under the system temp dir.
+///
+/// The process id keeps concurrent `xtask antlr …` invocations (e.g. a
+/// developer running `generate` while CI runs `check-generated`) from
+/// sharing — and deleting — each other's working directories. `kind`
+/// distinguishes the per-call purposes (`interp`, `check`, …).
+fn scratch_dir(kind: &str, slug: &str) -> PathBuf {
+    env::temp_dir().join(format!("mehen-antlr-{kind}-{slug}-{}", std::process::id()))
 }
 
 /// Human-readable instructions printed when the toolchain is unavailable.
@@ -141,7 +172,7 @@ fn generate_with(
     fs::create_dir_all(&generated_dir).map_err(|e| e.to_string())?;
 
     // Stage 1: ANTLR jar → .interp metadata, into a scratch dir.
-    let interp_dir = env::temp_dir().join(format!("mehen-antlr-{}", target.slug));
+    let interp_dir = scratch_dir("interp", target.slug);
     let _ = fs::remove_dir_all(&interp_dir);
     fs::create_dir_all(&interp_dir).map_err(|e| e.to_string())?;
 
@@ -235,7 +266,7 @@ fn target_has_drift(
     // Snapshot the checked-in modules.
     let before = read_generated(&generated_dir)?;
     // Regenerate into a scratch copy of the dir, then compare and restore.
-    let scratch = env::temp_dir().join(format!("mehen-antlr-check-{}", target.slug));
+    let scratch = scratch_dir("check", target.slug);
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
 
@@ -249,7 +280,7 @@ fn target_has_drift(
         parser_g4: target.parser_g4,
     };
     // Override generated dir via a sibling helper: generate into scratch.
-    let interp_dir = env::temp_dir().join(format!("mehen-antlr-checkinterp-{}", target.slug));
+    let interp_dir = scratch_dir("checkinterp", target.slug);
     let _ = fs::remove_dir_all(&interp_dir);
     fs::create_dir_all(&interp_dir).map_err(|e| e.to_string())?;
     run_pipeline_into(workspace, &scratch_target, tools, &interp_dir, &scratch)?;
@@ -306,15 +337,18 @@ fn read_generated(dir: &Path) -> Result<Vec<(String, String)>, String> {
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "rs"))
-        .map(|p| {
+        .map(|p| -> Result<(String, String), String> {
             let name = p
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let body = fs::read_to_string(&p).unwrap_or_default();
-            (name, body)
+            // Surface read failures instead of treating an unreadable file
+            // as empty — a silent empty body would skew the drift compare.
+            let body = fs::read_to_string(&p)
+                .map_err(|e| format!("failed reading {}: {e}", p.display()))?;
+            Ok((name, body))
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     entries.sort();
     Ok(entries)
 }

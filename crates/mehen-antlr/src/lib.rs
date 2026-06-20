@@ -15,7 +15,8 @@
 //!   non-ASCII source,
 //! - **diagnostics** ([`diagnostics`]) turning recovered `ParseTree::Error`
 //!   leaves into mehen [`ParseDiagnostic`](mehen_core::ParseDiagnostic)s,
-//! - **comment LOC** ([`comments`]) recovering CLOC from the hidden-channel
+//! - **LOC tokens** ([`comments`]) a source-ordered code/comment token list
+//!   for LOC, recovered from the hidden-channel-inclusive
 //!   token stream (comments are absent from the parse tree).
 //!
 //! Each ANTLR-backed analyzer owns its own recursive walk over the
@@ -54,7 +55,7 @@ use mehen_core::{MetricSpace, SourceSpan, SpaceId, SpaceKind};
 /// pinned in exactly one place ([`mehen-antlr`'s `Cargo.toml`]).
 pub use antlr4_runtime as runtime;
 
-pub use comments::{CommentRows, comment_rows};
+pub use comments::{LocToken, LocTokenKind, loc_tokens};
 pub use diagnostics::{child_rule, collect_errors, has_child_token};
 pub use span::{CharByteMap, ctx_span, span_from_char_range};
 

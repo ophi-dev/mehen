@@ -50,24 +50,27 @@
 
 use mehen_antlr::runtime::token::Token;
 use mehen_antlr::runtime::{ParseTree, ParserRuleContext, TerminalNode};
-use mehen_antlr::{CharByteMap, CommentRows, ctx_span};
+use mehen_antlr::{CharByteMap, LocToken, LocTokenKind, child_rule, ctx_span};
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
 use mehen_metrics::{
-    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, State, apply_state_to,
-    finalize_state, merge_child_into_parent,
+    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
+    apply_state_to, finalize_state, merge_child_into_parent,
 };
 use smol_str::SmolStr;
 
 use crate::generated::kotlin_parser as kp;
 
 /// Drive the walk over the parsed `kotlinFile` tree and return the unit
-/// `MetricSpace`. `comment_rows` carries the hidden-channel comment spans
-/// recovered by the analyzer's token pass (CLOC).
+/// `MetricSpace`. `loc_tokens` is the source-ordered code/comment token list
+/// recovered from the full (hidden-channel-inclusive) token stream; LOC is
+/// computed from it in a single ordered pass *after* the tree walk has
+/// opened and closed every space, so comments and code interleave correctly
+/// and per-space `loc.ploc`/`loc.cloc` reflect each scope's body.
 pub(crate) fn walk(
     tree: &ParseTree,
     source: &str,
     line_index: &LineIndex,
-    comment_rows: &[CommentRows],
+    loc_tokens: &[LocToken],
 ) -> MetricSpace {
     let char_map = CharByteMap::new(source);
 
@@ -80,11 +83,6 @@ pub(crate) fn walk(
     unit_state
         .loc
         .set_span(0, line_index.line_count().saturating_sub(1), true);
-    // CLOC: comments never appear in the parse tree (hidden channel), so
-    // they're observed here against the unit space.
-    for c in comment_rows {
-        unit_state.loc.observe_comment(c.start_row, c.end_row);
-    }
 
     let mut walker = Walker {
         char_map: &char_map,
@@ -93,6 +91,7 @@ pub(crate) fn walk(
         stack: vec![unit_state],
         kinds: vec![SpaceKind::Unit],
         cognitive: CognitiveContext::default(),
+        loc_routing: SpaceRangeTracker::new(),
     };
 
     if let ParseTree::Rule(rule) = tree {
@@ -102,9 +101,50 @@ pub(crate) fn walk(
     }
 
     let mut unit_state = walker.stack.pop().expect("walker stack underflow");
+
+    // CLOC pass: route each comment to the deepest enclosing space (or the
+    // unit) in source order. Comments are hidden-channel — absent from the
+    // parse tree — so they can't be observed during the AST walk. Running
+    // this *after* the walk (which seeded each space's `ploc_lines` via
+    // `record_close`) means a comment sharing a line with code is correctly
+    // classified as a code-comment, and each space gets its own `loc.cloc`.
+    // PLOC code lines are already recorded per-space during the AST walk, so
+    // only comments are routed here (mirrors `mehen-python`).
+    for t in loc_tokens {
+        if t.kind == LocTokenKind::Comment {
+            walker.loc_routing.observe_comment(
+                t.start_byte,
+                t.end_byte,
+                &mut unit_state.loc,
+                t.start_row,
+                t.end_row,
+            );
+        }
+    }
+
     finalize_state(&mut unit_state);
-    apply_state_to(unit_state, walker.tree.metrics_mut());
-    walker.tree.finish()
+
+    // Order matters (mirrors `mehen-rust`'s token-routed finish):
+    //   1. assemble the tree,
+    //   2. `finalize_into_tree` — roll each space's token-routed LOC up the
+    //      parent chain (merging into `unit_loc`) and overlay the per-space
+    //      LOC keys onto the tree,
+    //   3. write the unit keys from the now-merged `unit_loc`.
+    // Doing `apply_state_to` for the unit *last* is what gives the unit its
+    // rolled-up PLOC/CLOC — otherwise the unit reads 0 because every code
+    // token routed into a child space.
+    let mut root = walker.tree.finish();
+    // Halstead is recorded during the AST walk (Pattern A), so the tracker
+    // carries no Halstead events — the overlay only rewrites the LOC keys.
+    let mut unit_halstead = std::mem::take(&mut unit_state.halstead);
+    let mut unit_loc = std::mem::take(&mut unit_state.loc);
+    walker
+        .loc_routing
+        .finalize_into_tree(&mut root, &mut unit_halstead, &mut unit_loc);
+    unit_state.halstead = unit_halstead;
+    unit_state.loc = unit_loc;
+    apply_state_to(unit_state, &mut root.metrics);
+    root
 }
 
 /// Per-frame cognitive context — the legacy `(nesting, depth, lambda)`
@@ -156,6 +196,9 @@ struct Walker<'a> {
     stack: Vec<State>,
     kinds: Vec<SpaceKind>,
     cognitive: CognitiveContext,
+    /// Records each opened space's byte range so the post-walk LOC token
+    /// pass can route code/comment lines to the deepest enclosing scope.
+    loc_routing: SpaceRangeTracker,
 }
 
 impl Walker<'_> {
@@ -180,11 +223,16 @@ impl Walker<'_> {
         }
 
         // Cognitive: `else` adds a flat +1 (covers `else if`); the boolean
-        // operators feed the sequence collapser.
+        // operators feed the sequence collapser; a prefix `!` records a
+        // not-operator so a following same-kind operator is not collapsed
+        // with the one before the negation (`a && !b && c` is +2, not +1).
         match tt {
             kp::ELSE => self.current().cognitive.increment_by_one(),
             kp::CONJ => self.current().cognitive.observe_boolean("&&"),
             kp::DISJ => self.current().cognitive.observe_boolean("||"),
+            kp::EXCL_NO_WS | kp::EXCL_WS => {
+                self.current().cognitive.boolean_seq.not_operator("!");
+            }
             _ => {}
         }
 
@@ -220,9 +268,16 @@ impl Walker<'_> {
             HalsteadClass::Skip => {}
         }
 
-        // PLOC: a terminal token's start row is a code line, unless it's a
-        // structural newline/EOF (which carry no code).
-        if !matches!(tt, kp::NL) && tt >= 0 {
+        // PLOC: a code token's start row is a code line, recorded into the
+        // current space during the AST walk so per-space PLOC and its
+        // min/max bounds are correct at close time. `NL` is excluded —
+        // Kotlin newlines are grammar-significant (statement separators) so
+        // they appear as visible tree tokens, but a blank/structural newline
+        // is not code. Comments are *not* handled here either — they're
+        // hidden-channel (absent from the tree) and are routed in source
+        // order after the walk (see `walk`), which lets a comment sharing a
+        // line with code classify as a code-comment.
+        if tt >= 0 && tt != kp::NL {
             let row = (term.symbol().line() as u32).saturating_sub(1);
             self.current().loc.observe_code_line(row);
         }
@@ -230,6 +285,15 @@ impl Walker<'_> {
 
     fn visit_rule(&mut self, ctx: &ParserRuleContext, hint: ChildHint) {
         let ri = ctx.rule_index();
+
+        // Snapshot the cognitive context of the *enclosing* construct
+        // before anything in this subtree mutates it. This must happen
+        // before `maybe_open_space`, which calls `enter_function_cognitive`
+        // (resetting nesting/lambda and bumping depth) for function/lambda
+        // spaces — otherwise the restore below would reinstate the reset
+        // inner-function context instead of the caller's, and sibling code
+        // after a nested function/lambda would lose its enclosing nesting.
+        let saved_cognitive = self.cognitive;
 
         // NPA / NPM: classify direct members of the *enclosing* class
         // before we open any space for this node (so the kinds stack still
@@ -243,10 +307,7 @@ impl Walker<'_> {
         // Does this rule open a metric space?
         let opened = self.maybe_open_space(ctx, ri, hint);
 
-        // Per-rule classification (cyclomatic / cognitive / ABC / exit /
-        // LOC). Returns a possibly-mutated cognitive context to restore
-        // after the subtree, plus the per-child hints.
-        let saved_cognitive = self.cognitive;
+        // Per-rule classification (cyclomatic / cognitive / ABC / exit / LOC).
         self.classify_rule(ctx, ri, hint);
 
         // Recurse into children, computing each child's hint.
@@ -286,8 +347,15 @@ impl Walker<'_> {
         // (`functionDeclaration`, `propertyDeclaration`, …). Any other rule
         // (a method body, an expression) clears it so nested local
         // declarations are not counted as class members.
+        // A class/interface/object/enum body member position originates at
+        // `classMemberDeclaration` (the enum's *own* methods reach it via
+        // `enumClassBody → classMemberDeclarations`). `in_class_member` then
+        // flows through the transparent `declaration` wrapper to the real
+        // member rule. `enumEntry` is intentionally NOT a source: an entry's
+        // own `classBody` defines an anonymous subclass, so its members
+        // belong to that subclass, not to the enum.
         let propagate_member = match ri {
-            kp::RULE_CLASS_MEMBER_DECLARATION | kp::RULE_ENUM_ENTRY => true,
+            kp::RULE_CLASS_MEMBER_DECLARATION => true,
             kp::RULE_DECLARATION => hint.in_class_member,
             _ => false,
         };
@@ -433,7 +501,11 @@ impl Walker<'_> {
         state: State,
     ) {
         let span = ctx_span(ctx, self.char_map, self.line_index);
-        self.tree.open(kind.clone(), span, name);
+        let space_id = self.tree.open(kind.clone(), span, name);
+        // Record this space's byte range so the post-walk LOC token pass
+        // routes code/comment lines into it.
+        self.loc_routing
+            .record_open(space_id, span.start_byte, span.end_byte);
         self.stack.push(state);
         self.kinds.push(kind);
     }
@@ -461,6 +533,13 @@ impl Walker<'_> {
             state.wmc.set_cyclomatic(state.cyclomatic.cyclomatic + 1);
         }
         finalize_state(&mut state);
+        // Stash this space's AST-side LOC + cyclomatic snapshot so the LOC
+        // token pass can seed its `ploc_lines` (for correct comment-after-
+        // code classification) and recompute MI from the token-routed LOC.
+        if let Some(space_id) = self.tree.current_id() {
+            self.loc_routing
+                .record_close(space_id, &state.loc, &state.cyclomatic);
+        }
         apply_state_to(state.clone(), self.tree.metrics_mut());
         if let Some(parent) = self.stack.last_mut() {
             let parent_kind = self.kinds.last().cloned().unwrap_or(SpaceKind::Unit);
@@ -517,8 +596,14 @@ impl Walker<'_> {
                 }
                 self.current().cognitive.boolean_seq.reset();
             }
-            // Statement-shape boolean resets.
-            kp::RULE_ASSIGNMENT | kp::RULE_PROPERTY_DECLARATION => {
+            // Statement-shape boolean resets. Each `statement` starts a
+            // fresh boolean sequence so operators never collapse across
+            // statement boundaries — e.g. `foo(a && b); bar(c && d)` is +2,
+            // not +1. `statement` is the general boundary; `assignment` and
+            // `propertyDeclaration` are kept for the property-initializer
+            // and assignment forms that are not wrapped in a `statement`
+            // (class-body property declarations, `for`/`while` bodies).
+            kp::RULE_STATEMENT | kp::RULE_ASSIGNMENT | kp::RULE_PROPERTY_DECLARATION => {
                 self.current().cognitive.boolean_seq.reset();
             }
             _ => {}
@@ -588,13 +673,18 @@ impl Walker<'_> {
             self.current().loc.observe_lloc();
         }
 
-        // A statement-position bare expression (e.g. a call statement
-        // `foo(bar())`) is one LLOC. `statement → expression` is the exact
-        // signal; `declaration`/`assignment`/`loopStatement` payloads are
-        // counted via their own rules above, and nested calls live deeper
-        // in the expression subtree (never as a `statement`), so they don't
-        // double-count.
-        if ri == kp::RULE_STATEMENT && child_ctx(ctx, kp::RULE_EXPRESSION).is_some() {
+        // A statement-position *plain* expression (e.g. a call statement
+        // `foo(bar())` or a bare `a + b`) is one LLOC. `declaration` /
+        // `assignment` / `loopStatement` payloads are counted via their own
+        // rules above. Control-flow expressions used as statements
+        // (`if`/`when`/`try`/`return`/`throw`/…) are *also* already counted
+        // by the rule arm above — counting them here too would double-count,
+        // so skip a `statement → expression` whose expression bottoms out in
+        // one of those forms.
+        if ri == kp::RULE_STATEMENT
+            && let Some(expr) = child_rule(ctx, kp::RULE_EXPRESSION)
+            && !expression_is_already_lloc(expr)
+        {
             self.current().loc.observe_lloc();
         }
     }
@@ -675,15 +765,31 @@ fn rule_name(ctx: &ParserRuleContext) -> Option<String> {
     None
 }
 
-/// Count `functionValueParameter`s under a function declaration's
-/// `functionValueParameters`.
+/// Count the declared parameters of a function-like space. Handles every
+/// parameter-list shape the grammar attaches to a function space:
+///
+/// - `functionDeclaration` / `secondaryConstructor`: `functionValueParameters`
+///   holding `functionValueParameter`s.
+/// - `anonymousFunction`: `parametersWithOptionalType` holding
+///   `functionValueParameterWithOptionalType`s.
+/// - `setter`: a single `functionValueParameterWithOptionalType` as a direct
+///   child (e.g. `set(value)`), with no enclosing parameter-list rule.
 fn count_function_args(ctx: &ParserRuleContext) -> u32 {
     let mut total = 0;
     for child in ctx.children() {
         if let ParseTree::Rule(rule) = child {
             let c = rule.context();
-            if c.rule_index() == kp::RULE_FUNCTION_VALUE_PARAMETERS {
-                total += count_child_rules(c, kp::RULE_FUNCTION_VALUE_PARAMETER);
+            match c.rule_index() {
+                kp::RULE_FUNCTION_VALUE_PARAMETERS => {
+                    total += count_child_rules(c, kp::RULE_FUNCTION_VALUE_PARAMETER);
+                }
+                kp::RULE_PARAMETERS_WITH_OPTIONAL_TYPE => {
+                    total +=
+                        count_child_rules(c, kp::RULE_FUNCTION_VALUE_PARAMETER_WITH_OPTIONAL_TYPE);
+                }
+                // A setter's lone parameter sits directly under `setter`.
+                kp::RULE_FUNCTION_VALUE_PARAMETER_WITH_OPTIONAL_TYPE => total += 1,
+                _ => {}
             }
         }
     }
@@ -777,10 +883,10 @@ fn record_constructor_properties(
     container: ContainerKind,
     state: &mut State,
 ) {
-    let Some(primary) = child_ctx(class_ctx, kp::RULE_PRIMARY_CONSTRUCTOR) else {
+    let Some(primary) = child_rule(class_ctx, kp::RULE_PRIMARY_CONSTRUCTOR) else {
         return;
     };
-    let Some(params) = child_ctx(primary, kp::RULE_CLASS_PARAMETERS) else {
+    let Some(params) = child_rule(primary, kp::RULE_CLASS_PARAMETERS) else {
         return;
     };
     for child in params.children() {
@@ -799,12 +905,61 @@ fn record_constructor_properties(
     }
 }
 
-/// First direct child rule context with the given rule index.
-fn child_ctx(ctx: &ParserRuleContext, rule_index: usize) -> Option<&ParserRuleContext> {
-    ctx.children().iter().find_map(|c| match c {
-        ParseTree::Rule(rule) if rule.context().rule_index() == rule_index => Some(rule.context()),
-        _ => None,
-    })
+/// Whether a `statement`'s `expression` child bottoms out in a control-flow
+/// expression that the rule-level LLOC arm already counts
+/// (`if`/`when`/`try`/`jump`). Used to avoid double-counting those forms
+/// when they appear as bare expression statements.
+///
+/// Descends the single-child precedence-ladder wrappers (the same chain
+/// `else if` detection walks); an operator splits the ladder into multiple
+/// children, which means the expression is a compound (binary/call) form —
+/// a plain statement that should be counted, so we stop and return false.
+fn expression_is_already_lloc(expr: &ParserRuleContext) -> bool {
+    let mut current = expr;
+    loop {
+        match current.rule_index() {
+            kp::RULE_IF_EXPRESSION
+            | kp::RULE_WHEN_EXPRESSION
+            | kp::RULE_TRY_EXPRESSION
+            | kp::RULE_JUMP_EXPRESSION => return true,
+            _ => {}
+        }
+        // Follow the chain only while this rule is a transparent
+        // single-child wrapper leading toward a primary expression.
+        let mut rules = current.children().iter().filter_map(|c| match c {
+            ParseTree::Rule(rule) => Some(rule.context()),
+            _ => None,
+        });
+        match (rules.next(), rules.next()) {
+            (Some(only), None) if is_expression_ladder(current.rule_index()) => current = only,
+            _ => return false,
+        }
+    }
+}
+
+/// Rules in the expression precedence ladder that the LLOC double-count
+/// guard descends through (mirrors [`is_else_transparent`] minus the
+/// statement/control-structure wrappers — here we start from `expression`).
+fn is_expression_ladder(ri: usize) -> bool {
+    matches!(
+        ri,
+        kp::RULE_EXPRESSION
+            | kp::RULE_DISJUNCTION
+            | kp::RULE_CONJUNCTION
+            | kp::RULE_EQUALITY
+            | kp::RULE_COMPARISON
+            | kp::RULE_GENERIC_CALL_LIKE_COMPARISON
+            | kp::RULE_INFIX_OPERATION
+            | kp::RULE_ELVIS_EXPRESSION
+            | kp::RULE_INFIX_FUNCTION_CALL
+            | kp::RULE_RANGE_EXPRESSION
+            | kp::RULE_ADDITIVE_EXPRESSION
+            | kp::RULE_MULTIPLICATIVE_EXPRESSION
+            | kp::RULE_AS_EXPRESSION
+            | kp::RULE_PREFIX_UNARY_EXPRESSION
+            | kp::RULE_POSTFIX_UNARY_EXPRESSION
+            | kp::RULE_PRIMARY_EXPRESSION
+    )
 }
 
 fn container_kind(parent_kind: SpaceKind) -> ContainerKind {

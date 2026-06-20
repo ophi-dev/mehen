@@ -105,14 +105,13 @@ impl LanguageAnalyzer for KotlinAnalyzer {
             }
         };
 
-        // `KotlinParser::new` consumed the stream; recover the buffered
-        // tokens (including hidden-channel comments, which never appear in
-        // the parse tree) for CLOC. The parser fills the stream as it runs,
-        // so re-lexing here is the simplest way to get the full token list
-        // without threading the stream back out of the parser.
-        let comment_rows = collect_comment_rows(&source.text);
+        // `KotlinParser::new` consumed the stream; re-lex to recover the full
+        // buffered token list (including hidden-channel comments, which never
+        // appear in the parse tree) in source order. LOC is driven from this
+        // ordered token pass so comments and code interleave correctly.
+        let loc_tokens = collect_loc_tokens(&source.text);
 
-        let root = walker::walk(&tree, &source.text, &line_index, &comment_rows);
+        let root = walker::walk(&tree, &source.text, &line_index, &loc_tokens);
 
         // Recovered ANTLR error nodes are surfaced as `error` (not
         // `warning`) so the diagnostic contract (plan §9.3) treats the
@@ -130,16 +129,27 @@ impl LanguageAnalyzer for KotlinAnalyzer {
     }
 }
 
-/// Re-lex `source` and return the row spans of every comment token
-/// (hidden-channel `LineComment` / `DelimitedComment`). Comments are absent
-/// from the parse tree, so CLOC comes from this token pass.
-fn collect_comment_rows(source: &str) -> Vec<mehen_antlr::CommentRows> {
-    use generated::kotlin_lexer::{DELIMITED_COMMENT, LINE_COMMENT};
+/// Re-lex `source` into the source-ordered LOC token list that drives the
+/// LOC family. Comments (`LineComment` / `DelimitedComment`, plus the
+/// string-mode `Inside_Comment`) are classified as comments; whitespace and
+/// newlines (default- and string-mode) are skipped; every other token is a
+/// code token. Comments are absent from the parse tree (hidden channel), so
+/// LOC must come from this full token pass rather than the tree walk.
+fn collect_loc_tokens(source: &str) -> Vec<mehen_antlr::LocToken> {
+    use generated::kotlin_lexer::{
+        DELIMITED_COMMENT, INSIDE_COMMENT, INSIDE_NL, INSIDE_WS, LINE_COMMENT, NL, WS,
+    };
 
     let lexer = KotlinLexer::new(InputStream::new(source));
     let mut stream = CommonTokenStream::new(lexer);
     stream.fill();
-    mehen_antlr::comment_rows(stream.tokens(), &[LINE_COMMENT, DELIMITED_COMMENT])
+    let map = mehen_antlr::CharByteMap::new(source);
+    mehen_antlr::loc_tokens(
+        stream.tokens(),
+        &[LINE_COMMENT, DELIMITED_COMMENT, INSIDE_COMMENT],
+        &[WS, NL, INSIDE_WS, INSIDE_NL],
+        &map,
+    )
 }
 
 #[cfg(test)]

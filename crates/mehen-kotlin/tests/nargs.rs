@@ -33,3 +33,23 @@ fn kotlin_counts_function_constructor_and_lambda_parameters() {
     assert_eq!(nargs.functions_max, 3.0);
     assert_eq!(nargs.closures_max, 1.0);
 }
+
+/// Regression: a setter's lone parameter sits directly under `setter`
+/// (`set(value)`), and an anonymous function's parameters live under
+/// `parametersWithOptionalType`, not `functionValueParameters`. Both must
+/// be counted — they previously reported `nargs=0`.
+#[test]
+fn kotlin_counts_setter_and_anonymous_function_parameters() {
+    let a = analyze(
+        "class C {
+             var x: Int = 0
+                 set(value) { field = value }
+         }
+
+         val h = fun(a: Int, b: Int): Int { return a + b }",
+    );
+    let nargs = mehen_report::metrics_json::nargs(&a.root.metrics);
+    // setter `value` (1) + anonymous function `a, b` (2).
+    assert_eq!(nargs.total_functions, 3.0);
+    assert_eq!(nargs.functions_max, 2.0);
+}
