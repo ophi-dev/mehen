@@ -7,6 +7,13 @@ extend-exclude = [
     "tree-sitter-*/examples/",
     "**/CHANGELOG.md",
     "**/snapshots/**/*",
+    # Machine-generated ANTLR lexer/parser modules and the vendored `.g4`
+    # grammars they're generated from. These are not hand-authored prose —
+    # Unicode class names like `UNICODE_CLASS_ND` trip the spell checker
+    # (`ND` -> `AND`). Same rationale as the generated-snapshot exclude
+    # above; regenerate via `cargo xtask antlr generate <lang>`.
+    "**/src/generated/**",
+    "crates/mehen-*/grammar/*.g4",
     # Prose-metric dictionaries intentionally contain non-words, cliches,
     # hedges, and weasel phrases for the analyzer to flag. Excluding them
     # from typo checking keeps the analyzer lists authoritative.
