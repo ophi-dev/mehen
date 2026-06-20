@@ -18,7 +18,7 @@ mehen-metrics = { workspace = true }
 # keyword case-insensitivity, promoted properties, hooked properties,
 # match, attributes, etc. are first-class in mago's typed AST.
 # `bumpalo` is the arena allocator mago's parser writes into.
-mago-syntax = "=1.29.0"
+mago-syntax = "=1.30.0"
 mago-syntax-core = "=1.30.0"
 mago-database = "=1.30.0"
 mago-span = "=1.30.0"
