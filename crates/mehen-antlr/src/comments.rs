@@ -8,7 +8,7 @@
 //! retains them, which is where CLOC comes from. This module turns a list
 //! of comment tokens into `(start_row, end_row)` row pairs (0-based, to
 //! match the LOC accumulator's row convention) that the analyzer feeds into
-//! the unit space's [`mehen_metrics::LocStats::observe_comment`].
+//! the unit space's `mehen_metrics::LocStats::observe_comment`.
 //!
 //! Why CLOC lands only on the unit space: a hidden-channel token carries no
 //! enclosing-rule context, so attributing a comment to a specific
@@ -16,7 +16,7 @@
 //! pre-1.0 LOC semantics already roll child comment counts up to the unit,
 //! and CLOC at the file level is what the maintainability index and the
 //! `loc.cloc` metric report. Per-space CLOC attribution can be layered on
-//! later via [`mehen_metrics::SpaceRangeTracker`] if a metric needs it.
+//! later via `mehen_metrics::SpaceRangeTracker` if a metric needs it.
 
 use antlr4_runtime::token::{CommonToken, Token};
 

@@ -11,8 +11,6 @@ publish = false
 
 [dependencies]
 mehen-core = { workspace = true }
-mehen-metrics = { workspace = true }
-smol_str = { workspace = true }
 # `antlr4_runtime` is the lib name of the `antlr-rust-runtime` package
 # (`ophi-dev/antlr-rust-runtime`). Pinned exactly here — like every other
 # parser dependency (ra_ap_syntax, ruby-prism) — because parser-level

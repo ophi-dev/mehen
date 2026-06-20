@@ -1985,8 +1985,6 @@ version = "1.0.0"
 dependencies = [
  "antlr-rust-runtime",
  "mehen-core",
- "mehen-metrics",
- "smol_str",
 ]
 
 [[package]]
