@@ -16,12 +16,12 @@ mehen-metrics = { workspace = true }
 # Pinned here (not in `[workspace.dependencies]`) because `mehen-typescript`
 # is the only consumer. All Oxc crates ship in lockstep; mismatched
 # versions panic at AST type level — bump them together.
-oxc_allocator = "=0.135.0"
-oxc_ast = "=0.135.0"
-oxc_ast_visit = "=0.135.0"
-oxc_parser = "=0.135.0"
-oxc_span = "=0.135.0"
-oxc_syntax = "=0.135.0"
+oxc_allocator = "=0.137.0"
+oxc_ast = "=0.137.0"
+oxc_ast_visit = "=0.137.0"
+oxc_parser = "=0.137.0"
+oxc_span = "=0.137.0"
+oxc_syntax = "=0.137.0"
 smol_str = { workspace = true }
 
 [dev-dependencies]
