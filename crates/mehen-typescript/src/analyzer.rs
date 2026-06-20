@@ -88,7 +88,7 @@ fn analyze_with_source_type(
             "typescript.parse_error",
             format!(
                 "oxc_parser panicked with {} error(s)",
-                parser_return.errors.len()
+                parser_return.diagnostics.len()
             ),
         )];
         return LanguageAnalysis {
@@ -107,11 +107,14 @@ fn analyze_with_source_type(
         &source.line_index,
     );
 
-    // Oxc commonly returns a non-panicking parse with `errors` populated
-    // for invalid TS/JS input; surface those as `error` diagnostics so
-    // the metric output can't masquerade as clean (plan §9.3).
+    // Oxc commonly returns a non-panicking parse with `diagnostics`
+    // populated for invalid TS/JS input; surface those as `error`
+    // diagnostics so the metric output can't masquerade as clean
+    // (plan §9.3). `ParserReturn::diagnostics` (renamed from `errors`
+    // in oxc 0.137) is a `Diagnostics` newtype that derefs to
+    // `Vec<OxcDiagnostic>`, so `.iter()` / `.message` are unchanged.
     let diagnostics: Vec<ParseDiagnostic> = parser_return
-        .errors
+        .diagnostics
         .iter()
         .take(16)
         .map(|err| ParseDiagnostic::error("typescript.syntax_error", err.message.to_string()))
