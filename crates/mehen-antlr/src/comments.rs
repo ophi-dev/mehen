@@ -48,8 +48,16 @@ pub struct LocToken {
 ///
 /// `comment_token_types` is the set of lexer token types that denote a
 /// comment. `skip_token_types` is the set that contributes nothing to LOC
-/// (whitespace, newlines). Every other token is treated as code (its start
-/// row is a PLOC line). The end-of-file token (type `< 0`) is skipped.
+/// (whitespace, newlines). `trivia_bearing_token_types` is the set of
+/// operator tokens whose lexer rules fold optional comments into the token
+/// text (e.g. Kotlin's `EXCL_WS`/`NOT_IS`/`NOT_IN`/`QUEST_WS`/`AS_*`); their
+/// text is scanned for embedded comments. Every other token is treated as
+/// code (its start row is a PLOC line). The end-of-file token (`< 0`) is
+/// skipped.
+///
+/// Restricting the embedded-comment scan to `trivia_bearing_token_types`
+/// (rather than every token) avoids false positives from `//` or `/*` that
+/// appear inside string-literal text tokens (e.g. a URL `"http://x"`).
 ///
 /// Byte ranges are derived from each token's inclusive char indices via
 /// `map`, so routing stays correct for non-ASCII source.
@@ -57,6 +65,7 @@ pub fn loc_tokens(
     tokens: &[CommonToken],
     comment_token_types: &[i32],
     skip_token_types: &[i32],
+    trivia_bearing_token_types: &[i32],
     map: &CharByteMap,
 ) -> Vec<LocToken> {
     let mut out = Vec::with_capacity(tokens.len());
@@ -90,9 +99,85 @@ pub fn loc_tokens(
                 start_row,
                 end_row: start_row,
             });
+            // Some lexers fold optional trivia into operator tokens — e.g.
+            // Kotlin's `EXCL_WS: '!' Hidden`, `NOT_IS: '!is' (Hidden|NL)` —
+            // so a comment glued to the operator (`!is/* c */`) is part of
+            // the token text rather than a standalone comment token. Recover
+            // those as comments so CLOC isn't undercounted, using the same
+            // byte span and row offsets the embedded comment occupies. Only
+            // the declared trivia-bearing operator tokens are scanned, so a
+            // `//` or `/*` inside string-literal text is never misread.
+            if trivia_bearing_token_types.contains(&tt)
+                && let Some(text) = tok.text()
+            {
+                emit_embedded_comments(text, start_byte, start_row, &mut out);
+            }
         }
     }
     out
+}
+
+/// Scan an operator-token's `text` for embedded `/* … */` or `// …` comment
+/// runs and push a [`LocTokenKind::Comment`] for each, with rows offset from
+/// the token's `start_row` and byte span offset from the token's
+/// `token_start_byte`. Handles multi-line block comments.
+fn emit_embedded_comments(
+    text: &str,
+    token_start_byte: u32,
+    token_start_row: u32,
+    out: &mut Vec<LocToken>,
+) {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    // Newlines before the current scan position → row offset within the token.
+    let mut row_offset = 0u32;
+    while i + 1 < bytes.len() {
+        match (bytes[i], bytes[i + 1]) {
+            (b'/', b'*') => {
+                let start_row = token_start_row + row_offset;
+                let comment_start = i;
+                i += 2;
+                let mut inner_newlines = 0u32;
+                // Find the closing `*/`, counting newlines for the end row.
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    if bytes[i] == b'\n' {
+                        inner_newlines += 1;
+                    }
+                    i += 1;
+                }
+                i += 2; // consume `*/` (or run off the end on an unclosed comment)
+                let end = i.min(bytes.len());
+                out.push(LocToken {
+                    kind: LocTokenKind::Comment,
+                    start_byte: token_start_byte + comment_start as u32,
+                    end_byte: token_start_byte + end as u32,
+                    start_row,
+                    end_row: start_row + inner_newlines,
+                });
+                row_offset += inner_newlines;
+            }
+            (b'/', b'/') => {
+                // Line comment runs to the next newline (or token end).
+                let start_row = token_start_row + row_offset;
+                let comment_start = i;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                out.push(LocToken {
+                    kind: LocTokenKind::Comment,
+                    start_byte: token_start_byte + comment_start as u32,
+                    end_byte: token_start_byte + i as u32,
+                    start_row,
+                    end_row: start_row,
+                });
+            }
+            (b'\n', _) => {
+                row_offset += 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -116,7 +201,7 @@ mod tests {
             tok(1, 1, 5, 8, "// a"), // comment (type 1)
             tok(2, 2, 10, 10, "x"),  // code
         ];
-        let locs = loc_tokens(&tokens, &[1], &[], &map);
+        let locs = loc_tokens(&tokens, &[1], &[], &[], &map);
         assert_eq!(locs.len(), 3);
         assert_eq!(locs[0].kind, LocTokenKind::Code);
         assert_eq!(locs[1].kind, LocTokenKind::Comment);
@@ -133,7 +218,7 @@ mod tests {
             tok(1, 1, 0, 10, "/* a\nb\nc */"), // 3-line comment
             tok(99, 3, 11, 11, " "),           // whitespace (skipped)
         ];
-        let locs = loc_tokens(&tokens, &[1], &[99], &map);
+        let locs = loc_tokens(&tokens, &[1], &[99], &[], &map);
         assert_eq!(locs.len(), 1);
         assert_eq!(locs[0].kind, LocTokenKind::Comment);
         assert_eq!(locs[0].start_row, 0);
@@ -145,6 +230,42 @@ mod tests {
         let src = "x";
         let map = CharByteMap::new(src);
         let tokens = vec![tok(-1, 1, 0, 0, "<EOF>")];
-        assert!(loc_tokens(&tokens, &[], &[], &map).is_empty());
+        assert!(loc_tokens(&tokens, &[], &[], &[], &map).is_empty());
+    }
+
+    #[test]
+    fn recovers_comment_embedded_in_trivia_bearing_operator() {
+        // Operator token type 105 (`!is`) with a glued comment: `!is/* c */`.
+        // Source: `a !is/* c */ B` — operator token spans chars 2..=10.
+        let src = "a !is/* c */ B";
+        let map = CharByteMap::new(src);
+        let tokens = vec![
+            tok(7, 1, 0, 0, "a"),             // identifier (code)
+            tok(105, 1, 2, 10, "!is/* c */"), // NOT_IS with embedded comment
+            tok(7, 1, 13, 13, "B"),           // identifier (code)
+        ];
+        // 105 is declared trivia-bearing → its embedded `/* c */` is recovered.
+        let locs = loc_tokens(&tokens, &[2], &[], &[105], &map);
+        let comments: Vec<_> = locs
+            .iter()
+            .filter(|t| t.kind == LocTokenKind::Comment)
+            .collect();
+        assert_eq!(comments.len(), 1, "embedded comment must be recovered");
+        assert_eq!(comments[0].start_row, 0);
+    }
+
+    #[test]
+    fn does_not_scan_non_trivia_tokens_for_comments() {
+        // A string-literal text token containing `//` (e.g. a URL) must NOT
+        // be misread as a comment — only declared trivia-bearing tokens are
+        // scanned. Token type 7 is not in the trivia-bearing set.
+        let src = "\"http://x\"";
+        let map = CharByteMap::new(src);
+        let tokens = vec![tok(7, 1, 0, 9, "\"http://x\"")];
+        let locs = loc_tokens(&tokens, &[2], &[], &[105], &map);
+        assert!(
+            locs.iter().all(|t| t.kind == LocTokenKind::Code),
+            "the // inside a string literal must not become a comment"
+        );
     }
 }

@@ -121,3 +121,18 @@ fn kotlin_inline_block_comment_after_code() {
     assert_eq!(loc.cloc, 1.0);
     assert_eq!(loc.blank, 0.0);
 }
+
+/// Regression: Kotlin folds optional trivia into certain operator tokens
+/// (`NOT_IS: '!is' (Hidden|NL)`), so a comment glued to the operator
+/// (`x !is/* note */ Int`) lives inside the operator token's text rather than
+/// a standalone comment token. The LOC pass scans these trivia-bearing
+/// operators for embedded comments so CLOC isn't undercounted.
+#[test]
+fn kotlin_comment_embedded_in_operator_token_counts_as_cloc() {
+    let a = analyze(
+        "fun f(x: Any): Boolean {
+             return x !is/* note */ Int
+         }",
+    );
+    assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).cloc, 1.0);
+}
