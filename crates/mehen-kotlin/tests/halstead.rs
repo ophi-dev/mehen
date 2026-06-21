@@ -170,3 +170,26 @@ fn kotlin_shebang_excluded_from_halstead() {
         "the shebang must not change any Halstead count"
     );
 }
+
+/// Regression: an empty string literal (`""` / `""""""`) emits only
+/// delimiter tokens (all skipped) and no content token, so it would record
+/// no Halstead operand at all — undercounting Halstead/MI for the common
+/// empty-string default. An empty literal must count as one operand, like a
+/// non-empty literal of the same shape.
+#[test]
+fn kotlin_empty_string_literal_is_operand() {
+    let empty = analyze("fun f() = \"\"\n");
+    let nonempty = analyze("fun f() = \"x\"\n");
+    let raw_empty = analyze("fun f() = \"\"\"\"\"\"\n");
+    let eh = mehen_report::metrics_json::halstead(&empty.root.metrics);
+    let nh = mehen_report::metrics_json::halstead(&nonempty.root.metrics);
+    let rh = mehen_report::metrics_json::halstead(&raw_empty.root.metrics);
+    // `f` + the literal = 2 operands, total 2, same as a non-empty literal.
+    assert_eq!((eh.n2, eh.big_n2), (2.0, 2.0), "empty `\"\"` is an operand");
+    assert_eq!((eh.n2, eh.big_n2), (nh.n2, nh.big_n2));
+    assert_eq!(
+        (rh.n2, rh.big_n2),
+        (2.0, 2.0),
+        "empty raw `\"\"\"\"\"\"` is an operand"
+    );
+}

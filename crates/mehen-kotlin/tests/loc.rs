@@ -102,6 +102,24 @@ fn kotlin_control_flow_statements_count_lloc_once() {
     assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).lloc, 5.0);
 }
 
+/// Regression: a *parenthesized* bare control-flow expression
+/// (`(if (a) foo() else bar())`) must not be double-counted as LLOC. The
+/// `statement → expression` dedup guard descends the precedence ladder to
+/// find an already-counted `if`/`when`/`try`/`jump`; it must also descend
+/// through `parenthesizedExpression` (a single-rule-child wrapper), or the
+/// parenthesized form counts once by the inner `if` arm and again by the
+/// statement arm.
+#[test]
+fn kotlin_parenthesized_control_flow_counts_lloc_once() {
+    let paren = analyze("fun f(a: Boolean) {\n    (if (a) foo() else bar())\n}\n");
+    let plain = analyze("fun f(a: Boolean) {\n    if (a) foo() else bar()\n}\n");
+    assert_eq!(
+        mehen_report::metrics_json::loc(&paren.root.metrics).lloc,
+        mehen_report::metrics_json::loc(&plain.root.metrics).lloc,
+        "parenthesizing a bare `if` statement must not add an LLOC"
+    );
+}
+
 /// Regression: a multiline block comment that starts after code on the same
 /// line (`val x = /* … */ 1`) is classified as a code-comment, not
 /// comment-only — comments are now routed in source order after the AST walk

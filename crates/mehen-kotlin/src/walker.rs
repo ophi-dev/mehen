@@ -671,6 +671,35 @@ impl Walker<'_> {
         self.classify_abc_rule(ctx, ri);
         self.classify_exit(ctx, ri);
         self.classify_loc_rule(ctx, ri);
+        self.classify_empty_string_operand(ctx, ri);
+    }
+
+    /// Record a Halstead operand for an *empty* string literal (`""` /
+    /// `""""""`). A non-empty literal records its operand(s) via the content
+    /// tokens (`LINE_STR_TEXT`, escapes, refs), but an empty literal emits
+    /// only delimiter tokens (all skipped), so without this it would
+    /// contribute no operand at all — undercounting Halstead/MI for the very
+    /// common empty-string default. An empty literal has only terminal
+    /// children (the delimiters); a non-empty one has at least one content /
+    /// template-expression *rule* child, so "no rule children" detects empty
+    /// without firing on `"$x"` / `"${…}"` (which carry rule children).
+    fn classify_empty_string_operand(&mut self, ctx: &ParserRuleContext, ri: usize) {
+        if !matches!(
+            ri,
+            kp::RULE_LINE_STRING_LITERAL | kp::RULE_MULTI_LINE_STRING_LITERAL
+        ) {
+            return;
+        }
+        let has_content = ctx
+            .children()
+            .iter()
+            .any(|c| matches!(c, ParseTree::Rule(_)));
+        if !has_content {
+            self.current().halstead.observe_operand(HalsteadOperand {
+                kind: SmolStr::new("Operand"),
+                text: Some(SmolStr::new("\"\"")),
+            });
+        }
     }
 
     fn classify_cognitive(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
@@ -1069,6 +1098,14 @@ fn is_expression_ladder(ri: usize) -> bool {
             | kp::RULE_PREFIX_UNARY_EXPRESSION
             | kp::RULE_POSTFIX_UNARY_EXPRESSION
             | kp::RULE_PRIMARY_EXPRESSION
+            // `(if (a) … else …)` wraps the control-flow expression in
+            // `parenthesizedExpression: LPAREN expression RPAREN`. The parens
+            // are terminals (filtered out), leaving a single rule child, so
+            // the descent continues into the inner expression — otherwise a
+            // parenthesized bare `if`/`when`/`try`/`jump` statement is
+            // double-counted as LLOC (once by its own rule arm, once by the
+            // `statement → expression` arm).
+            | kp::RULE_PARENTHESIZED_EXPRESSION
     )
 }
 
