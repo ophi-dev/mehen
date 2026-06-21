@@ -175,3 +175,26 @@ fn kotlin_npm_excludes_enum_entry_body_members() {
     );
     assert_eq!(npm.total_methods, 1.0);
 }
+
+/// Regression: a *real* nested class inside an enum-entry body must still
+/// own its members. The `in_enum_entry` suppression (which keeps the entry's
+/// own direct members off the enum) is cleared once a real class-like space
+/// opens, so `class Inner { fun m() {} }` inside entry `A` counts `m` on
+/// `Inner` — while the entry's direct `fun direct` does not count on the enum.
+#[test]
+fn kotlin_npm_counts_real_nested_class_inside_enum_entry() {
+    let a = analyze(
+        "enum class E {
+             A {
+                 class Inner { fun m() {} }
+                 fun direct() {}
+             };
+
+             fun shared() {}
+         }",
+    );
+    let npm = mehen_report::metrics_json::npm(&a.root.metrics);
+    // `Inner.m` (on the nested class) + `E.shared` (on the enum) = 2.
+    // `E.direct` (the entry's own method) is NOT attributed to the enum.
+    assert_eq!(npm.total_methods, 2.0);
+}

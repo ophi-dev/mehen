@@ -281,8 +281,15 @@ impl Walker<'_> {
         // hidden-channel (absent from the tree) and are routed in source
         // order after the walk (see `walk`), which lets a comment sharing a
         // line with code classify as a code-comment.
+        //
+        // Some operator tokens fold *leading* trivia into their text
+        // (`AT_PRE_WS: (Hidden|NL) '@'`, `AT_BOTH_WS`), so `line()` points at
+        // the trivia's (possibly blank/comment-only) line rather than the
+        // real code character. Advance past the leading newlines in the token
+        // text so the PLOC line is where the actual code starts.
         if tt >= 0 && tt != kp::NL {
-            let row = (term.symbol().line() as u32).saturating_sub(1);
+            let base = (term.symbol().line() as u32).saturating_sub(1);
+            let row = base.saturating_add(leading_newlines(term.symbol().text().unwrap_or("")));
             self.current().loc.observe_code_line(row);
         }
     }
@@ -351,11 +358,18 @@ impl Walker<'_> {
         // (`functionDeclaration`, `propertyDeclaration`, …). Any other rule
         // (a method body, an expression) clears it so nested local
         // declarations are not counted as class members.
-        // Once inside an `enumEntry`, stay inside for the whole subtree: the
-        // entry's anonymous `classBody` defines a subclass (no space is
-        // opened for it), so none of its members may be attributed to the
-        // enclosing enum.
-        let in_enum_entry = hint.in_enum_entry || ri == kp::RULE_ENUM_ENTRY;
+        // Track whether we're inside an `enumEntry`'s anonymous body. Such a
+        // body defines a subclass but opens no space, so its direct members
+        // must not be attributed to the enclosing enum. The flag is set on
+        // entering `enumEntry` and CLEARED once a *real* class-like
+        // declaration opens its own space — that nested class owns its
+        // members normally (e.g. `A { class Inner { fun m() {} } }`: `m`
+        // belongs to `Inner`, not the enum).
+        let in_enum_entry = if opens_class_like(ri) {
+            false
+        } else {
+            hint.in_enum_entry || ri == kp::RULE_ENUM_ENTRY
+        };
 
         // A class/interface/object/enum body member position originates at
         // `classMemberDeclaration` (the enum's *own* methods reach it via
@@ -1054,6 +1068,32 @@ fn is_class_member_rule(ri: usize) -> bool {
         kp::RULE_PROPERTY_DECLARATION
             | kp::RULE_FUNCTION_DECLARATION
             | kp::RULE_SECONDARY_CONSTRUCTOR
+    )
+}
+
+/// Count the newlines in the leading-whitespace prefix of `text` (up to the
+/// first non-whitespace byte). Used to advance a token's PLOC row past
+/// leading trivia folded into the token (e.g. `AT_PRE_WS` = `"\n@"`), so the
+/// code line is where the real character is, not where the trivia started.
+fn leading_newlines(text: &str) -> u32 {
+    let mut count = 0;
+    for &b in text.as_bytes() {
+        match b {
+            b'\n' => count += 1,
+            b' ' | b'\t' | b'\r' => {}
+            _ => break,
+        }
+    }
+    count
+}
+
+/// Rules that open a class-like metric space (see `maybe_open_space`). Used
+/// to clear the `in_enum_entry` suppression once a real nested class/object
+/// owns the following body — its members belong to that class, not the enum.
+fn opens_class_like(ri: usize) -> bool {
+    matches!(
+        ri,
+        kp::RULE_CLASS_DECLARATION | kp::RULE_OBJECT_DECLARATION | kp::RULE_COMPANION_OBJECT
     )
 }
 

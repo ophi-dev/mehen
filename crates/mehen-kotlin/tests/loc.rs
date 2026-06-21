@@ -136,3 +136,17 @@ fn kotlin_comment_embedded_in_operator_token_counts_as_cloc() {
     );
     assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).cloc, 1.0);
 }
+
+/// Regression: `AT_PRE_WS`/`AT_BOTH_WS` annotation tokens fold the *leading*
+/// newline into the token text (`"\n@"`), so `line()` points at the blank
+/// line before the annotation. The PLOC observation advances past leading
+/// newlines, so a blank line before an annotated declaration is not counted
+/// as code.
+#[test]
+fn kotlin_blank_line_before_annotation_is_not_ploc() {
+    // 4 source lines: `fun a()`, blank, `@Deprecated`, `fun b()`.
+    let a = analyze("fun a() {}\n\n@Deprecated\nfun b() {}\n");
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    assert_eq!(loc.ploc, 3.0, "the blank line must not count as code");
+    assert_eq!(loc.blank, 1.0);
+}
