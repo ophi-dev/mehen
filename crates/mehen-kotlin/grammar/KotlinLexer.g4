@@ -42,10 +42,19 @@ LSQUARE: '[' -> pushMode(Inside);
 RSQUARE: ']';
 LCURL: '{' -> pushMode(DEFAULT_MODE);
 /*
- * When using another programming language (not Java) to generate a parser,
- * please replace this code with the corresponding code of a programming language you are using.
+ * MEHEN LOCAL PATCH (do not drop on re-vendor):
+ * Upstream uses a Java embedded action here —
+ *   RCURL: '}' { if (!_modeStack.isEmpty()) { popMode(); } };
+ * — which the ANTLR Rust target cannot translate, so the generated Rust
+ * lexer never popped the mode on `}`. That broke string-template
+ * interpolation (`"x ${foo()} y"`): everything after `}` was tokenized in
+ * DEFAULT_MODE instead of returning to string mode, producing recovered
+ * syntax errors. The grammar's own comment invites replacing this action
+ * with the target language's equivalent; the standard `-> popMode` lexer
+ * command is target-portable and the runtime's `pop_mode()` is a safe no-op
+ * on an empty mode stack, so it matches the guarded Java behavior.
  */
-RCURL: '}' { if (!_modeStack.isEmpty()) { popMode(); } };
+RCURL: '}' -> popMode;
 MULT: '*';
 MOD: '%';
 DIV: '/';

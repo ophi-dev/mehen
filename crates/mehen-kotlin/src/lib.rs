@@ -294,4 +294,26 @@ mod tests {
         assert_eq!(a.root.spaces.len(), 1);
         assert_eq!(a.root.spaces[0].kind, SpaceKind::Class);
     }
+
+    /// Regression: string-template interpolation (`"… ${expr} …"`) must parse
+    /// cleanly. The Kotlin lexer pushes `DEFAULT_MODE` on `${` and relies on
+    /// `}` popping back to string mode; the vendored grammar's `RCURL` rule
+    /// is patched to `-> popMode` (the upstream Java action was a no-op in
+    /// the Rust target), so the text after the interpolation is no longer
+    /// mis-tokenized as Kotlin code.
+    #[test]
+    fn string_template_interpolation_parses_cleanly() {
+        for src in [
+            "fun f(x: Int) { val s = \"v=${x} y\" }\n",
+            "fun f(b: Boolean) { val s = \"a ${ if (b) 1 else 2 } z\" }\n",
+            "fun f(x: Int) {\n    val s = \"v=${x}\"\n    val y = x + 1\n}\n",
+        ] {
+            let a = analyze(src, "Main.kt");
+            assert!(
+                a.diagnostics.is_empty(),
+                "string template should parse with no recovered errors, got {} for {src:?}",
+                a.diagnostics.len()
+            );
+        }
+    }
 }

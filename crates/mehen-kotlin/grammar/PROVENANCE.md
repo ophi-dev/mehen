@@ -1,8 +1,9 @@
 # Kotlin ANTLR grammar — provenance
 
 These `.g4` files are the **source of truth** for the Kotlin analyzer's parser.
-They are vendored verbatim; the generated Rust modules in `../src/generated/`
-are produced from them by `cargo xtask antlr generate kotlin`.
+They are vendored from upstream with one small local patch (see "Local
+patches" below); the generated Rust modules in `../src/generated/` are
+produced from them by `cargo xtask antlr generate kotlin`.
 
 ## Source
 
@@ -14,6 +15,21 @@ are produced from them by `cargo xtask antlr generate kotlin`.
 | Commit | `2f7aa0524ec27e788dfacd550f144809f2e0254c` |
 
 `KotlinLexer.g4` `import`s `UnicodeClasses`, so all three files must stay together.
+
+## Local patches
+
+These divergences from upstream are intentional and **must be re-applied if
+the grammar is re-vendored**. Each is marked with a `MEHEN LOCAL PATCH`
+comment in the `.g4` file.
+
+- **`KotlinLexer.g4` — `RCURL` mode pop.** Upstream guards the `}` mode pop
+  with a Java embedded action (`{ if (!_modeStack.isEmpty()) { popMode(); } }`),
+  which the ANTLR Rust target cannot translate — the generated Rust lexer
+  never popped the mode, breaking string-template interpolation
+  (`"x ${foo()} y"`). Replaced with the target-portable `-> popMode` lexer
+  command (the runtime's `pop_mode()` is a safe no-op on an empty mode stack,
+  matching the guarded behavior). The grammar's own comment invites this
+  replacement.
 
 ## Toolchain
 
