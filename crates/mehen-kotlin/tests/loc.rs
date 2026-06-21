@@ -280,3 +280,30 @@ fn kotlin_shebang_line_is_cloc_not_ploc_or_blank() {
     assert_eq!(loc.ploc, lb.ploc);
     assert_eq!(loc.blank, lb.blank);
 }
+
+/// Regression: the folded-leading-trivia PLOC adjustment (which advances a
+/// token's code row past trivia folded into `AT_PRE_WS`/`AT_BOTH_WS`
+/// annotation tokens) must apply ONLY to those annotation tokens. A raw
+/// triple-quoted string whose first content line looks like a comment
+/// (`// …` or `/* … */`) is literal string content, not folded trivia — its
+/// LOC must be identical to a raw string whose first line is plain text.
+#[test]
+fn kotlin_raw_string_content_looking_like_comment_is_code() {
+    let comment_like =
+        analyze("fun f(): String {\n    return \"\"\"\n// looks like comment\nreal\n\"\"\"\n}\n");
+    let block_like =
+        analyze("fun f(): String {\n    return \"\"\"\n/* block */\nreal\n\"\"\"\n}\n");
+    let plain = analyze("fun f(): String {\n    return \"\"\"\nplain text here\nreal\n\"\"\"\n}\n");
+    let cl = mehen_report::metrics_json::loc(&comment_like.root.metrics);
+    let bl = mehen_report::metrics_json::loc(&block_like.root.metrics);
+    let pl = mehen_report::metrics_json::loc(&plain.root.metrics);
+    // The string content must never be classified as a comment.
+    assert_eq!(cl.cloc, 0.0, "`// …` inside a raw string is not a comment");
+    assert_eq!(
+        bl.cloc, 0.0,
+        "`/* … */` inside a raw string is not a comment"
+    );
+    // And the comment-looking forms must match the plain-text baseline.
+    assert_eq!((cl.ploc, cl.blank), (pl.ploc, pl.blank));
+    assert_eq!((bl.ploc, bl.blank), (pl.ploc, pl.blank));
+}

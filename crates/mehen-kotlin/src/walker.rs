@@ -292,12 +292,6 @@ impl Walker<'_> {
         // order after the walk (see `walk`), which lets a comment sharing a
         // line with code classify as a code-comment.
         //
-        // Some operator tokens fold *leading* trivia into their text
-        // (`AT_PRE_WS: (Hidden|NL) '@'`, `AT_BOTH_WS`), so `line()` points at
-        // the trivia's (possibly blank/comment-only) line rather than the
-        // real code character. Advance past the leading newlines in the token
-        // text so the PLOC line is where the actual code starts.
-        //
         // `SHEBANG_LINE` (`#!/usr/bin/env kotlin` on an executable `.kts`) is
         // a *visible* terminal but is an interpreter directive, not Kotlin
         // code. Route it as a comment (CLOC) — matching how the Python
@@ -308,8 +302,20 @@ impl Walker<'_> {
             let row = (term.symbol().line() as u32).saturating_sub(1);
             self.current().loc.observe_comment(row, row);
         } else if tt >= 0 && tt != kp::NL {
+            // Only the annotation tokens that fold *leading* trivia into their
+            // text (`AT_PRE_WS: (Hidden|NL) '@'`, `AT_BOTH_WS`) need the row
+            // advanced past that trivia — for them `line()` points at the
+            // trivia's (possibly blank/comment-only) line, not the real `@`.
+            // For any other token the text IS the lexeme, so the heuristic
+            // would be wrong: a raw multiline-string content token whose text
+            // happens to start with `\n// …` or `\n/* … */` is literal string
+            // content, not folded trivia, and must keep its real start row.
             let base = (term.symbol().line() as u32).saturating_sub(1);
-            let row = base.saturating_add(leading_newlines(term.symbol().text().unwrap_or("")));
+            let row = if folds_leading_trivia(tt) {
+                base.saturating_add(leading_newlines(term.symbol().text().unwrap_or("")))
+            } else {
+                base
+            };
             self.current().loc.observe_code_line(row);
         }
     }
@@ -551,7 +557,9 @@ impl Walker<'_> {
     /// trivia so the span begins at the real declaration character.
     fn space_span(&self, ctx: &ParserRuleContext) -> mehen_core::SourceSpan {
         let mut span = ctx_span(ctx, self.char_map, self.line_index);
-        if let Some(start) = ctx.start() {
+        if let Some(start) = ctx.start()
+            && folds_leading_trivia(start.token_type())
+        {
             let (_, trivia_bytes) = leading_trivia(start.text().unwrap_or(""));
             if trivia_bytes > 0 {
                 let trimmed = span
@@ -1190,6 +1198,18 @@ fn leading_trivia(text: &str) -> (u32, usize) {
 /// into the token, so the code line is where the real character is.
 fn leading_newlines(text: &str) -> u32 {
     leading_trivia(text).0
+}
+
+/// Whether a token type folds *leading* trivia (whitespace/newlines/comments)
+/// into its text. Only the annotation `@` tokens whose lexer rule begins with
+/// `(Hidden | NL)` do — `AT_PRE_WS` and `AT_BOTH_WS`. Other trivia-bearing
+/// tokens fold *trailing* trivia (the lexeme comes first), so their leading
+/// prefix is never trivia. Crucially this must exclude string-content tokens:
+/// a raw multiline string whose first line is `// …` or `/* … */` is literal
+/// content, not folded trivia, and the leading-trivia heuristic must not
+/// touch it.
+fn folds_leading_trivia(tt: i32) -> bool {
+    matches!(tt, kp::AT_PRE_WS | kp::AT_BOTH_WS)
 }
 
 /// Rules that open a class-like metric space (see `maybe_open_space`). Used
