@@ -347,8 +347,26 @@ impl Walker<'_> {
         // Per-rule classification (cyclomatic / cognitive / ABC / exit / LOC).
         self.classify_rule(ctx, ri, hint);
 
+        // A call argument (`g(a && b)`) is an independent boolean context: its
+        // inner short-circuit run must not collapse with a same-kind operator
+        // outside the call, and vice-versa. Save the enclosing run's `last_op`,
+        // start the argument fresh, then restore it so the *outer* run
+        // continues across the call as if it were a single operand. This makes
+        // `g(a && b) + g(c && d)` count +2 (two independent runs) while keeping
+        // `a && g(x) && b` at +1 (one outer run, the call argument isolated).
+        let saved_bool = if ri == kp::RULE_VALUE_ARGUMENT {
+            let prev = self.current().cognitive.boolean_seq.last_op.take();
+            Some(prev)
+        } else {
+            None
+        };
+
         // Recurse into children, computing each child's hint.
         self.visit_children(ctx, ri, hint);
+
+        if let Some(prev) = saved_bool {
+            self.current().cognitive.boolean_seq.last_op = prev;
+        }
 
         if opened {
             self.close_space();
