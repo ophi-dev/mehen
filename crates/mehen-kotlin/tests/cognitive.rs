@@ -247,3 +247,18 @@ fn kotlin_boolean_sequence_resets_between_call_statements() {
     let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
     assert_eq!(cog.sum, 2.0);
 }
+
+/// Regression: the postfix `!!` not-null assertion shares the `EXCL_*`
+/// tokens with the prefix `!` logical-not, but it must NOT break a boolean
+/// run. `a && b!! && c` collapses both `&&` into one run → +1 (contrast
+/// `a && !b && c` which is +2, see `kotlin_negation_breaks_boolean_sequence`).
+#[test]
+fn kotlin_not_null_assertion_does_not_break_boolean_sequence() {
+    let a = analyze(
+        "fun h(a: Boolean, b: Boolean?, c: Boolean): Boolean {
+             return a && b!! && c
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(cog.sum, 1.0);
+}

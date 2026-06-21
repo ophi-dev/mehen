@@ -152,3 +152,26 @@ fn kotlin_npm_counts_property_accessors() {
     "#
     );
 }
+
+/// Regression: a method in an enum constant's anonymous body
+/// (`A { fun local() {} }`) belongs to that anonymous subclass, not the
+/// enum — no space is opened for the entry, so it must not be counted as a
+/// method of the enclosing enum. Only the enum's own `shared` counts.
+#[test]
+fn kotlin_npm_excludes_enum_entry_body_members() {
+    let a = analyze(
+        "enum class E {
+             A {
+                 fun local() {}
+             };
+
+             fun shared() {}
+         }",
+    );
+    let npm = mehen_report::metrics_json::npm(&a.root.metrics);
+    assert_eq!(
+        npm.class_methods, 1.0,
+        "only the enum's own `shared` counts"
+    );
+    assert_eq!(npm.total_methods, 1.0);
+}

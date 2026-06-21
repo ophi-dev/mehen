@@ -106,7 +106,13 @@ mod markdown_dispatch {
             FenceLanguage::Tsx => "fence.tsx",
             FenceLanguage::Go => "fence.go",
             FenceLanguage::Ruby => "fence.rb",
-            FenceLanguage::Kotlin => "fence.kt",
+            // A fenced Kotlin snippet is script-like — it commonly contains
+            // top-level statements (`println(...)`), which the `.kt`
+            // compilation-unit grammar rejects. Use `.kts` so the Kotlin
+            // analyzer selects the `script` entry rule (a superset that also
+            // accepts top-level declarations), avoiding a cascade of recovered
+            // syntax errors that would otherwise drop the fence's metrics.
+            FenceLanguage::Kotlin => "fence.kts",
             FenceLanguage::Powershell => "fence.ps1",
             FenceLanguage::C => "fence.c",
             FenceLanguage::Php => "fence.php",

@@ -34,9 +34,10 @@
 //!   `secondaryConstructor`, `getter`, `setter` is a function space (NOM
 //!   `record_function`); every `lambdaLiteral` is a function-shaped space
 //!   counted as a closure.
-//! - **LOC**: PLOC from code-line token rows, LLOC from statement-shaped
-//!   rules, CLOC from the hidden-channel comment pass (handled by the
-//!   analyzer and applied to the unit space here).
+//! - **LOC**: PLOC from per-space code-line observations during the AST
+//!   walk (NL excluded), LLOC from statement-shaped rules, CLOC from a
+//!   source-ordered pass over the hidden-channel comment tokens routed to
+//!   the deepest enclosing space via `SpaceRangeTracker` after the walk.
 //! - **Halstead**: per-token operator/operand classification — keyword and
 //!   punctuation tokens are operators; identifiers, literals, `this`,
 //!   `super`, `field` are operands (deduped by text).
@@ -179,6 +180,11 @@ struct ChildHint {
     /// types but are identifiers in this position, so they are Halstead
     /// *operands* regardless of token type.
     in_simple_identifier: bool,
+    /// We are inside an `enumEntry`'s subtree. An enum constant's anonymous
+    /// `classBody` defines a subclass (no space is opened for the entry), so
+    /// its `classMemberDeclaration`s must NOT seed `in_class_member` — that
+    /// would wrongly attribute the entry's members to the enclosing enum.
+    in_enum_entry: bool,
 }
 
 /// The enclosing class-body property's container + default visibility,
@@ -223,16 +229,14 @@ impl Walker<'_> {
         }
 
         // Cognitive: `else` adds a flat +1 (covers `else if`); the boolean
-        // operators feed the sequence collapser; a prefix `!` records a
-        // not-operator so a following same-kind operator is not collapsed
-        // with the one before the negation (`a && !b && c` is +2, not +1).
+        // operators feed the sequence collapser. The prefix `!` not-operator
+        // is handled at the rule level (`prefixUnaryOperator`), not here —
+        // the `EXCL_*` tokens are shared with the postfix `!!` not-null
+        // assertion, which must NOT break a boolean run.
         match tt {
             kp::ELSE => self.current().cognitive.increment_by_one(),
             kp::CONJ => self.current().cognitive.observe_boolean("&&"),
             kp::DISJ => self.current().cognitive.observe_boolean("||"),
-            kp::EXCL_NO_WS | kp::EXCL_WS => {
-                self.current().cognitive.boolean_seq.not_operator("!");
-            }
             _ => {}
         }
 
@@ -347,15 +351,21 @@ impl Walker<'_> {
         // (`functionDeclaration`, `propertyDeclaration`, …). Any other rule
         // (a method body, an expression) clears it so nested local
         // declarations are not counted as class members.
+        // Once inside an `enumEntry`, stay inside for the whole subtree: the
+        // entry's anonymous `classBody` defines a subclass (no space is
+        // opened for it), so none of its members may be attributed to the
+        // enclosing enum.
+        let in_enum_entry = hint.in_enum_entry || ri == kp::RULE_ENUM_ENTRY;
+
         // A class/interface/object/enum body member position originates at
         // `classMemberDeclaration` (the enum's *own* methods reach it via
         // `enumClassBody → classMemberDeclarations`). `in_class_member` then
         // flows through the transparent `declaration` wrapper to the real
-        // member rule. `enumEntry` is intentionally NOT a source: an entry's
-        // own `classBody` defines an anonymous subclass, so its members
-        // belong to that subclass, not to the enum.
+        // member rule. A `classMemberDeclaration` reached *inside* an
+        // `enumEntry`'s body is suppressed — those members belong to the
+        // entry's anonymous subclass, which opens no space here.
         let propagate_member = match ri {
-            kp::RULE_CLASS_MEMBER_DECLARATION => true,
+            kp::RULE_CLASS_MEMBER_DECLARATION => !in_enum_entry,
             kp::RULE_DECLARATION => hint.in_class_member,
             _ => false,
         };
@@ -395,6 +405,7 @@ impl Walker<'_> {
             child_hint.in_class_member = propagate_member;
             child_hint.property_visibility = property_owner;
             child_hint.in_simple_identifier = in_simple_identifier;
+            child_hint.in_enum_entry = in_enum_entry;
             self.visit(child, child_hint);
         }
     }
@@ -605,6 +616,15 @@ impl Walker<'_> {
             // (class-body property declarations, `for`/`while` bodies).
             kp::RULE_STATEMENT | kp::RULE_ASSIGNMENT | kp::RULE_PROPERTY_DECLARATION => {
                 self.current().cognitive.boolean_seq.reset();
+            }
+            // Prefix `!` (logical not) records a not-operator so a following
+            // same-kind boolean operator is not collapsed with the one
+            // before the negation (`a && !b && c` is +2). This is matched at
+            // the rule level — `prefixUnaryOperator` is logical `!`, whereas
+            // the postfix `!!` not-null assertion is `postfixUnaryOperator`
+            // and shares the same `EXCL_*` tokens but must NOT break a run.
+            kp::RULE_PREFIX_UNARY_OPERATOR if child_rule(ctx, kp::RULE_EXCL).is_some() => {
+                self.current().cognitive.boolean_seq.not_operator("!");
             }
             _ => {}
         }
