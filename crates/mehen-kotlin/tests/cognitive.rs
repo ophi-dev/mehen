@@ -196,3 +196,114 @@ fn kotlin_nested_if_inside_else_if_chain_counts() {
     }"###
     );
 }
+
+#[test]
+fn kotlin_nesting_preserved_after_nested_lambda() {
+    // Regression: a lambda resets the cognitive context on entry. Sibling
+    // code after the lambda (the second `if`) must still see the enclosing
+    // `if`'s nesting. If the outer context isn't snapshotted *before* the
+    // lambda's function-entry reset, the inner `if` under-counts (sum 2).
+    let a = analyze(
+        "fun f(a: Boolean, xs: List<Int>) {
+             if (a) {                       // +1
+                 xs.forEach { println(it) } // lambda resets context
+                 if (a) {                   // +2 (nesting = 1, preserved)
+                     println(\"x\")
+                 }
+             }
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(
+        cog.sum, 3.0,
+        "inner if must retain outer nesting after lambda"
+    );
+}
+
+#[test]
+fn kotlin_negation_breaks_boolean_sequence() {
+    // `a && !b && c`: the prefix `!` separates the two `&&` runs, so the
+    // second `&&` is not collapsed with the first → +2, not +1.
+    let a = analyze(
+        "fun g(a: Boolean, b: Boolean, c: Boolean): Boolean {
+             return a && !b && c
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(cog.sum, 2.0);
+}
+
+#[test]
+fn kotlin_boolean_sequence_resets_between_call_statements() {
+    // Two standalone calls each carrying `&&`. The boolean sequence must
+    // reset at the statement boundary, so the second `&&` adds +1 instead
+    // of collapsing with the first → +2, not +1.
+    let a = analyze(
+        "fun h(a: Boolean, b: Boolean, c: Boolean, d: Boolean) {
+             foo(a && b)
+             bar(c && d)
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(cog.sum, 2.0);
+}
+
+/// Regression: the postfix `!!` not-null assertion shares the `EXCL_*`
+/// tokens with the prefix `!` logical-not, but it must NOT break a boolean
+/// run. `a && b!! && c` collapses both `&&` into one run → +1 (contrast
+/// `a && !b && c` which is +2, see `kotlin_negation_breaks_boolean_sequence`).
+#[test]
+fn kotlin_not_null_assertion_does_not_break_boolean_sequence() {
+    let a = analyze(
+        "fun h(a: Boolean, b: Boolean?, c: Boolean): Boolean {
+             return a && b!! && c
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(cog.sum, 1.0);
+}
+
+/// Regression: two independent call-argument expressions in a *single*
+/// statement, each with the same boolean operator (`g(a && b) + g(c && d)`),
+/// are separate boolean runs — the second `&&` must not collapse with the
+/// first. A call argument is an independent boolean context: its `last_op` is
+/// saved/reset on entry and restored on exit, so the two `&&` count +2.
+#[test]
+fn kotlin_boolean_sequence_resets_between_call_args_in_one_statement() {
+    let a = analyze(
+        "fun h(a: Boolean, b: Boolean, c: Boolean, d: Boolean): Int {
+             return g(a && b) + g(c && d)
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(cog.sum, 2.0, "two independent call-arg `&&` runs are +2");
+}
+
+/// Regression: a call used as an *operand* of a surrounding boolean run must
+/// NOT break that run. `a && g(x) && b` is one outer `&&` sequence with the
+/// call isolated as a single operand → +1. (The save/restore of the call
+/// argument's boolean state must leave the *outer* `last_op` intact, so this
+/// must not regress to +2 — which a flat per-call reset would cause.)
+#[test]
+fn kotlin_call_operand_does_not_break_enclosing_boolean_sequence() {
+    let with_empty_call = analyze(
+        "fun h(a: Boolean, b: Boolean): Boolean {
+             return a && g() && b
+         }",
+    );
+    let with_arg_call = analyze(
+        "fun h(a: Boolean, b: Boolean, x: Int): Boolean {
+             return a && g(x) && b
+         }",
+    );
+    assert_eq!(
+        mehen_report::metrics_json::cognitive(&with_empty_call.root.metrics).sum,
+        1.0,
+        "a call with no args must not break the outer `&&` run"
+    );
+    assert_eq!(
+        mehen_report::metrics_json::cognitive(&with_arg_call.root.metrics).sum,
+        1.0,
+        "a call with an argument must not break the outer `&&` run"
+    );
+}

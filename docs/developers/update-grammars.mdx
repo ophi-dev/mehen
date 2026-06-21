@@ -4,9 +4,15 @@ description: "Bump pinned tree-sitter grammar versions and regenerate the kind e
 keywords: ["grammar update", "tree-sitter", "dependabot", "developers"]
 ---
 
-The languages that go through tree-sitter (Go, Kotlin, C, PowerShell, plus the Markdown text
-extensions used by `mehen-markdown`) are parsed via pinned `tree-sitter-<lang>` crates. Grammars
-change over time and need periodic updates — both for bug fixes and to keep up with new syntax.
+The languages that go through tree-sitter (Go, C, PowerShell, plus the Markdown text extensions
+used by `mehen-markdown`) are parsed via pinned `tree-sitter-<lang>` crates. Grammars change over
+time and need periodic updates — both for bug fixes and to keep up with new syntax.
+
+<Note>
+Kotlin is **not** tree-sitter-backed — it uses an ANTLR grammar. To regenerate the Kotlin parser,
+see [Add a new language → Adding an ANTLR-backed language](/developers/new-language) and
+`cargo xtask antlr generate kotlin`, not the tree-sitter flow below.
+</Note>
 
 Grammars can be updated on **Linux** and **macOS** natively, or on **Windows** using **WSL**.
 
@@ -22,13 +28,13 @@ only one analyzer consumes them.
 |---|---|
 | `tree-sitter-c` | `mehen-c` |
 | `tree-sitter-go` | `mehen-go` |
-| `tree-sitter-kotlin-sg` | `mehen-kotlin` |
 | `tree-sitter-pwsh` | `mehen-powershell` |
 | `tree-sitter-markdown-text` | `mehen-markdown` (auxiliary) |
 
-The Python, TypeScript / JavaScript / TSX / JSX, PHP, Ruby, and Rust analyzers do **not** use
-tree-sitter; they have no `grammar.rs` and need no kind-enum regeneration. Markdown's primary parser
-is pulldown-cmark; the tree-sitter Markdown grammar is only used for ancillary text extensions.
+The Python, TypeScript / JavaScript / TSX / JSX, PHP, Ruby, Rust, and Kotlin analyzers do **not**
+use tree-sitter; they have no `grammar.rs` and need no kind-enum regeneration. (Kotlin is
+ANTLR-backed — see the note above.) Markdown's primary parser is pulldown-cmark; the tree-sitter
+Markdown grammar is only used for ancillary text extensions.
 
 ## Update process
 

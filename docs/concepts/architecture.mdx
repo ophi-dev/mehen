@@ -33,8 +33,9 @@ returns the same `LanguageAnalysis` shape. mehen does not force a single AST mod
 | PHP | [Mago](https://github.com/carthage-software/mago) | Attributes, promoted properties, enums, traits, readonly, null-safe calls, `match`. |
 | Ruby | [Prism](https://ruby.github.io/prism/) | Blocks, lambdas, numbered params, rescue modifiers, endless methods, pattern matching. |
 | Rust | [`ra_ap_syntax`](https://docs.rs/ra_ap_syntax/) | The same syntax library rust-analyzer uses internally. |
+| Kotlin | [ANTLR](https://www.antlr.org/) (official [Kotlin spec grammar](https://github.com/Kotlin/kotlin-spec)) | Semantically-named rules for `when` entries, elvis `?:`, safe-call `?.`, `catch` blocks, labeled jumps, and property accessors — richer than a tree-sitter CST. |
 | Markdown | [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) | CommonMark + GFM with byte-accurate spans. |
-| Go, Kotlin, C, PowerShell | tree-sitter | Mature grammars where tree-sitter's coverage is the best available. |
+| Go, C, PowerShell | tree-sitter | Mature grammars where tree-sitter's coverage is the best available. |
 
 `mehen-metrics` owns the math (Halstead formulas, MI variants, cyclomatic accumulators); each
 per-language analyzer owns the *interpretation* — which syntax constructs count as decisions, which

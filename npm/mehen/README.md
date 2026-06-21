@@ -54,8 +54,8 @@ Full metric catalog with formulas and references: <https://mehen.ophi.dev/metric
 ## Supported languages
 
 Python (Ruff), TypeScript / JavaScript / JSX / TSX (Oxc), PHP (Mago), Ruby (Prism), Rust
-(`ra_ap_syntax`), Go (tree-sitter), C (tree-sitter), Kotlin (tree-sitter), PowerShell (tree-sitter),
-and Markdown (pulldown-cmark).
+(`ra_ap_syntax`), Kotlin (ANTLR — official Kotlin spec grammar), Go (tree-sitter), C (tree-sitter),
+PowerShell (tree-sitter), and Markdown (pulldown-cmark).
 
 ## CI integration
 

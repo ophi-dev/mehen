@@ -9,8 +9,9 @@
 - `crates/mehen-engine/`: pipeline orchestration (`run_diff`, `run_top_offenders`, registry, language detection).
 - `crates/mehen-core/`: parser-neutral domain types and the `LanguageAnalyzer` trait.
 - `crates/mehen-metrics/`: shared metric formulas, accumulators, and finalization helpers.
-- `crates/mehen-<lang>/`: per-language analyzers — each owns parsing, metric interpretation, and its own `grammar.rs` for tree-sitter-backed languages.
+- `crates/mehen-<lang>/`: per-language analyzers — each owns parsing, metric interpretation, and its own `grammar.rs` for tree-sitter-backed languages, or `src/generated/` modules for ANTLR-backed ones (e.g. `mehen-kotlin`).
 - `crates/mehen-tree-sitter/`: shared tree-sitter wrapper and CST traversal helpers.
+- `crates/mehen-antlr/`: shared support for ANTLR-backed analyzers — re-exports the `antlr4_runtime` runtime and provides span conversion (char→byte), recovered-error diagnostics, and hidden-channel comment (CLOC) extraction.
 - `crates/mehen-markdown/`: Markdown analyzer with embedded-code dispatch via `LanguageDispatcher`.
 - `crates/mehen-git/`, `crates/mehen-report/`: git operations and rendering (JSON, GitHub Markdown).
 - `xtask/`: developer-only commands (kind-enum codegen, AST dumps, audits).
@@ -73,6 +74,8 @@ When adding or updating a tree-sitter-backed language:
 3. Run `cargo xtask tree-sitter generate <lang>` and commit the resulting `grammar.rs`.
 4. Register the analyzer in `mehen-engine`'s registry (`crates/mehen-engine/src/registry.rs`).
 5. Add per-language metric tests under `crates/mehen-<lang>/tests/`.
+
+ANTLR-backed languages (e.g. Kotlin) follow the same hard rule for generated code: never edit `crates/mehen-<lang>/src/generated/*.rs` — they are produced by `cargo xtask antlr generate <lang>` from the vendored `.g4` grammar in `crates/mehen-<lang>/grammar/` and wrapped in a `#[rustfmt::skip] mod generated`. Regenerating needs the external toolchain (`MEHEN_ANTLR_JAR` + `antlr4-rust-gen` + Java); `cargo xtask antlr check-generated` guards drift in CI when the toolchain is present (it skips otherwise). See `docs/developers/new-language.mdx` ("Adding an ANTLR-backed language") and `crates/mehen-kotlin/grammar/PROVENANCE.md`.
 
 ## Coding Expectations
 - Keep internals internal (`pub(crate)`/private) unless a real external API is needed.

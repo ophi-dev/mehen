@@ -1,1 +1,7 @@
-src/languages/language_*.rs linguist-generated=true
+# ANTLR-generated lexer/parser modules: checked in (so a normal build needs
+# no Java/ANTLR toolchain) but machine-generated — collapse in diffs and
+# exclude from GitHub language stats. Regenerate via
+# `cargo xtask antlr generate <lang>`; never hand-edit. Spell check
+# (.typos.toml) and Copy/Paste Detection (.github/workflows/cpd.yml) exclude
+# the same path.
+**/src/generated/** linguist-generated=true

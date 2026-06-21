@@ -1,0 +1,24 @@
+[package]
+name = "mehen-antlr"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Mehen 1.0 — shared support for ANTLR-backed analyzer crates (internal)."
+publish = false
+
+[dependencies]
+mehen-core = { workspace = true }
+# `antlr4_runtime` is the lib name of the `antlr-rust-runtime` package
+# (`ophi-dev/antlr-rust-runtime`). Pinned exactly here — like every other
+# parser dependency (ra_ap_syntax, ruby-prism) — because parser-level
+# behavior must be reproducible across builds. This crate is the single
+# point where the workspace depends on the ANTLR runtime; analyzer crates
+# (mehen-kotlin, …) reach the runtime through `mehen_antlr`'s re-export so
+# they never pin the version independently.
+antlr4_runtime = { workspace = true }
+
+[lints]
+workspace = true

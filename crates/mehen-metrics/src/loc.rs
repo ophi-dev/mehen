@@ -149,6 +149,15 @@ impl LocStats {
         } else if is_after_code && comment_diff > 0 {
             self.code_comment_lines = self.code_comment_lines.saturating_add(1);
             self.only_comment_lines = self.only_comment_lines.saturating_add(comment_diff);
+        } else if comment_diff > 0 && self.ploc_lines.contains(&end_row) {
+            // Multi-line comment whose *closing* row carries code (e.g.
+            // `/* c\n*/ val x = 1`). That last row is a code-comment, not
+            // comment-only; only the rows strictly before it are
+            // comment-only. Without this, the code-bearing closing row is
+            // double-counted as comment-only and masks a real blank line
+            // elsewhere (`blank = sloc - ploc - only_comment`).
+            self.code_comment_lines = self.code_comment_lines.saturating_add(1);
+            self.only_comment_lines = self.only_comment_lines.saturating_add(comment_diff);
         } else {
             self.only_comment_lines = self.only_comment_lines.saturating_add(comment_diff + 1);
             self.last_comment_end = Some(end_row);

@@ -1,7 +1,7 @@
 ---
 title: "Supported languages"
 description: "Source-code and documentation languages mehen analyzes today, plus the parser backing each one."
-keywords: ["mehen languages", "supported languages", "polyglot", "ruff", "oxc", "mago", "prism", "tree-sitter", "pulldown-cmark"]
+keywords: ["mehen languages", "supported languages", "polyglot", "ruff", "oxc", "mago", "prism", "tree-sitter", "antlr", "pulldown-cmark"]
 ---
 
 mehen supports nine source languages and Markdown. Per-file language detection is by extension, and the
@@ -19,7 +19,7 @@ gives mehen the best semantic coverage for that ecosystem.
 | **Ruby** | `.rb` | [Prism](https://ruby.github.io/prism/) (`ruby-prism`) |
 | **Rust** | `.rs` | [`ra_ap_syntax`](https://docs.rs/ra_ap_syntax/) (rust-analyzer's syntax library) |
 | **Go** | `.go` | [tree-sitter-go](https://github.com/tree-sitter/tree-sitter-go) |
-| **Kotlin** | `.kt`, `.kts` | [tree-sitter-kotlin-sg](https://github.com/fwcd/tree-sitter-kotlin) |
+| **Kotlin** | `.kt`, `.kts` | [ANTLR](https://www.antlr.org/) — official [Kotlin spec grammar](https://github.com/Kotlin/kotlin-spec) via [antlr-rust-runtime](https://github.com/ophi-dev/antlr-rust-runtime) |
 | **C** | `.c`, `.h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) |
 | **PowerShell** | `.ps1`, `.psm1`, `.psd1` | [tree-sitter-pwsh](https://github.com/wharflab/tree-sitter-powershell) |
 
@@ -42,7 +42,12 @@ TypeScript front-end and `.jsx` through Oxc's TSX front-end.
   and safe navigation.
 - **`ra_ap_syntax`** is the syntax tree library used by rust-analyzer; it gives mehen exactly the
   syntactic granularity rust-analyzer uses for its own analyses.
-- **Tree-sitter** is mehen's pick for Go, Kotlin, C, and PowerShell, where its grammar quality and
+- **ANTLR** parses Kotlin from the official [Kotlin specification grammar](https://github.com/Kotlin/kotlin-spec),
+  generated to Rust by [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime).
+  The spec grammar models Kotlin constructs (`when` entries, the elvis `?:` and safe-call `?.`
+  operators, `catch` blocks, labeled jumps, property accessors) as first-class, semantically-named
+  rules — richer than a tree-sitter CST.
+- **Tree-sitter** is mehen's pick for Go, C, and PowerShell, where its grammar quality and
   ecosystem maturity make it the best fit.
 
 ## Documentation

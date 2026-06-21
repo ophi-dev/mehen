@@ -83,3 +83,245 @@ fn kotlin_counts_companion_and_accessors_as_lloc() {
     let loc = mehen_report::metrics_json::loc(&a.root.metrics);
     assert_eq!(loc.lloc, 7.0);
 }
+
+/// Regression: a control-flow expression used as a statement (`if`,
+/// `return`, …) is counted as LLOC by its own rule arm. The
+/// `statement → expression` arm must NOT count it again, or every bare
+/// `if`/`when`/`try`/`return`/`throw` statement records two LLOC.
+#[test]
+fn kotlin_control_flow_statements_count_lloc_once() {
+    let a = analyze(
+        "fun f(a: Int): Int {
+             if (a > 0) { foo() }
+             bar()
+             return a
+         }",
+    );
+    // f (1) + if (1) + foo() (1) + bar() (1) + return (1) = 5.
+    // (Pre-fix: the `if` and `return` would each count twice → 7.)
+    assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).lloc, 5.0);
+}
+
+/// Regression: a *parenthesized* bare control-flow expression
+/// (`(if (a) foo() else bar())`) must not be double-counted as LLOC. The
+/// `statement → expression` dedup guard descends the precedence ladder to
+/// find an already-counted `if`/`when`/`try`/`jump`; it must also descend
+/// through `parenthesizedExpression` (a single-rule-child wrapper), or the
+/// parenthesized form counts once by the inner `if` arm and again by the
+/// statement arm.
+#[test]
+fn kotlin_parenthesized_control_flow_counts_lloc_once() {
+    let paren = analyze("fun f(a: Boolean) {\n    (if (a) foo() else bar())\n}\n");
+    let plain = analyze("fun f(a: Boolean) {\n    if (a) foo() else bar()\n}\n");
+    assert_eq!(
+        mehen_report::metrics_json::loc(&paren.root.metrics).lloc,
+        mehen_report::metrics_json::loc(&plain.root.metrics).lloc,
+        "parenthesizing a bare `if` statement must not add an LLOC"
+    );
+}
+
+/// Regression: a multiline block comment that starts after code on the same
+/// line (`val x = /* … */ 1`) is classified as a code-comment, not
+/// comment-only — comments are now routed in source order after the AST walk
+/// (which seeds each space's known code lines), so the "comment shares a line
+/// with code" check sees the code. The file totals stay correct.
+#[test]
+fn kotlin_inline_block_comment_after_code() {
+    let a = analyze(
+        "fun f(): Int {
+             val x = /* trailing */ 1
+             return x
+         }",
+    );
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    // The inline block comment shares the `val x = … 1` line, so it is a
+    // code-comment: cloc counts it but it adds no comment-only/blank line.
+    assert_eq!(loc.cloc, 1.0);
+    assert_eq!(loc.blank, 0.0);
+}
+
+/// Regression: Kotlin folds optional trivia into certain operator tokens
+/// (`NOT_IS: '!is' (Hidden|NL)`), so a comment glued to the operator
+/// (`x !is/* note */ Int`) lives inside the operator token's text rather than
+/// a standalone comment token. The LOC pass scans these trivia-bearing
+/// operators for embedded comments so CLOC isn't undercounted.
+#[test]
+fn kotlin_comment_embedded_in_operator_token_counts_as_cloc() {
+    let a = analyze(
+        "fun f(x: Any): Boolean {
+             return x !is/* note */ Int
+         }",
+    );
+    assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).cloc, 1.0);
+}
+
+/// Regression: `AT_PRE_WS`/`AT_BOTH_WS` annotation tokens fold the *leading*
+/// newline into the token text (`"\n@"`), so `line()` points at the blank
+/// line before the annotation. The PLOC observation advances past leading
+/// newlines, so a blank line before an annotated declaration is not counted
+/// as code.
+#[test]
+fn kotlin_blank_line_before_annotation_is_not_ploc() {
+    // 4 source lines: `fun a()`, blank, `@Deprecated`, `fun b()`.
+    let a = analyze("fun a() {}\n\n@Deprecated\nfun b() {}\n");
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    assert_eq!(loc.ploc, 3.0, "the blank line must not count as code");
+    assert_eq!(loc.blank, 1.0);
+}
+
+/// Regression: a multiline block comment folded into the leading trivia of
+/// an `AT_PRE_WS` annotation token must not mark its comment-only lines as
+/// code. The PLOC trivia-skip advances past a leading block comment (and its
+/// embedded newlines), so the comment lines count as CLOC, not PLOC.
+#[test]
+fn kotlin_block_comment_before_annotation_is_not_ploc() {
+    // 5 source lines: `fun a()`, `/* c1`, `   c2 */`, `@Deprecated`, `fun b()`.
+    let a = analyze("fun a() {}\n/* c1\n   c2 */\n@Deprecated\nfun b() {}\n");
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    assert_eq!(
+        loc.ploc, 3.0,
+        "the 2 block-comment lines must not count as code"
+    );
+    assert_eq!(loc.cloc, 2.0);
+}
+
+/// Regression: a multi-line block comment whose *closing* row carries code
+/// (`/* c\n*/ val x = 1`) must classify that closing row as a code-comment,
+/// not comment-only. Otherwise the code-bearing row is double-counted as
+/// comment-only and masks a genuine blank line elsewhere
+/// (`blank = sloc - ploc - only_comment_lines`).
+#[test]
+fn kotlin_block_comment_closing_on_code_line_preserves_blank() {
+    // 6 lines: `fun f()`, `val a = 1`, BLANK, `/* c`, `*/ val b = 2`, `}`.
+    let a = analyze("fun f() {\n  val a = 1\n\n  /* c\n*/ val b = 2\n}\n");
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    assert_eq!(loc.blank, 1.0, "the genuine blank line must still count");
+    // ploc: `fun f`, `val a`, `*/ val b`, `}` = 4 (the comment-only `/* c` is not code).
+    assert_eq!(loc.ploc, 4.0);
+}
+
+/// Regression: an annotated declaration after a blank line has its `@` token
+/// lexed as `AT_PRE_WS`, whose folded leading newline would otherwise pull
+/// the space's span start onto the blank line — inflating the space's `sloc`
+/// and `blank`. The span start is trimmed past leading trivia.
+#[test]
+fn kotlin_annotated_space_span_excludes_leading_blank() {
+    // `fun a()`, blank, `@Deprecated`, `fun b() { println(1) }` (lines 4–6).
+    let a = analyze("fun a() {}\n\n@Deprecated\nfun b() {\n  println(1)\n}\n");
+    let b = a
+        .root
+        .spaces
+        .iter()
+        .find(|s| s.name.as_deref() == Some("b"))
+        .expect("function b space");
+    // b spans `@Deprecated`(3) .. `}`(6) = 4 SLOC, no blank inside.
+    assert_eq!(
+        b.span.start_line, 3,
+        "span must start at @Deprecated, not the blank line"
+    );
+    let loc = mehen_report::metrics_json::loc(&b.metrics);
+    assert_eq!(loc.sloc, 4.0);
+    assert_eq!(loc.blank, 0.0);
+}
+
+/// Regression: a block comment folded into an annotation token's leading
+/// trivia (`/* doc */\n@Anno fun b()`) must not be routed into the annotated
+/// space's CLOC. Trimming only the span's `start_line` left `start_byte`
+/// inside the folded comment, and `push_space` routes comments by byte range,
+/// so the comment was attributed to `b`. The span's `start_byte` is now
+/// trimmed past the trivia, so the comment counts only at file level.
+#[test]
+fn kotlin_block_comment_folded_into_annotation_not_routed_to_space() {
+    // `fun a()`, blank, `/* doc */`, `@Deprecated`, `fun b() { println(1) }`.
+    let a = analyze("fun a() {}\n\n/* doc */\n@Deprecated\nfun b() {\n  println(1)\n}\n");
+    let b = a
+        .root
+        .spaces
+        .iter()
+        .find(|s| s.name.as_deref() == Some("b"))
+        .expect("function b space");
+    // The span starts at `@Deprecated` (line 4), past the leading comment.
+    assert_eq!(b.span.start_line, 4, "span must start at @Deprecated");
+    let b_loc = mehen_report::metrics_json::loc(&b.metrics);
+    assert_eq!(b_loc.cloc, 0.0, "leading comment must not be b's CLOC");
+    // The comment is still counted once, at file level.
+    assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).cloc, 1.0);
+}
+
+/// Regression: the same fold on a *single line* (`/* docs */@Anno fun b()`)
+/// has zero embedded newlines, so a newline-count-only trim would miss it —
+/// but the comment bytes are still inside the span. The byte-based trim
+/// advances `start_byte` past the comment, keeping it out of `b`'s CLOC.
+#[test]
+fn kotlin_same_line_comment_before_annotation_not_routed_to_space() {
+    // `fun a()`, blank, `/* docs */@Deprecated fun b() { println(1) }`.
+    let a = analyze("fun a() {}\n\n/* docs */@Deprecated fun b() {\n  println(1)\n}\n");
+    let b = a
+        .root
+        .spaces
+        .iter()
+        .find(|s| s.name.as_deref() == Some("b"))
+        .expect("function b space");
+    assert_eq!(
+        mehen_report::metrics_json::loc(&b.metrics).cloc,
+        0.0,
+        "same-line leading comment must not be b's CLOC"
+    );
+    assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).cloc, 1.0);
+}
+
+/// Analyze as a `.kts` script (the shebang is only valid in scripts, which
+/// use the `script` entry rule).
+fn analyze_kts(source: &str) -> mehen_core::LanguageAnalysis {
+    let mut text = source.trim_end().trim_matches('\n').to_string();
+    text.push('\n');
+    let analyzer = KotlinAnalyzer::new();
+    let file = SourceFile::new("foo.kts".into(), Language::Kotlin, text);
+    analyzer.analyze(&file, &AnalysisConfig::default()).unwrap()
+}
+
+/// Regression: `SHEBANG_LINE` (`#!/usr/bin/env kotlin`) is a *visible* tree
+/// terminal on executable `.kts` scripts, but it is an interpreter directive,
+/// not Kotlin code. It must not count as PLOC, and (since it occupies a
+/// physical row) must be routed to CLOC rather than silently becoming a
+/// phantom blank line.
+#[test]
+fn kotlin_shebang_line_is_cloc_not_ploc_or_blank() {
+    let a = analyze_kts("#!/usr/bin/env kotlin\nval x = 1\nprintln(x)\n");
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    assert_eq!(loc.ploc, 2.0, "shebang must not count as code");
+    assert_eq!(loc.cloc, 1.0, "shebang is comment-like trivia");
+    assert_eq!(loc.blank, 0.0, "shebang must not become a phantom blank");
+    // The same script without the shebang has the same code/blank profile.
+    let b = analyze_kts("val x = 1\nprintln(x)\n");
+    let lb = mehen_report::metrics_json::loc(&b.root.metrics);
+    assert_eq!(loc.ploc, lb.ploc);
+    assert_eq!(loc.blank, lb.blank);
+}
+
+/// Regression: the folded-leading-trivia PLOC adjustment (which advances a
+/// token's code row past trivia folded into `AT_PRE_WS`/`AT_BOTH_WS`
+/// annotation tokens) must apply ONLY to those annotation tokens. A raw
+/// triple-quoted string whose first content line looks like a comment
+/// (`// …` or `/* … */`) is literal string content, not folded trivia — its
+/// LOC must be identical to a raw string whose first line is plain text.
+#[test]
+fn kotlin_raw_string_content_looking_like_comment_is_code() {
+    let comment_like =
+        analyze("fun f(): String {\n    return \"\"\"\n// looks like comment\nreal\n\"\"\"\n}\n");
+    let block_like =
+        analyze("fun f(): String {\n    return \"\"\"\n/* block */\nreal\n\"\"\"\n}\n");
+    let plain = analyze("fun f(): String {\n    return \"\"\"\nplain text here\nreal\n\"\"\"\n}\n");
+    let cl = mehen_report::metrics_json::loc(&comment_like.root.metrics);
+    let bl = mehen_report::metrics_json::loc(&block_like.root.metrics);
+    let pl = mehen_report::metrics_json::loc(&plain.root.metrics);
+    // The string content must never be classified as a comment.
+    assert_eq!(cl.cloc, 0.0, "`// …` inside a raw string is not a comment");
+    assert_eq!(
+        bl.cloc, 0.0,
+        "`/* … */` inside a raw string is not a comment"
+    );
+    // And the comment-looking forms must match the plain-text baseline.
+    assert_eq!((cl.ploc, cl.blank), (pl.ploc, pl.blank));
+    assert_eq!((bl.ploc, bl.blank), (pl.ploc, pl.blank));
+}
