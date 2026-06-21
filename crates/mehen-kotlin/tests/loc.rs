@@ -111,12 +111,12 @@ fn kotlin_control_flow_statements_count_lloc_once() {
 fn kotlin_inline_block_comment_after_code() {
     let a = analyze(
         "fun f(): Int {
-             val x = 1 // trailing
+             val x = /* trailing */ 1
              return x
          }",
     );
     let loc = mehen_report::metrics_json::loc(&a.root.metrics);
-    // The trailing comment shares the `val x = 1` line, so it is a
+    // The inline block comment shares the `val x = … 1` line, so it is a
     // code-comment: cloc counts it but it adds no comment-only/blank line.
     assert_eq!(loc.cloc, 1.0);
     assert_eq!(loc.blank, 0.0);
