@@ -91,6 +91,7 @@ pub(crate) fn walk(
         tree: MetricTreeBuilder::new(unit_span),
         stack: vec![unit_state],
         kinds: vec![SpaceKind::Unit],
+        suppress_parent_wmc: vec![false],
         cognitive: CognitiveContext::default(),
         loc_routing: SpaceRangeTracker::new(),
     };
@@ -201,6 +202,12 @@ struct Walker<'a> {
     tree: MetricTreeBuilder,
     stack: Vec<State>,
     kinds: Vec<SpaceKind>,
+    /// Parallel to `stack`/`kinds`: whether the closing space must NOT
+    /// contribute to its parent's WMC. Set for functions opened inside an
+    /// enum entry's anonymous body — that body opens no space of its own, so
+    /// the function closes with the *enum* as parent, but it belongs to the
+    /// entry's anonymous subclass, not the enum.
+    suppress_parent_wmc: Vec<bool>,
     cognitive: CognitiveContext,
     /// Records each opened space's byte range so the post-walk LOC token
     /// pass can route code/comment lines to the deepest enclosing scope.
@@ -443,7 +450,7 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_function();
                 state.nargs.record_function_args(count_function_args(ctx));
-                self.push_space(SpaceKind::Function, name, ctx, state);
+                self.push_space(SpaceKind::Function, name, ctx, state, hint.in_enum_entry);
                 self.enter_function_cognitive();
                 true
             }
@@ -454,7 +461,7 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_function();
                 state.nargs.record_function_args(count_function_args(ctx));
-                self.push_space(SpaceKind::Function, name, ctx, state);
+                self.push_space(SpaceKind::Function, name, ctx, state, hint.in_enum_entry);
                 self.enter_function_cognitive();
                 true
             }
@@ -462,7 +469,7 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_closure();
                 state.nargs.record_closure_args(count_lambda_args(ctx));
-                self.push_space(SpaceKind::Function, None, ctx, state);
+                self.push_space(SpaceKind::Function, None, ctx, state, hint.in_enum_entry);
                 self.enter_function_cognitive();
                 true
             }
@@ -491,7 +498,10 @@ impl Walker<'_> {
                     ContainerKind::Class
                 };
                 record_constructor_properties(ctx, container, &mut state);
-                self.push_space(kind, name, ctx, state);
+                // A class-like space owns its own WMC, so it never suppresses
+                // a parent contribution (and it has already cleared the
+                // enum-entry suppression for its own body).
+                self.push_space(kind, name, ctx, state, false);
                 true
             }
             kp::RULE_OBJECT_DECLARATION | kp::RULE_COMPANION_OBJECT => {
@@ -500,7 +510,7 @@ impl Walker<'_> {
                 state.npa.record_class_like();
                 state.npm.record_class_like();
                 state.wmc.record_class_like();
-                self.push_space(SpaceKind::Class, name, ctx, state);
+                self.push_space(SpaceKind::Class, name, ctx, state, false);
                 true
             }
             _ => false,
@@ -524,6 +534,7 @@ impl Walker<'_> {
         name: Option<String>,
         ctx: &ParserRuleContext,
         state: State,
+        suppress_parent_wmc: bool,
     ) {
         let span = ctx_span(ctx, self.char_map, self.line_index);
         let space_id = self.tree.open(kind.clone(), span, name);
@@ -533,6 +544,7 @@ impl Walker<'_> {
             .record_open(space_id, span.start_byte, span.end_byte);
         self.stack.push(state);
         self.kinds.push(kind);
+        self.suppress_parent_wmc.push(suppress_parent_wmc);
     }
 
     /// Cognitive function-entry: reset nesting / lambda, bump depth when
@@ -553,6 +565,7 @@ impl Walker<'_> {
 
     fn close_space(&mut self) {
         let closed_kind = self.kinds.pop().expect("kinds underflow");
+        let suppress_wmc = self.suppress_parent_wmc.pop().unwrap_or(false);
         let mut state = self.stack.pop().expect("stack underflow");
         if matches!(closed_kind, SpaceKind::Function) {
             state.wmc.set_cyclomatic(state.cyclomatic.cyclomatic + 1);
@@ -569,7 +582,11 @@ impl Walker<'_> {
         if let Some(parent) = self.stack.last_mut() {
             let parent_kind = self.kinds.last().cloned().unwrap_or(SpaceKind::Unit);
             merge_child_into_parent(parent, &state);
-            if matches!(closed_kind, SpaceKind::Function) {
+            // Roll a closing function's cyclomatic into the parent's WMC —
+            // unless it's a function from an enum entry's anonymous body,
+            // which belongs to that subclass (no space of its own) and must
+            // not inflate the enclosing enum's WMC.
+            if matches!(closed_kind, SpaceKind::Function) && !suppress_wmc {
                 let container = container_kind(parent_kind);
                 state.wmc.finalize_method_into(container, &mut parent.wmc);
             }
@@ -1071,16 +1088,41 @@ fn is_class_member_rule(ri: usize) -> bool {
     )
 }
 
-/// Count the newlines in the leading-whitespace prefix of `text` (up to the
-/// first non-whitespace byte). Used to advance a token's PLOC row past
-/// leading trivia folded into the token (e.g. `AT_PRE_WS` = `"\n@"`), so the
-/// code line is where the real character is, not where the trivia started.
+/// Count the newlines in the leading *trivia* prefix of `text` — whitespace
+/// **and** comments — up to the first real code byte. Used to advance a
+/// token's PLOC row past trivia folded into the token (`AT_PRE_WS`/
+/// `AT_BOTH_WS` = e.g. `"\n@"` or `"/* c\n */@"`), so the code line is where
+/// the real character is, not where the leading whitespace or block comment
+/// started.
 fn leading_newlines(text: &str) -> u32 {
-    let mut count = 0;
-    for &b in text.as_bytes() {
-        match b {
-            b'\n' => count += 1,
-            b' ' | b'\t' | b'\r' => {}
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut count = 0u32;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                count += 1;
+                i += 1;
+            }
+            b' ' | b'\t' | b'\r' => i += 1,
+            // Leading block comment: skip it, counting embedded newlines.
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    if bytes[i] == b'\n' {
+                        count += 1;
+                    }
+                    i += 1;
+                }
+                i += 2; // consume `*/`
+            }
+            // Leading line comment: skip to end of line (the newline after it
+            // is counted on the next loop iteration).
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
             _ => break,
         }
     }
@@ -1133,10 +1175,17 @@ fn halstead_class(tt: i32) -> HalsteadClass {
         return HalsteadClass::Operand;
     }
 
-    // Skip structural / trivia tokens.
+    // Skip structural / trivia tokens, including the string delimiters for
+    // both ordinary (`"`) and raw/triple-quoted (`"""`) strings so raw
+    // strings don't record extra Halstead operators vs. ordinary literals.
     if matches!(
         tt,
-        kp::NL | kp::QUOTE_OPEN | kp::QUOTE_CLOSE | kp::SEMICOLON
+        kp::NL
+            | kp::QUOTE_OPEN
+            | kp::QUOTE_CLOSE
+            | kp::TRIPLE_QUOTE_OPEN
+            | kp::TRIPLE_QUOTE_CLOSE
+            | kp::SEMICOLON
     ) || tt < 0
     {
         return HalsteadClass::Skip;

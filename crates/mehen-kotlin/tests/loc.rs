@@ -150,3 +150,19 @@ fn kotlin_blank_line_before_annotation_is_not_ploc() {
     assert_eq!(loc.ploc, 3.0, "the blank line must not count as code");
     assert_eq!(loc.blank, 1.0);
 }
+
+/// Regression: a multiline block comment folded into the leading trivia of
+/// an `AT_PRE_WS` annotation token must not mark its comment-only lines as
+/// code. The PLOC trivia-skip advances past a leading block comment (and its
+/// embedded newlines), so the comment lines count as CLOC, not PLOC.
+#[test]
+fn kotlin_block_comment_before_annotation_is_not_ploc() {
+    // 5 source lines: `fun a()`, `/* c1`, `   c2 */`, `@Deprecated`, `fun b()`.
+    let a = analyze("fun a() {}\n/* c1\n   c2 */\n@Deprecated\nfun b() {}\n");
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    assert_eq!(
+        loc.ploc, 3.0,
+        "the 2 block-comment lines must not count as code"
+    );
+    assert_eq!(loc.cloc, 2.0);
+}

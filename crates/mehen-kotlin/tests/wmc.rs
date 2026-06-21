@@ -36,3 +36,24 @@ fn kotlin_wmc_class_sums_method_cyclomatics() {
     }"###
     );
 }
+
+/// Regression: a function inside an enum constant's anonymous body must not
+/// roll into the enum's WMC. The entry body opens no space, so `local`
+/// closes with the enum as parent — but it belongs to the entry's anonymous
+/// subclass, so its cyclomatic is excluded from the enum's WMC. Only the
+/// enum's own `shared` (cyclomatic 1) contributes.
+#[test]
+fn kotlin_wmc_excludes_enum_entry_body_functions() {
+    let a = analyze(
+        "enum class E {
+             A {
+                 fun local(x: Int): Int { return if (x > 0) 1 else 2 }
+             };
+
+             fun shared() {}
+         }",
+    );
+    let wmc = mehen_report::metrics_json::wmc(&a.root.metrics);
+    // Only `E.shared` (cyclomatic 1) — `A.local` (cyclomatic 2) is excluded.
+    assert_eq!(wmc.total, 1.0);
+}

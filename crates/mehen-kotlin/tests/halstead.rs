@@ -90,3 +90,19 @@ fn kotlin_operators_and_operands() {
     }"###
     );
 }
+
+/// Regression: raw/triple-quoted string delimiters (`"""`) are skipped in
+/// Halstead just like ordinary `"` delimiters, so a raw string records the
+/// same operator counts as an equivalent ordinary string (no inflation).
+#[test]
+fn kotlin_raw_string_delimiters_excluded_from_halstead() {
+    let raw = analyze("fun f() = \"\"\"hello\"\"\"\n");
+    let ord = analyze("fun f() = \"hello\"\n");
+    let rh = mehen_report::metrics_json::halstead(&raw.root.metrics);
+    let oh = mehen_report::metrics_json::halstead(&ord.root.metrics);
+    assert_eq!(
+        (rh.n1, rh.big_n1),
+        (oh.n1, oh.big_n1),
+        "raw-string delimiters must not add Halstead operators vs. ordinary strings"
+    );
+}
