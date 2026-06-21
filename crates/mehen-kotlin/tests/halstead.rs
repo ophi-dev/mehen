@@ -106,3 +106,23 @@ fn kotlin_raw_string_delimiters_excluded_from_halstead() {
         "raw-string delimiters must not add Halstead operators vs. ordinary strings"
     );
 }
+
+/// Regression: a simple string-template reference (`"$x"`) lexes as a single
+/// `LINE_STR_REF` token holding the interpolated identifier, which must be a
+/// Halstead operand (like the `x` in the `"${x}"` form) rather than falling
+/// through to the operator default.
+#[test]
+fn kotlin_simple_string_template_ref_is_operand() {
+    // `fun f(x: Int) = "$x"`. Operands (distinct text): `f`, `x`, `Int`, and
+    // the `$x` ref token (text `$x`) = 4. The point is that the ref counts as
+    // an *operand* — before the fix it fell through to the operator default,
+    // so it would have inflated n1 and been absent from n2.
+    let with_ref = analyze("fun f(x: Int) = \"$x\"\n");
+    let h = mehen_report::metrics_json::halstead(&with_ref.root.metrics);
+    assert_eq!(h.n2, 4.0, "the `$x` ref must be counted as an operand");
+    // Sanity: an ordinary string literal of the same shape has the same
+    // operator count — the ref didn't leak into operators.
+    let plain = analyze("fun f(x: Int) = \"hi\"\n");
+    let ph = mehen_report::metrics_json::halstead(&plain.root.metrics);
+    assert_eq!(h.n1, ph.n1, "the ref must not be classified as an operator");
+}

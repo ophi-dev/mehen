@@ -166,3 +166,18 @@ fn kotlin_block_comment_before_annotation_is_not_ploc() {
     );
     assert_eq!(loc.cloc, 2.0);
 }
+
+/// Regression: a multi-line block comment whose *closing* row carries code
+/// (`/* c\n*/ val x = 1`) must classify that closing row as a code-comment,
+/// not comment-only. Otherwise the code-bearing row is double-counted as
+/// comment-only and masks a genuine blank line elsewhere
+/// (`blank = sloc - ploc - only_comment_lines`).
+#[test]
+fn kotlin_block_comment_closing_on_code_line_preserves_blank() {
+    // 6 lines: `fun f()`, `val a = 1`, BLANK, `/* c`, `*/ val b = 2`, `}`.
+    let a = analyze("fun f() {\n  val a = 1\n\n  /* c\n*/ val b = 2\n}\n");
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    assert_eq!(loc.blank, 1.0, "the genuine blank line must still count");
+    // ploc: `fun f`, `val a`, `*/ val b`, `}` = 4 (the comment-only `/* c` is not code).
+    assert_eq!(loc.ploc, 4.0);
+}

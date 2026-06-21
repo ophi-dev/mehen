@@ -181,11 +181,14 @@ struct ChildHint {
     /// types but are identifiers in this position, so they are Halstead
     /// *operands* regardless of token type.
     in_simple_identifier: bool,
-    /// We are inside an `enumEntry`'s subtree. An enum constant's anonymous
-    /// `classBody` defines a subclass (no space is opened for the entry), so
-    /// its `classMemberDeclaration`s must NOT seed `in_class_member` — that
-    /// would wrongly attribute the entry's members to the enclosing enum.
-    in_enum_entry: bool,
+    /// We are inside an anonymous class body that opens no metric space of
+    /// its own — an `enumEntry`'s body (`A { … }`) or an `objectLiteral`
+    /// (`object { … }`). Their `classMemberDeclaration`s must NOT seed
+    /// `in_class_member`, and their functions must NOT roll into the
+    /// enclosing class's WMC — those members belong to the anonymous
+    /// subclass, not the lexically-enclosing class. Cleared once a *real*
+    /// nested class-like declaration opens its own space.
+    in_anon_body: bool,
 }
 
 /// The enclosing class-body property's container + default visibility,
@@ -365,17 +368,17 @@ impl Walker<'_> {
         // (`functionDeclaration`, `propertyDeclaration`, …). Any other rule
         // (a method body, an expression) clears it so nested local
         // declarations are not counted as class members.
-        // Track whether we're inside an `enumEntry`'s anonymous body. Such a
-        // body defines a subclass but opens no space, so its direct members
-        // must not be attributed to the enclosing enum. The flag is set on
-        // entering `enumEntry` and CLEARED once a *real* class-like
-        // declaration opens its own space — that nested class owns its
-        // members normally (e.g. `A { class Inner { fun m() {} } }`: `m`
-        // belongs to `Inner`, not the enum).
-        let in_enum_entry = if opens_class_like(ri) {
+        // Track whether we're inside an anonymous class body that opens no
+        // space of its own — an `enumEntry` body or an `objectLiteral`
+        // (`object { … }`). Their direct members must not be attributed to
+        // the lexically-enclosing class. Set on entering those rules and
+        // CLEARED once a *real* class-like declaration opens its own space —
+        // that nested class owns its members normally (e.g.
+        // `A { class Inner { fun m() {} } }`: `m` belongs to `Inner`).
+        let in_anon_body = if opens_class_like(ri) {
             false
         } else {
-            hint.in_enum_entry || ri == kp::RULE_ENUM_ENTRY
+            hint.in_anon_body || ri == kp::RULE_ENUM_ENTRY || ri == kp::RULE_OBJECT_LITERAL
         };
 
         // A class/interface/object/enum body member position originates at
@@ -383,10 +386,10 @@ impl Walker<'_> {
         // `enumClassBody → classMemberDeclarations`). `in_class_member` then
         // flows through the transparent `declaration` wrapper to the real
         // member rule. A `classMemberDeclaration` reached *inside* an
-        // `enumEntry`'s body is suppressed — those members belong to the
-        // entry's anonymous subclass, which opens no space here.
+        // anonymous body (enum entry / object literal) is suppressed — those
+        // members belong to the anonymous subclass, which opens no space here.
         let propagate_member = match ri {
-            kp::RULE_CLASS_MEMBER_DECLARATION => !in_enum_entry,
+            kp::RULE_CLASS_MEMBER_DECLARATION => !in_anon_body,
             kp::RULE_DECLARATION => hint.in_class_member,
             _ => false,
         };
@@ -426,7 +429,7 @@ impl Walker<'_> {
             child_hint.in_class_member = propagate_member;
             child_hint.property_visibility = property_owner;
             child_hint.in_simple_identifier = in_simple_identifier;
-            child_hint.in_enum_entry = in_enum_entry;
+            child_hint.in_anon_body = in_anon_body;
             self.visit(child, child_hint);
         }
     }
@@ -450,7 +453,7 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_function();
                 state.nargs.record_function_args(count_function_args(ctx));
-                self.push_space(SpaceKind::Function, name, ctx, state, hint.in_enum_entry);
+                self.push_space(SpaceKind::Function, name, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
             }
@@ -461,7 +464,7 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_function();
                 state.nargs.record_function_args(count_function_args(ctx));
-                self.push_space(SpaceKind::Function, name, ctx, state, hint.in_enum_entry);
+                self.push_space(SpaceKind::Function, name, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
             }
@@ -469,7 +472,7 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_closure();
                 state.nargs.record_closure_args(count_lambda_args(ctx));
-                self.push_space(SpaceKind::Function, None, ctx, state, hint.in_enum_entry);
+                self.push_space(SpaceKind::Function, None, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
             }
@@ -1130,7 +1133,7 @@ fn leading_newlines(text: &str) -> u32 {
 }
 
 /// Rules that open a class-like metric space (see `maybe_open_space`). Used
-/// to clear the `in_enum_entry` suppression once a real nested class/object
+/// to clear the `in_anon_body` suppression once a real nested class/object
 /// owns the following body — its members belong to that class, not the enum.
 fn opens_class_like(ri: usize) -> bool {
     matches!(
@@ -1171,6 +1174,11 @@ fn halstead_class(tt: i32) -> HalsteadClass {
             | kp::FIELD
             | kp::LINE_STR_TEXT
             | kp::MULTI_LINE_STR_TEXT
+            // Simple string-template references (`"$x"`) lex as a single
+            // `…_STR_REF` token holding the interpolated identifier — it's
+            // the operand, matching the `"${x}"` expression form.
+            | kp::LINE_STR_REF
+            | kp::MULTI_LINE_STR_REF
     ) {
         return HalsteadClass::Operand;
     }

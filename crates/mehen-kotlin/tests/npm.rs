@@ -198,3 +198,22 @@ fn kotlin_npm_counts_real_nested_class_inside_enum_entry() {
     // `E.direct` (the entry's own method) is NOT attributed to the enum.
     assert_eq!(npm.total_methods, 2.0);
 }
+
+/// Regression: an object literal (`object { … }`) is an anonymous class
+/// whose body opens no metric space, so its members must not be attributed
+/// to the lexically-enclosing class. Only `C.outer` counts on `C`; the
+/// object literal's `inner` does not.
+#[test]
+fn kotlin_npm_excludes_object_literal_body_members() {
+    let a = analyze(
+        "class C {
+             fun outer() {}
+             val o = object {
+                 fun inner() {}
+             }
+         }",
+    );
+    let npm = mehen_report::metrics_json::npm(&a.root.metrics);
+    assert_eq!(npm.class_methods, 1.0, "only `C.outer` counts");
+    assert_eq!(npm.total_methods, 1.0);
+}
