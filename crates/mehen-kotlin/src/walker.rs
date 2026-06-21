@@ -520,9 +520,26 @@ impl Walker<'_> {
         }
     }
 
+    /// A space's source span, with leading trivia trimmed. A declaration's
+    /// start token can be an `AT_PRE_WS`/`AT_BOTH_WS` annotation token whose
+    /// text folds in the preceding newline(s)/comment, which would pull the
+    /// span's `start_line` back onto a blank/comment line and inflate the
+    /// space's `sloc`/`blank`. Advance `start_line` past those leading
+    /// newlines so the span begins at the real declaration line.
+    fn space_span(&self, ctx: &ParserRuleContext) -> mehen_core::SourceSpan {
+        let mut span = ctx_span(ctx, self.char_map, self.line_index);
+        if let Some(start) = ctx.start() {
+            let skip = leading_newlines(start.text().unwrap_or(""));
+            if skip > 0 {
+                span.start_line = span.start_line.saturating_add(skip).min(span.end_line);
+            }
+        }
+        span
+    }
+
     fn new_space_state(&self, ctx: &ParserRuleContext) -> State {
         let mut state = State::new();
-        let span = ctx_span(ctx, self.char_map, self.line_index);
+        let span = self.space_span(ctx);
         state.loc.set_span(
             span.start_line.saturating_sub(1),
             span.end_line.saturating_sub(1),
@@ -539,7 +556,7 @@ impl Walker<'_> {
         state: State,
         suppress_parent_wmc: bool,
     ) {
-        let span = ctx_span(ctx, self.char_map, self.line_index);
+        let span = self.space_span(ctx);
         let space_id = self.tree.open(kind.clone(), span, name);
         // Record this space's byte range so the post-walk LOC token pass
         // routes code/comment lines into it.
@@ -1172,8 +1189,13 @@ fn halstead_class(tt: i32) -> HalsteadClass {
             | kp::THIS
             | kp::SUPER
             | kp::FIELD
+            // String *content* tokens are operands (the literal's value),
+            // matching plain text: line/multiline text, escaped chars
+            // (`\n`), and the literal `"` runs inside a raw string.
             | kp::LINE_STR_TEXT
             | kp::MULTI_LINE_STR_TEXT
+            | kp::LINE_STR_ESCAPED_CHAR
+            | kp::MULTI_LINE_STRING_QUOTE
             // Simple string-template references (`"$x"`) lex as a single
             // `…_STR_REF` token holding the interpolated identifier — it's
             // the operand, matching the `"${x}"` expression form.

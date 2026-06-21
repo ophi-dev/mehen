@@ -181,3 +181,27 @@ fn kotlin_block_comment_closing_on_code_line_preserves_blank() {
     // ploc: `fun f`, `val a`, `*/ val b`, `}` = 4 (the comment-only `/* c` is not code).
     assert_eq!(loc.ploc, 4.0);
 }
+
+/// Regression: an annotated declaration after a blank line has its `@` token
+/// lexed as `AT_PRE_WS`, whose folded leading newline would otherwise pull
+/// the space's span start onto the blank line — inflating the space's `sloc`
+/// and `blank`. The span start is trimmed past leading trivia.
+#[test]
+fn kotlin_annotated_space_span_excludes_leading_blank() {
+    // `fun a()`, blank, `@Deprecated`, `fun b() { println(1) }` (lines 4–6).
+    let a = analyze("fun a() {}\n\n@Deprecated\nfun b() {\n  println(1)\n}\n");
+    let b = a
+        .root
+        .spaces
+        .iter()
+        .find(|s| s.name.as_deref() == Some("b"))
+        .expect("function b space");
+    // b spans `@Deprecated`(3) .. `}`(6) = 4 SLOC, no blank inside.
+    assert_eq!(
+        b.span.start_line, 3,
+        "span must start at @Deprecated, not the blank line"
+    );
+    let loc = mehen_report::metrics_json::loc(&b.metrics);
+    assert_eq!(loc.sloc, 4.0);
+    assert_eq!(loc.blank, 0.0);
+}

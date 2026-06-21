@@ -126,3 +126,20 @@ fn kotlin_simple_string_template_ref_is_operand() {
     let ph = mehen_report::metrics_json::halstead(&plain.root.metrics);
     assert_eq!(h.n1, ph.n1, "the ref must not be classified as an operator");
 }
+
+/// Regression: string *content* tokens — escaped chars (`\n` →
+/// `LINE_STR_ESCAPED_CHAR`) and the literal `"` runs in raw strings
+/// (`MULTI_LINE_STRING_QUOTE`) — are Halstead operands (the literal's value),
+/// not operators. An escape must not inflate the operator count vs. an
+/// equivalent plain string.
+#[test]
+fn kotlin_string_escape_content_is_operand_not_operator() {
+    let esc = analyze("fun f() = \"a\\nb\"\n");
+    let plain = analyze("fun f() = \"ab\"\n");
+    let eh = mehen_report::metrics_json::halstead(&esc.root.metrics);
+    let ph = mehen_report::metrics_json::halstead(&plain.root.metrics);
+    assert_eq!(
+        eh.n1, ph.n1,
+        "the \\n escape must be an operand, not an extra operator"
+    );
+}
