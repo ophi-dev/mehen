@@ -1288,6 +1288,11 @@ fn halstead_class(tt: i32) -> HalsteadClass {
             | kp::NULL_LITERAL
             | kp::THIS
             | kp::SUPER
+            // Labeled receivers (`this@Outer`, `super@Outer`) lex as single
+            // `THIS_AT`/`SUPER_AT` tokens — they name the same receiver value
+            // as bare `this`/`super`, so they are operands, not operators.
+            | kp::THIS_AT
+            | kp::SUPER_AT
             | kp::FIELD
             // String *content* tokens are operands (the literal's value),
             // matching plain text: line/multiline text, escaped chars
@@ -1308,6 +1313,13 @@ fn halstead_class(tt: i32) -> HalsteadClass {
     // Skip structural / trivia tokens, including the string delimiters for
     // both ordinary (`"`) and raw/triple-quoted (`"""`) strings so raw
     // strings don't record extra Halstead operators vs. ordinary literals.
+    //
+    // `NL` is skipped because Kotlin emits a newline token between nearly
+    // every construct — it is pervasive structural whitespace, not an
+    // operator the programmer wrote. An *explicit* `;` statement separator is
+    // different: it is a typed punctuator, peer to `,`/`.`/`:`/`(`, all of
+    // which count as operators — so the semicolon falls through to the
+    // operator default below rather than being skipped here.
     if matches!(
         tt,
         kp::NL
@@ -1315,7 +1327,6 @@ fn halstead_class(tt: i32) -> HalsteadClass {
             | kp::QUOTE_CLOSE
             | kp::TRIPLE_QUOTE_OPEN
             | kp::TRIPLE_QUOTE_CLOSE
-            | kp::SEMICOLON
             // A `.kts` shebang (`#!/usr/bin/env kotlin`) is an interpreter
             // directive, not a Kotlin operator/operand — skip it.
             | kp::SHEBANG_LINE
@@ -1324,7 +1335,8 @@ fn halstead_class(tt: i32) -> HalsteadClass {
         return HalsteadClass::Skip;
     }
 
-    // Everything else (keywords, punctuation, operators) is an operator.
+    // Everything else (keywords, punctuation including the explicit `;`,
+    // operators) is an operator.
     HalsteadClass::Operator
 }
 

@@ -193,3 +193,42 @@ fn kotlin_empty_string_literal_is_operand() {
         "empty raw `\"\"\"\"\"\"` is an operand"
     );
 }
+
+/// Regression: a labeled receiver (`this@Outer` / `super@Outer`) lexes as a
+/// single `THIS_AT`/`SUPER_AT` token. It names the same receiver value as
+/// bare `this`/`super`, so it must be a Halstead operand — not fall through
+/// to the operator default (which both inflates n1 and drops the receiver
+/// from the operand set).
+#[test]
+fn kotlin_labeled_receiver_is_operand() {
+    let labeled =
+        analyze("class Outer {\n  inner class Inner {\n    fun f() = this@Outer\n  }\n}\n");
+    let bare = analyze("class Outer {\n  inner class Inner {\n    fun f() = this\n  }\n}\n");
+    let lh = mehen_report::metrics_json::halstead(&labeled.root.metrics);
+    let bh = mehen_report::metrics_json::halstead(&bare.root.metrics);
+    // `this@Outer` must classify exactly like bare `this`.
+    assert_eq!(
+        (lh.n1, lh.big_n1, lh.n2, lh.big_n2),
+        (bh.n1, bh.big_n1, bh.n2, bh.big_n2),
+        "this@Outer must classify like bare this (operand, not operator)"
+    );
+}
+
+/// Regression: an *explicit* `;` statement separator (`val a = 1; val b = 2`)
+/// is a typed punctuator, peer to `,`/`.`/`:`/`(` — it must count as a
+/// Halstead operator. (Only `NL`, which Kotlin emits pervasively as
+/// structural whitespace, is skipped.) An explicit semicolon therefore adds
+/// exactly one distinct operator vs. the newline-separated form.
+#[test]
+fn kotlin_explicit_semicolon_is_operator() {
+    let semi = analyze("fun f() { val a = 1; val b = 2 }\n");
+    let newline = analyze("fun f() { val a = 1\n val b = 2 }\n");
+    let sh = mehen_report::metrics_json::halstead(&semi.root.metrics);
+    let nh = mehen_report::metrics_json::halstead(&newline.root.metrics);
+    assert_eq!(
+        sh.n1,
+        nh.n1 + 1.0,
+        "the explicit `;` must add one distinct operator"
+    );
+    assert_eq!(sh.big_n1, nh.big_n1 + 1.0, "and one operator occurrence");
+}
