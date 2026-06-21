@@ -205,3 +205,49 @@ fn kotlin_annotated_space_span_excludes_leading_blank() {
     assert_eq!(loc.sloc, 4.0);
     assert_eq!(loc.blank, 0.0);
 }
+
+/// Regression: a block comment folded into an annotation token's leading
+/// trivia (`/* doc */\n@Anno fun b()`) must not be routed into the annotated
+/// space's CLOC. Trimming only the span's `start_line` left `start_byte`
+/// inside the folded comment, and `push_space` routes comments by byte range,
+/// so the comment was attributed to `b`. The span's `start_byte` is now
+/// trimmed past the trivia, so the comment counts only at file level.
+#[test]
+fn kotlin_block_comment_folded_into_annotation_not_routed_to_space() {
+    // `fun a()`, blank, `/* doc */`, `@Deprecated`, `fun b() { println(1) }`.
+    let a = analyze("fun a() {}\n\n/* doc */\n@Deprecated\nfun b() {\n  println(1)\n}\n");
+    let b = a
+        .root
+        .spaces
+        .iter()
+        .find(|s| s.name.as_deref() == Some("b"))
+        .expect("function b space");
+    // The span starts at `@Deprecated` (line 4), past the leading comment.
+    assert_eq!(b.span.start_line, 4, "span must start at @Deprecated");
+    let b_loc = mehen_report::metrics_json::loc(&b.metrics);
+    assert_eq!(b_loc.cloc, 0.0, "leading comment must not be b's CLOC");
+    // The comment is still counted once, at file level.
+    assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).cloc, 1.0);
+}
+
+/// Regression: the same fold on a *single line* (`/* docs */@Anno fun b()`)
+/// has zero embedded newlines, so a newline-count-only trim would miss it —
+/// but the comment bytes are still inside the span. The byte-based trim
+/// advances `start_byte` past the comment, keeping it out of `b`'s CLOC.
+#[test]
+fn kotlin_same_line_comment_before_annotation_not_routed_to_space() {
+    // `fun a()`, blank, `/* docs */@Deprecated fun b() { println(1) }`.
+    let a = analyze("fun a() {}\n\n/* docs */@Deprecated fun b() {\n  println(1)\n}\n");
+    let b = a
+        .root
+        .spaces
+        .iter()
+        .find(|s| s.name.as_deref() == Some("b"))
+        .expect("function b space");
+    assert_eq!(
+        mehen_report::metrics_json::loc(&b.metrics).cloc,
+        0.0,
+        "same-line leading comment must not be b's CLOC"
+    );
+    assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).cloc, 1.0);
+}

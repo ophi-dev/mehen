@@ -522,16 +522,27 @@ impl Walker<'_> {
 
     /// A space's source span, with leading trivia trimmed. A declaration's
     /// start token can be an `AT_PRE_WS`/`AT_BOTH_WS` annotation token whose
-    /// text folds in the preceding newline(s)/comment, which would pull the
-    /// span's `start_line` back onto a blank/comment line and inflate the
-    /// space's `sloc`/`blank`. Advance `start_line` past those leading
-    /// newlines so the span begins at the real declaration line.
+    /// text folds in the preceding newline(s)/comment (`"\n@"`, `"/* c */@"`).
+    /// Left untrimmed this pulls the span's `start_line` onto a blank/comment
+    /// line (inflating `sloc`/`blank`) *and* leaves `start_byte` inside the
+    /// folded comment — and since `push_space` routes comments by the span's
+    /// byte range, a leading block comment would be attributed to this space's
+    /// CLOC. Advance both `start_byte` and `start_line` past the folded
+    /// trivia so the span begins at the real declaration character.
     fn space_span(&self, ctx: &ParserRuleContext) -> mehen_core::SourceSpan {
         let mut span = ctx_span(ctx, self.char_map, self.line_index);
         if let Some(start) = ctx.start() {
-            let skip = leading_newlines(start.text().unwrap_or(""));
-            if skip > 0 {
-                span.start_line = span.start_line.saturating_add(skip).min(span.end_line);
+            let (_, trivia_bytes) = leading_trivia(start.text().unwrap_or(""));
+            if trivia_bytes > 0 {
+                let trimmed = span
+                    .start_byte
+                    .saturating_add(trivia_bytes as u32)
+                    .min(span.end_byte);
+                span.start_byte = trimmed;
+                // Derive the line from the trimmed byte via the authoritative
+                // byte->line index (handles the same-line `/* c */@` case that
+                // a newline count alone would miss).
+                span.start_line = self.line_index.line_at(trimmed).min(span.end_line);
             }
         }
         span
@@ -1108,13 +1119,18 @@ fn is_class_member_rule(ri: usize) -> bool {
     )
 }
 
-/// Count the newlines in the leading *trivia* prefix of `text` — whitespace
-/// **and** comments — up to the first real code byte. Used to advance a
-/// token's PLOC row past trivia folded into the token (`AT_PRE_WS`/
-/// `AT_BOTH_WS` = e.g. `"\n@"` or `"/* c\n */@"`), so the code line is where
-/// the real character is, not where the leading whitespace or block comment
-/// started.
-fn leading_newlines(text: &str) -> u32 {
+/// Measure the leading *trivia* prefix of `text` — whitespace **and**
+/// comments — up to the first real code byte, returning
+/// `(embedded_newline_count, prefix_byte_len)`.
+///
+/// Some tokens fold preceding trivia into their text (`AT_PRE_WS`/
+/// `AT_BOTH_WS` = e.g. `"\n@"`, `"/* c\n */@"`, or same-line `"/* docs */@"`),
+/// so the token's reported line/start point at the trivia rather than the
+/// real code character. Callers use the newline count to advance a PLOC row
+/// and the byte length to advance a span's start offset past the folded
+/// trivia. Since the token text is the verbatim source substring, the
+/// prefix's byte length within `text` equals its byte length in the source.
+fn leading_trivia(text: &str) -> (u32, usize) {
     let bytes = text.as_bytes();
     let mut i = 0;
     let mut count = 0u32;
@@ -1146,7 +1162,14 @@ fn leading_newlines(text: &str) -> u32 {
             _ => break,
         }
     }
-    count
+    (count, i.min(bytes.len()))
+}
+
+/// Count the newlines in the leading trivia prefix of `text` (see
+/// [`leading_trivia`]). Used to advance a token's PLOC row past trivia folded
+/// into the token, so the code line is where the real character is.
+fn leading_newlines(text: &str) -> u32 {
+    leading_trivia(text).0
 }
 
 /// Rules that open a class-like metric space (see `maybe_open_space`). Used
