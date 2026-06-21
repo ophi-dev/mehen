@@ -143,3 +143,30 @@ fn kotlin_string_escape_content_is_operand_not_operator() {
         "the \\n escape must be an operand, not an extra operator"
     );
 }
+
+/// Analyze as a `.kts` script so the shebang is parsed via the `script`
+/// entry rule.
+fn analyze_kts(source: &str) -> mehen_core::LanguageAnalysis {
+    let mut text = source.trim_end().trim_matches('\n').to_string();
+    text.push('\n');
+    let analyzer = KotlinAnalyzer::new();
+    let file = SourceFile::new("foo.kts".into(), Language::Kotlin, text);
+    analyzer.analyze(&file, &AnalysisConfig::default()).unwrap()
+}
+
+/// Regression: a `.kts` shebang (`#!/usr/bin/env kotlin`) is an interpreter
+/// directive, not a Kotlin operator/operand. It must not contribute to the
+/// Halstead vocabulary — a script with a shebang has the same operator and
+/// operand counts as the same script without one.
+#[test]
+fn kotlin_shebang_excluded_from_halstead() {
+    let with_shebang = analyze_kts("#!/usr/bin/env kotlin\nval x = 1\nprintln(x)\n");
+    let without = analyze_kts("val x = 1\nprintln(x)\n");
+    let wh = mehen_report::metrics_json::halstead(&with_shebang.root.metrics);
+    let oh = mehen_report::metrics_json::halstead(&without.root.metrics);
+    assert_eq!(
+        (wh.n1, wh.big_n1, wh.n2, wh.big_n2),
+        (oh.n1, oh.big_n1, oh.n2, oh.big_n2),
+        "the shebang must not change any Halstead count"
+    );
+}

@@ -297,7 +297,17 @@ impl Walker<'_> {
         // the trivia's (possibly blank/comment-only) line rather than the
         // real code character. Advance past the leading newlines in the token
         // text so the PLOC line is where the actual code starts.
-        if tt >= 0 && tt != kp::NL {
+        //
+        // `SHEBANG_LINE` (`#!/usr/bin/env kotlin` on an executable `.kts`) is
+        // a *visible* terminal but is an interpreter directive, not Kotlin
+        // code. Route it as a comment (CLOC) — matching how the Python
+        // backend treats `#!`-lines — rather than PLOC: it must not be code,
+        // and leaving it out of PLOC alone would silently reclassify its row
+        // as a phantom blank line (`blank = sloc - ploc - only_comment`).
+        if tt == kp::SHEBANG_LINE {
+            let row = (term.symbol().line() as u32).saturating_sub(1);
+            self.current().loc.observe_comment(row, row);
+        } else if tt >= 0 && tt != kp::NL {
             let base = (term.symbol().line() as u32).saturating_sub(1);
             let row = base.saturating_add(leading_newlines(term.symbol().text().unwrap_or("")));
             self.current().loc.observe_code_line(row);
@@ -398,7 +408,17 @@ impl Walker<'_> {
         // its container + visibility once and thread it to the accessors
         // (`getter`/`setter`) for NPM. The enclosing space kind is the
         // class-like that owns the property.
-        let property_owner = if ri == kp::RULE_PROPERTY_DECLARATION && hint.in_class_member {
+        let property_owner = if in_anon_body {
+            // Inside an anonymous body (object literal / enum entry) the
+            // accessors belong to that anonymous subclass — which opens no
+            // space — so they must NOT inherit an enclosing property's owner.
+            // Otherwise a class property initialized to an `object { … }`
+            // whose member has a getter/setter (suppressed from
+            // `in_class_member`, so the inner property never re-resolves the
+            // owner) would record that accessor on the lexically-enclosing
+            // class, undoing the anonymous-body suppression for accessors.
+            None
+        } else if ri == kp::RULE_PROPERTY_DECLARATION && hint.in_class_member {
             match self.kinds.last().cloned().unwrap_or(SpaceKind::Unit) {
                 SpaceKind::Class | SpaceKind::Impl => Some(AccessorOwner {
                     container: ContainerKind::Class,
@@ -1239,6 +1259,9 @@ fn halstead_class(tt: i32) -> HalsteadClass {
             | kp::TRIPLE_QUOTE_OPEN
             | kp::TRIPLE_QUOTE_CLOSE
             | kp::SEMICOLON
+            // A `.kts` shebang (`#!/usr/bin/env kotlin`) is an interpreter
+            // directive, not a Kotlin operator/operand — skip it.
+            | kp::SHEBANG_LINE
     ) || tt < 0
     {
         return HalsteadClass::Skip;

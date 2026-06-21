@@ -217,3 +217,43 @@ fn kotlin_npm_excludes_object_literal_body_members() {
     assert_eq!(npm.class_methods, 1.0, "only `C.outer` counts");
     assert_eq!(npm.total_methods, 1.0);
 }
+
+/// Regression: a property accessor (`get`/`set`) inside an anonymous object
+/// literal in a class property's initializer belongs to that anonymous
+/// subclass, not the enclosing class. The accessor owner is threaded via
+/// `property_visibility` (separate from the `in_class_member` gate that
+/// suppresses ordinary members), so without clearing it inside an anonymous
+/// body the inner getter was recorded on the enclosing class's NPM.
+#[test]
+fn kotlin_npm_excludes_object_literal_accessor() {
+    let a = analyze(
+        "class C {
+             val o = object {
+                 val p: Int = 0
+                     get() = field
+             }
+         }",
+    );
+    let npm = mehen_report::metrics_json::npm(&a.root.metrics);
+    assert_eq!(
+        npm.class_methods, 0.0,
+        "the object-literal's getter must not count on C"
+    );
+    assert_eq!(npm.total_methods, 0.0);
+}
+
+/// Sanity counterpart to the above: a *real* class-body property accessor
+/// must still be counted as a class method. (Guards against the
+/// anonymous-body fix over-suppressing genuine accessors.)
+#[test]
+fn kotlin_npm_counts_real_class_body_accessor() {
+    let a = analyze(
+        "class C {
+             val p: Int = 0
+                 get() = field
+         }",
+    );
+    let npm = mehen_report::metrics_json::npm(&a.root.metrics);
+    assert_eq!(npm.class_methods, 1.0, "C's own getter counts");
+    assert_eq!(npm.total_methods, 1.0);
+}

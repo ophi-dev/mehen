@@ -251,3 +251,32 @@ fn kotlin_same_line_comment_before_annotation_not_routed_to_space() {
     );
     assert_eq!(mehen_report::metrics_json::loc(&a.root.metrics).cloc, 1.0);
 }
+
+/// Analyze as a `.kts` script (the shebang is only valid in scripts, which
+/// use the `script` entry rule).
+fn analyze_kts(source: &str) -> mehen_core::LanguageAnalysis {
+    let mut text = source.trim_end().trim_matches('\n').to_string();
+    text.push('\n');
+    let analyzer = KotlinAnalyzer::new();
+    let file = SourceFile::new("foo.kts".into(), Language::Kotlin, text);
+    analyzer.analyze(&file, &AnalysisConfig::default()).unwrap()
+}
+
+/// Regression: `SHEBANG_LINE` (`#!/usr/bin/env kotlin`) is a *visible* tree
+/// terminal on executable `.kts` scripts, but it is an interpreter directive,
+/// not Kotlin code. It must not count as PLOC, and (since it occupies a
+/// physical row) must be routed to CLOC rather than silently becoming a
+/// phantom blank line.
+#[test]
+fn kotlin_shebang_line_is_cloc_not_ploc_or_blank() {
+    let a = analyze_kts("#!/usr/bin/env kotlin\nval x = 1\nprintln(x)\n");
+    let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+    assert_eq!(loc.ploc, 2.0, "shebang must not count as code");
+    assert_eq!(loc.cloc, 1.0, "shebang is comment-like trivia");
+    assert_eq!(loc.blank, 0.0, "shebang must not become a phantom blank");
+    // The same script without the shebang has the same code/blank profile.
+    let b = analyze_kts("val x = 1\nprintln(x)\n");
+    let lb = mehen_report::metrics_json::loc(&b.root.metrics);
+    assert_eq!(loc.ploc, lb.ploc);
+    assert_eq!(loc.blank, lb.blank);
+}
