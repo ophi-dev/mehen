@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/ophi-dev/mehen/compare/v1.0.2...v1.1.0) (2026-06-22)
+
+
+### Features
+
+* **kotlin:** replace tree-sitter with ANTLR backend ([#149](https://github.com/ophi-dev/mehen/issues/149)) ([bc0f7fc](https://github.com/ophi-dev/mehen/commit/bc0f7fc1ff827f2dadb387da558661985f801185))
+
 ## [1.0.0](https://github.com/ophi-dev/mehen/compare/v1.0.0...v1.0.0) (2026-06-01)
 
 
