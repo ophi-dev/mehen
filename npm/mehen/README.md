@@ -72,7 +72,7 @@ steps:
   - uses: actions/checkout@v6
     with:
       fetch-depth: 0
-  - uses: ophi-dev/mehen@v0
+  - uses: ophi-dev/mehen@v1
     with:
       paths: src
       thresholds: |
