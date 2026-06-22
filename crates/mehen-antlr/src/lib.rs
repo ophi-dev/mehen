@@ -10,9 +10,8 @@
 //!
 //! - **runtime re-export** ([`runtime`]) so analyzer crates depend on the
 //!   ANTLR runtime through this crate and never pin its version themselves,
-//! - **span conversion** ([`span`]) bridging ANTLR's char-index positions to
-//!   mehen's byte-offset [`SourceSpan`](mehen_core::SourceSpan), correct for
-//!   non-ASCII source,
+//! - **span conversion** ([`span`]) lifting ANTLR token byte spans into
+//!   mehen's byte-offset [`SourceSpan`](mehen_core::SourceSpan)s,
 //! - **diagnostics** ([`diagnostics`]) turning recovered `ParseTree::Error`
 //!   leaves into mehen [`ParseDiagnostic`](mehen_core::ParseDiagnostic)s,
 //! - **LOC tokens** ([`comments`]) a source-ordered code/comment token list
@@ -56,8 +55,8 @@ use mehen_core::{MetricSpace, SourceSpan, SpaceId, SpaceKind};
 pub use antlr4_runtime as runtime;
 
 pub use comments::{LocToken, LocTokenKind, loc_tokens};
-pub use diagnostics::{child_rule, collect_errors, has_child_token};
-pub use span::{CharByteMap, ctx_span, span_from_char_range};
+pub use diagnostics::collect_errors;
+pub use span::{ctx_span, span_from_tokens};
 
 /// Build an "empty" unit space — used by analyzers when the parser fails
 /// before any walk can happen.

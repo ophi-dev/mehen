@@ -51,7 +51,7 @@
 
 use mehen_antlr::runtime::token::Token;
 use mehen_antlr::runtime::{ParseTree, ParserRuleContext, TerminalNode};
-use mehen_antlr::{CharByteMap, LocToken, LocTokenKind, child_rule, ctx_span};
+use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
 use mehen_metrics::{
     ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
@@ -69,14 +69,12 @@ use crate::generated::kotlin_parser as kp;
 /// and per-space `loc.ploc`/`loc.cloc` reflect each scope's body.
 pub(crate) fn walk(
     tree: &ParseTree,
-    source: &str,
     line_index: &LineIndex,
+    source_len: usize,
     loc_tokens: &[LocToken],
 ) -> MetricSpace {
-    let char_map = CharByteMap::new(source);
-
     let unit_span = match tree {
-        ParseTree::Rule(rule) => ctx_span(rule.context(), &char_map, line_index),
+        ParseTree::Rule(rule) => ctx_span(rule.context(), line_index, source_len),
         _ => mehen_core::SourceSpan::empty(),
     };
 
@@ -86,8 +84,8 @@ pub(crate) fn walk(
         .set_span(0, line_index.line_count().saturating_sub(1), true);
 
     let mut walker = Walker {
-        char_map: &char_map,
         line_index,
+        source_len,
         tree: MetricTreeBuilder::new(unit_span),
         stack: vec![unit_state],
         kinds: vec![SpaceKind::Unit],
@@ -200,8 +198,8 @@ struct AccessorOwner {
 }
 
 struct Walker<'a> {
-    char_map: &'a CharByteMap,
     line_index: &'a LineIndex,
+    source_len: usize,
     tree: MetricTreeBuilder,
     stack: Vec<State>,
     kinds: Vec<SpaceKind>,
@@ -522,7 +520,7 @@ impl Walker<'_> {
             }
             kp::RULE_CLASS_DECLARATION => {
                 let name = rule_name(ctx);
-                let is_interface = has_token(ctx, kp::INTERFACE);
+                let is_interface = ctx.has_token(kp::INTERFACE);
                 let kind = if is_interface {
                     SpaceKind::Interface
                 } else {
@@ -574,7 +572,7 @@ impl Walker<'_> {
     /// CLOC. Advance both `start_byte` and `start_line` past the folded
     /// trivia so the span begins at the real declaration character.
     fn space_span(&self, ctx: &ParserRuleContext) -> mehen_core::SourceSpan {
-        let mut span = ctx_span(ctx, self.char_map, self.line_index);
+        let mut span = ctx_span(ctx, self.line_index, self.source_len);
         if let Some(start) = ctx.start()
             && folds_leading_trivia(start.token_type())
         {
@@ -739,7 +737,7 @@ impl Walker<'_> {
             }
             // Label-qualified break/continue add +1 (goto-like).
             kp::RULE_JUMP_EXPRESSION => {
-                if has_token(ctx, kp::BREAK_AT) || has_token(ctx, kp::CONTINUE_AT) {
+                if ctx.has_token(kp::BREAK_AT) || ctx.has_token(kp::CONTINUE_AT) {
                     self.current().cognitive.increment_by_one();
                 }
                 self.current().cognitive.boolean_seq.reset();
@@ -760,7 +758,7 @@ impl Walker<'_> {
             // the rule level — `prefixUnaryOperator` is logical `!`, whereas
             // the postfix `!!` not-null assertion is `postfixUnaryOperator`
             // and shares the same `EXCL_*` tokens but must NOT break a run.
-            kp::RULE_PREFIX_UNARY_OPERATOR if child_rule(ctx, kp::RULE_EXCL).is_some() => {
+            kp::RULE_PREFIX_UNARY_OPERATOR if ctx.child_rule(kp::RULE_EXCL).is_some() => {
                 self.current().cognitive.boolean_seq.not_operator("!");
             }
             _ => {}
@@ -772,7 +770,7 @@ impl Walker<'_> {
             kp::RULE_ASSIGNMENT => self.current().abc.record_assignment(),
             // A `propertyDeclaration` with an initializer (`= expr`) is an
             // assignment; `val`/`var` without `=` is not.
-            kp::RULE_PROPERTY_DECLARATION if has_token(ctx, kp::ASSIGNMENT) => {
+            kp::RULE_PROPERTY_DECLARATION if ctx.has_token(kp::ASSIGNMENT) => {
                 self.current().abc.record_assignment();
             }
             // A call: the `callSuffix` rule wraps the argument list of a
@@ -781,7 +779,7 @@ impl Walker<'_> {
             // Multi-token operators modeled as rules: elvis (`?:`),
             // safe-nav (`?.`), and the `!!` not-null assertion.
             kp::RULE_ELVIS | kp::RULE_SAFE_NAV => self.current().abc.record_condition(),
-            kp::RULE_POSTFIX_UNARY_OPERATOR if has_token(ctx, kp::EXCL_NO_WS) => {
+            kp::RULE_POSTFIX_UNARY_OPERATOR if ctx.has_token(kp::EXCL_NO_WS) => {
                 self.current().abc.record_condition();
             }
             kp::RULE_IF_EXPRESSION
@@ -800,7 +798,7 @@ impl Walker<'_> {
             // enclosing function. A labeled `return@label` (`RETURN_AT`)
             // returns from a lambda, not the function, so it is excluded
             // (matches SonarKotlin); `break`/`continue` are excluded too.
-            if has_token(ctx, kp::RETURN) || has_token(ctx, kp::THROW) {
+            if ctx.has_token(kp::RETURN) || ctx.has_token(kp::THROW) {
                 self.current().nexit.record_exit();
             }
         }
@@ -839,7 +837,7 @@ impl Walker<'_> {
         // so skip a `statement → expression` whose expression bottoms out in
         // one of those forms.
         if ri == kp::RULE_STATEMENT
-            && let Some(expr) = child_rule(ctx, kp::RULE_EXPRESSION)
+            && let Some(expr) = ctx.child_rule(kp::RULE_EXPRESSION)
             && !expression_is_already_lloc(expr)
         {
             self.current().loc.observe_lloc();
@@ -894,14 +892,6 @@ fn else_branch_index(children: &[ParseTree]) -> Option<usize> {
     None
 }
 
-/// Whether `ctx` has a direct child terminal of the given token type.
-fn has_token(ctx: &ParserRuleContext, token_type: i32) -> bool {
-    ctx.children().iter().any(|c| match c {
-        ParseTree::Terminal(t) => t.symbol().token_type() == token_type,
-        _ => false,
-    })
-}
-
 /// The declared name of a class/function/object: its first
 /// `simpleIdentifier` child's covered text.
 fn rule_name(ctx: &ParserRuleContext) -> Option<String> {
@@ -938,11 +928,12 @@ fn count_function_args(ctx: &ParserRuleContext) -> u32 {
             let c = rule.context();
             match c.rule_index() {
                 kp::RULE_FUNCTION_VALUE_PARAMETERS => {
-                    total += count_child_rules(c, kp::RULE_FUNCTION_VALUE_PARAMETER);
+                    total += c.child_rules(kp::RULE_FUNCTION_VALUE_PARAMETER).count() as u32;
                 }
                 kp::RULE_PARAMETERS_WITH_OPTIONAL_TYPE => {
-                    total +=
-                        count_child_rules(c, kp::RULE_FUNCTION_VALUE_PARAMETER_WITH_OPTIONAL_TYPE);
+                    total += c
+                        .child_rules(kp::RULE_FUNCTION_VALUE_PARAMETER_WITH_OPTIONAL_TYPE)
+                        .count() as u32;
                 }
                 // A setter's lone parameter sits directly under `setter`.
                 kp::RULE_FUNCTION_VALUE_PARAMETER_WITH_OPTIONAL_TYPE => total += 1,
@@ -960,18 +951,11 @@ fn count_lambda_args(ctx: &ParserRuleContext) -> u32 {
         if let ParseTree::Rule(rule) = child {
             let c = rule.context();
             if c.rule_index() == kp::RULE_LAMBDA_PARAMETERS {
-                total += count_child_rules(c, kp::RULE_LAMBDA_PARAMETER);
+                total += c.child_rules(kp::RULE_LAMBDA_PARAMETER).count() as u32;
             }
         }
     }
     total
-}
-
-fn count_child_rules(ctx: &ParserRuleContext, rule_index: usize) -> u32 {
-    ctx.children()
-        .iter()
-        .filter(|c| matches!(c, ParseTree::Rule(rule) if rule.context().rule_index() == rule_index))
-        .count() as u32
 }
 
 /// Whether a member declaration is public — default unless a
@@ -1011,12 +995,12 @@ fn visibility_from_modifiers(modifiers: &ParserRuleContext) -> Option<bool> {
                 if let ParseTree::Rule(vis_rule) = inner {
                     let vis = vis_rule.context();
                     if vis.rule_index() == kp::RULE_VISIBILITY_MODIFIER {
-                        if has_token(vis, kp::PUBLIC) {
+                        if vis.has_token(kp::PUBLIC) {
                             return Some(true);
                         }
-                        if has_token(vis, kp::PRIVATE)
-                            || has_token(vis, kp::PROTECTED)
-                            || has_token(vis, kp::INTERNAL)
+                        if vis.has_token(kp::PRIVATE)
+                            || vis.has_token(kp::PROTECTED)
+                            || vis.has_token(kp::INTERNAL)
                         {
                             return Some(false);
                         }
@@ -1040,10 +1024,10 @@ fn record_constructor_properties(
     container: ContainerKind,
     state: &mut State,
 ) {
-    let Some(primary) = child_rule(class_ctx, kp::RULE_PRIMARY_CONSTRUCTOR) else {
+    let Some(primary) = class_ctx.child_rule(kp::RULE_PRIMARY_CONSTRUCTOR) else {
         return;
     };
-    let Some(params) = child_rule(primary, kp::RULE_CLASS_PARAMETERS) else {
+    let Some(params) = primary.child_rule(kp::RULE_CLASS_PARAMETERS) else {
         return;
     };
     for child in params.children() {
@@ -1053,7 +1037,7 @@ fn record_constructor_properties(
                 continue;
             }
             // Only `val`/`var` parameters are properties.
-            if !has_token(param, kp::VAL) && !has_token(param, kp::VAR) {
+            if !param.has_token(kp::VAL) && !param.has_token(kp::VAR) {
                 continue;
             }
             let public = member_is_public(param);

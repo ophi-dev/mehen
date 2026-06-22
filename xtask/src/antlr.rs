@@ -10,10 +10,9 @@
 //!    `*.interp` metadata into Rust lexer/parser modules.
 //!
 //! The generated modules are checked in verbatim under
-//! `crates/mehen-<lang>/src/generated/` (see that dir's README). They are
-//! NOT run through rustfmt: ANTLR's deeply-nested generated code does not
-//! reach a rustfmt fixed point, so the owning analyzer wraps them in a
-//! `#[rustfmt::skip] mod generated { … }` and `cargo fmt` leaves them alone.
+//! `crates/mehen-<lang>/src/generated/` (see that dir's README). The
+//! generator emits lint and `rustfmt::skip` attributes inside each file, so
+//! owning analyzer crates include them as plain modules.
 //!
 //! Because this path needs Java + the ANTLR jar + the generator binary —
 //! none of which a normal `cargo build` requires — the tools are discovered
@@ -219,6 +218,7 @@ fn generate_with(
             gen_status.code()
         ));
     }
+    normalize_generated_rs(&generated_dir)?;
 
     let _ = fs::remove_dir_all(&interp_dir);
 
@@ -326,6 +326,24 @@ fn run_pipeline_into(
         .map_err(|e| format!("failed to launch antlr4-rust-gen: {e}"))?;
     if !gen_status.success() {
         return Err(format!("antlr4-rust-gen failed for `{}`", target.slug));
+    }
+    normalize_generated_rs(out_dir)?;
+    Ok(())
+}
+
+fn normalize_generated_rs(dir: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if !path.is_file() || path.extension().is_none_or(|x| x != "rs") {
+            continue;
+        }
+        let body = fs::read_to_string(&path)
+            .map_err(|e| format!("failed reading {}: {e}", path.display()))?;
+        let normalized = format!("{}\n", body.trim_end_matches(['\n', '\r']));
+        if normalized != body {
+            fs::write(&path, normalized)
+                .map_err(|e| format!("failed writing {}: {e}", path.display()))?;
+        }
     }
     Ok(())
 }

@@ -36,7 +36,7 @@ comment in the `.g4` file.
 | Tool | Version |
 |---|---|
 | ANTLR tool jar | `antlr-4.13.2-complete.jar` (from <https://www.antlr.org/download/>) |
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.4.0` (commit `6bf139715dceffdee505a3ac64ebc8d2ad0868cd`) |
+| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.5.0` (commit `ba2c065c26ba7cdd7cb1ec9e0011484f76ec31be`) |
 
 ## Regenerating
 
@@ -53,4 +53,6 @@ That command drives the same pipeline this directory was produced with:
    → `<interp-dir>/KotlinLexer.interp` + `<interp-dir>/KotlinParser.interp`
 2. `antlr4-rust-gen --lexer <interp-dir>/KotlinLexer.interp --parser <interp-dir>/KotlinParser.interp --out-dir ../src/generated`
 
-The entry rule is `kotlinFile` (`KotlinParser::kotlin_file()`).
+The analyzer selects between the generated `kotlinFile`
+(`KotlinParser::kotlin_file()`) and `script` (`KotlinParser::script()`) entry
+rules, matching the generated parser's v0.5.0 entry-rule documentation.

@@ -15,8 +15,8 @@
 //! separate, `fatal` path handled by the analyzer crate; this module only
 //! covers recovered `Error` nodes within a returned tree.
 
+use antlr4_runtime::ParseTree;
 use antlr4_runtime::token::Token;
-use antlr4_runtime::{ParseTree, ParserRuleContext};
 use mehen_core::ParseDiagnostic;
 
 /// Walk `tree` and emit one `error`-severity [`ParseDiagnostic`] per
@@ -57,24 +57,4 @@ fn collect_into(tree: &ParseTree, code: &str, max: usize, out: &mut Vec<ParseDia
         }
         ParseTree::Terminal(_) => {}
     }
-}
-
-/// Returns the first child rule context with `rule_index` directly under
-/// `ctx`, if any. A small convenience used by language walkers that need a
-/// specific child rule (e.g. a class declaration's `class_body`).
-pub fn child_rule(ctx: &ParserRuleContext, rule_index: usize) -> Option<&ParserRuleContext> {
-    ctx.children().iter().find_map(|child| match child {
-        ParseTree::Rule(rule) if rule.context().rule_index() == rule_index => Some(rule.context()),
-        _ => None,
-    })
-}
-
-/// Returns true if any direct child terminal of `ctx` has the given token
-/// type. Languages use this for keyword-presence checks (e.g. does this
-/// `classDeclaration` carry an `INTERFACE` token?).
-pub fn has_child_token(ctx: &ParserRuleContext, token_type: i32) -> bool {
-    ctx.children().iter().any(|child| match child {
-        ParseTree::Terminal(t) => t.symbol().token_type() == token_type,
-        _ => false,
-    })
 }

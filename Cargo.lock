@@ -79,9 +79,9 @@ dependencies = [
 
 [[package]]
 name = "antlr-rust-runtime"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02c250273214b90aea0c90d3951b4d7c5b38658af2a0f9deede640e9600d83ef"
+checksum = "08f343ee0a2264d0372a848fff0094dd33754a97668414b7bcb732dd84a109eb"
 dependencies = [
  "thiserror",
 ]
