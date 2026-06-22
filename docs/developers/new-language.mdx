@@ -58,8 +58,8 @@ is available.
 
 ANTLR is a first-class backend (`AnalysisBackend::Antlr`), used when a high-quality ANTLR v4
 grammar exists but no Rust-native parser does. The shared crate `mehen-antlr` provides the runtime
-re-export, char-index→byte-offset span conversion, recovered-error diagnostics, and
-hidden-channel comment (CLOC) extraction. The Rust lexer/parser modules are generated **offline**
+re-export, token-span conversion, recovered-error diagnostics, and hidden-channel comment (CLOC)
+extraction. The Rust lexer/parser modules are generated **offline**
 from a vendored `.g4` grammar and checked in — a normal `cargo build` never needs Java or the
 ANTLR jar.
 
@@ -80,9 +80,9 @@ ANTLR jar.
     cargo xtask antlr generate <lang>
     ```
 
-    The result lands in `crates/mehen-<lang>/src/generated/`. Wrap it in a
-    `#[rustfmt::skip] #[allow(warnings)] mod generated { … }` — ANTLR's deeply-nested output is not
-    rustfmt-stable, so it must not be formatted.
+    The result lands in `crates/mehen-<lang>/src/generated/`. The generated files carry their own
+    lint and `rustfmt::skip` attributes, so the owning analyzer can include them with plain
+    `pub(crate) mod ...;` declarations unless another crate needs direct access.
 
     <Warning>
     Never edit the generated modules. `cargo xtask antlr check-generated` guards drift in CI when the

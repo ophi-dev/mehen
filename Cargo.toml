@@ -83,7 +83,7 @@ gix = { version = "^0.84", default-features = false, features = ["attributes", "
 # (`crates/mehen-kotlin/src/generated/`) always link the runtime they were
 # generated against. Bump deliberately and regenerate via
 # `cargo xtask antlr generate --all`.
-antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.4.0" }
+antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.5.0" }
 
 tree-sitter = "=0.26.9"
 # Per-language grammars (`tree-sitter-c`, `tree-sitter-go`,
