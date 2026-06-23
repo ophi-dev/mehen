@@ -866,3 +866,14 @@ fn derived_table_join_is_a_multi_relation_scope() {
     let m = metrics("SELECT id FROM (SELECT id FROM a) q JOIN b ON q.id = b.id");
     assert!(get(&m, "sql.identifier.unqualified_column_ratio") > 0.0);
 }
+
+#[test]
+fn non_table_ddl_targets_count_as_writes() {
+    // DROP FUNCTION / DROP SCHEMA target non-table object references but still
+    // mutate a schema object — they must count toward write/touch and risk.
+    let func = metrics("DROP FUNCTION foo");
+    assert_eq!(get(&func, "sql.object.write_count"), 1.0);
+    assert!(get(&func, "sql.change_risk_score") >= 8.0);
+    let schema = metrics("DROP SCHEMA s");
+    assert_eq!(get(&schema, "sql.object.write_count"), 1.0);
+}

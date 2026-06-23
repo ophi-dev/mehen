@@ -1895,9 +1895,12 @@ const WRITE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::CreateTableStatement,
     SyntaxKind::CreateViewStatement,
     SyntaxKind::CreateMaterializedViewStatement,
+    SyntaxKind::CreateIndexStatement,
     SyntaxKind::DropTableStatement,
     SyntaxKind::DropViewStatement,
     SyntaxKind::DropIndexStatement,
+    SyntaxKind::DropFunctionStatement,
+    SyntaxKind::DropSchemaStatement,
     SyntaxKind::DropStatement,
 ]);
 
@@ -1956,15 +1959,22 @@ fn collect_touched_objects(
     // (Phase 1). The write-target *node* is tracked by identity so the
     // file-wide read pass can skip exactly that node (and not a same-named
     // table genuinely read in a subquery).
+    // The objects a write statement targets are not always `TableReference`s:
+    // `DROP FUNCTION foo` targets a `FunctionName`, `CREATE INDEX idx …` a
+    // `DatabaseReference`, etc. Match those outer reference kinds. The crawl
+    // stops at nested SELECT nodes (subquery sources are not targets); it does NOT
+    // recurse *into* a matched reference, so a `TableReference`'s inner
+    // `ObjectReference` is not double-counted — `recursive_crawl` with
+    // `recurse_into = false` returns the outermost match on each path.
+    const TARGET_REFS: SyntaxSet = SyntaxSet::new(&[
+        SyntaxKind::TableReference,
+        SyntaxKind::FunctionName,
+        SyntaxKind::DatabaseReference,
+    ]);
     let mut write_target_nodes: Vec<ErasedSegment> = Vec::new();
     let write_stmts = root.recursive_crawl(&WRITE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
     for stmt in &write_stmts {
-        let stmt_tables = stmt.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
-            true,
-            &SELECT_STATEMENT,
-            true,
-        );
+        let stmt_tables = stmt.recursive_crawl(&TARGET_REFS, false, &SELECT_STATEMENT, true);
         // DDL statements mutate *every* statement-level table (`DROP TABLE a, b`,
         // `TRUNCATE a, b` — all targets). DML statements mutate only the first
         // (the target); any further statement-level tables are FROM/USING read
