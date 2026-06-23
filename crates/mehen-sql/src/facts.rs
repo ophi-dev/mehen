@@ -275,6 +275,13 @@ pub(crate) struct SqlFileFacts {
     pub unparsable_segments: u32,
     /// Lines touched by unparsable segments.
     pub unparsable_lines: u32,
+    /// Count of lexer errors reported by sqruff for malformed tokens. The
+    /// current sqruff release always returns an empty lex-error vector
+    /// (malformed input becomes `Unparsable` parse segments instead), so this
+    /// is 0 in practice today — it is plumbed so a future sqruff version that
+    /// does surface lex errors cannot make invalid SQL look clean to the
+    /// parser-health metrics (Codex P2).
+    pub lex_error_count: u32,
 }
 
 // ── SyntaxSet constants ────────────────────────────────────────────────
@@ -693,10 +700,10 @@ fn expression_has_column_equality(node: &ErasedSegment) -> bool {
             let left_is_col = i
                 .checked_sub(1)
                 .and_then(|j| code.get(j))
-                .is_some_and(|s| s.is_type(SyntaxKind::ColumnReference));
+                .is_some_and(|s| operand_is_column_reference(s));
             let right_is_col = code
                 .get(i + 1)
-                .is_some_and(|s| s.is_type(SyntaxKind::ColumnReference));
+                .is_some_and(|s| operand_is_column_reference(s));
             if left_is_col && right_is_col {
                 return true;
             }
@@ -705,6 +712,38 @@ fn expression_has_column_equality(node: &ErasedSegment) -> bool {
     // Recurse into nested expression/bracketed groups (e.g. compound ON with
     // AND/OR, or parenthesized conditions).
     node.segments().iter().any(expression_has_column_equality)
+}
+
+/// Whether an `=` operand is (after unwrapping any parentheses/expression
+/// wrappers) a single column reference. `ON (a.id) = (b.id)` parses each side
+/// as `Bracketed → Expression → ColumnReference`, so a normal equi-join must
+/// not be miscounted as non-equi just because its keys are parenthesized
+/// (Codex P2). A wrapper around a literal (`(a.status) = ('x')`) unwraps to a
+/// `QuotedLiteral`, so it is still correctly rejected as a non-key filter.
+fn operand_is_column_reference(seg: &ErasedSegment) -> bool {
+    if seg.is_type(SyntaxKind::ColumnReference) {
+        return true;
+    }
+    if seg.is_type(SyntaxKind::Bracketed) || seg.is_type(SyntaxKind::Expression) {
+        // Descend through the single meaningful child (skip brackets/trivia).
+        let inner: Vec<&ErasedSegment> = seg
+            .segments()
+            .iter()
+            .filter(|s| {
+                !s.is_whitespace()
+                    && !s.is_meta()
+                    && !s.is_comment()
+                    && !s.is_type(SyntaxKind::StartBracket)
+                    && !s.is_type(SyntaxKind::EndBracket)
+            })
+            .collect();
+        // Only unwrap an unambiguous single-operand group; a multi-token group
+        // (e.g. `a + b`) is not a bare column reference.
+        if let [only] = inner.as_slice() {
+            return operand_is_column_reference(only);
+        }
+    }
+    false
 }
 
 // ── set operations ───────────────────────────────────────────────────

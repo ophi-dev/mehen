@@ -89,7 +89,7 @@ impl LanguageAnalyzer for SqlAnalyzer {
 
         let parser = Parser::from(&dialect);
         let tables = Tables::default();
-        let (tokens, _lex_errs) = dialect.lexer().lex(&tables, source.text.as_str());
+        let (tokens, lex_errs) = dialect.lexer().lex(&tables, source.text.as_str());
         let parsed = match parser.parse(&tables, &tokens) {
             Ok(Some(tree)) => tree,
             Ok(None) => {
@@ -102,6 +102,7 @@ impl LanguageAnalyzer for SqlAnalyzer {
                     &source.text,
                     &resolution,
                     /* parse_failed */ false,
+                    lex_errs.len() as u32,
                 ));
             }
             Err(e) => {
@@ -118,6 +119,7 @@ impl LanguageAnalyzer for SqlAnalyzer {
                     &source.text,
                     &resolution,
                     /* parse_failed */ true,
+                    lex_errs.len() as u32,
                 );
                 analysis.diagnostics.push(ParseDiagnostic::error(
                     "sql.parse_error",
@@ -130,7 +132,12 @@ impl LanguageAnalyzer for SqlAnalyzer {
         let line_index = &source.line_index;
         let line_at = |byte: u32| line_index.line_at(byte);
 
-        let file_facts = facts::extract(&parsed, &dialect, line_at);
+        let mut file_facts = facts::extract(&parsed, &dialect, line_at);
+        // Lexer errors (malformed tokens) are distinct from unparsable parse
+        // segments. The current sqruff release never populates this vector, but
+        // surface them into parser-health so a future version cannot make
+        // invalid SQL look clean (Codex P2).
+        file_facts.lex_error_count = lex_errs.len() as u32;
         let statement_spans: Vec<(u32, u32)> = file_facts
             .statements
             .iter()
@@ -175,6 +182,14 @@ impl LanguageAnalyzer for SqlAnalyzer {
                     "{} unparsable SQL segment(s); some metrics may be incomplete",
                     file_facts.unparsable_segments
                 ),
+            ));
+        }
+        // Surface any lexer errors as warnings (none in the current sqruff
+        // release, but plumbed so malformed tokens can never look clean).
+        for err in &lex_errs {
+            diagnostics.push(ParseDiagnostic::warning(
+                "sql.lex_error",
+                format!("SQL lexer error: {err}"),
             ));
         }
 
@@ -227,6 +242,7 @@ fn empty_sql_analysis(
     text: &str,
     resolution: &dialect::DialectResolution,
     parse_failed: bool,
+    lex_error_count: u32,
 ) -> LanguageAnalysis {
     let mut root = MetricSpace::new(SpaceId(0), SpaceKind::Unit, file_span);
     // No parse tree → no statement spans and no code tokens; LOC is derived
@@ -240,12 +256,23 @@ fn empty_sql_analysis(
         facts.unparsable_segments = 1;
         facts.unparsable_lines = loc.code.max(loc.physical).max(1);
     }
+    // Carry any lexer errors into parser-health so they are reflected even
+    // when there is no parse tree (current sqruff never sets this).
+    facts.lex_error_count = lex_error_count;
     metrics::publish(&facts, &loc, resolution, &mut root.metrics);
     publish_dialect_labels(&mut root, resolution);
+    let diagnostics = if lex_error_count > 0 {
+        vec![ParseDiagnostic::warning(
+            "sql.lex_error",
+            format!("{lex_error_count} SQL lexer error(s)"),
+        )]
+    } else {
+        Vec::new()
+    };
     LanguageAnalysis {
         language: Language::Sql,
         backend: AnalysisBackend::Sqruff,
-        diagnostics: Vec::new(),
+        diagnostics,
         root,
         contributions: Vec::new(),
     }

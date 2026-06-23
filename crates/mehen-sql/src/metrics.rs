@@ -429,10 +429,14 @@ fn publish_parser(facts: &SqlFileFacts, loc: &SqlLoc, target: &mut MetricSet) {
         0.0
     };
     set(target, "sql.parser.unparsable_ratio", ratio.min(1.0));
+    // Diagnostics surfaced by the parser: unparsable segments plus any lexer
+    // errors. Lexer errors are 0 in the current sqruff release (malformed
+    // input becomes unparsable segments) but are folded in so a future version
+    // that emits them cannot leave `diagnostic_count` at 0 for invalid SQL.
     set(
         target,
         "sql.parser.diagnostic_count",
-        facts.unparsable_segments,
+        facts.unparsable_segments + facts.lex_error_count,
     );
 }
 

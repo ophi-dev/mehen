@@ -322,6 +322,19 @@ fn inequality_join_is_non_equi() {
 }
 
 #[test]
+fn parenthesized_join_keys_are_equi() {
+    // `ON (a.id) = (b.id)` wraps each key in `Bracketed → Expression`, so the
+    // operands flanking `=` are not immediate `ColumnReference`s. Unwrapping
+    // single-operand parens must still recognise the equality join (Codex P2).
+    let paren = metrics("SELECT * FROM a JOIN b ON (a.id) = (b.id)");
+    assert_eq!(get(&paren, "sql.join.non_equi_count"), 0.0);
+    // A parenthesized comparison against a literal is *not* an equi-join: the
+    // right side unwraps to a literal, not a column.
+    let lit = metrics("SELECT * FROM a JOIN b ON (a.status) = ('x')");
+    assert_eq!(get(&lit, "sql.join.non_equi_count"), 1.0);
+}
+
+#[test]
 fn block_comment_interior_is_not_code() {
     // The middle line of a multi-line block comment has no marker but is fully
     // inside the comment span — it must count as comment, not code.
