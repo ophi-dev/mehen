@@ -128,17 +128,25 @@ fn cognitive(f: &SqlFileFacts) -> f64 {
         + f.joins.cross
         + f.joins.natural
         + f.joins.lateral) as f64;
-    // 6. CASE: +1 each, +1 per nesting level, +0.25 per WHEN beyond 2
+    // 6. CASE: +1 each, +1 per nesting level, +0.25 per WHEN beyond 2. The
+    //    surplus-arm count is computed per-CASE in `extract_cases` so a
+    //    many-armed CASE is not cancelled by single-armed ones.
     score += f.cases.count as f64;
     score += f.cases.max_depth.saturating_sub(1) as f64;
-    score += 0.25 * (f.cases.when_count.saturating_sub(2 * f.cases.count.max(1))) as f64;
-    // 7. boolean operators + nesting beyond 2
+    score += 0.25 * f.cases.surplus_when_arms as f64;
+    // 7. boolean operators + nesting beyond 2.
+    //    §8.2 rule 7 also adds "+1 for mixed AND/OR chains without explicit
+    //    grouping"; that term is omitted here because
+    //    `sql.predicate.mixed_and_or_without_grouping_count` is not tracked in
+    //    Phase 1 (would require precedence-aware predicate analysis).
     score += 0.25 * f.predicates.boolean_operator_count as f64;
     score += f.predicates.max_boolean_depth.saturating_sub(2) as f64;
     // 8. window functions + frames
     score += 0.5 * f.windows.function_count as f64;
     score += f.windows.frame_count as f64;
-    // 9. set operations
+    // 9. set operations.
+    //    §8.2 rule 9 also adds "+1 for nested set expressions"; that term is
+    //    omitted because nested set-expression depth is not tracked in Phase 1.
     score += 0.5 * f.set_ops.count as f64;
     // 10. unaliased derived expressions
     score += 0.25 * f.output.expression_without_alias_count as f64;
@@ -198,7 +206,10 @@ fn review_burden(
     portability_risk: f64,
     loc: &SqlLoc,
 ) -> f64 {
-    let touch = (f.objects.read_object_count + f.objects.write_object_count) as f64;
+    // §8.3 weights `norm(sql.object.touch_count, 20)` — the count of *distinct*
+    // objects touched (read ∪ write), not the sum of the two counters (which
+    // would double-count an object that is both read and written).
+    let touch = f.objects.touch_count as f64;
     let raw = 0.30 * norm(cognitive, 60.0)
         + 0.18 * norm(structural, 80.0)
         + 0.14 * norm(touch, 20.0)
@@ -244,12 +255,13 @@ fn modularity(f: &SqlFileFacts) -> f64 {
     let cte_shallow_score = 1.0 - norm(f.ctes.max_dependency_depth as f64, 6.0);
     let cte_fanout_score = 1.0 - norm(f.ctes.max_fan_out as f64, 8.0);
     let derived_table_penalty = norm(f.subqueries.derived_table_count as f64, 5.0);
+    let trivial_cte_penalty = f.ctes.trivial_count as f64 / cte_count.max(1.0);
 
     let health = 0.35 * cte_use_ratio
         + 0.25 * cte_shallow_score
         + 0.15 * cte_fanout_score
         + 0.15 * (1.0 - derived_table_penalty)
-        + 0.10; // trivial-CTE term omitted (not tracked); credit the full 0.10
+        + 0.10 * (1.0 - trivial_cte_penalty);
     100.0 * clamp01(health)
 }
 

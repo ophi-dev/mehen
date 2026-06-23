@@ -200,3 +200,93 @@ fn unqualified_column_ratio_in_multi_relation_scope() {
     let ratio = get(&m, "sql.identifier.unqualified_column_ratio");
     assert!(ratio > 0.0 && ratio < 1.0, "ratio was {ratio}");
 }
+
+// ── review-fix regressions ────────────────────────────────────────────
+
+#[test]
+fn cast_count_handles_both_forms_once_each() {
+    // Shorthand `::` cast is one CastExpression (must not be double-counted via
+    // a `::` substring); SQL-standard CAST(...) is a function (must be counted).
+    assert_eq!(get(&metrics("SELECT b::int FROM t"), "sql.cast.count"), 1.0);
+    assert_eq!(
+        get(&metrics("SELECT CAST(a AS int) FROM t"), "sql.cast.count"),
+        1.0
+    );
+    assert_eq!(
+        get(
+            &metrics("SELECT b::int, CAST(a AS int) FROM t"),
+            "sql.cast.count"
+        ),
+        2.0
+    );
+}
+
+#[test]
+fn read_count_is_per_object_not_per_statement() {
+    // A query touching three tables reads three objects, not one.
+    let m = metrics("SELECT * FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id");
+    assert_eq!(get(&m, "sql.object.read_count"), 3.0);
+    assert_eq!(get(&m, "sql.object.touch_count"), 3.0);
+}
+
+#[test]
+fn touch_count_dedups_read_and_write_of_same_object() {
+    // `t` is both read (FROM) and written (UPDATE target) → touched once.
+    let m = metrics("UPDATE t SET v = 1 WHERE id IN (SELECT id FROM t WHERE flagged)");
+    assert_eq!(get(&m, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.read_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.touch_count"), 1.0);
+}
+
+#[test]
+fn merge_using_source_is_a_read_not_a_write() {
+    let m = metrics(
+        "MERGE INTO accounts a USING updates u ON a.id = u.id \
+         WHEN MATCHED THEN UPDATE SET a.bal = u.bal",
+    );
+    assert_eq!(get(&m, "sql.object.write_count"), 1.0); // accounts
+    assert_eq!(get(&m, "sql.object.read_count"), 1.0); // updates
+}
+
+#[test]
+fn table_alias_count_excludes_output_aliases() {
+    // `total` is an output alias, not a table alias; `c` is a table alias.
+    let m = metrics("SELECT SUM(x) AS total FROM customers c");
+    assert_eq!(get(&m, "sql.alias.table_alias_count"), 1.0);
+}
+
+#[test]
+fn update_without_where_ignores_subquery_where() {
+    // No statement-level WHERE — rewrites every row — even though the scalar
+    // subquery has its own WHERE (Codex P1).
+    let m = metrics("UPDATE t SET v = (SELECT v FROM u WHERE u.id = t.id)");
+    assert_eq!(get(&m, "sql.dml.update_without_where_count"), 1.0);
+    // With a real statement-level WHERE it is not flagged.
+    let guarded = metrics("UPDATE t SET v = (SELECT v FROM u WHERE u.id = t.id) WHERE t.active");
+    assert_eq!(get(&guarded, "sql.dml.update_without_where_count"), 0.0);
+}
+
+#[test]
+fn trivial_cte_is_detected() {
+    // `a` just renames a source (trivial); `b` filters (non-trivial).
+    let m = metrics(
+        "WITH a AS (SELECT * FROM src), \
+              b AS (SELECT * FROM other WHERE x > 1) \
+         SELECT * FROM a JOIN b ON a.id = b.id",
+    );
+    assert_eq!(get(&m, "sql.cte.trivial_count"), 1.0);
+}
+
+#[test]
+fn boolean_depth_not_inflated_by_redundant_parens() {
+    let depth = |sql: &str| get(&metrics(sql), "sql.predicate.max_boolean_depth");
+    // A flat predicate and a single (redundant) outer bracket are both depth 1.
+    assert_eq!(depth("SELECT * FROM t WHERE a AND b"), 1.0);
+    assert_eq!(depth("SELECT * FROM t WHERE (a OR b)"), 1.0);
+    // One nested boolean group adds a level.
+    assert_eq!(depth("SELECT * FROM t WHERE a AND (b OR c)"), 2.0);
+    // Two nested levels.
+    assert_eq!(depth("SELECT * FROM t WHERE a AND (b OR (c AND d))"), 3.0);
+    // Sibling bracketed groups under a top-level AND are depth 2, not 3.
+    assert_eq!(depth("SELECT * FROM t WHERE (a OR b) AND (c OR d)"), 2.0);
+}

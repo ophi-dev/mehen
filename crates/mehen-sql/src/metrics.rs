@@ -175,6 +175,7 @@ fn publish_cte(facts: &SqlFileFacts, target: &mut MetricSet) {
     );
     set(target, "sql.cte.max_fan_out", c.max_fan_out);
     set(target, "sql.cte.unused_count", c.unused_count);
+    set(target, "sql.cte.trivial_count", c.trivial_count);
 }
 
 fn publish_joins(facts: &SqlFileFacts, target: &mut MetricSet) {
@@ -343,6 +344,7 @@ fn publish_objects(facts: &SqlFileFacts, target: &mut MetricSet) {
     let o = &facts.objects;
     set(target, "sql.object.read_count", o.read_object_count);
     set(target, "sql.object.write_count", o.write_object_count);
+    set(target, "sql.object.touch_count", o.touch_count);
     set(target, "sql.dml.insert_count", o.insert_count);
     set(target, "sql.dml.update_count", o.update_count);
     set(target, "sql.dml.delete_count", o.delete_count);

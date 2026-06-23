@@ -111,6 +111,11 @@ pub(crate) struct CaseFacts {
     pub when_count: u32,
     pub max_when_count: u32,
     pub missing_else_count: u32,
+    /// Sum over each CASE of `max(0, its_when_count - 2)`. Computed per-CASE so
+    /// the cognitive "WHEN arms beyond two" term (§8.2 rule 6) is correct: a
+    /// global `when_count - 2*count` would let a many-armed CASE be cancelled
+    /// by single-armed ones.
+    pub surplus_when_arms: u32,
 }
 
 /// Aggregation / grouping facts (research foundation §6.9).
@@ -182,8 +187,8 @@ pub(crate) struct OutputFacts {
     pub table_alias_count: u32,
 }
 
-/// CTE-graph facts derived from sqruff's `Query` analysis (research
-/// foundation §6.4).
+/// CTE-graph facts derived from the `CommonTableExpression` CST nodes
+/// (research foundation §6.4).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CteFacts {
     pub count: u32,
@@ -192,6 +197,10 @@ pub(crate) struct CteFacts {
     pub max_dependency_depth: u32,
     pub max_fan_out: u32,
     pub unused_count: u32,
+    /// CTEs that only rename/select from a single source with no filtering,
+    /// aggregation, or join (§6.4) — they add naming overhead without
+    /// structural value.
+    pub trivial_count: u32,
 }
 
 /// DML/DDL/DCL/TCL object-touch facts (research foundation §6.14).
@@ -211,8 +220,12 @@ pub(crate) struct ObjectFacts {
     pub grant_revoke_count: u32,
     pub transaction_control_count: u32,
     pub returning_count: u32,
+    /// Distinct objects written (created/altered/dropped/inserted/updated/…).
     pub write_object_count: u32,
+    /// Distinct objects read (table references in FROM/JOIN positions).
     pub read_object_count: u32,
+    /// Distinct objects touched — `|read ∪ write|` (research foundation §6.14).
+    pub touch_count: u32,
 }
 
 /// Per-statement facts with source span (research foundation §5.2).
@@ -642,14 +655,8 @@ fn extract_cases(root: &ErasedSegment, cases: &mut CaseFacts) {
         let whens = count_anywhere_within_case(case, SyntaxKind::WhenClause);
         cases.when_count += whens;
         cases.max_when_count = cases.max_when_count.max(whens);
-        let has_else = !case
-            .recursive_crawl(
-                &SyntaxSet::single(SyntaxKind::ElseClause),
-                true,
-                &SyntaxSet::EMPTY,
-                true,
-            )
-            .is_empty();
+        cases.surplus_when_arms += whens.saturating_sub(2);
+        let has_else = count_direct(case, SyntaxKind::ElseClause) > 0;
         if !has_else {
             cases.missing_else_count += 1;
         }
@@ -836,39 +843,23 @@ fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
         + count_substr(&upper, "!= NULL");
 }
 
-/// Approximate boolean-expression nesting depth: the deepest chain of
-/// bracketed groups containing AND/OR within `node`.
+/// Boolean-expression nesting depth within `node`.
+///
+/// The outermost boolean operator (wherever it sits — bracketed or not) is
+/// level 1; each boolean-bearing `Bracketed` group nested *inside* another
+/// boolean expression adds one more level. So:
+/// - `a AND b` → 1 (flat),
+/// - `(a OR b)` → 1 (a single, possibly redundant, outer group is still one
+///   boolean level),
+/// - `a AND (b OR c)` → 2 (the `OR` is one level below the `AND`),
+/// - `a AND (b OR (c AND d))` → 3.
+///
+/// Brackets are the nesting proxy because sqruff represents `AND`/`OR` as flat
+/// `BinaryOperator` tokens rather than a nested boolean tree. `0` means no
+/// boolean operator is present at all.
 fn boolean_depth(node: &ErasedSegment) -> u32 {
-    fn walk(node: &ErasedSegment, depth: u32) -> u32 {
-        let mut max = depth;
-        let mut next = depth;
-        if node.is_type(SyntaxKind::Bracketed) {
-            // A bracketed group that contains a boolean operator adds a level.
-            let contains_bool = node
-                .recursive_crawl(
-                    &SyntaxSet::single(SyntaxKind::BinaryOperator),
-                    true,
-                    &SyntaxSet::EMPTY,
-                    true,
-                )
-                .iter()
-                .any(|o| {
-                    let r = o.raw().to_ascii_uppercase();
-                    r == "AND" || r == "OR"
-                });
-            if contains_bool {
-                next = depth + 1;
-                max = max.max(next);
-            }
-        }
-        for child in node.segments() {
-            max = max.max(walk(child, next));
-        }
-        max
-    }
-    // Base level is 1 if any boolean operator is present at all.
-    let has_bool = node
-        .recursive_crawl(
+    fn contains_bool(node: &ErasedSegment) -> bool {
+        node.recursive_crawl(
             &SyntaxSet::single(SyntaxKind::BinaryOperator),
             true,
             &SyntaxSet::EMPTY,
@@ -878,11 +869,65 @@ fn boolean_depth(node: &ErasedSegment) -> u32 {
         .any(|o| {
             let r = o.raw().to_ascii_uppercase();
             r == "AND" || r == "OR"
-        });
-    if !has_bool {
+        })
+    }
+    // `level` is the boolean depth credited to the *current* subtree. It starts
+    // at 0 and becomes 1 the first time we descend into a boolean-bearing
+    // region (so the outermost boolean — bracketed or not — is level 1). Each
+    // *further* boolean-bearing bracket below that adds one.
+    fn walk(node: &ErasedSegment, level: u32) -> u32 {
+        // Entering a boolean-bearing bracket that is nested inside the current
+        // boolean region deepens it by one. The seed level is already 1, so the
+        // outermost boolean bracket does not stack an extra level on the base.
+        let here = if node.is_type(SyntaxKind::Bracketed) && contains_bool(node) {
+            level + 1
+        } else {
+            level
+        };
+        let mut max = here;
+        for child in node.segments() {
+            max = max.max(walk(child, here));
+        }
+        max
+    }
+    if !contains_bool(node) {
         return 0;
     }
-    walk(node, 1)
+    // Seed level 1: the clause holds at least one boolean operator at its own
+    // level. But a single outer bracket wrapping the whole predicate
+    // (`WHERE (a OR b)`) must not count as a deeper level than the equivalent
+    // unbracketed `WHERE a OR b`. Descend through any leading non-boolean
+    // wrappers, then walk: the first boolean bracket encountered sits at the
+    // base level, deeper ones add to it.
+    walk(node, 1).saturating_sub(redundant_outer_bracket(node))
+}
+
+/// Returns 1 when `node`'s boolean content is entirely wrapped in a single
+/// outer bracket (so the seeded walk would over-count it by one), else 0.
+/// Handles the `WHERE (a OR b)` redundant-parenthesis case so it scores the
+/// same as `WHERE a OR b`.
+fn redundant_outer_bracket(node: &ErasedSegment) -> u32 {
+    // Find the boolean operators directly at this clause level (not inside any
+    // bracket). If there are none — every boolean lives inside brackets — the
+    // outermost bracket is redundant and the walk's +1 for it is spurious.
+    fn has_unbracketed_bool(node: &ErasedSegment) -> bool {
+        for child in node.segments() {
+            if child.is_type(SyntaxKind::Bracketed) {
+                continue;
+            }
+            if child.is_type(SyntaxKind::BinaryOperator) {
+                let r = child.raw().to_ascii_uppercase();
+                if r == "AND" || r == "OR" {
+                    return true;
+                }
+            }
+            if has_unbracketed_bool(child) {
+                return true;
+            }
+        }
+        false
+    }
+    if has_unbracketed_bool(node) { 0 } else { 1 }
 }
 
 // ── subqueries / derived tables ───────────────────────────────────────
@@ -1090,8 +1135,16 @@ fn extract_expressions(root: &ErasedSegment, expr: &mut ExpressionFacts) {
         expr.max_function_nesting = expr.max_function_nesting.max(function_nesting(f));
     }
     expr.distinct_function_count = names.len() as u32;
-    expr.cast_count = count_anywhere(root, SyntaxKind::CastExpression)
-        + count_substr(&root.raw().to_ascii_uppercase(), "::");
+    // Casts come in two forms: the shorthand `x::int` parses to exactly one
+    // `CastExpression` node (whose raw already contains `::`, so a substring
+    // count would double-count it), and the SQL-standard `CAST(x AS int)`
+    // parses as a `Function` named CAST (no `CastExpression`, no `::`). Count
+    // each form once: CastExpression nodes + CAST(...) function calls.
+    let standard_casts = functions
+        .iter()
+        .filter(|f| function_name(f).is_some_and(|n| n.eq_ignore_ascii_case("CAST")))
+        .count() as u32;
+    expr.cast_count = count_anywhere(root, SyntaxKind::CastExpression) + standard_casts;
 }
 
 /// Depth of an expression's operator/operand tree (1 for a leaf expression).
@@ -1241,7 +1294,20 @@ fn extract_output(root: &ErasedSegment, selects: &[ErasedSegment], out: &mut Out
     }
 
     out.quoted_identifier_count = count_anywhere(root, SyntaxKind::QuotedIdentifier);
-    out.table_alias_count = count_anywhere(root, SyntaxKind::AliasExpression);
+    // Only FROM/JOIN aliases are *table* aliases. `AliasExpression` also covers
+    // output-column aliases (`SELECT SUM(x) AS total`), so counting every alias
+    // would inflate the table-alias metric. Count aliases that are direct
+    // children of a `from_expression_element`.
+    let from_elems = root.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::FromExpressionElement),
+        true,
+        &SyntaxSet::EMPTY,
+        true,
+    );
+    out.table_alias_count = from_elems
+        .iter()
+        .map(|e| count_direct(e, SyntaxKind::AliasExpression))
+        .sum();
 }
 
 /// Count the relations referenced *directly* by a SELECT's own FROM/JOIN
@@ -1341,6 +1407,38 @@ fn extract_cte_graph(root: &ErasedSegment, _dialect: &Dialect, ctes: &mut CteFac
         .iter()
         .filter(|n| !referenced.contains(&n.to_ascii_uppercase()))
         .count() as u32;
+
+    ctes.trivial_count = cte_nodes.iter().filter(|c| is_trivial_cte(c)).count() as u32;
+}
+
+/// A trivial CTE selects from a single source with no filtering, aggregation,
+/// grouping, or join — it only renames a relation (§6.4). Such CTEs add naming
+/// overhead without structural value and dock the modularity-health score.
+fn is_trivial_cte(cte: &ErasedSegment) -> bool {
+    // The CTE body is the bracketed SELECT after `AS`. A trivial body has
+    // exactly one table reference and none of the structure-adding clauses.
+    let table_refs = cte
+        .recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::TableReference),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        )
+        .len();
+    if table_refs != 1 {
+        return false;
+    }
+    const STRUCTURE: SyntaxSet = SyntaxSet::new(&[
+        SyntaxKind::WhereClause,
+        SyntaxKind::JoinClause,
+        SyntaxKind::GroupbyClause,
+        SyntaxKind::HavingClause,
+        SyntaxKind::SetExpression,
+        SyntaxKind::CaseExpression,
+        SyntaxKind::OverClause,
+    ]);
+    cte.recursive_crawl(&STRUCTURE, true, &SyntaxSet::EMPTY, true)
+        .is_empty()
 }
 
 /// The defined name of a CTE (the identifier before its `AS (`).
@@ -1427,53 +1525,43 @@ fn longest_chain(edges: &std::collections::BTreeMap<String, Vec<String>>, nodes:
 fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &mut SqlFileFacts) {
     let _ = line_at;
     let obj = &mut facts.objects;
+    // Per-statement-kind counters (used by the DML/DDL/TCL metric keys).
     for stmt in &facts.statements {
         match stmt.kind {
-            StatementKind::Insert => {
-                obj.insert_count += 1;
-                obj.write_object_count += 1;
-            }
-            StatementKind::Update => {
-                obj.update_count += 1;
-                obj.write_object_count += 1;
-            }
-            StatementKind::Delete => {
-                obj.delete_count += 1;
-                obj.write_object_count += 1;
-            }
-            StatementKind::Merge => {
-                obj.merge_count += 1;
-                obj.write_object_count += 1;
-            }
+            StatementKind::Insert => obj.insert_count += 1,
+            StatementKind::Update => obj.update_count += 1,
+            StatementKind::Delete => obj.delete_count += 1,
+            StatementKind::Merge => obj.merge_count += 1,
             StatementKind::CreateTable
             | StatementKind::CreateTableAsSelect
             | StatementKind::CreateView
-            | StatementKind::CreateOther => {
-                obj.create_count += 1;
-                obj.write_object_count += 1;
-            }
-            StatementKind::AlterTable => {
-                obj.alter_count += 1;
-                obj.write_object_count += 1;
-            }
-            StatementKind::Drop => {
-                obj.drop_count += 1;
-                obj.write_object_count += 1;
-            }
-            StatementKind::Truncate => {
-                obj.truncate_count += 1;
-                obj.write_object_count += 1;
-            }
+            | StatementKind::CreateOther => obj.create_count += 1,
+            StatementKind::AlterTable => obj.alter_count += 1,
+            StatementKind::Drop => obj.drop_count += 1,
+            StatementKind::Truncate => obj.truncate_count += 1,
             StatementKind::Grant | StatementKind::Revoke => obj.grant_revoke_count += 1,
             StatementKind::TransactionControl => obj.transaction_control_count += 1,
-            StatementKind::Select | StatementKind::WithSelect | StatementKind::SetOperation => {
-                obj.read_object_count += 1
-            }
             _ => {}
         }
     }
 
-    // UPDATE/DELETE without WHERE.
+    // Distinct read/write/touch object counts (research foundation §6.14:
+    // "distinct objects read/written/touched"). Counting objects rather than
+    // statements means a 10-table SELECT contributes 10 reads, and an object
+    // both read and written is touched once. Read objects are table references
+    // in FROM/JOIN positions; write objects are the statement-level targets of
+    // write statements. Names are uppercased so case variants collapse.
+    let (read_objects, write_objects) = collect_touched_objects(root);
+    obj.read_object_count = read_objects.len() as u32;
+    obj.write_object_count = write_objects.len() as u32;
+    obj.touch_count = read_objects.union(&write_objects).count() as u32;
+
+    // UPDATE/DELETE without WHERE. The WHERE crawl must stop at nested
+    // SELECT nodes: `UPDATE t SET v = (SELECT v FROM u WHERE u.id = t.id)` has no
+    // *statement-level* WHERE — it still rewrites every row — but a naive
+    // recursive crawl would find the subquery's WHERE and wrongly clear the
+    // no-WHERE flag (Codex P1). Passing `SELECT_STATEMENT` as the
+    // no-recurse set confines the search to the statement's own clauses.
     let updates = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::UpdateStatement),
         true,
@@ -1481,14 +1569,7 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
         true,
     );
     for u in &updates {
-        if u.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::WhereClause),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        )
-        .is_empty()
-        {
+        if !has_own_where_clause(u) {
             obj.update_without_where_count += 1;
         }
     }
@@ -1499,14 +1580,7 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
         true,
     );
     for d in &deletes {
-        if d.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::WhereClause),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        )
-        .is_empty()
-        {
+        if !has_own_where_clause(d) {
             obj.delete_without_where_count += 1;
         }
     }
@@ -1518,6 +1592,123 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
     // RETURNING / OUTPUT clauses.
     let upper = root.raw().to_ascii_uppercase();
     obj.returning_count = count_substr(&upper, "RETURNING ");
+}
+
+/// Whether `stmt` has a `WHERE` clause at its own statement level — i.e. one
+/// not nested inside a subquery. The crawl stops descending at nested
+/// `SelectStatement`s so a scalar subquery's `WHERE` doesn't mask a missing
+/// statement-level predicate on an `UPDATE`/`DELETE`.
+fn has_own_where_clause(stmt: &ErasedSegment) -> bool {
+    !stmt
+        .recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::WhereClause),
+            true,
+            &SELECT_STATEMENT,
+            true,
+        )
+        .is_empty()
+}
+
+/// Write-statement kinds whose statement-level `table_reference` targets are
+/// the objects they mutate.
+const WRITE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::InsertStatement,
+    SyntaxKind::UpdateStatement,
+    SyntaxKind::DeleteStatement,
+    SyntaxKind::MergeStatement,
+    SyntaxKind::TruncateStatement,
+    SyntaxKind::AlterTableStatement,
+    SyntaxKind::CreateTableStatement,
+    SyntaxKind::CreateViewStatement,
+    SyntaxKind::CreateMaterializedViewStatement,
+    SyntaxKind::DropTableStatement,
+    SyntaxKind::DropViewStatement,
+    SyntaxKind::DropIndexStatement,
+    SyntaxKind::DropStatement,
+]);
+
+/// Collect the distinct read and write object names touched by the file.
+///
+/// Read objects are `table_reference`s in FROM/JOIN read positions
+/// (`from_expression_element`). Write objects are the statement-level
+/// `table_reference` targets of write statements — the `table_reference`
+/// children that are *not* inside a FROM/JOIN element (e.g. the `accounts`
+/// in `UPDATE accounts …`, the `target` in `INSERT INTO target …`). Names are
+/// uppercased so case variants collapse to one object.
+fn collect_touched_objects(
+    root: &ErasedSegment,
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    use std::collections::BTreeSet;
+    let mut read = BTreeSet::new();
+    let mut write = BTreeSet::new();
+
+    // Reads: every table reference reachable from a FROM/JOIN element.
+    let from_elems = root.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::FromExpressionElement),
+        true,
+        &SyntaxSet::EMPTY,
+        true,
+    );
+    for elem in &from_elems {
+        for tr in elem.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::TableReference),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        ) {
+            read.insert(tr.raw().to_ascii_uppercase());
+        }
+    }
+
+    // Writes: the mutated target of each write statement is its *first*
+    // statement-level table reference (the one not inside a FROM/JOIN element):
+    // the `accounts` in `UPDATE accounts …`, the `target` in `INSERT INTO
+    // target …`, the `accounts` after `MERGE INTO`. Any *further* statement-
+    // level table references are read sources, not write targets — most
+    // importantly MERGE's `USING <source>` table, which is read, not written.
+    let write_stmts = root.recursive_crawl(&WRITE_STATEMENTS, true, &SyntaxSet::EMPTY, true);
+    for stmt in &write_stmts {
+        let statement_level: Vec<_> = stmt
+            .recursive_crawl(
+                &SyntaxSet::single(SyntaxKind::TableReference),
+                true,
+                &SyntaxSet::EMPTY,
+                true,
+            )
+            .into_iter()
+            .filter(|tr| !is_within_from_element(stmt, tr))
+            .collect();
+        // MERGE has two statement-level table references with opposite roles:
+        // `MERGE INTO <target>` (write) and `USING <source>` (read). Every
+        // other write statement's statement-level references are all targets.
+        let merge = stmt.is_type(SyntaxKind::MergeStatement);
+        for (i, tr) in statement_level.iter().enumerate() {
+            let name = tr.raw().to_ascii_uppercase();
+            if merge && i > 0 {
+                read.insert(name);
+            } else {
+                write.insert(name);
+            }
+        }
+    }
+
+    (read, write)
+}
+
+/// Whether `target` sits inside a `FromExpressionElement` descendant of
+/// `stmt` (i.e. it is a read source, not a write target).
+fn is_within_from_element(stmt: &ErasedSegment, target: &ErasedSegment) -> bool {
+    fn walk(node: &ErasedSegment, target: &ErasedSegment, in_from: bool) -> bool {
+        if node.is(target) {
+            return in_from;
+        }
+        let next = in_from || node.is_type(SyntaxKind::FromExpressionElement);
+        node.segments().iter().any(|c| walk(c, target, next))
+    }
+    walk(stmt, target, false)
 }
 
 // ── Halstead ────────────────────────────────────────────────────────────
