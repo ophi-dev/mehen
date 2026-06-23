@@ -27,6 +27,7 @@ mehen-go = { workspace = true, optional = true }
 mehen-c = { workspace = true, optional = true }
 mehen-kotlin = { workspace = true, optional = true }
 mehen-powershell = { workspace = true, optional = true }
+mehen-sql = { workspace = true, optional = true }
 
 camino = { workspace = true }
 clap = { workspace = true }
@@ -58,6 +59,7 @@ default = [
     "lang-c",
     "lang-kotlin",
     "lang-powershell",
+    "lang-sql",
 ]
 lang-python = ["dep:mehen-python"]
 lang-typescript = ["dep:mehen-typescript"]
@@ -68,6 +70,7 @@ lang-go = ["dep:mehen-go"]
 lang-c = ["dep:mehen-c"]
 lang-kotlin = ["dep:mehen-kotlin"]
 lang-powershell = ["dep:mehen-powershell"]
+lang-sql = ["dep:mehen-sql"]
 
 [lints]
 workspace = true

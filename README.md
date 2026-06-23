@@ -16,12 +16,13 @@ complexity.
 
 ## Why teams use mehen
 
-- **Polyglot by design** — per-file language detection across nine source languages plus Markdown.
-  Useful for monorepos.
+- **Polyglot by design** — per-file language detection across nine source languages plus Markdown
+  and SQL. Useful for monorepos.
 - **Real language parsers** — Ruff for Python, Oxc for TS/JS/JSX/TSX, Mago for PHP, Prism for Ruby,
   `ra_ap_syntax` for Rust, the official Kotlin spec ANTLR grammar for Kotlin, pulldown-cmark for
-  Markdown, tree-sitter for Go, C, PowerShell.
-- **Code and documentation in one tool** — source-code complexity *and* Markdown documentation health.
+  Markdown, sqruff for SQL, tree-sitter for Go, C, PowerShell.
+- **Code, documentation, and SQL in one tool** — source-code complexity, Markdown documentation
+  health, *and* a dedicated relational metric family for `.sql` files.
 - **Deterministic, no network** — pure static analysis. Same input → same output. Safe for air-gapped
   CI.
 - **Pull-request native** — built-in `mehen diff` plus a sticky comment GitHub Action.
@@ -86,7 +87,8 @@ Everything else lives in the docs site:
   ABC, LOC family, NOM, NPA, NPM, WMC.
 - [Markdown metrics](https://mehen.ophi.dev/metrics/markdown/overview) — DMI, MRPC, MCC, link debt,
   filler/lazy risk, English/Japanese prose layer.
-- [SQL metrics (preview)](https://mehen.ophi.dev/metrics/sql/overview) — roadmap for `mehen-sql`.
+- [SQL metrics](https://mehen.ophi.dev/metrics/sql/overview) — CTE graphs, join/subquery structure,
+  object-touch risk, SQL Halstead, and composite scores via `mehen-sql` (sqruff-backed).
 - [Commands](https://mehen.ophi.dev/commands/overview) — `mehen metrics`, `mehen diff`,
   `mehen top-offenders`.
 - [Developers guide](https://mehen.ophi.dev/developers/overview) — build, test, contribute, add a

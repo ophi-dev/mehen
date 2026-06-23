@@ -91,6 +91,16 @@ fn write_unit_metrics(out: &mut String, metrics: &MetricSet, language: Language)
         return;
     }
 
+    if language == Language::Sql {
+        // SQL has its own relational/dataflow metric family (`sql.*`):
+        // statements, query blocks, CTE graph, joins, predicates,
+        // object-touch risk, and an SQL-flavored Halstead. Like
+        // Markdown, the source-code families (cyclomatic/cognitive/…)
+        // don't apply, so render the SQL groups directly.
+        write_sql_metrics(out, metrics);
+        return;
+    }
+
     let families = MetricsFamilies::from_metrics(metrics);
     write_cyclomatic(out, &families.cyclomatic);
     write_cognitive(out, &families.cognitive);
@@ -291,6 +301,118 @@ fn write_markdown_metrics(out: &mut String, metrics: &MetricSet) {
     );
 }
 
+/// Render the `sql.*` metric family as Markdown tables, one per documented
+/// group. Mirrors the catalogue in `docs/metrics/sql/overview.mdx`.
+fn write_sql_metrics(out: &mut String, metrics: &MetricSet) {
+    write_markdown_group(
+        out,
+        "LOC",
+        &[
+            ("physical", "sql.loc.physical"),
+            ("code", "sql.loc.code"),
+            ("comment", "sql.loc.comment"),
+            ("blank", "sql.loc.blank"),
+            ("logical", "sql.loc.logical"),
+            ("comment_density", "sql.loc.comment_density"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Statements",
+        &[
+            ("count", "sql.statement.count"),
+            ("kind_distinct", "sql.statement.kind_distinct"),
+            ("kind_entropy", "sql.statement.kind_entropy"),
+            ("unparsed_count", "sql.statement.unparsed_count"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Query structure",
+        &[
+            ("query_block.count", "sql.query_block.count"),
+            ("query_block.max_depth", "sql.query_block.max_depth"),
+            ("cte.count", "sql.cte.count"),
+            ("cte.max_dependency_depth", "sql.cte.max_dependency_depth"),
+            ("cte.unused_count", "sql.cte.unused_count"),
+            ("join.count", "sql.join.count"),
+            ("subquery.correlated_count", "sql.subquery.correlated_count"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Expression complexity",
+        &[
+            (
+                "predicate.boolean_operator_count",
+                "sql.predicate.boolean_operator_count",
+            ),
+            ("case.count", "sql.case.count"),
+            ("case.max_depth", "sql.case.max_depth"),
+            ("window.function_count", "sql.window.function_count"),
+            ("set_op.count", "sql.set_op.count"),
+            ("expression.max_depth", "sql.expression.max_depth"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Object touch / risk",
+        &[
+            ("object.write_count", "sql.object.write_count"),
+            ("ddl.drop_count", "sql.ddl.drop_count"),
+            ("ddl.truncate_count", "sql.ddl.truncate_count"),
+            (
+                "dml.update_without_where_count",
+                "sql.dml.update_without_where_count",
+            ),
+            (
+                "dml.delete_without_where_count",
+                "sql.dml.delete_without_where_count",
+            ),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Halstead",
+        &[
+            ("vocabulary", "sql.halstead.vocabulary"),
+            ("length", "sql.halstead.length"),
+            ("volume", "sql.halstead.volume"),
+            ("difficulty", "sql.halstead.difficulty"),
+            ("effort", "sql.halstead.effort"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Composite scores",
+        &[
+            ("structural_complexity", "sql.structural_complexity"),
+            ("cognitive_complexity", "sql.cognitive_complexity"),
+            ("change_risk_score", "sql.change_risk_score"),
+            ("review_burden_index", "sql.review_burden_index"),
+            ("maintainability_index", "sql.maintainability_index"),
+            ("modularity_health", "sql.modularity_health"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Parser health",
+        &[
+            ("diagnostic_count", "sql.parser.diagnostic_count"),
+            ("unparsable_ratio", "sql.parser.unparsable_ratio"),
+            ("dialect.confidence", "sql.dialect.confidence"),
+        ],
+        metrics,
+    );
+}
+
 fn write_markdown_group(
     out: &mut String,
     title: &str,
@@ -340,12 +462,13 @@ fn write_nested_spaces(out: &mut String, spaces: &[MetricSpace], depth: usize, l
         };
         let _ = writeln!(out);
         let _ = writeln!(out, "{header} {label}");
-        // The Markdown analyzer only publishes flat unit-level
-        // `markdown.*` metrics; nested spaces (sections, embedded
-        // code) carry no source-code roll-ups, so the Cyclomatic /
-        // Cognitive / LOC tables would all be zero. Skip them in
-        // that case rather than emit misleading numbers.
-        if language != Language::Markdown {
+        // The Markdown and SQL analyzers only publish flat unit-level
+        // family metrics (`markdown.*` / `sql.*`); their nested spaces
+        // (Markdown sections / embedded code, SQL per-statement spans)
+        // carry no source-code roll-ups, so the Cyclomatic / Cognitive
+        // / LOC tables would all be zero. Skip them in that case rather
+        // than emit misleading numbers.
+        if language != Language::Markdown && language != Language::Sql {
             let families = MetricsFamilies::from_metrics(&space.metrics);
             write_cyclomatic(out, &families.cyclomatic);
             write_cognitive(out, &families.cognitive);

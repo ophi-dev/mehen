@@ -1,13 +1,13 @@
 ---
 title: "SQL metrics roadmap"
-description: "Implementation phases for the upcoming mehen-sql analyzer."
+description: "Implementation phases for the mehen-sql analyzer."
 keywords: ["mehen-sql roadmap", "sql analyzer", "implementation"]
 ---
 
 The SQL analyzer ships in phases. Each phase delivers usable output before the next phase compounds on
 it.
 
-## Phase 1 — parser adapter and raw metrics
+## Phase 1 — parser adapter and raw metrics ✅ shipped
 
 Deliverables:
 
@@ -26,7 +26,7 @@ Deliverables:
 
 This phase is enough to produce valuable top-offender output.
 
-## Phase 2 — composite scores and profiles
+## Phase 2 — composite scores ✅ shipped
 
 - `sql.structural_complexity`.
 - `sql.cognitive_complexity`.
@@ -34,8 +34,11 @@ This phase is enough to produce valuable top-offender output.
 - `sql.change_risk_score`.
 - `sql.maintainability_index`.
 - `sql.modularity_health`.
-- Profile-based thresholds (`sql.analytics_default`, `sql.migration_default`, `sql.procedural_default`).
-- Diff-aware deltas.
+
+Composite scores are published alongside the raw metrics and feed `mehen top-offenders` /
+`mehen diff` directly (any `sql.*` key is a valid selector and threshold target). Named profile
+presets (`sql.analytics_default`, `sql.migration_default`, `sql.procedural_default`) and
+diff-aware delta gates remain to be wired through the threshold engine.
 
 ## Phase 3 — procedural SQL
 

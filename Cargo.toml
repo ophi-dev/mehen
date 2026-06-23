@@ -15,6 +15,7 @@ members = [
     "crates/mehen-c",
     "crates/mehen-kotlin",
     "crates/mehen-powershell",
+    "crates/mehen-sql",
     "crates/mehen-engine",
     "crates/mehen-git",
     "crates/mehen-report",
@@ -56,6 +57,7 @@ mehen-go = { path = "crates/mehen-go" }
 mehen-c = { path = "crates/mehen-c" }
 mehen-kotlin = { path = "crates/mehen-kotlin" }
 mehen-powershell = { path = "crates/mehen-powershell" }
+mehen-sql = { path = "crates/mehen-sql" }
 mehen-engine = { path = "crates/mehen-engine" }
 mehen-git = { path = "crates/mehen-git" }
 mehen-report = { path = "crates/mehen-report" }

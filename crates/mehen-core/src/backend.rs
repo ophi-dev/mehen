@@ -26,6 +26,11 @@ pub enum AnalysisBackend {
     RaApSyntax,
     /// Pulldown-cmark parser used by `mehen-markdown`.
     PulldownCmark,
+    /// sqruff (`quarylabs/sqruff`) dialect-aware SQL parser. Used by
+    /// `mehen-sql`. sqruff parses SQL into a single dialect-agnostic
+    /// `SyntaxKind` CST and ships the CTE/scope/wildcard analysis the SQL
+    /// metric family consumes (see `design-docs/sql_parser_comparison.md`).
+    Sqruff,
     /// A parser generated from an ANTLR v4 grammar, running on the
     /// `antlr4_runtime` Rust runtime (`ophi-dev/antlr-rust-runtime`). Used
     /// by `mehen-kotlin` (official Kotlin spec grammar) and the substrate
@@ -48,6 +53,7 @@ impl AnalysisBackend {
             AnalysisBackend::Prism => "prism",
             AnalysisBackend::RaApSyntax => "rust-ra-ap-syntax",
             AnalysisBackend::PulldownCmark => "pulldown-cmark",
+            AnalysisBackend::Sqruff => "sqruff",
             AnalysisBackend::Antlr => "antlr",
             AnalysisBackend::Other(s) => s.as_str(),
         }

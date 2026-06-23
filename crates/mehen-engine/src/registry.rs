@@ -140,6 +140,10 @@ fn register_default_analyzers(registry: &mut AnalyzerRegistry) {
             Box::new(mehen_powershell::PowerShellAnalyzer::new())
         });
     }
+    #[cfg(feature = "lang-sql")]
+    {
+        let _ = registry.register(Language::Sql, || Box::new(mehen_sql::SqlAnalyzer::new()));
+    }
     {
         let _ = registry.register(Language::Markdown, || {
             Box::new(mehen_markdown::MarkdownAnalyzer::new())

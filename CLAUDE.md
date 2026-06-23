@@ -13,6 +13,7 @@
 - `crates/mehen-tree-sitter/`: shared tree-sitter wrapper and CST traversal helpers.
 - `crates/mehen-antlr/`: shared support for ANTLR-backed analyzers — re-exports the `antlr4_runtime` runtime and provides span conversion (char→byte), recovered-error diagnostics, and hidden-channel comment (CLOC) extraction.
 - `crates/mehen-markdown/`: Markdown analyzer with embedded-code dispatch via `LanguageDispatcher`.
+- `crates/mehen-sql/`: SQL analyzer (sqruff-backed). Like Markdown, it publishes a dedicated flat-key family (`sql.*`) instead of the source-code metric families; the sqruff CST is confined to `facts.rs` behind a parser-neutral `SqlFileFacts` adapter.
 - `crates/mehen-git/`, `crates/mehen-report/`: git operations and rendering (JSON, GitHub Markdown).
 - `xtask/`: developer-only commands (kind-enum codegen, AST dumps, audits).
 - `docs/`: Mintlify documentation site (replaces the legacy `mehen-book/`).
