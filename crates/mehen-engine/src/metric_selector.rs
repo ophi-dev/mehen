@@ -88,12 +88,50 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
                 label,
                 polarity: polarity_override.unwrap_or(default_polarity),
             });
+        } else if is_namespaced_metric(name) {
+            // Language-owned families (`sql.*`, `markdown.*`) publish flat keys
+            // that aren't in the source-code `KNOWN_METRICS` catalogue. Accept
+            // any such key verbatim so e.g. `--metric sql.change_risk_score`
+            // works. `read_metric` reads the bare key from the `MetricSpace`.
+            // The name/label must be `'static`; leak the (short-lived, CLI-run)
+            // string, matching `metric_set_key_for`'s fallback.
+            let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+            selectors.push(MetricSelector {
+                name: leaked,
+                label: leaked,
+                polarity: polarity_override.unwrap_or_else(|| default_namespaced_polarity(name)),
+            });
         } else {
             log::warn!("Unknown metric '{name}', skipping.");
         }
     }
 
     selectors
+}
+
+/// Whether `name` is a language-owned namespaced metric key (`sql.*`,
+/// `markdown.*`) that the CLI should accept even though it is not in the
+/// source-code `KNOWN_METRICS` catalogue.
+fn is_namespaced_metric(name: &str) -> bool {
+    name.starts_with("sql.") || name.starts_with("markdown.")
+}
+
+/// Default polarity for a namespaced metric. Most are higher-is-worse
+/// (complexity/risk/burden); the "health"/"maintainability"/"coverage"/
+/// "grounding" style scores are higher-is-better.
+fn default_namespaced_polarity(name: &str) -> Polarity {
+    const HIGHER_IS_BETTER: &[&str] = &[
+        "maintainability",
+        "modularity_health",
+        "alias_coverage",
+        "grounding",
+        "scaffold",
+    ];
+    if HIGHER_IS_BETTER.iter().any(|frag| name.contains(frag)) {
+        Polarity::HigherIsBetter
+    } else {
+        Polarity::LowerIsBetter
+    }
 }
 
 /// Translate a CLI selector name (e.g. `cyclomatic`, `nom.functions`,
@@ -169,5 +207,40 @@ mod tests {
         let specs = vec!["mi".to_string()];
         let selectors = parse_metric_selectors(&specs);
         assert!(selectors.is_empty());
+    }
+
+    #[test]
+    fn namespaced_sql_and_markdown_metrics_are_accepted() {
+        // Language-owned `sql.*`/`markdown.*` keys aren't in KNOWN_METRICS but
+        // must be usable as `top-offenders`/`diff` selectors.
+        let specs = vec![
+            "sql.change_risk_score".to_string(),
+            "markdown.review.review_criticality_index".to_string(),
+        ];
+        let selectors = parse_metric_selectors(&specs);
+        assert_eq!(selectors.len(), 2);
+        assert_eq!(selectors[0].name, "sql.change_risk_score");
+        assert_eq!(
+            selectors[1].name,
+            "markdown.review.review_criticality_index"
+        );
+    }
+
+    #[test]
+    fn namespaced_metric_default_polarity() {
+        // Risk/complexity scores are higher-is-worse; health/maintainability
+        // scores are higher-is-better.
+        assert_eq!(
+            default_namespaced_polarity("sql.change_risk_score"),
+            Polarity::LowerIsBetter
+        );
+        assert_eq!(
+            default_namespaced_polarity("sql.maintainability_index"),
+            Polarity::HigherIsBetter
+        );
+        assert_eq!(
+            default_namespaced_polarity("sql.modularity_health"),
+            Polarity::HigherIsBetter
+        );
     }
 }

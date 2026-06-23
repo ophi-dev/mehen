@@ -836,7 +836,10 @@ fn extract_aggregates(root: &ErasedSegment, agg: &mut AggregateFacts) {
             let upper = name.to_ascii_uppercase();
             if AGGREGATE_NAMES.contains(&upper.as_str()) {
                 agg.function_count += 1;
-                if func.raw().to_ascii_uppercase().contains("DISTINCT") {
+                // `COUNT(DISTINCT …)` — detect the `DISTINCT` *keyword* token,
+                // not a substring, so an argument like `COUNT(distinctive_id)`
+                // or `COUNT('distinct')` doesn't false-match.
+                if count_keyword(func, "DISTINCT") > 0 {
                     agg.distinct_count += 1;
                 }
             }
@@ -1535,11 +1538,6 @@ fn extract_cte_graph(root: &ErasedSegment, _dialect: &Dialect, ctes: &mut CteFac
     // CTE names (the leading identifier of each CTE definition).
     let cte_names: Vec<String> = cte_nodes.iter().map(cte_name).collect();
 
-    // `WITH RECURSIVE` detected from adjacent keyword tokens, not raw text, so
-    // a comment or string literal containing the phrase doesn't mark a
-    // non-recursive CTE as recursive.
-    let recursive_keyword = has_adjacent_keywords(root, "WITH", "RECURSIVE");
-
     // Build the dependency graph: edge cte_a -> cte_b when a's body reads b.
     use std::collections::{BTreeMap, BTreeSet};
     let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1562,11 +1560,11 @@ fn extract_cte_graph(root: &ErasedSegment, _dialect: &Dialect, ctes: &mut CteFac
             *fan_out.entry(dep_up).or_default() += 1;
         }
     }
-    ctes.recursive_count = if recursive_keyword {
-        self_recursive.max(1)
-    } else {
-        self_recursive
-    };
+    // A recursive CTE is one whose body references *itself* — count those. The
+    // `WITH RECURSIVE` keyword merely permits recursion; a `WITH RECURSIVE c AS
+    // (SELECT 1)` that never self-references is not a recursive CTE, so the
+    // count reflects actual self-references rather than the keyword's presence.
+    ctes.recursive_count = self_recursive;
     ctes.max_fan_out = fan_out.values().copied().max().unwrap_or(0);
     ctes.max_dependency_depth = longest_chain(&edges, &cte_names);
 
@@ -2055,28 +2053,4 @@ fn count_keyword(node: &ErasedSegment, word: &str) -> u32 {
     kws.iter()
         .filter(|k| k.raw().eq_ignore_ascii_case(word))
         .count() as u32
-}
-
-/// Whether `node` contains two adjacent `Keyword` tokens (ignoring intervening
-/// whitespace/comments) matching `first` then `second`, case-insensitively.
-/// Token-based so the phrase inside a comment or string literal does not match.
-fn has_adjacent_keywords(node: &ErasedSegment, first: &str, second: &str) -> bool {
-    fn walk(node: &ErasedSegment, first: &str, second: &str) -> bool {
-        let code: Vec<&ErasedSegment> = node
-            .segments()
-            .iter()
-            .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment())
-            .collect();
-        for pair in code.windows(2) {
-            if pair[0].is_type(SyntaxKind::Keyword)
-                && pair[0].raw().eq_ignore_ascii_case(first)
-                && pair[1].is_type(SyntaxKind::Keyword)
-                && pair[1].raw().eq_ignore_ascii_case(second)
-            {
-                return true;
-            }
-        }
-        node.segments().iter().any(|c| walk(c, first, second))
-    }
-    walk(node, first, second)
 }

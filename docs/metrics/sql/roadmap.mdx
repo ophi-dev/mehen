@@ -36,9 +36,11 @@ This phase is enough to produce valuable top-offender output.
 - `sql.modularity_health`.
 
 Composite scores are published alongside the raw metrics and feed `mehen top-offenders` /
-`mehen diff` directly (any `sql.*` key is a valid selector and threshold target). Named profile
-presets (`sql.analytics_default`, `sql.migration_default`, `sql.procedural_default`) and
-diff-aware delta gates remain to be wired through the threshold engine.
+`mehen diff` directly — any `sql.*` key is a valid selector and threshold target
+(e.g. `mehen top-offenders --metric sql.change_risk_score`). Risk/complexity scores default to
+higher-is-worse and maintainability/health scores to higher-is-better; prefix a metric with `+`/`-`
+to override. Named profile presets (`sql.analytics_default`, `sql.migration_default`,
+`sql.procedural_default`) and diff-aware delta gates remain to be wired through the threshold engine.
 
 ## Phase 3 — procedural SQL
 

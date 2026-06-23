@@ -658,3 +658,35 @@ fn nested_subquery_alias_does_not_mask_outer_correlation() {
     );
     assert!(get(&m, "sql.subquery.correlated_count") >= 1.0);
 }
+
+#[test]
+fn aggregate_distinct_detected_from_keyword_not_substring() {
+    assert_eq!(
+        get(
+            &metrics("SELECT COUNT(DISTINCT id) FROM t"),
+            "sql.aggregate.distinct_count"
+        ),
+        1.0
+    );
+    // A column whose name merely contains "distinct" must not match.
+    assert_eq!(
+        get(
+            &metrics("SELECT COUNT(distinctive_id) FROM t"),
+            "sql.aggregate.distinct_count"
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn non_self_referential_with_recursive_is_not_recursive() {
+    // WITH RECURSIVE but the body never references itself → not a recursive CTE.
+    let m = metrics("WITH RECURSIVE c AS (SELECT 1 AS n) SELECT * FROM c");
+    assert_eq!(get(&m, "sql.cte.recursive_count"), 0.0);
+    // A genuinely self-referential recursive CTE is counted.
+    let rec = metrics(
+        "WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r WHERE n < 3) \
+         SELECT * FROM r",
+    );
+    assert_eq!(get(&rec, "sql.cte.recursive_count"), 1.0);
+}
