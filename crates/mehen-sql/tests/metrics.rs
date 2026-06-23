@@ -506,3 +506,43 @@ fn returning_matches_across_newlines() {
     let tsql = metrics("INSERT INTO t (a)\nOUTPUT\ninserted.id\nVALUES (1)");
     assert_eq!(get(&tsql, "sql.dml.returning_count"), 1.0);
 }
+
+#[test]
+fn equi_join_requires_column_to_column_equality() {
+    // Real equi-join: column = column.
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM a JOIN b ON a.id = b.id"),
+            "sql.join.non_equi_count"
+        ),
+        0.0
+    );
+    // Constant/filter equalities are NOT equi-joins.
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM a JOIN b ON 1 = 1"),
+            "sql.join.non_equi_count"
+        ),
+        1.0
+    );
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM a JOIN b ON a.status = 'active'"),
+            "sql.join.non_equi_count"
+        ),
+        1.0
+    );
+}
+
+#[test]
+fn create_or_replace_matches_across_whitespace() {
+    let m = metrics("CREATE\nOR REPLACE VIEW v AS SELECT 1 FROM t");
+    assert_eq!(get(&m, "sql.ddl.create_or_replace_count"), 1.0);
+}
+
+#[test]
+fn returning_in_comment_is_not_counted() {
+    // A comment mentioning RETURNING/OUTPUT must not increment the metric.
+    let m = metrics("SELECT 1 FROM t; -- RETURNING id\n");
+    assert_eq!(get(&m, "sql.dml.returning_count"), 0.0);
+}

@@ -636,22 +636,46 @@ fn join_condition_has_equality(clause: &ErasedSegment, has_using: bool) -> bool 
         &SyntaxSet::EMPTY,
         true,
     );
+    // An equi-join needs an equality (`=`) *between two column references* —
+    // `ON a.id = b.id`. A `=` against a literal or constant (`ON 1 = 1`,
+    // `ON a.status = 'active'`) is a filter, not a join key, so it must not
+    // suppress the non-equi signal (Codex P2).
     for cond in &conds {
-        let comparisons = cond.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::ComparisonOperator),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        );
-        for c in &comparisons {
-            // The operator's raw text, whitespace-trimmed, must be exactly `=`
-            // to count as an equality. `>=`, `<=`, `!=`, `<>` are inequalities.
-            if c.raw().trim() == "=" {
+        if expression_has_column_equality(cond) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `node` contains a `=` comparison whose operands on both sides are
+/// column references. Walks expression containers and inspects the code
+/// siblings flanking each `=` operator.
+fn expression_has_column_equality(node: &ErasedSegment) -> bool {
+    // Examine the code-token children at this level for the pattern
+    // `<col> = <col>`.
+    let code: Vec<&ErasedSegment> = node
+        .segments()
+        .iter()
+        .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment())
+        .collect();
+    for (i, seg) in code.iter().enumerate() {
+        if seg.is_type(SyntaxKind::ComparisonOperator) && seg.raw().trim() == "=" {
+            let left_is_col = i
+                .checked_sub(1)
+                .and_then(|j| code.get(j))
+                .is_some_and(|s| s.is_type(SyntaxKind::ColumnReference));
+            let right_is_col = code
+                .get(i + 1)
+                .is_some_and(|s| s.is_type(SyntaxKind::ColumnReference));
+            if left_is_col && right_is_col {
                 return true;
             }
         }
     }
-    false
+    // Recurse into nested expression/bracketed groups (e.g. compound ON with
+    // AND/OR, or parenthesized conditions).
+    node.segments().iter().any(expression_has_column_equality)
 }
 
 // ── set operations ───────────────────────────────────────────────────
@@ -1720,25 +1744,52 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
         }
     }
 
-    // CREATE OR REPLACE.
-    obj.create_or_replace_count =
-        count_substr(&root.raw().to_ascii_uppercase(), "CREATE OR REPLACE");
+    // The remaining clause detections work over the *code* token stream
+    // (comments/whitespace excluded) so a comment like `-- RETURNING id` or
+    // `/* CREATE OR REPLACE */` never trips them, and arbitrary whitespace
+    // between keywords is irrelevant (we look at adjacency in the token list).
+    let code_words = code_token_words(root);
 
-    // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses, matched
-    // as whitespace-delimited words: `OUTPUT` is only a keyword token under the
-    // tsql grammar, but the metric should fire regardless of which dialect the
-    // file parsed as (inference may fall back to ANSI). Splitting on ASCII
-    // whitespace handles `INSERT …\nRETURNING id` and `OUTPUT\tinserted.id`
-    // (newlines/tabs between keyword and expression) that a literal-space
-    // substring match would miss, and word boundaries avoid identifiers like
-    // `output_log`.
-    let words = root
-        .raw()
-        .to_ascii_uppercase()
-        .split_ascii_whitespace()
+    // CREATE OR REPLACE — three consecutive code tokens, handling
+    // `CREATE\nOR REPLACE` / `CREATE  OR  REPLACE` (whitespace-insensitive).
+    obj.create_or_replace_count = code_words
+        .windows(3)
+        .filter(|w| w[0] == "CREATE" && w[1] == "OR" && w[2] == "REPLACE")
+        .count() as u32;
+
+    // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses. Counted
+    // from code tokens (never comments). `OUTPUT` is only a keyword token under
+    // the tsql grammar, but treating it as a code word makes the metric fire
+    // regardless of which dialect the file parsed as.
+    obj.returning_count = code_words
+        .iter()
         .filter(|w| *w == "RETURNING" || *w == "OUTPUT")
         .count() as u32;
-    obj.returning_count = words;
+}
+
+/// The uppercased text of every *code* leaf token in `node` (comments,
+/// whitespace, and meta tokens excluded), in source order. Used for
+/// adjacency/word checks that must ignore comments and be whitespace-agnostic.
+fn code_token_words(node: &ErasedSegment) -> Vec<String> {
+    fn walk(node: &ErasedSegment, out: &mut Vec<String>) {
+        let children = node.segments();
+        if children.is_empty() {
+            if node.is_comment() || node.is_whitespace() || node.is_meta() {
+                return;
+            }
+            let raw = node.raw().trim();
+            if !raw.is_empty() {
+                out.push(raw.to_ascii_uppercase());
+            }
+            return;
+        }
+        for child in children {
+            walk(child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, &mut out);
+    out
 }
 
 /// Whether `stmt` has a `WHERE` clause at its own statement level — i.e. one
