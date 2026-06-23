@@ -106,6 +106,13 @@ impl LanguageAnalyzer for SqlAnalyzer {
                 // downstream selectors/thresholds. The error diagnostic marks
                 // the analysis incomplete (the engine treats it as blocking).
                 let mut analysis = empty_sql_analysis(file_span, &source.text, &resolution);
+                // Reflect the failure in the parser-health metrics so they
+                // agree with the emitted diagnostic (a report with a
+                // `sql.parse_error` must not also say `diagnostic_count = 0`).
+                analysis.root.metrics.insert(
+                    mehen_core::MetricKey::new("sql.parser.diagnostic_count"),
+                    1i64,
+                );
                 analysis.diagnostics.push(ParseDiagnostic::error(
                     "sql.parse_error",
                     format!("sqruff failed to parse: {}", e.description),

@@ -116,18 +116,28 @@ fn is_namespaced_metric(name: &str) -> bool {
     name.starts_with("sql.") || name.starts_with("markdown.")
 }
 
-/// Default polarity for a namespaced metric. Most are higher-is-worse
-/// (complexity/risk/burden); the "health"/"maintainability"/"coverage"/
-/// "grounding" style scores are higher-is-better.
+/// Default polarity for a namespaced metric, by *exact* key. Substring
+/// inference is too crude (e.g. `markdown.maintainability.artifact_debt_score`
+/// is a penalty despite containing "maintainability", and `sql.dialect.confidence`
+/// is higher-is-better), so the higher-is-better metrics are enumerated and
+/// everything else defaults to higher-is-worse. Users can always override with
+/// a `+`/`-` prefix.
 fn default_namespaced_polarity(name: &str) -> Polarity {
     const HIGHER_IS_BETTER: &[&str] = &[
-        "maintainability",
-        "modularity_health",
-        "alias_coverage",
-        "grounding",
-        "scaffold",
+        // SQL composite/quality scores where larger is healthier.
+        "sql.maintainability_index",
+        "sql.modularity_health",
+        "sql.select.output_alias_coverage",
+        "sql.dialect.confidence",
+        // Markdown quality scores where larger is healthier.
+        "markdown.maintainability.documentation_maintainability_index",
+        "markdown.maintainability.section_balance_score",
+        "markdown.maintainability.good_scaffold_score",
+        "markdown.grounding.repository_grounding_score",
+        "markdown.grounding.evidence_coverage_score",
+        "markdown.links.information_scent_score",
     ];
-    if HIGHER_IS_BETTER.iter().any(|frag| name.contains(frag)) {
+    if HIGHER_IS_BETTER.contains(&name) {
         Polarity::HigherIsBetter
     } else {
         Polarity::LowerIsBetter

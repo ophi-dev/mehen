@@ -690,3 +690,51 @@ fn non_self_referential_with_recursive_is_not_recursive() {
     );
     assert_eq!(get(&rec, "sql.cte.recursive_count"), 1.0);
 }
+
+#[test]
+fn cte_names_excluded_from_object_touch() {
+    // `base` is a CTE (query-local), not a database object — only `orders` is
+    // a real read object.
+    let m = metrics(
+        "WITH base AS (SELECT id FROM orders) SELECT * FROM base JOIN base b2 ON base.id = b2.id",
+    );
+    assert_eq!(
+        get(&m, "sql.object.read_count"),
+        1.0,
+        "only `orders` is a real object"
+    );
+    assert_eq!(get(&m, "sql.object.touch_count"), 1.0);
+}
+
+#[test]
+fn hard_parse_error_reports_a_diagnostic_count() {
+    // A report carrying a `sql.parse_error` must not also say diagnostic_count = 0.
+    use mehen_core::{AnalysisConfig, Language, LanguageAnalyzer, SourceFile};
+    use mehen_sql::SqlAnalyzer;
+    let analysis = SqlAnalyzer::new()
+        .analyze(
+            &SourceFile::new(
+                "broken.sql".into(),
+                Language::Sql,
+                "SELECT FROM WHERE ;;; (((".to_string(),
+            ),
+            &AnalysisConfig::production(),
+        )
+        .expect("ok with diagnostics");
+    let has_error = analysis
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "sql.parse_error");
+    let count = analysis
+        .root
+        .metrics
+        .get(&MetricKey::new("sql.parser.diagnostic_count"))
+        .map(|v| v.as_f64())
+        .unwrap_or(0.0);
+    if has_error {
+        assert!(
+            count >= 1.0,
+            "parse error must be reflected in diagnostic_count, got {count}"
+        );
+    }
+}

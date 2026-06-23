@@ -1884,7 +1884,22 @@ fn collect_touched_objects(
     let mut read = BTreeSet::new();
     let mut write = BTreeSet::new();
 
-    // Reads: every table reference reachable from a FROM/JOIN element.
+    // CTE names are query-local aliases, not database objects — exclude them
+    // from object-touch counts so a CTE-heavy query isn't reported as reading
+    // N extra "objects" (`base`, `per_customer`, …).
+    let cte_names: BTreeSet<String> = root
+        .recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::CommonTableExpression),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        )
+        .iter()
+        .map(|c| cte_name(c).to_ascii_uppercase())
+        .collect();
+
+    // Reads: every table reference reachable from a FROM/JOIN element that is
+    // not a CTE reference.
     let from_elems = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::FromExpressionElement),
         true,
@@ -1898,7 +1913,10 @@ fn collect_touched_objects(
             &SyntaxSet::EMPTY,
             true,
         ) {
-            read.insert(tr.raw().to_ascii_uppercase());
+            let name = tr.raw().to_ascii_uppercase();
+            if !cte_names.contains(&name) {
+                read.insert(name);
+            }
         }
     }
 
@@ -1926,6 +1944,9 @@ fn collect_touched_objects(
         let merge = stmt.is_type(SyntaxKind::MergeStatement);
         for (i, tr) in statement_level.iter().enumerate() {
             let name = tr.raw().to_ascii_uppercase();
+            if cte_names.contains(&name) {
+                continue; // a CTE used as a MERGE/DML target is query-local
+            }
             if merge && i > 0 {
                 read.insert(name);
             } else {
