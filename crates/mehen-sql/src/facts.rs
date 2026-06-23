@@ -419,10 +419,12 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
             .is_empty()
     };
 
-    // Order matters: more specific kinds first.
-    if has(SyntaxKind::WithCompoundStatement) {
-        return StatementKind::WithSelect;
-    }
+    // Order matters: more specific kinds first. The `WithCompoundStatement`
+    // (CTE) check is deliberately *after* the DML/DDL checks: a CTE can be
+    // attached to another statement form — `CREATE TABLE dst AS WITH c AS (…)
+    // SELECT …`, or dialects allowing `WITH … INSERT/UPDATE/DELETE` — and the
+    // outer statement kind is the meaningful classification, not `with_select`
+    // (Codex P2).
     if has(SyntaxKind::MergeStatement) {
         return StatementKind::Merge;
     }
@@ -480,6 +482,11 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
     }
     if has(SyntaxKind::SetExpression) {
         return StatementKind::SetOperation;
+    }
+    // A CTE that is *not* attached to a DML/DDL statement (handled above) is a
+    // plain `WITH … SELECT` read.
+    if has(SyntaxKind::WithCompoundStatement) {
+        return StatementKind::WithSelect;
     }
     if has(SyntaxKind::SelectStatement) {
         return StatementKind::Select;
@@ -555,7 +562,10 @@ fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
         if natural {
             joins.natural += 1;
         }
-        if has_kw("LATERAL") || has_kw("APPLY") {
+        // LATERAL / CROSS APPLY / OUTER APPLY are lateral joins; they correlate
+        // by position and legitimately have no `ON`/`USING`.
+        let lateral = has_kw("LATERAL") || has_kw("APPLY");
+        if lateral {
             joins.lateral += 1;
         }
         // `USING` is a keyword child that appears *after* the joined relation,
@@ -574,9 +584,9 @@ fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
             )
             .is_empty()
             || has_using;
-        // CROSS / NATURAL joins legitimately omit a condition; only flag the
-        // others.
-        if !has_condition && !matches!(kind_word, JoinWord::Cross) && !natural {
+        // CROSS / NATURAL / LATERAL (incl. CROSS|OUTER APPLY) joins legitimately
+        // omit a condition; only flag the others.
+        if !has_condition && !matches!(kind_word, JoinWord::Cross) && !natural && !lateral {
             joins.missing_condition += 1;
         }
         if has_condition && !join_condition_has_equality(clause, has_using) {
@@ -1093,35 +1103,67 @@ fn is_correlated(_root: &ErasedSegment, subquery: &ErasedSegment) -> bool {
     false
 }
 
+/// Identifier node kinds. Both naked (`t`) and quoted (`"t"`, `` `t` ``,
+/// `[t]`) identifiers must be resolved — quoted identifiers are common in
+/// Snowflake/BigQuery/Postgres/T-SQL and are a distinct `SyntaxKind`.
+const IDENTIFIER_KINDS: SyntaxSet =
+    SyntaxSet::new(&[SyntaxKind::NakedIdentifier, SyntaxKind::QuotedIdentifier]);
+
+/// Normalize an identifier's raw text for comparison: strip surrounding quote
+/// characters (`"`, `` ` ``, `[ ]`) so `"t"`, `` `t` ``, `[t]`, and `t`
+/// compare equal.
+fn normalize_identifier(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        let quoted = (first == b'"' && last == b'"')
+            || (first == b'`' && last == b'`')
+            || (first == b'[' && last == b']');
+        if quoted {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Relation names in scope at `node`: the names of table references in
+/// `from_expression_element` positions (read sources) plus their table
+/// aliases. Only FROM/JOIN aliases are relation aliases — output-column
+/// aliases (`SELECT i.x AS o`) are *not* relations, so including them would
+/// mask a genuine outer reference (`o.grp`) in a correlated subquery.
 fn relation_names(node: &ErasedSegment) -> Vec<String> {
     let mut names = Vec::new();
-    // Table references and their aliases define the in-scope relation names.
-    let table_refs = node.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::TableReference),
+    let from_elems = node.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::FromExpressionElement),
         true,
         &SyntaxSet::EMPTY,
         true,
     );
-    for tr in &table_refs {
-        names.push(last_identifier(tr));
-    }
-    let aliases = node.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::AliasExpression),
-        true,
-        &SyntaxSet::EMPTY,
-        true,
-    );
-    for a in &aliases {
-        if let Some(id) = a
-            .recursive_crawl(
-                &SyntaxSet::single(SyntaxKind::NakedIdentifier),
-                true,
-                &SyntaxSet::EMPTY,
-                true,
-            )
-            .first()
-        {
-            names.push(id.raw().to_string());
+    for elem in &from_elems {
+        // Table reference(s) of this FROM element.
+        for tr in elem.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::TableReference),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        ) {
+            names.push(last_identifier(&tr));
+        }
+        // The element's own (table) alias, if any.
+        for a in elem.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::AliasExpression),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        ) {
+            if let Some(id) = a
+                .recursive_crawl(&IDENTIFIER_KINDS, true, &SyntaxSet::EMPTY, true)
+                .first()
+            {
+                names.push(normalize_identifier(id.raw()));
+            }
         }
     }
     names
@@ -1133,33 +1175,24 @@ fn relation_names(node: &ErasedSegment) -> Vec<String> {
 /// Using the relation component keeps it consistent with [`relation_names`]
 /// (which records table refs by their last identifier), so a local
 /// fully-qualified reference is not misread as an outer/correlated reference.
+/// Quoted identifiers (`"t".id`) are handled by [`normalize_identifier`].
 fn column_qualifier(col: &ErasedSegment) -> Option<String> {
-    let idents = col.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::NakedIdentifier),
-        true,
-        &SyntaxSet::EMPTY,
-        true,
-    );
+    let idents = col.recursive_crawl(&IDENTIFIER_KINDS, true, &SyntaxSet::EMPTY, true);
     // A qualified ref has at least two identifier parts separated by a dot.
     // The last part is the column; the part before it is the relation.
     if col.raw().contains('.') && idents.len() >= 2 {
-        Some(idents[idents.len() - 2].raw().to_string())
+        Some(normalize_identifier(idents[idents.len() - 2].raw()))
     } else {
         None
     }
 }
 
 fn last_identifier(node: &ErasedSegment) -> String {
-    let idents = node.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::NakedIdentifier),
-        true,
-        &SyntaxSet::EMPTY,
-        true,
-    );
+    let idents = node.recursive_crawl(&IDENTIFIER_KINDS, true, &SyntaxSet::EMPTY, true);
     idents
         .last()
-        .map(|i| i.raw().to_string())
-        .unwrap_or_else(|| node.raw().to_string())
+        .map(|i| normalize_identifier(i.raw()))
+        .unwrap_or_else(|| normalize_identifier(node.raw()))
 }
 
 /// Count SELECT nodes that sit directly inside a FROM/JOIN bracketed expression.
@@ -1553,19 +1586,25 @@ fn cte_name(cte: &ErasedSegment) -> String {
     String::new()
 }
 
-/// CTE names referenced inside `cte`'s body (its dependencies).
-fn cte_body_dependencies(cte: &ErasedSegment, cte_names: &[String]) -> Vec<String> {
+/// Distinct CTE names referenced inside `cte`'s body (its dependencies). A CTE
+/// referenced multiple times in one body is a single dependency edge — so the
+/// result is deduplicated to avoid inflating `dependency_edges`/`max_fan_out`
+/// (and thus the modularity score).
+fn cte_body_dependencies(
+    cte: &ErasedSegment,
+    cte_names: &[String],
+) -> std::collections::BTreeSet<String> {
     let refs = cte.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::TableReference),
         true,
         &SyntaxSet::EMPTY,
         true,
     );
-    let mut deps = Vec::new();
+    let mut deps = std::collections::BTreeSet::new();
     for r in &refs {
         let name = r.raw().to_ascii_uppercase();
         if cte_names.iter().any(|c| c.eq_ignore_ascii_case(&name)) {
-            deps.push(name);
+            deps.insert(name);
         }
     }
     deps
@@ -1686,9 +1725,13 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
     obj.create_or_replace_count =
         count_substr(&root.raw().to_ascii_uppercase(), "CREATE OR REPLACE");
 
-    // RETURNING / OUTPUT clauses.
-    let upper = root.raw().to_ascii_uppercase();
-    obj.returning_count = count_substr(&upper, "RETURNING ");
+    // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses, matched
+    // as text: `OUTPUT` is only recognized as a keyword token when parsed under
+    // the tsql dialect, but the metric should fire regardless of which dialect
+    // the file was parsed as (inference may fall back to ANSI). Word-boundary
+    // padding (`<sp>OUTPUT<sp>`) avoids matching identifiers like `output_log`.
+    let padded = format!(" {} ", root.raw().to_ascii_uppercase());
+    obj.returning_count = count_substr(&padded, " RETURNING ") + count_substr(&padded, " OUTPUT ");
 }
 
 /// Whether `stmt` has a `WHERE` clause at its own statement level — i.e. one
@@ -1823,6 +1866,20 @@ fn extract_halstead(root: &ErasedSegment, h: &mut HalsteadFacts) {
         operators: &mut BTreeMap<String, u32>,
         operands: &mut BTreeMap<String, u32>,
     ) {
+        // A column/table/object reference is a single operand even though it is
+        // a *node* (`t`, `.`, `id`): treat its full text (`t.id`) as one
+        // operand and do not recurse, otherwise `t.id` would split into two
+        // operands `t` and `id`, distorting the Halstead operand counts (§7).
+        if node.is_type(SyntaxKind::ColumnReference)
+            || node.is_type(SyntaxKind::TableReference)
+            || node.is_type(SyntaxKind::ObjectReference)
+        {
+            let raw = node.raw().trim();
+            if !raw.is_empty() {
+                *operands.entry(raw.to_ascii_lowercase()).or_default() += 1;
+            }
+            return;
+        }
         let children = node.segments();
         if children.is_empty() {
             // Leaf token: classify.

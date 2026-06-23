@@ -22,10 +22,14 @@ fn metrics(sql: &str) -> mehen_core::MetricSet {
         .metrics
 }
 
+/// Strict metric lookup: panics if the key is absent. Every `sql.*` key is
+/// published unconditionally (with an explicit `0` when not applicable), so a
+/// missing key here means a dropped/renamed metric or a typo in the test —
+/// failing fast surfaces that instead of silently reading `0.0`.
 fn get(m: &mehen_core::MetricSet, key: &str) -> f64 {
     m.get(&MetricKey::new(key))
-        .map(|v| v.as_f64())
-        .unwrap_or(0.0)
+        .unwrap_or_else(|| panic!("missing metric key: {key}"))
+        .as_f64()
 }
 
 #[test]
@@ -390,4 +394,95 @@ fn fully_qualified_local_ref_is_not_correlated() {
          WHERE o.x > (SELECT AVG(i.x) FROM inner_t i WHERE i.grp = o.grp)",
     );
     assert_eq!(get(&correlated, "sql.subquery.correlated_count"), 1.0);
+}
+
+#[test]
+fn cte_with_attached_to_ddl_classifies_as_ctas() {
+    // A CTE attached to CREATE TABLE AS must classify as create_table_as, not
+    // with_select.
+    let m = metrics("CREATE TABLE dst AS WITH c AS (SELECT 1 AS x) SELECT x FROM c");
+    assert_eq!(get(&m, "sql.statement.kind_count.create_table_as"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.with_select"), 0.0);
+    // A standalone WITH … SELECT is still with_select.
+    let plain = metrics("WITH c AS (SELECT 1 AS x) SELECT x FROM c");
+    assert_eq!(get(&plain, "sql.statement.kind_count.with_select"), 1.0);
+}
+
+#[test]
+fn outer_apply_is_not_a_missing_condition_join() {
+    // CROSS/OUTER APPLY (T-SQL) and LATERAL legitimately omit ON/USING.
+    let m = metrics("SELECT * FROM t OUTER APPLY fn(t.id) AS x");
+    assert_eq!(get(&m, "sql.join.missing_condition_count"), 0.0);
+    assert!(get(&m, "sql.join.kind_count.lateral") >= 1.0);
+}
+
+#[test]
+fn output_clause_counts_toward_returning() {
+    // T-SQL OUTPUT and Postgres RETURNING both count.
+    let tsql = metrics("INSERT INTO t (a) OUTPUT inserted.a VALUES (1)");
+    assert_eq!(get(&tsql, "sql.dml.returning_count"), 1.0);
+    let pg = metrics("INSERT INTO t (a) VALUES (1) RETURNING a");
+    assert_eq!(get(&pg, "sql.dml.returning_count"), 1.0);
+}
+
+#[test]
+fn cte_dependency_dedups_repeated_refs() {
+    // `b` references `a` twice; that is one dependency edge, not two.
+    let m = metrics(
+        "WITH a AS (SELECT 1 AS x), \
+              b AS (SELECT a1.x FROM a a1 JOIN a a2 ON a1.x = a2.x) \
+         SELECT x FROM b",
+    );
+    assert_eq!(get(&m, "sql.cte.dependency_edges"), 1.0);
+    assert_eq!(get(&m, "sql.cte.max_fan_out"), 1.0);
+}
+
+#[test]
+fn halstead_treats_qualified_column_as_one_operand() {
+    // `t.id` is one operand, not two (`t` + `id`). A query referencing only
+    // `t.id` (plus the table) should have a small distinct-operand count.
+    let m = metrics("SELECT t.id FROM t");
+    // operands: `t.id` (column ref) and `t` (table ref) = 2 distinct.
+    assert_eq!(get(&m, "sql.halstead.distinct_operands"), 2.0);
+}
+
+#[test]
+fn parse_error_still_publishes_full_metric_surface() {
+    // A hard parse error must still publish the zeroed sql.* surface so
+    // downstream selectors/thresholds find their keys.
+    use mehen_core::{AnalysisConfig, Language, LanguageAnalyzer, SourceFile};
+    use mehen_sql::SqlAnalyzer;
+    let analysis = SqlAnalyzer::new()
+        .analyze(
+            &SourceFile::new(
+                "broken.sql".into(),
+                Language::Sql,
+                "SELECT FROM WHERE ;;; garbage (((".to_string(),
+            ),
+            &AnalysisConfig::production(),
+        )
+        .expect("analysis returns Ok with diagnostics");
+    // Full surface present (e.g. statement count + a composite key).
+    assert!(
+        analysis
+            .root
+            .metrics
+            .get(&MetricKey::new("sql.statement.count"))
+            .is_some()
+    );
+    assert!(
+        analysis
+            .root
+            .metrics
+            .get(&MetricKey::new("sql.structural_complexity"))
+            .is_some()
+    );
+}
+
+#[test]
+fn quoted_identifiers_resolve_in_qualifier_and_alias() {
+    // Quoted table alias + quoted-qualified column should be measured.
+    let m = metrics(r#"SELECT "t".id FROM tbl "t""#);
+    // The alias `"t"` is a table alias.
+    assert_eq!(get(&m, "sql.alias.table_alias_count"), 1.0);
 }

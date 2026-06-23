@@ -98,18 +98,17 @@ impl LanguageAnalyzer for SqlAnalyzer {
                 return Ok(empty_sql_analysis(file_span, &resolution));
             }
             Err(e) => {
-                let mut root = MetricSpace::new(SpaceId(0), SpaceKind::Unit, file_span);
-                publish_dialect_labels(&mut root, &resolution);
-                return Ok(LanguageAnalysis {
-                    language: Language::Sql,
-                    backend: AnalysisBackend::Sqruff,
-                    diagnostics: vec![ParseDiagnostic::error(
-                        "sql.parse_error",
-                        format!("sqruff failed to parse: {}", e.description),
-                    )],
-                    root,
-                    contributions: Vec::new(),
-                });
+                // Publish the full (zeroed) `sql.*` surface so the output
+                // contract is identical to the empty/success paths — a hard
+                // parse error must not silently drop every metric key for
+                // downstream selectors/thresholds. The error diagnostic marks
+                // the analysis incomplete (the engine treats it as blocking).
+                let mut analysis = empty_sql_analysis(file_span, &resolution);
+                analysis.diagnostics.push(ParseDiagnostic::error(
+                    "sql.parse_error",
+                    format!("sqruff failed to parse: {}", e.description),
+                ));
+                return Ok(analysis);
             }
         };
 
