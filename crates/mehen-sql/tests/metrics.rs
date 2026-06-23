@@ -633,3 +633,28 @@ fn null_risk_ignores_comments_and_literals() {
         1.0
     );
 }
+
+#[test]
+fn recursive_cte_detected_from_tokens_not_comments() {
+    let real = metrics(
+        "WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r WHERE n < 5) \
+         SELECT * FROM r",
+    );
+    assert!(get(&real, "sql.cte.recursive_count") >= 1.0);
+    // The phrase inside a comment must not mark a non-recursive CTE recursive.
+    let commented = metrics("WITH c AS (SELECT 1 AS x) SELECT * FROM c -- WITH RECURSIVE\n");
+    assert_eq!(get(&commented, "sql.cte.recursive_count"), 0.0);
+}
+
+#[test]
+fn nested_subquery_alias_does_not_mask_outer_correlation() {
+    // The inner `coupons c2` alias must not shadow the outer `c` so the
+    // `o.customer_id = c.id` correlation is still detected.
+    let m = metrics(
+        "SELECT * FROM customers c \
+         WHERE EXISTS (SELECT 1 FROM orders o \
+                       WHERE o.customer_id = c.id \
+                         AND EXISTS (SELECT 1 FROM coupons c2 WHERE c2.oid = o.id))",
+    );
+    assert!(get(&m, "sql.subquery.correlated_count") >= 1.0);
+}

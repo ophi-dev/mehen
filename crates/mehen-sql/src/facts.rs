@@ -1130,13 +1130,17 @@ fn ancestor_select_depth(root: &ErasedSegment, target: &ErasedSegment) -> u32 {
 /// outer scope. Heuristic: the subquery contains a qualified column reference
 /// whose qualifier is not a relation defined inside the subquery itself.
 fn is_correlated(_root: &ErasedSegment, subquery: &ErasedSegment) -> bool {
-    // Collect aliases/tables defined inside the subquery.
+    // Relations defined in *this* subquery's own scope (not deeper nested
+    // SELECT nodes — their relations belong to their own scope and would otherwise
+    // mask a genuine outer reference).
     let inner_relations = relation_names(subquery);
-    // Qualified column refs inside the subquery.
+    // Column refs evaluated in this subquery's scope — exclude refs that live
+    // inside a more deeply nested SELECT (those are that inner query's to
+    // resolve, not this one's).
     let col_refs = subquery.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::ColumnReference),
         true,
-        &SyntaxSet::EMPTY,
+        &SELECT_STATEMENT,
         true,
     );
     for col in &col_refs {
@@ -1183,18 +1187,22 @@ fn normalize_identifier(raw: &str) -> String {
 /// mask a genuine outer reference (`o.grp`) in a correlated subquery.
 fn relation_names(node: &ErasedSegment) -> Vec<String> {
     let mut names = Vec::new();
+    // Only FROM elements in *this* query level — stop at nested SELECT nodes so a
+    // derived table's or correlated inner subquery's relations/aliases don't
+    // leak into this scope and mask a genuine outer reference.
     let from_elems = node.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::FromExpressionElement),
         true,
-        &SyntaxSet::EMPTY,
+        &SELECT_STATEMENT,
         true,
     );
     for elem in &from_elems {
-        // Table reference(s) of this FROM element.
+        // Table reference(s) of this FROM element (again, not those inside a
+        // derived-table subquery nested in the element).
         for tr in elem.recursive_crawl(
             &SyntaxSet::single(SyntaxKind::TableReference),
             true,
-            &SyntaxSet::EMPTY,
+            &SELECT_STATEMENT,
             true,
         ) {
             names.push(last_identifier(&tr));
@@ -1203,7 +1211,7 @@ fn relation_names(node: &ErasedSegment) -> Vec<String> {
         for a in elem.recursive_crawl(
             &SyntaxSet::single(SyntaxKind::AliasExpression),
             true,
-            &SyntaxSet::EMPTY,
+            &SELECT_STATEMENT,
             true,
         ) {
             if let Some(id) = a
@@ -1527,7 +1535,10 @@ fn extract_cte_graph(root: &ErasedSegment, _dialect: &Dialect, ctes: &mut CteFac
     // CTE names (the leading identifier of each CTE definition).
     let cte_names: Vec<String> = cte_nodes.iter().map(cte_name).collect();
 
-    let recursive_keyword = root.raw().to_ascii_uppercase().contains("WITH RECURSIVE");
+    // `WITH RECURSIVE` detected from adjacent keyword tokens, not raw text, so
+    // a comment or string literal containing the phrase doesn't mark a
+    // non-recursive CTE as recursive.
+    let recursive_keyword = has_adjacent_keywords(root, "WITH", "RECURSIVE");
 
     // Build the dependency graph: edge cte_a -> cte_b when a's body reads b.
     use std::collections::{BTreeMap, BTreeSet};
@@ -2044,4 +2055,28 @@ fn count_keyword(node: &ErasedSegment, word: &str) -> u32 {
     kws.iter()
         .filter(|k| k.raw().eq_ignore_ascii_case(word))
         .count() as u32
+}
+
+/// Whether `node` contains two adjacent `Keyword` tokens (ignoring intervening
+/// whitespace/comments) matching `first` then `second`, case-insensitively.
+/// Token-based so the phrase inside a comment or string literal does not match.
+fn has_adjacent_keywords(node: &ErasedSegment, first: &str, second: &str) -> bool {
+    fn walk(node: &ErasedSegment, first: &str, second: &str) -> bool {
+        let code: Vec<&ErasedSegment> = node
+            .segments()
+            .iter()
+            .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment())
+            .collect();
+        for pair in code.windows(2) {
+            if pair[0].is_type(SyntaxKind::Keyword)
+                && pair[0].raw().eq_ignore_ascii_case(first)
+                && pair[1].is_type(SyntaxKind::Keyword)
+                && pair[1].raw().eq_ignore_ascii_case(second)
+            {
+                return true;
+            }
+        }
+        node.segments().iter().any(|c| walk(c, first, second))
+    }
+    walk(node, first, second)
 }
