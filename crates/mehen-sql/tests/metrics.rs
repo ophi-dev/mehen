@@ -839,3 +839,30 @@ fn update_from_and_merge_sources_are_reads() {
     assert_eq!(get(&merge, "sql.object.write_count"), 1.0);
     assert_eq!(get(&merge, "sql.object.read_count"), 1.0);
 }
+
+#[test]
+fn multi_target_ddl_counts_all_as_writes() {
+    // `DROP TABLE a, b` mutates both — both are writes, neither a read.
+    let m = metrics("DROP TABLE a, b");
+    assert_eq!(get(&m, "sql.object.write_count"), 2.0);
+    assert_eq!(get(&m, "sql.object.read_count"), 0.0);
+}
+
+#[test]
+fn cube_rollup_classified_by_function_name() {
+    // `ROLLUP(cube_id)` is a rollup, not a cube (the arg name must not match).
+    let r = metrics("SELECT a FROM t GROUP BY ROLLUP(cube_id)");
+    assert_eq!(get(&r, "sql.group_by.rollup_count"), 1.0);
+    assert_eq!(get(&r, "sql.group_by.cube_count"), 0.0);
+    let c = metrics("SELECT a FROM t GROUP BY CUBE(rollup_id)");
+    assert_eq!(get(&c, "sql.group_by.cube_count"), 1.0);
+    assert_eq!(get(&c, "sql.group_by.rollup_count"), 0.0);
+}
+
+#[test]
+fn derived_table_join_is_a_multi_relation_scope() {
+    // The derived table `q` and base `b` are two relations, so the unqualified
+    // `id` is detected in a multi-relation scope.
+    let m = metrics("SELECT id FROM (SELECT id FROM a) q JOIN b ON q.id = b.id");
+    assert!(get(&m, "sql.identifier.unqualified_column_ratio") > 0.0);
+}

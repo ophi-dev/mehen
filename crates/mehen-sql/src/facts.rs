@@ -878,7 +878,9 @@ fn extract_aggregates(root: &ErasedSegment, agg: &mut AggregateFacts) {
     agg.having_count = count_anywhere(root, SyntaxKind::HavingClause);
     agg.rollup_count = count_anywhere(root, SyntaxKind::CubeRollupClause);
     agg.grouping_sets_count = count_anywhere(root, SyntaxKind::GroupingSetsClause);
-    // CubeRollupClause covers both CUBE and ROLLUP in sqruff; split by keyword.
+    // CubeRollupClause covers both CUBE and ROLLUP in sqruff; split by the
+    // clause's `CUBE`/`ROLLUP` *keyword* token, not raw text, so an argument
+    // identifier like `ROLLUP(cube_id)` doesn't increment both counters.
     let cube_rollups = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::CubeRollupClause),
         true,
@@ -888,12 +890,13 @@ fn extract_aggregates(root: &ErasedSegment, agg: &mut AggregateFacts) {
     let mut cube = 0u32;
     let mut rollup = 0u32;
     for cr in &cube_rollups {
-        let raw = cr.raw().to_ascii_uppercase();
-        if raw.contains("CUBE") {
-            cube += 1;
-        }
-        if raw.contains("ROLLUP") {
-            rollup += 1;
+        // The construct is named by a `FunctionNameIdentifier` (`CUBE`/`ROLLUP`)
+        // — not a keyword — so classify by that name, not raw-text substring
+        // (a `ROLLUP(cube_id)` argument must not increment the cube counter).
+        match function_name(cr).map(|n| n.to_ascii_uppercase()).as_deref() {
+            Some("CUBE") => cube += 1,
+            Some("ROLLUP") => rollup += 1,
+            _ => {}
         }
     }
     agg.cube_count = cube;
@@ -1527,11 +1530,14 @@ fn extract_output(root: &ErasedSegment, selects: &[ErasedSegment], out: &mut Out
         .sum();
 }
 
-/// Count the relations referenced *directly* by a SELECT's own FROM/JOIN
-/// (not nested subqueries).
+/// Count the relations in a SELECT's own FROM/JOIN scope (not nested
+/// subqueries). Each `from_expression_element` is one relation — a base table
+/// *or* a derived table (`(SELECT …) q`) — so derived-table joins are counted
+/// (a `TableReference`-only count would miss `q` and make a 2-relation scope
+/// look single-relation, skewing `unqualified_column_ratio`).
 fn count_direct_relations(sel: &ErasedSegment) -> u32 {
     sel.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::TableReference),
+        &SyntaxSet::single(SyntaxKind::FromExpressionElement),
         true,
         &SELECT_STATEMENT,
         true,
@@ -1959,16 +1965,27 @@ fn collect_touched_objects(
             &SELECT_STATEMENT,
             true,
         );
+        // DDL statements mutate *every* statement-level table (`DROP TABLE a, b`,
+        // `TRUNCATE a, b` — all targets). DML statements mutate only the first
+        // (the target); any further statement-level tables are FROM/USING read
+        // sources (`UPDATE dst … FROM src`, `MERGE INTO dst USING src`).
+        let all_targets = !matches!(
+            stmt.get_type(),
+            SyntaxKind::InsertStatement
+                | SyntaxKind::UpdateStatement
+                | SyntaxKind::DeleteStatement
+                | SyntaxKind::MergeStatement
+        );
         for (i, tr) in stmt_tables.iter().enumerate() {
             let name = tr.raw().to_ascii_uppercase();
             if cte_names.contains(&name) {
                 continue; // a CTE used as a DML/MERGE target/source is query-local
             }
-            if i == 0 {
+            if i == 0 || all_targets {
                 write.insert(name);
                 write_target_nodes.push(tr.clone());
             } else {
-                // FROM/USING source tables of the write statement are reads.
+                // FROM/USING source tables of a DML statement are reads.
                 read.insert(name);
             }
         }
