@@ -326,3 +326,68 @@ fn block_comment_interior_is_not_code() {
     assert_eq!(get(&m, "sql.loc.code"), 1.0, "only the SELECT line is code");
     assert_eq!(get(&m, "sql.loc.comment"), 3.0, "all 3 comment lines");
 }
+
+#[test]
+fn joined_derived_table_is_not_an_in_subquery() {
+    // `JOIN (SELECT …)` must not be mis-counted as an `IN (SELECT …)` predicate
+    // (the substring `IN (SELECT` appears inside `JOIN (SELECT`).
+    let m = metrics("SELECT * FROM a JOIN (SELECT id FROM b) q ON a.id = q.id");
+    assert_eq!(get(&m, "sql.subquery.in_count"), 0.0);
+    // A genuine IN subquery is still counted.
+    let real = metrics("SELECT * FROM a WHERE a.id IN (SELECT id FROM b)");
+    assert_eq!(get(&real, "sql.subquery.in_count"), 1.0);
+    // EXISTS likewise detected from keyword + bracketed SELECT.
+    let exists = metrics("SELECT * FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.k = a.k)");
+    assert_eq!(get(&exists, "sql.subquery.exists_count"), 1.0);
+}
+
+#[test]
+fn null_comparison_risk_counted_once() {
+    // `!= NULL` / `<> NULL` must count once each, not also as `= NULL`.
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM t WHERE x != NULL"),
+            "sql.predicate.null_semantics_risk_count"
+        ),
+        1.0
+    );
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM t WHERE x <> NULL"),
+            "sql.predicate.null_semantics_risk_count"
+        ),
+        1.0
+    );
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM t WHERE x = NULL"),
+            "sql.predicate.null_semantics_risk_count"
+        ),
+        1.0
+    );
+    // `IS NULL` is the safe form — not a risk.
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM t WHERE x IS NULL"),
+            "sql.predicate.null_semantics_risk_count"
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn fully_qualified_local_ref_is_not_correlated() {
+    // A fully-qualified reference to the subquery's own table (`schema.t.id`)
+    // must not be misread as an outer/correlated reference.
+    let local = metrics(
+        "SELECT * FROM outer_t o \
+         WHERE o.id IN (SELECT s.inner_t.id FROM s.inner_t WHERE s.inner_t.active)",
+    );
+    assert_eq!(get(&local, "sql.subquery.correlated_count"), 0.0);
+    // A genuine outer reference (`o.grp`) is still detected as correlated.
+    let correlated = metrics(
+        "SELECT * FROM outer_t o \
+         WHERE o.x > (SELECT AVG(i.x) FROM inner_t i WHERE i.grp = o.grp)",
+    );
+    assert_eq!(get(&correlated, "sql.subquery.correlated_count"), 1.0);
+}

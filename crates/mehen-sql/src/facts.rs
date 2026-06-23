@@ -869,12 +869,31 @@ fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
         pred.max_boolean_depth = pred.max_boolean_depth.max(boolean_depth(parent));
     }
 
-    // NULL-semantics risk: `NOT IN`, `= NULL`, `<> NULL`, `!= NULL`.
+    // NULL-semantics risk: comparing a value to NULL with `=`/`<>`/`!=`
+    // (always NULL in standard SQL) and `NOT IN` (NULL-in-list trap). Count
+    // each risky comparison once: `!= NULL` and `<> NULL` must not also be
+    // counted as `= NULL` (Codex P3), so we tally NULL comparisons by scanning
+    // for ` NULL` preceded by a comparison operator and classify by that
+    // operator, instead of overlapping substring counts.
     let upper = root.raw().to_ascii_uppercase();
-    pred.null_semantics_risk_count = count_substr(&upper, "NOT IN")
-        + count_substr(&upper, "= NULL")
-        + count_substr(&upper, "<> NULL")
-        + count_substr(&upper, "!= NULL");
+    pred.null_semantics_risk_count =
+        count_substr(&upper, "NOT IN") + count_null_comparisons(&upper);
+}
+
+/// Count comparisons of the form `<op> NULL` where `<op>` is `=`, `<>`, or
+/// `!=`. Each comparison is counted exactly once regardless of operator (so
+/// `x != NULL` is 1, not 2). Operates on already-uppercased text.
+fn count_null_comparisons(upper: &str) -> u32 {
+    let mut count = 0u32;
+    for (idx, _) in upper.match_indices("NULL") {
+        // Look back past whitespace for a comparison operator ending in `=` or
+        // `>` (covers `=`, `!=`, `<>`).
+        let before = upper[..idx].trim_end();
+        if before.ends_with('=') || before.ends_with("<>") {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Boolean-expression nesting depth within `node`.
@@ -981,12 +1000,50 @@ fn extract_subqueries(root: &ErasedSegment, selects: &[ErasedSegment], sub: &mut
     }
     // Derived tables: SELECT directly inside a FROM/JOIN bracketed expression.
     sub.derived_table_count = count_derived_tables(root);
-    // EXISTS / IN subqueries by keyword adjacency.
-    let upper = root.raw().to_ascii_uppercase();
-    sub.exists_count = count_substr(&upper, "EXISTS (") + count_substr(&upper, "EXISTS(");
-    sub.in_count = count_substr(&upper, "IN (SELECT") + count_substr(&upper, "IN(SELECT");
+    // EXISTS / IN subqueries, detected from keyword tokens that are followed by
+    // a bracketed SELECT — not substring matching, which would mis-count e.g.
+    // `JOIN (SELECT …)` as an `IN (SELECT` predicate (Codex P2).
+    let (exists_n, in_n) = count_keyword_subqueries(root);
+    sub.exists_count = exists_n;
+    sub.in_count = in_n;
     // Scalar subqueries: SELECT inside a select_clause_element expression.
     sub.scalar_count = count_scalar_subqueries(root);
+}
+
+/// Count `EXISTS (SELECT …)` and `IN (SELECT …)` subquery predicates by
+/// inspecting keyword tokens and their following sibling, so substrings like
+/// the `IN (` inside `JOIN (` are not miscounted.
+fn count_keyword_subqueries(root: &ErasedSegment) -> (u32, u32) {
+    fn following_bracketed_select(siblings: &[ErasedSegment], from: usize) -> bool {
+        for sib in siblings.iter().skip(from + 1) {
+            if sib.is_whitespace() || sib.is_meta() {
+                continue;
+            }
+            return sib.is_type(SyntaxKind::Bracketed)
+                && !sib
+                    .recursive_crawl(&SELECT_STATEMENT, false, &SyntaxSet::EMPTY, true)
+                    .is_empty();
+        }
+        false
+    }
+    fn walk(node: &ErasedSegment, exists: &mut u32, in_count: &mut u32) {
+        let children = node.segments();
+        for (i, child) in children.iter().enumerate() {
+            if child.is_type(SyntaxKind::Keyword) {
+                let kw = child.raw().to_ascii_uppercase();
+                if kw == "EXISTS" && following_bracketed_select(children, i) {
+                    *exists += 1;
+                } else if kw == "IN" && following_bracketed_select(children, i) {
+                    *in_count += 1;
+                }
+            }
+            walk(child, exists, in_count);
+        }
+    }
+    let mut exists = 0u32;
+    let mut in_count = 0u32;
+    walk(root, &mut exists, &mut in_count);
+    (exists, in_count)
 }
 
 /// Number of SELECT ancestors (inclusive) above and including `target`.
@@ -1070,7 +1127,12 @@ fn relation_names(node: &ErasedSegment) -> Vec<String> {
     names
 }
 
-/// The qualifier of a column reference (`c` in `c.id`), if it is qualified.
+/// The relation qualifier of a column reference, if it is qualified — the
+/// identifier *immediately before* the column name. For `c.id` that is `c`;
+/// for a fully-qualified `schema.t.id` it is `t` (the relation), not `schema`.
+/// Using the relation component keeps it consistent with [`relation_names`]
+/// (which records table refs by their last identifier), so a local
+/// fully-qualified reference is not misread as an outer/correlated reference.
 fn column_qualifier(col: &ErasedSegment) -> Option<String> {
     let idents = col.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::NakedIdentifier),
@@ -1079,8 +1141,9 @@ fn column_qualifier(col: &ErasedSegment) -> Option<String> {
         true,
     );
     // A qualified ref has at least two identifier parts separated by a dot.
+    // The last part is the column; the part before it is the relation.
     if col.raw().contains('.') && idents.len() >= 2 {
-        Some(idents[0].raw().to_string())
+        Some(idents[idents.len() - 2].raw().to_string())
     } else {
         None
     }
