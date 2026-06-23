@@ -771,3 +771,18 @@ fn hard_parse_error_reports_a_diagnostic_count() {
         );
     }
 }
+
+#[test]
+fn nested_set_expression_does_not_make_statement_a_set_operation() {
+    // A UNION inside a CTE → the statement is a with_select, not set_operation.
+    let cte = metrics("WITH c AS (SELECT 1 AS x UNION ALL SELECT 2) SELECT * FROM c");
+    assert_eq!(get(&cte, "sql.statement.kind_count.with_select"), 1.0);
+    assert_eq!(get(&cte, "sql.statement.kind_count.set_operation"), 0.0);
+    // A UNION inside a derived table → plain select.
+    let derived = metrics("SELECT * FROM (SELECT 1 AS x UNION ALL SELECT 2) q");
+    assert_eq!(get(&derived, "sql.statement.kind_count.select"), 1.0);
+    assert_eq!(get(&derived, "sql.statement.kind_count.set_operation"), 0.0);
+    // A genuine top-level UNION is still a set_operation.
+    let top = metrics("SELECT a FROM x UNION ALL SELECT a FROM y");
+    assert_eq!(get(&top, "sql.statement.kind_count.set_operation"), 1.0);
+}

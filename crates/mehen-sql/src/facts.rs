@@ -480,21 +480,49 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
     if has(SyntaxKind::ExplainStatement) {
         return StatementKind::Explain;
     }
-    if has(SyntaxKind::SetExpression) {
-        return StatementKind::SetOperation;
-    }
-    // A CTE that is *not* attached to a DML/DDL statement (handled above) is a
-    // plain `WITH … SELECT` read.
-    if has(SyntaxKind::WithCompoundStatement) {
-        return StatementKind::WithSelect;
-    }
-    if has(SyntaxKind::SelectStatement) {
-        return StatementKind::Select;
+    // Read-query shape: classify by the statement's *top-level* body, not any
+    // nested selectable. `WITH c AS (SELECT … UNION …) SELECT …` is a
+    // `with_select`, and `SELECT * FROM (SELECT … UNION …) q` is a plain
+    // `select` — a nested UNION inside a CTE or derived table must not make
+    // either look like a top-level `set_operation` (Codex P2).
+    if let Some(kind) = top_level_query_kind(stmt) {
+        return kind;
     }
     if stmt_is_procedural(stmt) {
         return StatementKind::Procedural;
     }
     StatementKind::Unknown
+}
+
+/// Classify a statement's outermost query body: the first of
+/// `WithCompoundStatement` / `SetExpression` / `SelectStatement` reached while
+/// descending the statement's direct structure, *without* entering a
+/// `Bracketed` group (a derived table / parenthesized subquery) or a deeper
+/// selectable. Returns `None` if the statement has no query body.
+fn top_level_query_kind(stmt: &ErasedSegment) -> Option<StatementKind> {
+    fn walk(node: &ErasedSegment) -> Option<StatementKind> {
+        for child in node.segments() {
+            if child.is_type(SyntaxKind::WithCompoundStatement) {
+                return Some(StatementKind::WithSelect);
+            }
+            if child.is_type(SyntaxKind::SetExpression) {
+                return Some(StatementKind::SetOperation);
+            }
+            if child.is_type(SyntaxKind::SelectStatement) {
+                return Some(StatementKind::Select);
+            }
+            // Do not descend into bracketed groups — a nested selectable there
+            // (derived table, scalar subquery) is not the statement's body.
+            if child.is_type(SyntaxKind::Bracketed) {
+                continue;
+            }
+            if let Some(kind) = walk(child) {
+                return Some(kind);
+            }
+        }
+        None
+    }
+    walk(stmt)
 }
 
 fn stmt_contains_create(stmt: &ErasedSegment) -> bool {
