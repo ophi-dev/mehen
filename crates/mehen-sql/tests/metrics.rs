@@ -746,6 +746,19 @@ fn hard_parse_error_reports_a_diagnostic_count() {
             .map(|v| v.as_f64())
             .unwrap_or(0.0);
         assert!(unparsable >= 1.0, "unparsable segment count should be >= 1");
+        // A totally unparsable file reports a nonzero unparsable ratio (the
+        // textual-LOC `code` count is 0, so the ratio falls back to the
+        // unparsable-line count as the denominator → 1.0).
+        let ratio = analysis
+            .root
+            .metrics
+            .get(&MetricKey::new("sql.parser.unparsable_ratio"))
+            .map(|v| v.as_f64())
+            .unwrap_or(0.0);
+        assert!(
+            ratio > 0.0,
+            "unparsable_ratio must be > 0 for a hard failure, got {ratio}"
+        );
         let mi = analysis
             .root
             .metrics

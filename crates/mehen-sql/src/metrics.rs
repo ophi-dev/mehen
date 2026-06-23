@@ -417,8 +417,14 @@ fn publish_parser(facts: &SqlFileFacts, loc: &SqlLoc, target: &mut MetricSet) {
         "sql.parser.unparsable_line_count",
         facts.unparsable_lines,
     );
-    let ratio = if loc.code > 0 {
-        facts.unparsable_lines as f64 / loc.code as f64
+    // Ratio of unparsable lines to code lines. When a hard parse failure
+    // leaves `loc.code == 0` (textual LOC counts non-blank lines as comments),
+    // fall back to the unparsable-line count as the denominator so a totally
+    // unparsable file reports a ratio of 1.0 rather than 0.0 — otherwise
+    // parser-health thresholds would miss exactly the failures this surfaces.
+    let denom = loc.code.max(facts.unparsable_lines);
+    let ratio = if denom > 0 {
+        facts.unparsable_lines as f64 / denom as f64
     } else {
         0.0
     };
