@@ -21,6 +21,10 @@ smol_str = { workspace = true }
 # (feature-gated dialect grammars) — never the heavier `lib` crate, so no
 # Jinja templater plumbing or `pyo3` is pulled in.
 sqruff-lib-core = { git = "https://github.com/quarylabs/sqruff", tag = "v0.38.0" }
+# `ansi` is always compiled by sqruff (not a feature gate) and is the
+# inference fallback, so it is not listed here. `sparksql` transitively pulls
+# in `hive`. We deliberately omit `duckdb` (its dialect is a thin layer over
+# `postgres`, which we already ship).
 sqruff-lib-dialects = { git = "https://github.com/quarylabs/sqruff", tag = "v0.38.0", default-features = false, features = [
     "postgres",
     "tsql",
@@ -28,10 +32,12 @@ sqruff-lib-dialects = { git = "https://github.com/quarylabs/sqruff", tag = "v0.3
     "bigquery",
     "mysql",
     "sqlite",
-    "duckdb",
     "oracle",
     "clickhouse",
     "redshift",
+    "sparksql",
+    "athena",
+    "db2",
 ] }
 
 [dev-dependencies]

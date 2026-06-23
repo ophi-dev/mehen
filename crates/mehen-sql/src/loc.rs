@@ -3,12 +3,16 @@
 
 //! LOC / size metrics (research foundation §6.1).
 //!
-//! Line classification is comment-aware: every line touched by a sqruff
-//! comment token (`-- …`, `/* … */`, dialect comments) is a comment line; a
-//! line with code tokens is a code line; otherwise it is blank. A line that
-//! holds both code and a trailing comment counts as code (code dominates) and
-//! also as a comment, matching the research foundation's overlapping
-//! definitions where `comment + code` can exceed physical lines.
+//! Line classification is comment-aware and *byte-span based*: a line is code
+//! when it has any non-whitespace byte outside every sqruff comment span, a
+//! comment when it is non-blank but fully covered by comment spans, and blank
+//! otherwise. A line that holds both code and a comment (e.g. `SELECT 1 -- x`,
+//! or a line that opens/closes a block comment beside code) counts as code
+//! *and* comment, matching the research foundation's overlapping definitions
+//! where `comment + code` can exceed physical lines. Using the parser's
+//! authoritative comment byte ranges (rather than scanning text for `--` /
+//! `/* */` markers) correctly classifies interior lines of multi-line block
+//! comments, which carry no marker of their own.
 
 use std::collections::BTreeSet;
 
@@ -64,38 +68,51 @@ pub(crate) fn compute(
     };
     loc.physical = physical;
 
-    // Lines touched by comment tokens.
+    // Comment byte ranges, straight from the parser. Used to classify lines by
+    // *byte coverage* rather than re-scanning text for `--`/`/* */` markers:
+    // an interior line of a multi-line block comment carries no marker but is
+    // fully inside a comment span, so a marker heuristic would wrongly count it
+    // as code (Codex P2).
+    let mut comment_spans: Vec<(u32, u32)> = Vec::new();
     let mut comment_lines: BTreeSet<u32> = BTreeSet::new();
     let comments = root.recursive_crawl(&COMMENT_KINDS, true, &SyntaxSet::EMPTY, true);
     for c in &comments {
         if let Some(pm) = c.get_position_marker() {
-            let start = line_at(pm.source_slice.start as u32);
-            let end = line_at(pm.source_slice.end.saturating_sub(1) as u32);
-            for l in start..=end {
+            let s = pm.source_slice.start as u32;
+            let e = pm.source_slice.end as u32;
+            comment_spans.push((s, e));
+            let start_line = line_at(s);
+            let end_line = line_at(e.saturating_sub(1));
+            for l in start_line..=end_line {
                 comment_lines.insert(l);
             }
         }
     }
 
-    // Classify each physical line.
+    // Classify each physical line by whether it has any non-whitespace byte
+    // *outside* every comment span.
     let mut blank = 0u32;
     let mut comment = 0u32;
     let mut code = 0u32;
-    for (idx, line) in text.lines().enumerate() {
+    let mut line_start = 0usize; // byte offset of the current line's start
+    for (idx, line) in text.split_inclusive('\n').enumerate() {
         let line_no = (idx + 1) as u32;
-        let trimmed = line.trim();
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
         let is_comment_line = comment_lines.contains(&line_no);
-        if trimmed.is_empty() {
+        if content.trim().is_empty() {
             blank += 1;
-        } else if is_comment_line && !line_has_code_outside_comment(line) {
-            comment += 1;
-        } else {
+        } else if line_has_code_outside_comments(content, line_start, &comment_spans) {
             code += 1;
             // A code line that also carries a comment counts toward comment too.
             if is_comment_line {
                 comment += 1;
             }
+        } else {
+            // Non-blank, but every non-whitespace byte is inside a comment.
+            comment += 1;
         }
+        line_start += line.len();
     }
     loc.blank = blank;
     loc.comment = comment;
@@ -120,38 +137,27 @@ pub(crate) fn compute(
     loc
 }
 
-/// Whether a physical line contains code outside of its comment portion.
-/// Used to keep `code -- trailing comment` classified as a code line.
-fn line_has_code_outside_comment(line: &str) -> bool {
-    // Strip a trailing `-- …` line comment, then check for remaining tokens.
-    let before_line_comment = match line.find("--") {
-        Some(idx) => &line[..idx],
-        None => line,
-    };
-    // Strip a `/* … */` block comment occurrence on this line (best-effort:
-    // single-line blocks). Multi-line blocks are already covered because each
-    // of their lines is in `comment_lines` and we only call this for lines
-    // that also could hold code; the residual after removing one block is a
-    // good-enough signal for the overlapping count.
-    let residual = strip_inline_block_comment(before_line_comment);
-    !residual.trim().is_empty()
-}
-
-fn strip_inline_block_comment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(open) = rest.find("/*") {
-        out.push_str(&rest[..open]);
-        if let Some(close) = rest[open + 2..].find("*/") {
-            rest = &rest[open + 2 + close + 2..];
-        } else {
-            // Unterminated on this line — drop the remainder.
-            rest = "";
-            break;
+/// Whether the line whose content is `content` (starting at byte `line_start`
+/// in the source) has any non-whitespace byte that falls *outside* every
+/// comment span. This is the span-based code/comment test: a line fully inside
+/// a multi-line block comment has all its bytes covered → no code; a line like
+/// `SELECT 1 -- note` has code bytes before the comment span → code.
+fn line_has_code_outside_comments(
+    content: &str,
+    line_start: usize,
+    comment_spans: &[(u32, u32)],
+) -> bool {
+    for (i, b) in content.bytes().enumerate() {
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        let abs = (line_start + i) as u32;
+        let inside_comment = comment_spans.iter().any(|&(s, e)| abs >= s && abs < e);
+        if !inside_comment {
+            return true;
         }
     }
-    out.push_str(rest);
-    out
+    false
 }
 
 #[cfg(test)]
@@ -159,15 +165,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strips_trailing_line_comment() {
-        assert!(line_has_code_outside_comment("SELECT 1 -- hi"));
-        assert!(!line_has_code_outside_comment("-- just a comment"));
-        assert!(!line_has_code_outside_comment("   -- indented comment"));
+    fn code_before_comment_span_is_code() {
+        // "SELECT 1 -- note": the `-- note` starts at byte 9.
+        let content = "SELECT 1 -- note";
+        assert!(line_has_code_outside_comments(content, 0, &[(9, 16)]));
     }
 
     #[test]
-    fn strips_inline_block_comment() {
-        assert!(line_has_code_outside_comment("SELECT /* x */ 1"));
-        assert!(!line_has_code_outside_comment("/* whole line */"));
+    fn line_fully_inside_comment_span_is_not_code() {
+        // A `-- whole line` comment covers the entire line.
+        let content = "-- just a comment";
+        assert!(!line_has_code_outside_comments(content, 0, &[(0, 17)]));
+    }
+
+    #[test]
+    fn block_comment_interior_line_has_no_marker_but_is_not_code() {
+        // An interior block-comment line carries no `/*`/`*/` marker. With a
+        // span fully covering it (offsets 20..50 here), it must NOT count as
+        // code even though a marker-scan heuristic would have missed it.
+        let content = "   explain why this query exists";
+        let start = 20usize;
+        let end = start + content.len();
+        assert!(!line_has_code_outside_comments(
+            content,
+            start,
+            &[(start as u32, end as u32)]
+        ));
+    }
+
+    #[test]
+    fn code_after_block_comment_close_is_code() {
+        // "*/ SELECT 1": the comment span ends mid-line; the SELECT is code.
+        let content = "*/ SELECT 1";
+        // Comment covers the leading `*/` only (bytes 0..2).
+        assert!(line_has_code_outside_comments(content, 0, &[(0, 2)]));
     }
 }

@@ -527,10 +527,23 @@ fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
     );
     joins.total = clauses.len() as u32;
     for clause in &clauses {
-        let raw = clause.raw().to_ascii_uppercase();
-        // Classify by leading keywords (the join clause text begins with the
-        // join keywords before the joined relation).
-        let kind_word = join_kind(&raw);
+        // Classify from the join clause's *keyword* tokens (e.g. `LEFT`,
+        // `JOIN`), not the whole raw text — otherwise a relation named
+        // `left_table` in a plain `JOIN left_table` would be misread as a LEFT
+        // join (Codex P2). The keywords precede the joined `from_expression_*`.
+        let keywords = join_keywords(clause);
+        let has_kw = |w: &str| keywords.iter().any(|k| k == w);
+        let kind_word = if has_kw("LEFT") {
+            JoinWord::Left
+        } else if has_kw("RIGHT") {
+            JoinWord::Right
+        } else if has_kw("FULL") {
+            JoinWord::Full
+        } else if has_kw("CROSS") {
+            JoinWord::Cross
+        } else {
+            JoinWord::Inner
+        };
         match kind_word {
             JoinWord::Left => joins.left += 1,
             JoinWord::Right => joins.right += 1,
@@ -538,12 +551,20 @@ fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
             JoinWord::Cross => joins.cross += 1,
             JoinWord::Inner => joins.inner += 1,
         }
-        if raw.contains("NATURAL") {
+        let natural = has_kw("NATURAL");
+        if natural {
             joins.natural += 1;
         }
-        if raw.contains("LATERAL") || raw.contains("APPLY") {
+        if has_kw("LATERAL") || has_kw("APPLY") {
             joins.lateral += 1;
         }
+        // `USING` is a keyword child that appears *after* the joined relation,
+        // so it is not part of the leading-keyword run — check all keyword
+        // children for it.
+        let has_using = clause
+            .segments()
+            .iter()
+            .any(|s| s.is_type(SyntaxKind::Keyword) && s.raw().eq_ignore_ascii_case("USING"));
         let has_condition = !clause
             .recursive_crawl(
                 &SyntaxSet::single(SyntaxKind::JoinOnCondition),
@@ -552,13 +573,13 @@ fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
                 true,
             )
             .is_empty()
-            || raw.contains(" USING");
+            || has_using;
         // CROSS / NATURAL joins legitimately omit a condition; only flag the
         // others.
-        if !has_condition && !matches!(kind_word, JoinWord::Cross) && !raw.contains("NATURAL") {
+        if !has_condition && !matches!(kind_word, JoinWord::Cross) && !natural {
             joins.missing_condition += 1;
         }
-        if has_condition && !join_condition_has_equality(clause) {
+        if has_condition && !join_condition_has_equality(clause, has_using) {
             joins.non_equi += 1;
         }
     }
@@ -572,21 +593,33 @@ enum JoinWord {
     Cross,
 }
 
-fn join_kind(raw: &str) -> JoinWord {
-    if raw.contains("LEFT") {
-        JoinWord::Left
-    } else if raw.contains("RIGHT") {
-        JoinWord::Right
-    } else if raw.contains("FULL") {
-        JoinWord::Full
-    } else if raw.contains("CROSS") {
-        JoinWord::Cross
-    } else {
-        JoinWord::Inner
+/// The uppercased `keyword` tokens that lead a join clause (before the joined
+/// relation): `["LEFT", "JOIN"]`, `["CROSS", "JOIN"]`, `["NATURAL", "JOIN"]`,
+/// etc. Stops at the first non-keyword child so it never picks up identifiers.
+fn join_keywords(clause: &ErasedSegment) -> Vec<String> {
+    let mut out = Vec::new();
+    for child in clause.segments() {
+        if child.is_type(SyntaxKind::Keyword) {
+            out.push(child.raw().to_ascii_uppercase());
+        } else if child.is_whitespace() || child.is_meta() {
+            continue;
+        } else {
+            // First substantive non-keyword node (the joined relation): the
+            // leading keyword run is over.
+            break;
+        }
     }
+    out
 }
 
-fn join_condition_has_equality(clause: &ErasedSegment) -> bool {
+/// Whether a join condition contains a genuine equality (`=`) between columns.
+/// A condition with only inequality operators (`>=`, `!=`, `<`, …) is a
+/// non-equi join even though those operators' text contains `=` (Codex P2).
+fn join_condition_has_equality(clause: &ErasedSegment, has_using: bool) -> bool {
+    // `USING (...)` is inherently an equality join.
+    if has_using {
+        return true;
+    }
     let conds = clause.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::JoinOnCondition),
         true,
@@ -601,13 +634,14 @@ fn join_condition_has_equality(clause: &ErasedSegment) -> bool {
             true,
         );
         for c in &comparisons {
-            if c.raw().contains('=') {
+            // The operator's raw text, whitespace-trimmed, must be exactly `=`
+            // to count as an equality. `>=`, `<=`, `!=`, `<>` are inequalities.
+            if c.raw().trim() == "=" {
                 return true;
             }
         }
     }
-    // `USING` is inherently equality.
-    clause.raw().to_ascii_uppercase().contains(" USING")
+    false
 }
 
 // ── set operations ───────────────────────────────────────────────────

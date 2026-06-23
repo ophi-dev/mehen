@@ -55,10 +55,11 @@ diff-aware delta gates remain to be wired through the threshold engine.
 - Optional sqruff lineage integration or mehen lineage implementation.
 - Schema blast-radius metrics.
 
-## Dialect coverage (initial)
+## Dialect coverage
 
-`ansi`, `postgres`, `sqlite`, `mysql`, `tsql`, `oracle/plsql`, `snowflake`, `bigquery`, `duckdb` (subject
-to parser maturity).
+`ansi` (default), `postgres`, `tsql`, `snowflake`, `bigquery`, `mysql`, `sqlite`, `oracle`,
+`clickhouse`, `redshift`, `sparksql`, `athena`, `db2`. The dialect is inferred from syntax hints with
+a reported confidence (`sql.dialect.confidence`), falling back to ANSI.
 
 ## Validation strategy
 

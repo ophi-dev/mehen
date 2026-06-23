@@ -290,3 +290,39 @@ fn boolean_depth_not_inflated_by_redundant_parens() {
     // Sibling bracketed groups under a top-level AND are depth 2, not 3.
     assert_eq!(depth("SELECT * FROM t WHERE (a OR b) AND (c OR d)"), 2.0);
 }
+
+#[test]
+fn join_kind_uses_keywords_not_relation_name() {
+    // A relation literally named `left_table` in a plain INNER join must not
+    // be classified as a LEFT join.
+    let m = metrics("SELECT * FROM a JOIN left_table ON a.id = left_table.id");
+    assert_eq!(get(&m, "sql.join.kind_count.inner"), 1.0);
+    assert_eq!(get(&m, "sql.join.kind_count.left"), 0.0);
+    assert_eq!(get(&m, "sql.join.outer_count"), 0.0);
+}
+
+#[test]
+fn inequality_join_is_non_equi() {
+    // A range join (`>=`) has no equality condition → non-equi.
+    let range = metrics("SELECT * FROM a JOIN b ON a.ts >= b.start_ts");
+    assert_eq!(get(&range, "sql.join.non_equi_count"), 1.0);
+    // `!=` likewise.
+    let neq = metrics("SELECT * FROM a JOIN b ON a.id != b.id");
+    assert_eq!(get(&neq, "sql.join.non_equi_count"), 1.0);
+    // A genuine equality join is not flagged.
+    let equi = metrics("SELECT * FROM a JOIN b ON a.id = b.id");
+    assert_eq!(get(&equi, "sql.join.non_equi_count"), 0.0);
+    // USING is inherently equality.
+    let using = metrics("SELECT * FROM a JOIN b USING (id)");
+    assert_eq!(get(&using, "sql.join.non_equi_count"), 0.0);
+}
+
+#[test]
+fn block_comment_interior_is_not_code() {
+    // The middle line of a multi-line block comment has no marker but is fully
+    // inside the comment span — it must count as comment, not code.
+    let sql = "/* line one\n   explain why this query exists\n   line three */\nSELECT 1;\n";
+    let m = metrics(sql);
+    assert_eq!(get(&m, "sql.loc.code"), 1.0, "only the SELECT line is code");
+    assert_eq!(get(&m, "sql.loc.comment"), 3.0, "all 3 comment lines");
+}
