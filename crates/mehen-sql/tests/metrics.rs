@@ -578,3 +578,58 @@ fn column_named_output_is_not_a_returning_clause() {
         1.0
     );
 }
+
+#[test]
+fn identifier_named_output_in_dml_is_not_a_returning_clause() {
+    // A table/column literally named `output`/`returning` inside DML must not
+    // count — the clause is a Keyword token, the identifier is not.
+    assert_eq!(
+        get(
+            &metrics("UPDATE t SET output = 1 WHERE id = 1"),
+            "sql.dml.returning_count"
+        ),
+        0.0
+    );
+    assert_eq!(
+        get(
+            &metrics("INSERT INTO output (id) VALUES (1)"),
+            "sql.dml.returning_count"
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn null_risk_ignores_comments_and_literals() {
+    // Risk text inside a comment or a string literal must not be counted.
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM t -- avoid x = NULL\n"),
+            "sql.predicate.null_semantics_risk_count"
+        ),
+        0.0
+    );
+    assert_eq!(
+        get(
+            &metrics("SELECT 'NOT IN list' AS msg FROM t"),
+            "sql.predicate.null_semantics_risk_count"
+        ),
+        0.0
+    );
+    // A real `= NULL` predicate is still counted (once).
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM t WHERE x = NULL"),
+            "sql.predicate.null_semantics_risk_count"
+        ),
+        1.0
+    );
+    // Real NOT IN.
+    assert_eq!(
+        get(
+            &metrics("SELECT * FROM t WHERE x NOT IN (1, 2)"),
+            "sql.predicate.null_semantics_risk_count"
+        ),
+        1.0
+    );
+}

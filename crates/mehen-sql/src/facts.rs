@@ -904,29 +904,53 @@ fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
     }
 
     // NULL-semantics risk: comparing a value to NULL with `=`/`<>`/`!=`
-    // (always NULL in standard SQL) and `NOT IN` (NULL-in-list trap). Count
-    // each risky comparison once: `!= NULL` and `<> NULL` must not also be
-    // counted as `= NULL` (Codex P3), so we tally NULL comparisons by scanning
-    // for ` NULL` preceded by a comparison operator and classify by that
-    // operator, instead of overlapping substring counts.
-    let upper = root.raw().to_ascii_uppercase();
-    pred.null_semantics_risk_count =
-        count_substr(&upper, "NOT IN") + count_null_comparisons(&upper);
+    // (always NULL in standard SQL) and `NOT IN` (NULL-in-list trap). Derived
+    // from parsed tokens — a `ComparisonOperator` adjacent to a `NullLiteral`,
+    // and adjacent `NOT`+`IN` keyword tokens — so text inside comments or
+    // string literals (`-- avoid x = NULL`, `'NOT IN list'`) is never counted.
+    pred.null_semantics_risk_count = count_null_semantics_risk(root);
 }
 
-/// Count comparisons of the form `<op> NULL` where `<op>` is `=`, `<>`, or
-/// `!=`. Each comparison is counted exactly once regardless of operator (so
-/// `x != NULL` is 1, not 2). Operates on already-uppercased text.
-fn count_null_comparisons(upper: &str) -> u32 {
-    let mut count = 0u32;
-    for (idx, _) in upper.match_indices("NULL") {
-        // Look back past whitespace for a comparison operator ending in `=` or
-        // `>` (covers `=`, `!=`, `<>`).
-        let before = upper[..idx].trim_end();
-        if before.ends_with('=') || before.ends_with("<>") {
-            count += 1;
+/// Count NULL-semantics risks from parsed tokens (comments/literals excluded):
+/// a `=`/`<>`/`!=` comparison whose neighboring code operand is a `NullLiteral`
+/// (each counted once), plus `NOT IN` keyword pairs.
+fn count_null_semantics_risk(root: &ErasedSegment) -> u32 {
+    fn walk(node: &ErasedSegment, count: &mut u32) {
+        let code: Vec<&ErasedSegment> = node
+            .segments()
+            .iter()
+            .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment())
+            .collect();
+        for (i, seg) in code.iter().enumerate() {
+            // `<op> NULL` / `NULL <op>` where op is `=`, `<>`, or `!=`.
+            if seg.is_type(SyntaxKind::ComparisonOperator) {
+                let op = seg.raw().trim();
+                if op == "=" || op == "<>" || op == "!=" {
+                    let neighbor_is_null = |j: Option<usize>| {
+                        j.and_then(|k| code.get(k))
+                            .is_some_and(|s| s.is_type(SyntaxKind::NullLiteral))
+                    };
+                    if neighbor_is_null(i.checked_sub(1)) || neighbor_is_null(Some(i + 1)) {
+                        *count += 1;
+                    }
+                }
+            }
+            // `NOT IN` — adjacent keyword tokens.
+            if seg.is_type(SyntaxKind::Keyword)
+                && seg.raw().eq_ignore_ascii_case("NOT")
+                && code.get(i + 1).is_some_and(|s| {
+                    s.is_type(SyntaxKind::Keyword) && s.raw().eq_ignore_ascii_case("IN")
+                })
+            {
+                *count += 1;
+            }
+        }
+        for child in node.segments() {
+            walk(child, count);
         }
     }
+    let mut count = 0u32;
+    walk(root, &mut count);
     count
 }
 
@@ -1757,11 +1781,11 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
         .filter(|w| w[0] == "CREATE" && w[1] == "OR" && w[2] == "REPLACE")
         .count() as u32;
 
-    // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses. Scanned
-    // only *inside DML statements* (INSERT/UPDATE/DELETE/MERGE), so a column
-    // or alias named `output`/`returning` in an ordinary `SELECT output FROM t`
-    // does not inflate the count. Code tokens only (comments excluded), and
-    // `OUTPUT` is treated as a word so the metric fires regardless of dialect.
+    // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses, counted
+    // from `Keyword` tokens inside DML statements (INSERT/UPDATE/DELETE/MERGE).
+    // The clause word is lexed as a `Keyword`, whereas a column or table named
+    // `output`/`returning` is a `NakedIdentifier` — so this never fires on
+    // `UPDATE t SET output = 1` or `INSERT INTO output (…)`.
     const DML_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
         SyntaxKind::InsertStatement,
         SyntaxKind::UpdateStatement,
@@ -1771,9 +1795,8 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
     let dml_stmts = root.recursive_crawl(&DML_STATEMENTS, true, &SyntaxSet::EMPTY, true);
     obj.returning_count = dml_stmts
         .iter()
-        .flat_map(code_token_words)
-        .filter(|w| w == "RETURNING" || w == "OUTPUT")
-        .count() as u32;
+        .map(|s| count_keyword(s, "RETURNING") + count_keyword(s, "OUTPUT"))
+        .sum();
 }
 
 /// The uppercased text of every *code* leaf token in `node` (comments,
@@ -2021,8 +2044,4 @@ fn count_keyword(node: &ErasedSegment, word: &str) -> u32 {
     kws.iter()
         .filter(|k| k.raw().eq_ignore_ascii_case(word))
         .count() as u32
-}
-
-fn count_substr(haystack: &str, needle: &str) -> u32 {
-    haystack.matches(needle).count() as u32
 }
