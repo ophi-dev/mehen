@@ -736,5 +736,25 @@ fn hard_parse_error_reports_a_diagnostic_count() {
             count >= 1.0,
             "parse error must be reflected in diagnostic_count, got {count}"
         );
+        // The composites must also reflect the parse failure (not report a
+        // pristine file): unparsable facts are seeded, so maintainability is
+        // below its risk-free maximum of 100.
+        let unparsable = analysis
+            .root
+            .metrics
+            .get(&MetricKey::new("sql.parser.unparsable_segment_count"))
+            .map(|v| v.as_f64())
+            .unwrap_or(0.0);
+        assert!(unparsable >= 1.0, "unparsable segment count should be >= 1");
+        let mi = analysis
+            .root
+            .metrics
+            .get(&MetricKey::new("sql.maintainability_index"))
+            .map(|v| v.as_f64())
+            .unwrap_or(100.0);
+        assert!(
+            mi < 100.0,
+            "maintainability must reflect parser risk, got {mi}"
+        );
     }
 }

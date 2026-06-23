@@ -97,21 +97,27 @@ impl LanguageAnalyzer for SqlAnalyzer {
                 // mostly-empty analysis rather than failing. LOC is still
                 // counted from the text so comment-only files report real
                 // physical/comment/blank lines.
-                return Ok(empty_sql_analysis(file_span, &source.text, &resolution));
+                return Ok(empty_sql_analysis(
+                    file_span,
+                    &source.text,
+                    &resolution,
+                    /* parse_failed */ false,
+                ));
             }
             Err(e) => {
-                // Publish the full (zeroed) `sql.*` surface so the output
-                // contract is identical to the empty/success paths — a hard
-                // parse error must not silently drop every metric key for
-                // downstream selectors/thresholds. The error diagnostic marks
-                // the analysis incomplete (the engine treats it as blocking).
-                let mut analysis = empty_sql_analysis(file_span, &source.text, &resolution);
-                // Reflect the failure in the parser-health metrics so they
-                // agree with the emitted diagnostic (a report with a
-                // `sql.parse_error` must not also say `diagnostic_count = 0`).
-                analysis.root.metrics.insert(
-                    mehen_core::MetricKey::new("sql.parser.diagnostic_count"),
-                    1i64,
+                // Publish the full `sql.*` surface so the output contract is
+                // identical to the empty/success paths — a hard parse error
+                // must not silently drop every metric key for downstream
+                // selectors/thresholds. `parse_failed = true` seeds the
+                // parser-health facts so the parser-health metrics *and* the
+                // composites that consume them reflect the failure. The error
+                // diagnostic marks the analysis incomplete (engine treats it
+                // as blocking).
+                let mut analysis = empty_sql_analysis(
+                    file_span,
+                    &source.text,
+                    &resolution,
+                    /* parse_failed */ true,
                 );
                 analysis.diagnostics.push(ParseDiagnostic::error(
                     "sql.parse_error",
@@ -210,16 +216,30 @@ fn publish_dialect_labels(root: &mut MetricSpace, resolution: &dialect::DialectR
 /// parse error). Publishes the full zeroed `sql.*` surface, but LOC is still
 /// counted from `text` so a comment-only file (`-- migration note`) reports
 /// real physical/comment/blank lines rather than all zeros.
+///
+/// When `parse_failed` is true (a hard `Err` from the parser), the facts are
+/// seeded with parser-health risk (unparsable segment/lines) so the
+/// *composite* scores reflect the failure too — otherwise a totally
+/// unparsable file would report a healthy maintainability index alongside its
+/// `sql.parse_error` diagnostic.
 fn empty_sql_analysis(
     file_span: SourceSpan,
     text: &str,
     resolution: &dialect::DialectResolution,
+    parse_failed: bool,
 ) -> LanguageAnalysis {
     let mut root = MetricSpace::new(SpaceId(0), SpaceKind::Unit, file_span);
-    let facts = facts::SqlFileFacts::default();
     // No parse tree → no statement spans and no code tokens; LOC is derived
     // from the text alone (every non-blank line is a comment line).
     let loc = loc::compute_textual(text);
+    let mut facts = facts::SqlFileFacts::default();
+    if parse_failed {
+        // The whole file is unparsable; mark it so parser-health metrics and
+        // the composites that consume them (review burden, maintainability)
+        // reflect the parse failure rather than reporting a clean file.
+        facts.unparsable_segments = 1;
+        facts.unparsable_lines = loc.code.max(loc.physical).max(1);
+    }
     metrics::publish(&facts, &loc, resolution, &mut root.metrics);
     publish_dialect_labels(&mut root, resolution);
     LanguageAnalysis {
