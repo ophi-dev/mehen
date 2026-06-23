@@ -94,8 +94,10 @@ impl LanguageAnalyzer for SqlAnalyzer {
             Ok(Some(tree)) => tree,
             Ok(None) => {
                 // Empty input (only whitespace/comments) — emit a valid,
-                // mostly-empty analysis rather than failing.
-                return Ok(empty_sql_analysis(file_span, &resolution));
+                // mostly-empty analysis rather than failing. LOC is still
+                // counted from the text so comment-only files report real
+                // physical/comment/blank lines.
+                return Ok(empty_sql_analysis(file_span, &source.text, &resolution));
             }
             Err(e) => {
                 // Publish the full (zeroed) `sql.*` surface so the output
@@ -103,7 +105,7 @@ impl LanguageAnalyzer for SqlAnalyzer {
                 // parse error must not silently drop every metric key for
                 // downstream selectors/thresholds. The error diagnostic marks
                 // the analysis incomplete (the engine treats it as blocking).
-                let mut analysis = empty_sql_analysis(file_span, &resolution);
+                let mut analysis = empty_sql_analysis(file_span, &source.text, &resolution);
                 analysis.diagnostics.push(ParseDiagnostic::error(
                     "sql.parse_error",
                     format!("sqruff failed to parse: {}", e.description),
@@ -197,14 +199,20 @@ fn publish_dialect_labels(root: &mut MetricSpace, resolution: &dialect::DialectR
     );
 }
 
+/// Build an analysis with no parse tree (empty/comment-only input, or a hard
+/// parse error). Publishes the full zeroed `sql.*` surface, but LOC is still
+/// counted from `text` so a comment-only file (`-- migration note`) reports
+/// real physical/comment/blank lines rather than all zeros.
 fn empty_sql_analysis(
     file_span: SourceSpan,
+    text: &str,
     resolution: &dialect::DialectResolution,
 ) -> LanguageAnalysis {
     let mut root = MetricSpace::new(SpaceId(0), SpaceKind::Unit, file_span);
-    // Publish a zeroed metric surface so downstream selectors find keys.
     let facts = facts::SqlFileFacts::default();
-    let loc = loc::SqlLoc::default();
+    // No parse tree → no statement spans and no code tokens; LOC is derived
+    // from the text alone (every non-blank line is a comment line).
+    let loc = loc::compute_textual(text);
     metrics::publish(&facts, &loc, resolution, &mut root.metrics);
     publish_dialect_labels(&mut root, resolution);
     LanguageAnalysis {

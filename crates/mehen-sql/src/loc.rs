@@ -137,6 +137,30 @@ pub(crate) fn compute(
     loc
 }
 
+/// LOC for sources with no parse tree (empty / comment-only input, or a hard
+/// parse error). Counts physical and blank lines from the text; every
+/// remaining non-blank line is treated as a comment, since the absence of a
+/// parse tree means there is no parseable code. There are no statements, so
+/// the logical/statement-length metrics stay zero.
+pub(crate) fn compute_textual(text: &str) -> SqlLoc {
+    let mut loc = SqlLoc::default();
+    if text.is_empty() {
+        return loc;
+    }
+    let nl = text.bytes().filter(|b| *b == b'\n').count() as u32;
+    loc.physical = if text.ends_with('\n') { nl } else { nl + 1 };
+    for line in text.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        if content.trim().is_empty() {
+            loc.blank += 1;
+        } else {
+            loc.comment += 1;
+        }
+    }
+    loc
+}
+
 /// Whether the line whose content is `content` (starting at byte `line_start`
 /// in the source) has any non-whitespace byte that falls *outside* every
 /// comment span. This is the span-based code/comment test: a line fully inside

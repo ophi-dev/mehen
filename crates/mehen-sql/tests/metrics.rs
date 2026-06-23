@@ -486,3 +486,23 @@ fn quoted_identifiers_resolve_in_qualifier_and_alias() {
     // The alias `"t"` is a table alias.
     assert_eq!(get(&m, "sql.alias.table_alias_count"), 1.0);
 }
+
+#[test]
+fn comment_only_file_counts_loc() {
+    // A comment-only file (sqruff returns no parse tree) must still report
+    // physical/comment/blank lines, not all zeros.
+    let m = metrics("-- migration note\n-- second line\n");
+    assert_eq!(get(&m, "sql.loc.physical"), 2.0);
+    assert_eq!(get(&m, "sql.loc.comment"), 2.0);
+    assert_eq!(get(&m, "sql.loc.code"), 0.0);
+}
+
+#[test]
+fn returning_matches_across_newlines() {
+    // RETURNING/OUTPUT on their own line (whitespace, not a literal space,
+    // between keyword and expression) must still be counted.
+    let pg = metrics("INSERT INTO t (a) VALUES (1)\nRETURNING id");
+    assert_eq!(get(&pg, "sql.dml.returning_count"), 1.0);
+    let tsql = metrics("INSERT INTO t (a)\nOUTPUT\ninserted.id\nVALUES (1)");
+    assert_eq!(get(&tsql, "sql.dml.returning_count"), 1.0);
+}

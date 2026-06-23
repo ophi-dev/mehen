@@ -1365,7 +1365,7 @@ fn extract_output(root: &ErasedSegment, selects: &[ErasedSegment], out: &mut Out
     for elem in &elems {
         // A "derived expression" is a select element that is not a bare column
         // reference or wildcard — i.e. it computes something.
-        let is_expr = elem
+        let is_expr = !elem
             .recursive_crawl(
                 &SyntaxSet::new(&[
                     SyntaxKind::Expression,
@@ -1377,8 +1377,7 @@ fn extract_output(root: &ErasedSegment, selects: &[ErasedSegment], out: &mut Out
                 &SyntaxSet::EMPTY,
                 false,
             )
-            .is_empty()
-            .not_eq();
+            .is_empty();
         if is_expr {
             out.derived_expression_count += 1;
             let has_alias = !elem
@@ -1726,12 +1725,20 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
         count_substr(&root.raw().to_ascii_uppercase(), "CREATE OR REPLACE");
 
     // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses, matched
-    // as text: `OUTPUT` is only recognized as a keyword token when parsed under
-    // the tsql dialect, but the metric should fire regardless of which dialect
-    // the file was parsed as (inference may fall back to ANSI). Word-boundary
-    // padding (`<sp>OUTPUT<sp>`) avoids matching identifiers like `output_log`.
-    let padded = format!(" {} ", root.raw().to_ascii_uppercase());
-    obj.returning_count = count_substr(&padded, " RETURNING ") + count_substr(&padded, " OUTPUT ");
+    // as whitespace-delimited words: `OUTPUT` is only a keyword token under the
+    // tsql grammar, but the metric should fire regardless of which dialect the
+    // file parsed as (inference may fall back to ANSI). Splitting on ASCII
+    // whitespace handles `INSERT …\nRETURNING id` and `OUTPUT\tinserted.id`
+    // (newlines/tabs between keyword and expression) that a literal-space
+    // substring match would miss, and word boundaries avoid identifiers like
+    // `output_log`.
+    let words = root
+        .raw()
+        .to_ascii_uppercase()
+        .split_ascii_whitespace()
+        .filter(|w| *w == "RETURNING" || *w == "OUTPUT")
+        .count() as u32;
+    obj.returning_count = words;
 }
 
 /// Whether `stmt` has a `WHERE` clause at its own statement level — i.e. one
@@ -1958,13 +1965,4 @@ fn count_keyword(node: &ErasedSegment, word: &str) -> u32 {
 
 fn count_substr(haystack: &str, needle: &str) -> u32 {
     haystack.matches(needle).count() as u32
-}
-
-trait BoolExt {
-    fn not_eq(self) -> bool;
-}
-impl BoolExt for bool {
-    fn not_eq(self) -> bool {
-        !self
-    }
 }
