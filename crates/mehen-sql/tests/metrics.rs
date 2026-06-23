@@ -786,3 +786,23 @@ fn nested_set_expression_does_not_make_statement_a_set_operation() {
     let top = metrics("SELECT a FROM x UNION ALL SELECT a FROM y");
     assert_eq!(get(&top, "sql.statement.kind_count.set_operation"), 1.0);
 }
+
+#[test]
+fn mixed_window_keys_are_summed_not_maxed() {
+    // `PARTITION BY a, b + 1` has 1 column key + 1 expression key = 2.
+    let m =
+        metrics("SELECT ROW_NUMBER() OVER (PARTITION BY a, b + 1 ORDER BY c, d * 2) AS rn FROM t");
+    assert_eq!(get(&m, "sql.window.partition_expression_count"), 2.0);
+    assert_eq!(get(&m, "sql.window.order_expression_count"), 2.0);
+}
+
+#[test]
+fn procedure_body_dml_is_not_top_level_dml() {
+    // A CREATE PROCEDURE whose body contains INSERT must not be classified as
+    // an insert (and must not inflate the DML risk counters). When sqruff
+    // parses the routine under a procedural dialect it is `procedural`;
+    // otherwise it is `unknown` — either way it is never `insert`.
+    let m = metrics("CREATE PROCEDURE p () BEGIN INSERT INTO t (a) VALUES (1); END");
+    assert_eq!(get(&m, "sql.statement.kind_count.insert"), 0.0);
+    assert_eq!(get(&m, "sql.dml.insert_count"), 0.0);
+}

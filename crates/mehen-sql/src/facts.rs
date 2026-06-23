@@ -419,6 +419,15 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
             .is_empty()
     };
 
+    // Procedural definitions are classified *first*: a `CREATE PROCEDURE` /
+    // `FUNCTION` / `TRIGGER` body commonly contains `INSERT`/`UPDATE`/…, but
+    // the top-level statement is the routine definition, not the nested DML —
+    // classifying it as DML would also wrongly feed `extract_objects`'
+    // DML/no-WHERE risk metrics (Codex P2).
+    if stmt_is_procedural(stmt) {
+        return StatementKind::Procedural;
+    }
+
     // Order matters: more specific kinds first. The `WithCompoundStatement`
     // (CTE) check is deliberately *after* the DML/DDL checks: a CTE can be
     // attached to another statement form — `CREATE TABLE dst AS WITH c AS (…)
@@ -487,9 +496,6 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
     // either look like a top-level `set_operation` (Codex P2).
     if let Some(kind) = top_level_query_kind(stmt) {
         return kind;
-    }
-    if stmt_is_procedural(stmt) {
-        return StatementKind::Procedural;
     }
     StatementKind::Unknown
 }
@@ -806,11 +812,11 @@ fn extract_windows(root: &ErasedSegment, windows: &mut WindowFacts) {
             true,
         );
         for p in &partitions {
-            windows.partition_expression_count += count_direct(p, SyntaxKind::Expression).max(
-                // Some partition keys are bare column_references, not wrapped
-                // in Expression.
-                count_direct(p, SyntaxKind::ColumnReference),
-            );
+            // A partition clause mixes bare column keys and computed-expression
+            // keys (`PARTITION BY a, b + 1`). Sum both categories — taking the
+            // max would drop one for mixed clauses (Codex P2).
+            windows.partition_expression_count += count_direct(p, SyntaxKind::ColumnReference)
+                + count_direct(p, SyntaxKind::Expression);
         }
         let orders = over.recursive_crawl(
             &SyntaxSet::single(SyntaxKind::OrderbyClause),
@@ -820,7 +826,7 @@ fn extract_windows(root: &ErasedSegment, windows: &mut WindowFacts) {
         );
         for o in &orders {
             windows.order_expression_count += count_direct(o, SyntaxKind::ColumnReference)
-                .max(count_direct(o, SyntaxKind::Expression));
+                + count_direct(o, SyntaxKind::Expression);
         }
     }
 }
