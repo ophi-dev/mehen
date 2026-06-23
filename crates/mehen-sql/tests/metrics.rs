@@ -738,13 +738,20 @@ fn hard_parse_error_reports_a_diagnostic_count() {
         .diagnostics
         .iter()
         .any(|d| d.code == "sql.parse_error");
+    // Assert the precondition first: if the parser stops emitting
+    // `sql.parse_error` for this malformed input, the test must *fail*, not
+    // silently pass with all the body assertions skipped (CodeRabbit).
+    assert!(
+        has_error,
+        "expected sql.parse_error diagnostic for malformed SQL"
+    );
     let count = analysis
         .root
         .metrics
         .get(&MetricKey::new("sql.parser.diagnostic_count"))
         .map(|v| v.as_f64())
         .unwrap_or(0.0);
-    if has_error {
+    {
         assert!(
             count >= 1.0,
             "parse error must be reflected in diagnostic_count, got {count}"
@@ -859,6 +866,21 @@ fn multi_target_ddl_counts_all_as_writes() {
     let m = metrics("DROP TABLE a, b");
     assert_eq!(get(&m, "sql.object.write_count"), 2.0);
     assert_eq!(get(&m, "sql.object.read_count"), 0.0);
+}
+
+#[test]
+fn cte_names_are_scoped_to_their_owning_statement() {
+    // A CTE named `tmp` in the first statement must not suppress a *real* `tmp`
+    // table read in a later statement: CTE name scope is per-statement, not
+    // file-wide (CodeRabbit). The second `SELECT * FROM tmp` reads the real
+    // table `tmp`, so the file touches one read object.
+    let m = metrics("WITH tmp AS (SELECT 1 AS x) SELECT * FROM tmp; SELECT * FROM tmp;");
+    assert_eq!(get(&m, "sql.object.read_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.touch_count"), 1.0);
+    // Within the first statement the CTE `tmp` is still query-local and is not
+    // counted as a read on its own.
+    let single = metrics("WITH tmp AS (SELECT 1 AS x) SELECT * FROM tmp");
+    assert_eq!(get(&single, "sql.object.read_count"), 0.0);
 }
 
 #[test]

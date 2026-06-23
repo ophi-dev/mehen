@@ -1973,36 +1973,54 @@ fn collect_touched_objects(
     let mut read = BTreeSet::new();
     let mut write = BTreeSet::new();
 
-    // CTE names are query-local aliases, not database objects — exclude them
-    // from object-touch counts so a CTE-heavy query isn't reported as reading
-    // N extra "objects" (`base`, `per_customer`, …).
-    let cte_names: BTreeSet<String> = root
-        .recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::CommonTableExpression),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        )
-        .iter()
-        .map(|c| cte_name(c).to_ascii_uppercase())
-        .collect();
+    // CTE names are query-local aliases scoped to their *owning* statement, not
+    // database objects. They must be collected per top-level statement: a CTE
+    // named `tmp` in `WITH tmp AS (…) SELECT … FROM tmp;` must not suppress a
+    // real `tmp` table read in a *later* statement (`SELECT … FROM tmp;`),
+    // which a file-wide CTE-name set would wrongly do (CodeRabbit). Iterate
+    // each top-level `Statement` and collect/filter within that scope.
+    for stmt in &top_level_statements(root) {
+        let cte_names: BTreeSet<String> = stmt
+            .recursive_crawl(
+                &SyntaxSet::single(SyntaxKind::CommonTableExpression),
+                true,
+                &SyntaxSet::EMPTY,
+                true,
+            )
+            .iter()
+            .map(|c| cte_name(c).to_ascii_uppercase())
+            .collect();
+        collect_statement_objects(stmt, &cte_names, &mut read, &mut write);
+    }
 
-    // Writes: the mutated target of each write statement is its *first*
-    // statement-level `table_reference` in document order (not inside a nested
-    // SELECT). Every *other* table reference in the statement is a read source
-    // — `UPDATE dst … FROM src`, `DELETE dst USING src`, `MERGE INTO dst USING
-    // src`, `INSERT INTO dst SELECT … FROM src`. This first-table rule is
-    // robust across dialect shapes (ANSI wraps the target in a
-    // `from_expression_element`; Postgres keeps it a bare child). Procedural
-    // bodies are skipped so a routine's DML isn't counted as a top-level write
-    // (Phase 1). The write-target *node* is tracked by identity so the
-    // file-wide read pass can skip exactly that node (and not a same-named
-    // table genuinely read in a subquery).
+    (read, write)
+}
+
+/// Top-level `Statement` nodes (one per DML/DDL/… statement in the file),
+/// not descending into nested statements (a procedural body or a subquery's
+/// inner statement is handled within its owner's scope).
+fn top_level_statements(root: &ErasedSegment) -> Vec<ErasedSegment> {
+    root.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::Statement),
+        false,
+        &SyntaxSet::EMPTY,
+        true,
+    )
+}
+
+/// Collect read/write objects for a single top-level statement, given the set
+/// of CTE names local to that statement.
+fn collect_statement_objects(
+    stmt: &ErasedSegment,
+    cte_names: &std::collections::BTreeSet<String>,
+    read: &mut std::collections::BTreeSet<String>,
+    write: &mut std::collections::BTreeSet<String>,
+) {
     // The objects a write statement targets are not always `TableReference`s:
     // `DROP FUNCTION foo` targets a `FunctionName`, `CREATE INDEX idx …` a
     // `DatabaseReference`, etc. Match those outer reference kinds. The crawl
-    // stops at nested SELECT nodes (subquery sources are not targets); it does NOT
-    // recurse *into* a matched reference, so a `TableReference`'s inner
+    // stops at nested SELECT nodes (subquery sources are not targets); it does
+    // NOT recurse *into* a matched reference, so a `TableReference`'s inner
     // `ObjectReference` is not double-counted — `recursive_crawl` with
     // `recurse_into = false` returns the outermost match on each path.
     const TARGET_REFS: SyntaxSet = SyntaxSet::new(&[
@@ -2010,22 +2028,34 @@ fn collect_touched_objects(
         SyntaxKind::FunctionName,
         SyntaxKind::DatabaseReference,
     ]);
+
+    // Writes: the mutated target of each write statement is its *first*
+    // statement-level reference in document order (not inside a nested SELECT).
+    // Every *other* statement-level reference is a read source — `UPDATE dst …
+    // FROM src`, `DELETE dst USING src`, `MERGE INTO dst USING src`, `INSERT
+    // INTO dst SELECT … FROM src`. This first-target rule is robust across
+    // dialect shapes (ANSI wraps the target in a `from_expression_element`;
+    // Postgres keeps it a bare child). Procedural bodies are skipped so a
+    // routine's DML isn't counted as a top-level write (Phase 1). The
+    // write-target *node* is tracked by identity so the read pass can skip
+    // exactly that node (and not a same-named table genuinely read in a
+    // subquery).
     let mut write_target_nodes: Vec<ErasedSegment> = Vec::new();
-    let write_stmts = root.recursive_crawl(&WRITE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
-    for stmt in &write_stmts {
-        let stmt_tables = stmt.recursive_crawl(&TARGET_REFS, false, &SELECT_STATEMENT, true);
+    // Write-statement node(s) inside this top-level statement, outside any
+    // procedural body. Empty for read-only statements (the loop is then a
+    // no-op and only the read pass below runs).
+    let write_stmts = stmt.recursive_crawl(&WRITE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
+    for ws in &write_stmts {
+        let stmt_tables = ws.recursive_crawl(&TARGET_REFS, false, &SELECT_STATEMENT, true);
         // Multi-target DDL mutates *every* statement-level reference (`DROP
-        // TABLE a, b`, `TRUNCATE a, b` — all writes). Statements with a
-        // *host-object* shape mutate only their first reference (the target);
-        // any later statement-level reference is a read dependency:
-        //   - DML: `UPDATE dst … FROM src`, `DELETE dst USING src`, `MERGE INTO
-        //     dst USING src`, `INSERT INTO dst SELECT …` — `dst` is written,
-        //     sources are read.
+        // TABLE a, b`, `TRUNCATE a, b`). Host-object shapes mutate only their
+        // first reference (the target); later references are reads:
+        //   - DML: `UPDATE dst … FROM src`, `MERGE INTO dst USING src` — `dst`
+        //     is written, sources are read.
         //   - `CREATE INDEX idx ON t` / `DROP INDEX idx ON t` — `idx` is the
-        //     written object, the host table `t` is only referenced (a read),
-        //     not mutated.
+        //     written object, the host table `t` is only a read.
         let first_target_only = matches!(
-            stmt.get_type(),
+            ws.get_type(),
             SyntaxKind::InsertStatement
                 | SyntaxKind::UpdateStatement
                 | SyntaxKind::DeleteStatement
@@ -2054,9 +2084,9 @@ fn collect_touched_objects(
     // identity, not name — so a `DELETE FROM u` target that sits in a FROM
     // element under some dialects is not double-counted as a read, while a
     // table genuinely read in a subquery still counts). Stop at procedural
-    // definitions so a routine body's FROM clauses aren't attributed to a
-    // top-level read.
-    let from_elems = root.recursive_crawl(
+    // definitions so a routine body's FROM clauses aren't attributed to this
+    // top-level statement.
+    let from_elems = stmt.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::FromExpressionElement),
         true,
         &PROCEDURAL_DEFINITIONS,
@@ -2076,8 +2106,6 @@ fn collect_touched_objects(
             }
         }
     }
-
-    (read, write)
 }
 
 // ── Halstead ────────────────────────────────────────────────────────────
