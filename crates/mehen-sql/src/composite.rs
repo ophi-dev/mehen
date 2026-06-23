@@ -43,6 +43,13 @@ pub(crate) fn compute(
     let cognitive_complexity = cognitive(facts);
     let change_risk_score = change_risk(facts);
     let halstead_volume = halstead_volume(facts);
+    // The review-burden / maintainability formulas (§8.3/§8.5) weight a
+    // `sql.dialect.portability_risk_count` (count of features outside the
+    // ANSI/core profile). Phase 1 does not enumerate dialect-specific
+    // features, so we use the dialect-inference conflict count — how many
+    // dialect families' syntax hints fired — as a conservative proxy: a file
+    // that trips several dialects' markers is, by construction, less portable.
+    // Both terms carry only a 0.05 weight, so the approximation is bounded.
     let portability_risk = dialect.conflict_count as f64;
 
     let review_burden_index = review_burden(
@@ -159,6 +166,12 @@ fn modularization_credit(f: &SqlFileFacts) -> f64 {
 }
 
 /// SQL Change Risk Score (research foundation §8.4).
+///
+/// Phase-1 deviation: the spec's `+ 5 * dynamic_sql_count` term is omitted
+/// because dynamic SQL (`EXECUTE IMMEDIATE`, `sp_executesql`, …) is a
+/// procedural-dialect construct not yet tracked (Phase 3). Every other term
+/// matches the spec weights exactly. When dynamic-SQL detection lands, add the
+/// `+ 5 * dynamic_sql_count` term here.
 fn change_risk(f: &SqlFileFacts) -> f64 {
     let o = &f.objects;
     8.0 * o.drop_count as f64
