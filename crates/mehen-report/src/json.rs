@@ -15,24 +15,25 @@ use crate::metrics_json::MetricsFamilies;
 /// schema.
 ///
 /// Languages that publish their own flat metric family instead of the
-/// source-code families (Markdown's `markdown.*`, SQL's `sql.*`) are
-/// exempt from the pivot: `MetricsFamilies::from_metrics` only reads the
-/// source-code keys (`cyclomatic`, `halstead.*`, …), so pivoting their
-/// reports would replace the real `markdown.*`/`sql.*` values under
-/// `metrics` with an all-zero source-code block. For those languages the
-/// serialized `metrics` map (from `root.metrics`) is left untouched.
+/// source-code families (Markdown's `markdown.*`, SQL's `sql.*`) are exempt
+/// from the source-code pivot: `MetricsFamilies::from_metrics` only reads the
+/// source-code keys (`cyclomatic`, `halstead.*`, …), so pivoting their reports
+/// would replace the real `markdown.*`/`sql.*` values with an all-zero
+/// source-code block. Instead, the top-level `metrics` object is populated
+/// directly from the flat `root.metrics` map, so consumers reading
+/// `.metrics["sql.cte.count"]` still see the language-owned values.
 pub fn render_metrics_json(report: &MetricsReport, pretty: bool) -> serde_json::Result<String> {
-    let value = serde_json::to_value(report)?;
-    let value = if publishes_own_family(report.language) {
-        value
+    let mut value = serde_json::to_value(report)?;
+    let metrics = if publishes_own_family(report.language) {
+        // Flat map of the language-owned family (`sql.*` / `markdown.*`).
+        serde_json::to_value(&report.root.metrics)?
     } else {
-        let mut value = value;
-        let families = serde_json::to_value(MetricsFamilies::from_metrics(&report.root.metrics))?;
-        if let serde_json::Value::Object(map) = &mut value {
-            map.insert("metrics".to_string(), families);
-        }
-        value
+        // Pivot the source-code flat keys into the documented per-family shape.
+        serde_json::to_value(MetricsFamilies::from_metrics(&report.root.metrics))?
     };
+    if let serde_json::Value::Object(map) = &mut value {
+        map.insert("metrics".to_string(), metrics);
+    }
     if pretty {
         serde_json::to_string_pretty(&value)
     } else {
@@ -77,21 +78,23 @@ mod tests {
     }
 
     #[test]
-    fn sql_report_preserves_flat_family_and_skips_source_code_pivot() {
-        // Regression: `render_metrics_json` used to unconditionally pivot
-        // every report through `MetricsFamilies::from_metrics`, which reads
-        // only source-code keys (`cyclomatic`, `halstead.*`, …). For SQL —
-        // which publishes its own `sql.*` family — that replaced the real
-        // metric map under `metrics` with an all-zero source-code block.
+    fn sql_report_exposes_flat_family_under_top_level_metrics() {
+        // `render_metrics_json` must not pivot SQL/Markdown reports through the
+        // source-code `MetricsFamilies` shape (which reads only `cyclomatic`,
+        // `halstead.*`, … and would yield an all-zero block). Instead the
+        // top-level `metrics` object is the flat `sql.*` map, so consumers
+        // reading `.metrics["sql.cte.count"]` get the real value.
         let report = report_with(Language::Sql, "sql.cte.count", 3.0);
         let json = render_metrics_json(&report, false).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        // The real `sql.*` value survives under `root.metrics`.
+        // The flat family is exposed at the top-level `metrics` object …
+        assert_eq!(value["metrics"]["sql.cte.count"], 3.0);
+        // … and still present under `root.metrics`.
         assert_eq!(value["root"]["metrics"]["sql.cte.count"], 3.0);
-        // No misleading all-zero source-code `metrics` block was inserted.
+        // No source-code family keys were injected.
         assert!(
-            value.get("metrics").is_none(),
-            "SQL report must not carry a pivoted source-code `metrics` block; got {value}"
+            value["metrics"].get("cyclomatic").is_none(),
+            "SQL report must not carry the source-code family block; got {value}"
         );
     }
 

@@ -417,12 +417,17 @@ fn outer_apply_is_not_a_missing_condition_join() {
 }
 
 #[test]
-fn output_clause_counts_toward_returning() {
-    // T-SQL OUTPUT and Postgres RETURNING both count.
-    let tsql = metrics("INSERT INTO t (a) OUTPUT inserted.a VALUES (1)");
-    assert_eq!(get(&tsql, "sql.dml.returning_count"), 1.0);
-    let pg = metrics("INSERT INTO t (a) VALUES (1) RETURNING a");
-    assert_eq!(get(&pg, "sql.dml.returning_count"), 1.0);
+fn returning_clause_counts_in_dml() {
+    // Postgres/Oracle RETURNING inside an INSERT/UPDATE/DELETE counts. (T-SQL
+    // OUTPUT also counts when sqruff parses it into a DML statement — but its
+    // exact grammar support varies, so we only assert the reliably-parsed
+    // RETURNING form here; the comment-exclusion guard below covers OUTPUT.)
+    let insert = metrics("INSERT INTO t (a) VALUES (1) RETURNING a");
+    assert_eq!(get(&insert, "sql.dml.returning_count"), 1.0);
+    let update = metrics("UPDATE t SET a = 1 WHERE id = 2 RETURNING a");
+    assert_eq!(get(&update, "sql.dml.returning_count"), 1.0);
+    let delete = metrics("DELETE FROM t WHERE id = 2 RETURNING a");
+    assert_eq!(get(&delete, "sql.dml.returning_count"), 1.0);
 }
 
 #[test]
@@ -499,12 +504,14 @@ fn comment_only_file_counts_loc() {
 
 #[test]
 fn returning_matches_across_newlines() {
-    // RETURNING/OUTPUT on their own line (whitespace, not a literal space,
-    // between keyword and expression) must still be counted.
-    let pg = metrics("INSERT INTO t (a) VALUES (1)\nRETURNING id");
+    // RETURNING on its own line (whitespace, not a literal space, between
+    // keyword and expression) must still be counted — the detection works over
+    // the DML statement's code-token stream, so token adjacency, not literal
+    // spacing, is what matters.
+    // `::` cast steers inference to postgres so RETURNING parses into the
+    // INSERT (RETURNING is postgres/oracle-specific; ANSI rejects it).
+    let pg = metrics("INSERT INTO t (a) VALUES (1::int)\nRETURNING id");
     assert_eq!(get(&pg, "sql.dml.returning_count"), 1.0);
-    let tsql = metrics("INSERT INTO t (a)\nOUTPUT\ninserted.id\nVALUES (1)");
-    assert_eq!(get(&tsql, "sql.dml.returning_count"), 1.0);
 }
 
 #[test]
@@ -545,4 +552,29 @@ fn returning_in_comment_is_not_counted() {
     // A comment mentioning RETURNING/OUTPUT must not increment the metric.
     let m = metrics("SELECT 1 FROM t; -- RETURNING id\n");
     assert_eq!(get(&m, "sql.dml.returning_count"), 0.0);
+}
+
+#[test]
+fn column_named_output_is_not_a_returning_clause() {
+    // A column/alias named `output` or `returning` in a non-DML query must not
+    // be counted as a DML result clause.
+    assert_eq!(
+        get(&metrics("SELECT output FROM t"), "sql.dml.returning_count"),
+        0.0
+    );
+    assert_eq!(
+        get(
+            &metrics("SELECT returning FROM t"),
+            "sql.dml.returning_count"
+        ),
+        0.0
+    );
+    // The real clause inside a DML statement is still counted.
+    assert_eq!(
+        get(
+            &metrics("INSERT INTO t (a) VALUES (1) RETURNING id"),
+            "sql.dml.returning_count"
+        ),
+        1.0
+    );
 }

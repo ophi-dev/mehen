@@ -1757,13 +1757,22 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
         .filter(|w| w[0] == "CREATE" && w[1] == "OR" && w[2] == "REPLACE")
         .count() as u32;
 
-    // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses. Counted
-    // from code tokens (never comments). `OUTPUT` is only a keyword token under
-    // the tsql grammar, but treating it as a code word makes the metric fire
-    // regardless of which dialect the file parsed as.
-    obj.returning_count = code_words
+    // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses. Scanned
+    // only *inside DML statements* (INSERT/UPDATE/DELETE/MERGE), so a column
+    // or alias named `output`/`returning` in an ordinary `SELECT output FROM t`
+    // does not inflate the count. Code tokens only (comments excluded), and
+    // `OUTPUT` is treated as a word so the metric fires regardless of dialect.
+    const DML_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+        SyntaxKind::InsertStatement,
+        SyntaxKind::UpdateStatement,
+        SyntaxKind::DeleteStatement,
+        SyntaxKind::MergeStatement,
+    ]);
+    let dml_stmts = root.recursive_crawl(&DML_STATEMENTS, true, &SyntaxSet::EMPTY, true);
+    obj.returning_count = dml_stmts
         .iter()
-        .filter(|w| *w == "RETURNING" || *w == "OUTPUT")
+        .flat_map(code_token_words)
+        .filter(|w| w == "RETURNING" || w == "OUTPUT")
         .count() as u32;
 }
 
