@@ -539,13 +539,8 @@ fn stmt_contains_create(stmt: &ErasedSegment) -> bool {
 }
 
 fn stmt_is_procedural(stmt: &ErasedSegment) -> bool {
-    const PROCEDURAL: SyntaxSet = SyntaxSet::new(&[
-        SyntaxKind::CreateProcedureStatement,
-        SyntaxKind::CreateFunctionStatement,
-        SyntaxKind::CreateTriggerStatement,
-    ]);
     !stmt
-        .recursive_crawl(&PROCEDURAL, false, &SyntaxSet::EMPTY, true)
+        .recursive_crawl(&PROCEDURAL_DEFINITIONS, false, &SyntaxSet::EMPTY, true)
         .is_empty()
 }
 
@@ -1791,7 +1786,7 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
     let updates = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::UpdateStatement),
         true,
-        &SyntaxSet::EMPTY,
+        &PROCEDURAL_DEFINITIONS,
         true,
     );
     for u in &updates {
@@ -1802,7 +1797,7 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
     let deletes = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::DeleteStatement),
         true,
-        &SyntaxSet::EMPTY,
+        &PROCEDURAL_DEFINITIONS,
         true,
     );
     for d in &deletes {
@@ -1835,7 +1830,7 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
         SyntaxKind::DeleteStatement,
         SyntaxKind::MergeStatement,
     ]);
-    let dml_stmts = root.recursive_crawl(&DML_STATEMENTS, true, &SyntaxSet::EMPTY, true);
+    let dml_stmts = root.recursive_crawl(&DML_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
     obj.returning_count = dml_stmts
         .iter()
         .map(|s| count_keyword(s, "RETURNING") + count_keyword(s, "OUTPUT"))
@@ -1900,6 +1895,18 @@ const WRITE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::DropStatement,
 ]);
 
+/// Procedural-definition statement kinds. DML/object scans pass this as their
+/// `no_recursive_types` so statements *inside* a stored routine/trigger body
+/// are not attributed to the top-level statement (which is `procedural`) —
+/// otherwise `CREATE PROCEDURE … INSERT INTO t …` would still add `t` to the
+/// object-touch sets and inflate `change_risk_score` (Codex P2). Phase 1 does
+/// not analyze routine bodies; Phase 3 will.
+const PROCEDURAL_DEFINITIONS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::CreateProcedureStatement,
+    SyntaxKind::CreateFunctionStatement,
+    SyntaxKind::CreateTriggerStatement,
+]);
+
 /// Collect the distinct read and write object names touched by the file.
 ///
 /// Read objects are `table_reference`s in FROM/JOIN read positions
@@ -1932,12 +1939,55 @@ fn collect_touched_objects(
         .map(|c| cte_name(c).to_ascii_uppercase())
         .collect();
 
-    // Reads: every table reference reachable from a FROM/JOIN element that is
-    // not a CTE reference.
+    // Writes first: the mutated target of each write statement is the table
+    // reference(s) it governs *directly* — reachable without descending into a
+    // nested `SelectStatement` (those tables belong to a read subquery). So
+    // `UPDATE accounts …` / `DELETE FROM u …` / `INSERT INTO target …` /
+    // `MERGE INTO accounts …` all yield their target even when a dialect places
+    // it after `FROM`. For MERGE the *first* such table is the write target and
+    // the rest (`USING <source>`) are reads. Procedural bodies are skipped so a
+    // stored routine's DML isn't counted as a top-level write (Phase 1).
+    // Track the exact write-target *nodes* (by identity) so the read pass can
+    // skip them without also excluding genuine reads of a same-named table
+    // (e.g. `UPDATE t … WHERE id IN (SELECT id FROM t …)` writes `t` and also
+    // reads `t` in the subquery — both roles count, deduped only by name into
+    // `touch`).
+    let mut write_target_nodes: Vec<ErasedSegment> = Vec::new();
+    let write_stmts = root.recursive_crawl(&WRITE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
+    for stmt in &write_stmts {
+        let merge = stmt.is_type(SyntaxKind::MergeStatement);
+        // Table refs governed by the statement itself (not inside a subquery).
+        let targets = stmt.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::TableReference),
+            true,
+            &SELECT_STATEMENT,
+            true,
+        );
+        for (i, tr) in targets.iter().enumerate() {
+            let name = tr.raw().to_ascii_uppercase();
+            if cte_names.contains(&name) {
+                continue; // a CTE used as a DML/MERGE target is query-local
+            }
+            if merge && i > 0 {
+                read.insert(name); // MERGE's USING source
+            } else {
+                write.insert(name);
+                write_target_nodes.push(tr.clone());
+            }
+        }
+    }
+
+    // Reads: table references in FROM/JOIN positions that are not CTE
+    // references and are not a write-target node themselves. The exclusion is
+    // by node identity, not name, so a `DELETE FROM u` target (which sits in a
+    // FROM element under some dialects) is not double-counted as a read, while
+    // a table genuinely read in a subquery still counts. Stop at procedural
+    // definitions so a routine body's FROM clauses aren't attributed to a
+    // top-level read.
     let from_elems = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::FromExpressionElement),
         true,
-        &SyntaxSet::EMPTY,
+        &PROCEDURAL_DEFINITIONS,
         true,
     );
     for elem in &from_elems {
@@ -1948,61 +1998,14 @@ fn collect_touched_objects(
             true,
         ) {
             let name = tr.raw().to_ascii_uppercase();
-            if !cte_names.contains(&name) {
+            let is_write_target = write_target_nodes.iter().any(|w| w.is(&tr));
+            if !cte_names.contains(&name) && !is_write_target {
                 read.insert(name);
-            }
-        }
-    }
-
-    // Writes: the mutated target of each write statement is its *first*
-    // statement-level table reference (the one not inside a FROM/JOIN element):
-    // the `accounts` in `UPDATE accounts …`, the `target` in `INSERT INTO
-    // target …`, the `accounts` after `MERGE INTO`. Any *further* statement-
-    // level table references are read sources, not write targets — most
-    // importantly MERGE's `USING <source>` table, which is read, not written.
-    let write_stmts = root.recursive_crawl(&WRITE_STATEMENTS, true, &SyntaxSet::EMPTY, true);
-    for stmt in &write_stmts {
-        let statement_level: Vec<_> = stmt
-            .recursive_crawl(
-                &SyntaxSet::single(SyntaxKind::TableReference),
-                true,
-                &SyntaxSet::EMPTY,
-                true,
-            )
-            .into_iter()
-            .filter(|tr| !is_within_from_element(stmt, tr))
-            .collect();
-        // MERGE has two statement-level table references with opposite roles:
-        // `MERGE INTO <target>` (write) and `USING <source>` (read). Every
-        // other write statement's statement-level references are all targets.
-        let merge = stmt.is_type(SyntaxKind::MergeStatement);
-        for (i, tr) in statement_level.iter().enumerate() {
-            let name = tr.raw().to_ascii_uppercase();
-            if cte_names.contains(&name) {
-                continue; // a CTE used as a MERGE/DML target is query-local
-            }
-            if merge && i > 0 {
-                read.insert(name);
-            } else {
-                write.insert(name);
             }
         }
     }
 
     (read, write)
-}
-
-/// Whether `target` sits inside a `FromExpressionElement` descendant of
-/// `stmt` (i.e. it is a read source, not a write target).
-fn is_within_from_element(stmt: &ErasedSegment, target: &ErasedSegment) -> bool {
-    fn walk(node: &ErasedSegment, target: &ErasedSegment, in_from: bool) -> bool {
-        if node.is(target) {
-            return in_from;
-        }
-        let next = in_from || node.is_type(SyntaxKind::FromExpressionElement);
-        node.segments().iter().any(|c| walk(c, target, next))
-    }
-    walk(stmt, target, false)
 }
 
 // ── Halstead ────────────────────────────────────────────────────────────

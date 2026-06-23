@@ -806,3 +806,21 @@ fn procedure_body_dml_is_not_top_level_dml() {
     assert_eq!(get(&m, "sql.statement.kind_count.insert"), 0.0);
     assert_eq!(get(&m, "sql.dml.insert_count"), 0.0);
 }
+
+#[test]
+fn delete_and_update_targets_are_writes() {
+    // The table a DELETE/UPDATE governs is a write object (it mutates rows),
+    // even when a dialect places the target after `FROM`.
+    let del = metrics("DELETE FROM u WHERE id = 1");
+    assert_eq!(get(&del, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&del, "sql.object.read_count"), 0.0);
+
+    let upd = metrics("UPDATE accounts SET bal = 0 WHERE id = 1");
+    assert_eq!(get(&upd, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&upd, "sql.object.read_count"), 0.0);
+
+    // INSERT … SELECT writes the target and reads the source.
+    let ins = metrics("INSERT INTO target SELECT * FROM source");
+    assert_eq!(get(&ins, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&ins, "sql.object.read_count"), 1.0);
+}
