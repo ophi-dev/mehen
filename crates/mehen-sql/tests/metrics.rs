@@ -877,3 +877,17 @@ fn non_table_ddl_targets_count_as_writes() {
     let schema = metrics("DROP SCHEMA s");
     assert_eq!(get(&schema, "sql.object.write_count"), 1.0);
 }
+
+#[test]
+fn create_index_writes_the_index_and_reads_the_host_table() {
+    // `CREATE INDEX idx ON t` mutates the index object (`idx`), but the host
+    // table `t` is only a dependency — referenced, not written. So the index
+    // is the single write target and the table is a read.
+    let create = metrics("CREATE INDEX idx ON t (a)");
+    assert_eq!(get(&create, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&create, "sql.object.read_count"), 1.0);
+    // `DROP INDEX idx ON t` (dialects that name the host table) is the same
+    // shape: the index is dropped, the table is only referenced.
+    let drop = metrics("DROP INDEX idx ON t");
+    assert_eq!(get(&drop, "sql.object.write_count"), 1.0);
+}

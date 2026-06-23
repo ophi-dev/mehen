@@ -1975,17 +1975,26 @@ fn collect_touched_objects(
     let write_stmts = root.recursive_crawl(&WRITE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
     for stmt in &write_stmts {
         let stmt_tables = stmt.recursive_crawl(&TARGET_REFS, false, &SELECT_STATEMENT, true);
-        // DDL statements mutate *every* statement-level table (`DROP TABLE a, b`,
-        // `TRUNCATE a, b` — all targets). DML statements mutate only the first
-        // (the target); any further statement-level tables are FROM/USING read
-        // sources (`UPDATE dst … FROM src`, `MERGE INTO dst USING src`).
-        let all_targets = !matches!(
+        // Multi-target DDL mutates *every* statement-level reference (`DROP
+        // TABLE a, b`, `TRUNCATE a, b` — all writes). Statements with a
+        // *host-object* shape mutate only their first reference (the target);
+        // any later statement-level reference is a read dependency:
+        //   - DML: `UPDATE dst … FROM src`, `DELETE dst USING src`, `MERGE INTO
+        //     dst USING src`, `INSERT INTO dst SELECT …` — `dst` is written,
+        //     sources are read.
+        //   - `CREATE INDEX idx ON t` / `DROP INDEX idx ON t` — `idx` is the
+        //     written object, the host table `t` is only referenced (a read),
+        //     not mutated.
+        let first_target_only = matches!(
             stmt.get_type(),
             SyntaxKind::InsertStatement
                 | SyntaxKind::UpdateStatement
                 | SyntaxKind::DeleteStatement
                 | SyntaxKind::MergeStatement
+                | SyntaxKind::CreateIndexStatement
+                | SyntaxKind::DropIndexStatement
         );
+        let all_targets = !first_target_only;
         for (i, tr) in stmt_tables.iter().enumerate() {
             let name = tr.raw().to_ascii_uppercase();
             if cte_names.contains(&name) {
