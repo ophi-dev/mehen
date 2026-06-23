@@ -824,3 +824,18 @@ fn delete_and_update_targets_are_writes() {
     assert_eq!(get(&ins, "sql.object.write_count"), 1.0);
     assert_eq!(get(&ins, "sql.object.read_count"), 1.0);
 }
+
+#[test]
+fn update_from_and_merge_sources_are_reads() {
+    // `UPDATE dst … FROM src`: dst is written, src is read.
+    let upd = metrics("UPDATE dst SET x = src.y FROM src WHERE dst.id = src.id");
+    assert_eq!(get(&upd, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&upd, "sql.object.read_count"), 1.0);
+    // MERGE: INTO target is written, USING source is read.
+    let merge = metrics(
+        "MERGE INTO accounts a USING updates u ON a.id = u.id \
+         WHEN MATCHED THEN UPDATE SET a.bal = u.bal",
+    );
+    assert_eq!(get(&merge, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&merge, "sql.object.read_count"), 1.0);
+}

@@ -96,7 +96,9 @@ fn infer(source: &str) -> Inference {
         has("::"),
         has("DISTINCT ON"),
         has(" ILIKE "),
-        has("RETURNING "),
+        // `RETURNING` followed by any whitespace (so `RETURNING\nid` is matched,
+        // not just `RETURNING id`).
+        has("RETURNING ") || has("RETURNING\n") || has("RETURNING\t") || has("RETURNING\r"),
         has("ARRAY["),
     ]);
     let bigquery = count(&[
