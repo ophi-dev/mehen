@@ -353,7 +353,9 @@ fn infer(source: &str) -> Inference {
     // must not flip the effective parser dialect (Codex P2). Identifiers can
     // still false-positive, but that only nudges an advisory confidence — the
     // parse itself uses the resolved grammar.
-    let code = strip_noncode(source);
+    // Normalize CRLF → LF so newline-anchored hints (the T-SQL `GO` batch
+    // separator) match on Windows-line-ending files too (Codex P2).
+    let code = strip_noncode(source).replace("\r\n", "\n");
     let upper = code.to_ascii_uppercase();
     let has = |needle: &str| upper.contains(needle);
 
@@ -521,6 +523,16 @@ mod tests {
 
     fn directive(source: &str) -> Option<DialectDirective> {
         parse_dialect_directive(source)
+    }
+
+    #[test]
+    fn go_batch_separator_infers_tsql_on_crlf() {
+        // The `GO` batch separator is a strong T-SQL hint; it must match on
+        // Windows (CRLF) line endings too, not just LF (Codex P2).
+        let crlf = resolve("SELECT 1\r\nGO\r\nSELECT 2\r\n", None);
+        assert_eq!(crlf.inferred, DialectKind::Tsql);
+        let lf = resolve("SELECT 1\nGO\nSELECT 2\n", None);
+        assert_eq!(lf.inferred, DialectKind::Tsql);
     }
 
     #[test]
