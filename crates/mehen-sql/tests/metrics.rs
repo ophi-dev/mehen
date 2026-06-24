@@ -58,6 +58,31 @@ fn unused_cte_is_detected() {
 }
 
 #[test]
+fn cte_dependency_graph_is_scoped_per_with_block() {
+    // CTE names are scoped to their owning WITH block. The second statement's
+    // `FROM b` reads a real table `b`, NOT the first statement's CTE `b`, so it
+    // must not forge a cross-statement dependency edge (Codex P2).
+    let sql = "WITH b AS (SELECT 1 AS x) SELECT * FROM b; \
+               WITH a AS (SELECT * FROM b) SELECT * FROM a;";
+    let m = metrics(sql);
+    assert_eq!(get(&m, "sql.cte.count"), 2.0);
+    assert_eq!(get(&m, "sql.cte.dependency_edges"), 0.0);
+    assert_eq!(get(&m, "sql.cte.max_dependency_depth"), 1.0);
+    // Both CTEs are used within their own statement, so neither is unused.
+    assert_eq!(get(&m, "sql.cte.unused_count"), 0.0);
+
+    // A genuine intra-block chain a -> b -> c is still detected.
+    let chain = metrics(
+        "WITH a AS (SELECT 1 AS x), \
+              b AS (SELECT x FROM a), \
+              c AS (SELECT x FROM b) \
+         SELECT x FROM c",
+    );
+    assert_eq!(get(&chain, "sql.cte.dependency_edges"), 2.0);
+    assert_eq!(get(&chain, "sql.cte.max_dependency_depth"), 3.0);
+}
+
+#[test]
 fn join_count_and_kinds() {
     let sql = "SELECT * FROM a \
                INNER JOIN b ON a.id = b.id \

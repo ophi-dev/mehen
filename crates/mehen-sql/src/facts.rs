@@ -11,9 +11,11 @@
 //! `extract` call, so a sqruff bump can only break this file.
 //!
 //! The walk is a single recursive descent that classifies nodes by
-//! `SyntaxKind` and records facts. Where sqruff already ships higher-level
-//! analysis (the `Query`/CTE model in `utils::analysis::query`), the adapter
-//! uses it directly rather than re-deriving the CTE dependency graph.
+//! `SyntaxKind` and records facts. The CTE dependency graph is re-derived from
+//! the `CommonTableExpression` CST nodes rather than using sqruff's
+//! `Query`/`crawl_sources` model, which relies on interior mutability
+//! (`Rc<RefCell<…>>`) that would conflict with borrows held across the call
+//! (see [`extract_cte_graph`]).
 
 use sqruff_lib_core::dialects::Dialect;
 use sqruff_lib_core::dialects::syntax::{SyntaxKind, SyntaxSet};
@@ -1598,77 +1600,138 @@ fn extract_cte_graph(root: &ErasedSegment, _dialect: &Dialect, ctes: &mut CteFac
     // (`Rc<RefCell<…>>`) and re-borrows while crawling, which would conflict
     // with any borrow held across the call. The CST is the stable, verified
     // shape (parser comparison §2.1).
-    let cte_nodes = root.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::CommonTableExpression),
-        true,
-        &SyntaxSet::EMPTY,
-        true,
-    );
-    ctes.count = cte_nodes.len() as u32;
-    if ctes.count == 0 {
-        return;
-    }
-
-    // CTE names (the leading identifier of each CTE definition).
-    let cte_names: Vec<String> = cte_nodes.iter().map(cte_name).collect();
-
-    // Build the dependency graph: edge cte_a -> cte_b when a's body reads b.
+    //
+    // CTE names are scoped to their owning `WITH` block, so the graph is built
+    // per `WithCompoundStatement`: a `b` table reference in `WITH a AS (SELECT
+    // * FROM b) …` only counts as a CTE dependency when `b` is a CTE *of the
+    // same WITH block*. A file-wide name set would forge cross-statement edges
+    // — `WITH b AS (…) SELECT …; WITH a AS (SELECT * FROM b) …` would falsely
+    // make the second statement's real table `b` a dependency on the first
+    // statement's CTE (Codex P2).
     use std::collections::{BTreeMap, BTreeSet};
-    let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut fan_out: BTreeMap<String, u32> = BTreeMap::new();
-    let mut self_recursive = 0u32;
 
-    for (idx, cte) in cte_nodes.iter().enumerate() {
-        let name_up = cte_names[idx].to_ascii_uppercase();
-        for dep in cte_body_dependencies(cte, &cte_names) {
-            let dep_up = dep.to_ascii_uppercase();
-            if dep_up == name_up {
-                self_recursive += 1;
-                continue;
-            }
-            ctes.dependency_edges += 1;
-            edges
-                .entry(name_up.clone())
-                .or_default()
-                .push(dep_up.clone());
-            *fan_out.entry(dep_up).or_default() += 1;
-        }
-    }
-    // A recursive CTE is one whose body references *itself* — count those. The
-    // `WITH RECURSIVE` keyword merely permits recursion; a `WITH RECURSIVE c AS
-    // (SELECT 1)` that never self-references is not a recursive CTE, so the
-    // count reflects actual self-references rather than the keyword's presence.
-    ctes.recursive_count = self_recursive;
-    ctes.max_fan_out = fan_out.values().copied().max().unwrap_or(0);
-    ctes.max_dependency_depth = longest_chain(&edges, &cte_names);
-
-    // Unused CTEs: defined but referenced by neither another CTE body nor the
-    // final query. Build the full set of referenced CTE names from every
-    // table reference in the file that matches a CTE name, then subtract.
-    let all_refs = root.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::TableReference),
+    let with_blocks = root.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::WithCompoundStatement),
         true,
         &SyntaxSet::EMPTY,
         true,
     );
-    let mut referenced: BTreeSet<String> = BTreeSet::new();
-    // A CTE name only counts as "referenced" when it appears as a table
-    // reference *outside* its own definition body.
-    for (idx, cte) in cte_nodes.iter().enumerate() {
-        let self_name = cte_names[idx].to_ascii_uppercase();
-        for r in &all_refs {
-            let name = r.raw().to_ascii_uppercase();
-            if name == self_name && !is_within(cte, r) {
-                referenced.insert(name);
+
+    let mut total = 0u32;
+    let mut trivial = 0u32;
+
+    for with in &with_blocks {
+        // The CTEs *directly* owned by this WITH block. A nested WITH (in a CTE
+        // body or subquery) is its own scope and is handled when the crawl
+        // reaches it, so restrict to this block's own definitions.
+        let cte_nodes: Vec<ErasedSegment> = with
+            .recursive_crawl(
+                &SyntaxSet::single(SyntaxKind::CommonTableExpression),
+                true,
+                &SyntaxSet::single(SyntaxKind::WithCompoundStatement),
+                false,
+            )
+            .into_iter()
+            .filter(|c| owning_with_block(root, c).is_some_and(|w| w.is(with)))
+            .collect();
+        if cte_nodes.is_empty() {
+            continue;
+        }
+        total += cte_nodes.len() as u32;
+        trivial += cte_nodes.iter().filter(|c| is_trivial_cte(c)).count() as u32;
+
+        // Names defined in *this* block — the only names that can be intra-block
+        // dependencies.
+        let cte_names: Vec<String> = cte_nodes.iter().map(cte_name).collect();
+
+        let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut fan_out: BTreeMap<String, u32> = BTreeMap::new();
+
+        for (idx, cte) in cte_nodes.iter().enumerate() {
+            let name_up = cte_names[idx].to_ascii_uppercase();
+            for dep in cte_body_dependencies(cte, &cte_names) {
+                let dep_up = dep.to_ascii_uppercase();
+                if dep_up == name_up {
+                    // A recursive CTE references *itself*. `WITH RECURSIVE`
+                    // merely permits recursion; the count reflects an actual
+                    // self-reference, not the keyword.
+                    ctes.recursive_count += 1;
+                    continue;
+                }
+                ctes.dependency_edges += 1;
+                edges
+                    .entry(name_up.clone())
+                    .or_default()
+                    .push(dep_up.clone());
+                *fan_out.entry(dep_up).or_default() += 1;
             }
         }
-    }
-    ctes.unused_count = cte_names
-        .iter()
-        .filter(|n| !referenced.contains(&n.to_ascii_uppercase()))
-        .count() as u32;
+        ctes.max_fan_out = ctes
+            .max_fan_out
+            .max(fan_out.values().copied().max().unwrap_or(0));
+        ctes.max_dependency_depth = ctes
+            .max_dependency_depth
+            .max(longest_chain(&edges, &cte_names));
 
-    ctes.trivial_count = cte_nodes.iter().filter(|c| is_trivial_cte(c)).count() as u32;
+        // Unused CTEs: defined but referenced by neither another CTE body nor
+        // the block's main query. A name counts as referenced only when it
+        // appears as a table reference *within this WITH block* and *outside*
+        // its own definition body.
+        let block_refs = with.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::TableReference),
+            true,
+            &SyntaxSet::single(SyntaxKind::WithCompoundStatement),
+            false,
+        );
+        let mut referenced: BTreeSet<String> = BTreeSet::new();
+        for (idx, cte) in cte_nodes.iter().enumerate() {
+            let self_name = cte_names[idx].to_ascii_uppercase();
+            for r in &block_refs {
+                let name = r.raw().to_ascii_uppercase();
+                if name == self_name
+                    && !is_within(cte, r)
+                    && owning_with_block(root, r).is_some_and(|w| w.is(with))
+                {
+                    referenced.insert(name);
+                }
+            }
+        }
+        ctes.unused_count += cte_names
+            .iter()
+            .filter(|n| !referenced.contains(&n.to_ascii_uppercase()))
+            .count() as u32;
+    }
+
+    ctes.count = total;
+    ctes.trivial_count = trivial;
+}
+
+/// The innermost `WithCompoundStatement` that contains `node`, if any. Used to
+/// attribute a CTE definition or table reference to the WITH block whose scope
+/// it actually belongs to (so a nested WITH's names don't leak outward, and a
+/// reference is matched against the right block's CTE names).
+fn owning_with_block(root: &ErasedSegment, node: &ErasedSegment) -> Option<ErasedSegment> {
+    fn walk(
+        current: &ErasedSegment,
+        node: &ErasedSegment,
+        nearest_with: Option<&ErasedSegment>,
+    ) -> Option<ErasedSegment> {
+        if current.is(node) {
+            return nearest_with.cloned();
+        }
+        let next = if current.is_type(SyntaxKind::WithCompoundStatement) {
+            Some(current)
+        } else {
+            nearest_with
+        };
+        for child in current.segments() {
+            if let Some(found) = walk(child, node, next) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(root, node, None)
 }
 
 /// A trivial CTE selects from a single source with no filtering, aggregation,
