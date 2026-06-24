@@ -1150,7 +1150,10 @@ fn extract_subqueries(root: &ErasedSegment, selects: &[ErasedSegment], sub: &mut
 fn count_keyword_subqueries(root: &ErasedSegment) -> (u32, u32) {
     fn following_bracketed_select(siblings: &[ErasedSegment], from: usize) -> bool {
         for sib in siblings.iter().skip(from + 1) {
-            if sib.is_whitespace() || sib.is_meta() {
+            // Skip whitespace, meta, and comments — a comment between the
+            // keyword and the subquery (`IN /* ids */ (SELECT …)`) is legal
+            // SQL and must not hide the predicate (Codex P2).
+            if sib.is_whitespace() || sib.is_meta() || sib.is_comment() {
                 continue;
             }
             return sib.is_type(SyntaxKind::Bracketed)
@@ -1784,12 +1787,14 @@ fn cte_name(cte: &ErasedSegment) -> String {
 /// result is deduplicated to avoid inflating `dependency_edges`/`max_fan_out`
 /// (and thus the modularity score).
 ///
-/// The crawl stops at any nested `WithCompoundStatement`: a table reference
-/// inside a CTE body's own `WITH` resolves in *that* inner scope, so it must
-/// not be matched against this block's `cte_names`. Otherwise
-/// `WITH b AS (…), a AS (WITH b AS (…) SELECT * FROM b) …` would forge a
-/// phantom `a -> b` edge against the outer `b` even though `a` reads the inner
-/// `b` (Codex P2).
+/// CTE names are lexically scoped: a nested `WITH` inside the body can *see*
+/// the enclosing block's CTE names, so `WITH a AS (…), b AS (WITH x AS (SELECT
+/// * FROM a) …) …` is a real `b -> a` edge and the crawl must keep descending
+/// into nested WITH bodies (CodeRabbit). But a nested CTE *shadows* an outer
+/// name: `WITH b AS (…), a AS (WITH b AS (…) SELECT * FROM b) …` reads the
+/// inner `b`, not the outer one, so that reference is NOT an `a -> b` edge
+/// (Codex P2). We therefore crawl the whole body and drop any reference that a
+/// nested `CommonTableExpression` between it and `cte` redefines.
 fn cte_body_dependencies(
     cte: &ErasedSegment,
     cte_names: &[String],
@@ -1797,13 +1802,34 @@ fn cte_body_dependencies(
     let refs = cte.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::TableReference),
         true,
+        &SyntaxSet::EMPTY,
+        true,
+    );
+    // Nested `WITH` blocks inside this body. A reference is *shadowed* when it
+    // sits inside a nested block that defines the same name — it then resolves
+    // to that inner CTE, not the enclosing block's. The shadowing scope is the
+    // whole `WithCompoundStatement` (its CTE bodies *and* its main query), not
+    // just the `CommonTableExpression` definition node.
+    let nested_with_blocks = cte.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::WithCompoundStatement),
+        true,
+        &SyntaxSet::EMPTY,
         true,
     );
     let mut deps = std::collections::BTreeSet::new();
     for r in &refs {
         let name = r.raw().to_ascii_uppercase();
-        if cte_names.iter().any(|c| c.eq_ignore_ascii_case(&name)) {
+        if !cte_names.iter().any(|c| c.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        let shadowed = nested_with_blocks.iter().any(|w| {
+            is_within(w, r)
+                && w.segments()
+                    .iter()
+                    .filter(|c| c.is_type(SyntaxKind::CommonTableExpression))
+                    .any(|c| cte_name(c).eq_ignore_ascii_case(&name))
+        });
+        if !shadowed {
             deps.insert(name);
         }
     }

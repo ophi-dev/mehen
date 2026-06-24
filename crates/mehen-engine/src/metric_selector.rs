@@ -171,28 +171,39 @@ fn is_namespaced_metric(name: &str) -> bool {
     name.starts_with("sql.") || name.starts_with("markdown.")
 }
 
-/// Default polarity for a namespaced metric, by *exact* key. Substring
-/// inference is too crude (e.g. `markdown.maintainability.artifact_debt_score`
-/// is a penalty despite containing "maintainability", and `sql.dialect.confidence`
-/// is higher-is-better), so the higher-is-better metrics are enumerated and
-/// everything else defaults to higher-is-worse. Users can always override with
-/// a `+`/`-` prefix.
+/// Namespaced (`sql.*` / `markdown.*`) metric keys where a *larger* value is
+/// healthier. Substring inference is too crude (e.g.
+/// `markdown.maintainability.artifact_debt_score` is a penalty despite
+/// containing "maintainability", and `sql.dialect.confidence` is
+/// higher-is-better), so the higher-is-better metrics are enumerated by exact
+/// key and everything else defaults to higher-is-worse. This is the single
+/// source of truth shared by the `diff` selector polarity and the
+/// `top-offenders` ranking polarity ([`crate::top_offenders`]).
+pub(crate) const NAMESPACED_HIGHER_IS_BETTER: &[&str] = &[
+    // SQL composite/quality scores where larger is healthier.
+    "sql.maintainability_index",
+    "sql.modularity_health",
+    "sql.select.output_alias_coverage",
+    "sql.dialect.confidence",
+    // Markdown quality scores where larger is healthier.
+    "markdown.maintainability.documentation_maintainability_index",
+    "markdown.maintainability.section_balance_score",
+    "markdown.maintainability.good_scaffold_score",
+    "markdown.grounding.repository_grounding_score",
+    "markdown.grounding.evidence_coverage_score",
+    "markdown.links.information_scent_score",
+];
+
+/// Whether a namespaced metric key is higher-is-better (see
+/// [`NAMESPACED_HIGHER_IS_BETTER`]).
+pub(crate) fn is_namespaced_higher_is_better(name: &str) -> bool {
+    NAMESPACED_HIGHER_IS_BETTER.contains(&name)
+}
+
+/// Default polarity for a namespaced metric, by *exact* key. Users can always
+/// override with a `+`/`-` prefix.
 fn default_namespaced_polarity(name: &str) -> Polarity {
-    const HIGHER_IS_BETTER: &[&str] = &[
-        // SQL composite/quality scores where larger is healthier.
-        "sql.maintainability_index",
-        "sql.modularity_health",
-        "sql.select.output_alias_coverage",
-        "sql.dialect.confidence",
-        // Markdown quality scores where larger is healthier.
-        "markdown.maintainability.documentation_maintainability_index",
-        "markdown.maintainability.section_balance_score",
-        "markdown.maintainability.good_scaffold_score",
-        "markdown.grounding.repository_grounding_score",
-        "markdown.grounding.evidence_coverage_score",
-        "markdown.links.information_scent_score",
-    ];
-    if HIGHER_IS_BETTER.contains(&name) {
+    if is_namespaced_higher_is_better(name) {
         Polarity::HigherIsBetter
     } else {
         Polarity::LowerIsBetter

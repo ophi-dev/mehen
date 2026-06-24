@@ -83,17 +83,37 @@ fn cte_dependency_graph_is_scoped_per_with_block() {
 }
 
 #[test]
-fn nested_with_does_not_forge_outer_cte_dependency() {
-    // `a`'s body has its own `WITH b`, so `FROM b` reads the *inner* `b`, not
-    // the outer sibling CTE `b`. No `a -> b` edge against the outer `b`
-    // (Codex P2: the dependency scan must stop at nested WITH blocks).
-    let m = metrics(
+fn nested_with_shadowing_and_visibility() {
+    // Shadowing: `a`'s body has its own `WITH b`, so `FROM b` reads the *inner*
+    // `b`, not the outer sibling CTE `b` — no phantom `a -> b` edge (Codex P2).
+    let shadow = metrics(
         "WITH b AS (SELECT 1 AS x), \
               a AS (WITH b AS (SELECT 2 AS y) SELECT * FROM b) \
          SELECT * FROM a",
     );
-    assert_eq!(get(&m, "sql.cte.dependency_edges"), 0.0);
-    assert_eq!(get(&m, "sql.cte.max_dependency_depth"), 1.0);
+    assert_eq!(get(&shadow, "sql.cte.dependency_edges"), 0.0);
+    assert_eq!(get(&shadow, "sql.cte.max_dependency_depth"), 1.0);
+
+    // Visibility: an outer CTE `a` referenced inside `b`'s nested WITH body is
+    // a real `b -> a` dependency — the scan must keep traversing nested WITH
+    // bodies, only dropping *shadowed* names (CodeRabbit).
+    let visible = metrics(
+        "WITH a AS (SELECT 1 AS x), \
+              b AS (WITH y AS (SELECT * FROM a) SELECT * FROM y) \
+         SELECT * FROM b",
+    );
+    assert_eq!(get(&visible, "sql.cte.dependency_edges"), 1.0);
+}
+
+#[test]
+fn in_subquery_counted_through_intervening_comment() {
+    // A comment between `IN`/`EXISTS` and the subquery parentheses is legal
+    // SQL and must not hide the predicate (Codex P2).
+    let in_q = metrics("SELECT * FROM t WHERE id IN /* ids */ (SELECT id FROM u)");
+    assert_eq!(get(&in_q, "sql.subquery.in_count"), 1.0);
+    let exists_q =
+        metrics("SELECT * FROM t WHERE EXISTS /* chk */ (SELECT 1 FROM u WHERE u.id = t.id)");
+    assert_eq!(get(&exists_q, "sql.subquery.exists_count"), 1.0);
 }
 
 #[test]

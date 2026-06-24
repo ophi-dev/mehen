@@ -233,12 +233,19 @@ fn cmp_entries(
 
 /// Resolve a metric's "higher is worse / better" polarity from its
 /// key. Maintainability-index variants (`mi.*`) are higher-is-better;
-/// every other metric the engine publishes (cyclomatic, cognitive,
-/// loc.*, halstead.*, abc, nom, nargs, nexit, npa, npm, wmc) is
-/// higher-is-worse. This mirrors the legacy `KNOWN_METRICS` catalog
-/// and the rewrite plan §5.1 metric contract.
+/// the language-owned `sql.*`/`markdown.*` quality scores
+/// (`sql.maintainability_index`, `sql.modularity_health`, …) are too —
+/// otherwise `rank_top_offenders` would surface the *healthiest* SQL/doc
+/// files as the worst offenders (Codex P2). Every other metric the engine
+/// publishes (cyclomatic, cognitive, loc.*, halstead.*, abc, nom, nargs,
+/// nexit, npa, npm, wmc) is higher-is-worse. This mirrors the legacy
+/// `KNOWN_METRICS` catalog and the rewrite plan §5.1 metric contract.
 fn default_polarity_for(selector: &MetricSelector) -> Polarity {
-    if selector.key.as_str().starts_with("mi.") || selector.key.as_str() == "mi" {
+    let key = selector.key.as_str();
+    if key.starts_with("mi.")
+        || key == "mi"
+        || crate::metric_selector::is_namespaced_higher_is_better(key)
+    {
         Polarity::HigherIsBetter
     } else {
         Polarity::HigherIsWorse
@@ -739,6 +746,31 @@ mod tests {
     fn root_aggregator_reads_bare_key() {
         let space = space_with_metrics(&[("loc.lloc", 42.0), ("loc.lloc.max", 999.0)]);
         assert_eq!(read_metric(&sel("loc.lloc"), &space), 42.0);
+    }
+
+    #[test]
+    fn sql_quality_scores_are_higher_is_better_for_ranking() {
+        // Regression: `default_polarity_for` only knew `mi.*`, so the SQL
+        // quality scores were ranked higher-is-worse — surfacing the
+        // *healthiest* SQL files as the top offenders (Codex P2).
+        assert_eq!(
+            default_polarity_for(&sel("sql.maintainability_index")),
+            Polarity::HigherIsBetter
+        );
+        assert_eq!(
+            default_polarity_for(&sel("sql.modularity_health")),
+            Polarity::HigherIsBetter
+        );
+        // A risk score stays higher-is-worse (larger = more offending).
+        assert_eq!(
+            default_polarity_for(&sel("sql.change_risk_score")),
+            Polarity::HigherIsWorse
+        );
+        // mi.* is unchanged.
+        assert_eq!(
+            default_polarity_for(&sel("mi.visual_studio")),
+            Polarity::HigherIsBetter
+        );
     }
 
     #[test]

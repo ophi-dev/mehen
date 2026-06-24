@@ -280,8 +280,11 @@ fn strip_noncode(source: &str) -> String {
                 out.push(' ');
                 i += 1;
             }
-        } else if b == b'#' {
-            // MySQL-style line comment.
+        } else if b == b'#' && matches!(next, None | Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            // MySQL-style line comment — but only when `#` stands alone
+            // (followed by whitespace/EOL). `#tmp` / `##global` are T-SQL
+            // temp-table identifiers, NOT comments, so they must stay as code
+            // and not swallow later dialect hints on the line (CodeRabbit).
             while i < bytes.len() && bytes[i] != b'\n' {
                 out.push(' ');
                 i += 1;
@@ -518,6 +521,22 @@ mod tests {
 
     fn directive(source: &str) -> Option<DialectDirective> {
         parse_dialect_directive(source)
+    }
+
+    #[test]
+    fn hash_temp_table_is_not_a_comment_for_inference() {
+        // `#tmp` / `##global` are T-SQL temp tables, NOT `#` comments — they
+        // must not swallow later dialect hints on the line (CodeRabbit). The
+        // `CROSS APPLY` hint after `#tmp` must still infer T-SQL.
+        let r = resolve(
+            "SELECT * INTO #tmp FROM t CROSS APPLY dbo.fn(t.id) AS x",
+            None,
+        );
+        assert_eq!(r.effective, DialectKind::Tsql);
+        // A standalone `# ` comment IS still stripped (MySQL style): a hint
+        // only inside it does not drive inference.
+        let commented = resolve("# QUALIFY note\nSELECT a FROM t", None);
+        assert_eq!(commented.effective, DialectKind::Ansi);
     }
 
     #[test]
