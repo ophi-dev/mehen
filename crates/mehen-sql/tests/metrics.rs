@@ -938,3 +938,61 @@ fn create_index_writes_the_index_and_reads_the_host_table() {
     let drop = metrics("DROP INDEX idx ON t");
     assert_eq!(get(&drop, "sql.object.write_count"), 1.0);
 }
+
+// ── in-file dialect directive (`-- sqlfluff:dialect:<name>`) ──────────────
+
+/// Full analysis (metrics + diagnostics) for directive integration tests.
+fn analyze_full(sql: &str) -> mehen_core::LanguageAnalysis {
+    SqlAnalyzer::new()
+        .analyze(
+            &SourceFile::new("dir.sql".into(), Language::Sql, sql.to_string()),
+            &AnalysisConfig::production(),
+        )
+        .expect("analysis ok")
+}
+
+fn diag_codes(a: &mehen_core::LanguageAnalysis) -> Vec<String> {
+    a.diagnostics.iter().map(|d| d.code.clone()).collect()
+}
+
+#[test]
+fn directive_pins_dialect_and_sets_confidence() {
+    let m = metrics("-- sqlfluff:dialect:postgres\nSELECT 1");
+    assert_eq!(get(&m, "sql.dialect.is_postgres"), 1.0);
+    assert_eq!(get(&m, "sql.dialect.confidence"), 1.0);
+    assert_eq!(get(&m, "sql.dialect.directive_present"), 1.0);
+}
+
+#[test]
+fn directive_unknown_dialect_emits_warning_and_falls_back() {
+    let a = analyze_full("-- sqlfluff:dialect:nope\nSELECT 1");
+    assert!(diag_codes(&a).contains(&"sql.dialect.unknown".to_string()));
+    // Falls back to ansi inference; directive still recorded as present.
+    let m = &a.root.metrics;
+    assert_eq!(get(m, "sql.dialect.is_ansi"), 1.0);
+    assert_eq!(get(m, "sql.dialect.directive_present"), 1.0);
+    assert!(get(m, "sql.dialect.confidence") < 1.0);
+}
+
+#[test]
+fn directive_uncompiled_dialect_warns_and_does_not_panic() {
+    // `duckdb` is a real sqruff dialect but not compiled into this build. It
+    // must degrade to inference with a warning — never panic.
+    let a = analyze_full("-- sqlfluff:dialect:duckdb\nSELECT 1");
+    assert!(diag_codes(&a).contains(&"sql.dialect.unsupported".to_string()));
+    assert_eq!(get(&a.root.metrics, "sql.dialect.is_ansi"), 1.0);
+}
+
+#[test]
+fn directive_present_is_zero_without_a_directive() {
+    let m = metrics("SELECT 1");
+    assert_eq!(get(&m, "sql.dialect.directive_present"), 0.0);
+}
+
+#[test]
+fn directive_surfaces_on_comment_only_file() {
+    // No statements parse, but the bad directive warning must still surface.
+    let a = analyze_full("-- sqlfluff:dialect:nope\n-- just a note");
+    assert!(diag_codes(&a).contains(&"sql.dialect.unknown".to_string()));
+    assert_eq!(get(&a.root.metrics, "sql.dialect.directive_present"), 1.0);
+}

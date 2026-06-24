@@ -295,6 +295,7 @@ mod tests {
         let loc = SqlLoc::default();
         let d = DialectResolution {
             requested: None,
+            directive: None,
             inferred: sqruff_lib_core::dialects::init::DialectKind::Ansi,
             effective: sqruff_lib_core::dialects::init::DialectKind::Ansi,
             confidence: 30,

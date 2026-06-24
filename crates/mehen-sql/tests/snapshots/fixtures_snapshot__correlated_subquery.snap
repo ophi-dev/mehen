@@ -33,6 +33,7 @@ expression: "serde_json :: json!\n({\n    \"backend\" : analysis.backend.label()
     "sql.derived_table.count": 0,
     "sql.dialect.confidence": 0.3,
     "sql.dialect.conflict_count": 0,
+    "sql.dialect.directive_present": 0,
     "sql.dialect.is_ansi": 1,
     "sql.dialect.requested": 0,
     "sql.dml.delete_count": 0,

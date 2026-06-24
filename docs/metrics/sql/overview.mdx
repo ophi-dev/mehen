@@ -11,9 +11,44 @@ bodies, DDL packages, and mixed scripts. It is backed by the
 
 <Note>
 SQL files (`.sql`, `.ddl`, `.dml`) are analyzed automatically. The dialect is inferred from syntax
-hints with a reported confidence (`sql.dialect.confidence`), falling back to ANSI. sqruff supports
+hints with a reported confidence (`sql.dialect.confidence`), falling back to ANSI. mehen compiles
 ANSI, postgres, T-SQL, snowflake, bigquery, mysql, sqlite, oracle, clickhouse, redshift, sparksql,
 athena, and db2.
+</Note>
+
+## Selecting a dialect
+
+Dialect inference is a best-effort guess. To pin a file's dialect deterministically, add an in-file
+directive on its own line, using the same syntax as
+[SQLFluff's in-file configuration](https://docs.sqlfluff.com/en/stable/configuration/setting_configuration.html#in-file-configuration-directives):
+
+```sql
+-- sqlfluff:dialect:postgres
+SELECT id FROM users RETURNING id;
+```
+
+When present, the directive overrides inference: `sql.dialect.confidence` is reported as `1.0`,
+`sql.dialect.directive_present` is `1`, and `sql.dialect.is_<dialect>` reflects the pinned dialect.
+
+mehen mirrors SQLFluff's parsing of this directive:
+
+- Both `-- sqlfluff:dialect:<name>` and `--sqlfluff:dialect:<name>` (no space) are accepted; whitespace
+  around the colons is ignored.
+- The directive must start at the beginning of the line — an **indented** directive is ignored (this
+  matches SQLFluff).
+- Only `--` line comments are honored; **block comments** (`/* sqlfluff:dialect:… */`) are not.
+- If several directives appear, the **last** one wins.
+- An **unknown** dialect name (`sql.dialect.unknown`) or one **not compiled** into this build such as
+  `databricks`, `duckdb`, or `trino` (`sql.dialect.unsupported`) emits a non-blocking warning and
+  falls back to inference — it never aborts the analysis.
+
+<Note>
+sqruff (mehen's parser) does **not** itself consume SQLFluff in-file configuration — it silently
+ignores the directive (and older builds panic on some inline-config forms). mehen therefore parses
+the `dialect` directive itself and only ever hands sqruff a resolved, validated dialect. One
+intentional divergence from SQLFluff: SQLFluff matches dialect names **case-sensitively**, and so
+does mehen — `-- sqlfluff:dialect:Postgres` (capital P) is reported as an unknown dialect, exactly as
+SQLFluff would reject it.
 </Note>
 
 ## Why SQL gets its own family
@@ -50,7 +85,7 @@ These `sql.*` keys are published today (raw metrics — research foundation §15
 | `sql.select.*` | `star_count`, `outer_star_count`, `expression_without_alias_count`, `output_alias_coverage`. |
 | `sql.identifier.*`, `sql.alias.*`, `sql.relation.*` | `unqualified_column_ratio`, `quoted_count`, `table_alias_count`, `ref_count`. |
 | `sql.object.*`, `sql.dml.*`, `sql.ddl.*`, `sql.dcl.*`, `sql.transaction.*` | Object-touch and migration-risk counts (`read_count`, `write_count`, `drop_count`, `truncate_count`, `update_without_where_count`, …). |
-| `sql.dialect.*` | `confidence`, `conflict_count`, `requested`, `is_<dialect>`. |
+| `sql.dialect.*` | `confidence`, `conflict_count`, `requested`, `directive_present`, `is_<dialect>`. |
 | `sql.parser.*` | `diagnostic_count`, `unparsable_segment_count`, `unparsable_line_count`, `unparsable_ratio`. |
 | `sql.halstead.*` | `distinct_operators`, `distinct_operands`, `total_operators`, `total_operands`, `vocabulary`, `length`, `volume`, `difficulty`, `effort`. |
 

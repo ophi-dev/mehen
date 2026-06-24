@@ -42,7 +42,6 @@ use smol_str::SmolStr;
 use sqruff_lib_core::dialects::init::DialectKind;
 use sqruff_lib_core::parser::Parser;
 use sqruff_lib_core::parser::segments::Tables;
-use sqruff_lib_dialects::kind_to_dialect;
 
 use crate::dialect::dialect_label;
 
@@ -78,14 +77,14 @@ impl LanguageAnalyzer for SqlAnalyzer {
             end_line: source.line_index.line_count(),
         };
 
-        // Resolve the dialect (no explicit request surfaced in 1.0, so this is
-        // inference + ansi fallback). `kind_to_dialect` returns None only when
-        // the dialect's feature is off; `ansi` is always compiled, so the
-        // fallback can never fail.
-        let resolution = dialect::resolve(&source.text, requested_dialect());
-        let dialect = kind_to_dialect(&resolution.effective, None)
-            .or_else(|| kind_to_dialect(&DialectKind::Ansi, None))
-            .expect("ansi dialect is always available");
+        // Resolve the dialect and build its grammar in one step. An in-file
+        // `-- sqlfluff:dialect:<name>` directive (SQLFluff parity) wins, then a
+        // caller request (reserved in 1.0), then syntax inference; an
+        // unknown/uncompiled pin degrades to inference. The grammar is built
+        // exactly once here — `resolve_with_dialect` reuses the same build for
+        // its compiled-in check, so directive files don't pay for it twice.
+        let (resolution, dialect) =
+            dialect::resolve_with_dialect(&source.text, requested_dialect());
 
         let parser = Parser::from(&dialect);
         let tables = Tables::default();
@@ -192,6 +191,12 @@ impl LanguageAnalyzer for SqlAnalyzer {
                 format!("SQL lexer error: {err}"),
             ));
         }
+        // An in-file `-- sqlfluff:dialect:<name>` directive that names an
+        // unknown or uncompiled dialect degrades to inference; warn so the
+        // author sees why their pin had no effect.
+        if let Some(diag) = directive_diagnostic(&resolution) {
+            diagnostics.push(diag);
+        }
 
         Ok(LanguageAnalysis {
             language: Language::Sql,
@@ -225,6 +230,36 @@ fn publish_dialect_labels(root: &mut MetricSpace, resolution: &dialect::DialectR
         mehen_core::MetricKey::new(format!("sql.dialect.is_{effective}")),
         1i64,
     );
+}
+
+/// Translate a directive that named an unknown or uncompiled dialect into a
+/// non-blocking warning. An *active* directive (recognized + compiled) drives
+/// the dialect silently; only the degraded cases warn. Returns `None` when
+/// there is no directive or the directive is active.
+fn directive_diagnostic(resolution: &dialect::DialectResolution) -> Option<ParseDiagnostic> {
+    use dialect::DirectiveStatus;
+    let directive = resolution.directive.as_ref()?;
+    match directive.status {
+        DirectiveStatus::Active(_) => None,
+        DirectiveStatus::Unsupported => Some(ParseDiagnostic::warning(
+            "sql.dialect.unsupported",
+            format!(
+                "in-file directive requested dialect '{}', which is not compiled \
+                 into this build; falling back to inferred dialect '{}'",
+                directive.name,
+                dialect_label(resolution.inferred),
+            ),
+        )),
+        DirectiveStatus::Unknown => Some(ParseDiagnostic::warning(
+            "sql.dialect.unknown",
+            format!(
+                "in-file directive requested unknown dialect '{}'; falling back \
+                 to inferred dialect '{}'",
+                directive.name,
+                dialect_label(resolution.inferred),
+            ),
+        )),
+    }
 }
 
 /// Build an analysis with no parse tree (empty/comment-only input, or a hard
@@ -261,14 +296,19 @@ fn empty_sql_analysis(
     facts.lex_error_count = lex_error_count;
     metrics::publish(&facts, &loc, resolution, &mut root.metrics);
     publish_dialect_labels(&mut root, resolution);
-    let diagnostics = if lex_error_count > 0 {
-        vec![ParseDiagnostic::warning(
+    let mut diagnostics = Vec::new();
+    if lex_error_count > 0 {
+        diagnostics.push(ParseDiagnostic::warning(
             "sql.lex_error",
             format!("{lex_error_count} SQL lexer error(s)"),
-        )]
-    } else {
-        Vec::new()
-    };
+        ));
+    }
+    // A bad dialect directive must surface even when there is no parse tree
+    // (comment-only file, or a hard parse failure), so the author still sees
+    // why their pin had no effect.
+    if let Some(diag) = directive_diagnostic(resolution) {
+        diagnostics.push(diag);
+    }
     LanguageAnalysis {
         language: Language::Sql,
         backend: AnalysisBackend::Sqruff,

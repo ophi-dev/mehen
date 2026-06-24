@@ -403,6 +403,15 @@ fn publish_dialect(
         "sql.dialect.requested",
         dialect.requested.is_some() as i64,
     );
+    // 1 when an in-file `-- sqlfluff:dialect:<name>` directive was present
+    // (regardless of whether it resolved to a compiled dialect). The effective
+    // dialect itself is recoverable from the one-hot `sql.dialect.is_<name>`
+    // key published by `publish_dialect_labels`.
+    set(
+        target,
+        "sql.dialect.directive_present",
+        dialect.directive.is_some() as i64,
+    );
     let _ = dialect_label(dialect.effective);
 }
 

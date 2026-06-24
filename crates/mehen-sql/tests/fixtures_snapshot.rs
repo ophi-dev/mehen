@@ -68,3 +68,4 @@ fixture_snapshot!(analytics_cte_chain, "analytics_cte_chain");
 fixture_snapshot!(migration_destructive, "migration_destructive");
 fixture_snapshot!(correlated_subquery, "correlated_subquery");
 fixture_snapshot!(set_ops_unions, "set_ops_unions");
+fixture_snapshot!(dialect_directive, "dialect_directive");
