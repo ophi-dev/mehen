@@ -1783,6 +1783,13 @@ fn cte_name(cte: &ErasedSegment) -> String {
 /// referenced multiple times in one body is a single dependency edge — so the
 /// result is deduplicated to avoid inflating `dependency_edges`/`max_fan_out`
 /// (and thus the modularity score).
+///
+/// The crawl stops at any nested `WithCompoundStatement`: a table reference
+/// inside a CTE body's own `WITH` resolves in *that* inner scope, so it must
+/// not be matched against this block's `cte_names`. Otherwise
+/// `WITH b AS (…), a AS (WITH b AS (…) SELECT * FROM b) …` would forge a
+/// phantom `a -> b` edge against the outer `b` even though `a` reads the inner
+/// `b` (Codex P2).
 fn cte_body_dependencies(
     cte: &ErasedSegment,
     cte_names: &[String],
@@ -1790,7 +1797,7 @@ fn cte_body_dependencies(
     let refs = cte.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::TableReference),
         true,
-        &SyntaxSet::EMPTY,
+        &SyntaxSet::single(SyntaxKind::WithCompoundStatement),
         true,
     );
     let mut deps = std::collections::BTreeSet::new();

@@ -258,15 +258,100 @@ struct Inference {
 /// Map of dialect family → a count of how many of its hint tokens fired.
 /// Inference picks the family with the most hits; ties or a single weak hit
 /// keep confidence low and fall back to `ansi`.
+///
+/// Replace comment and string-literal *content* with spaces so the dialect
+/// inference scan only sees code. Handles `-- line` and `# line` comments,
+/// `/* block */` comments, and single-quoted string literals (with `''`
+/// escaping). Lengths are preserved (content → spaces) so this stays a cheap
+/// single pass and never needs to reallocate token boundaries. This is an
+/// advisory pre-scan, not a lexer; it does not need to model dollar-quoting or
+/// every dialect's quote rules — only to keep the common comment/literal
+/// false-positives out of the hint count.
+fn strip_noncode(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        if b == b'-' && next == Some(b'-') {
+            // Line comment to end of line.
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out.push(' ');
+                i += 1;
+            }
+        } else if b == b'#' {
+            // MySQL-style line comment.
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out.push(' ');
+                i += 1;
+            }
+        } else if b == b'/' && next == Some(b'*') {
+            // Block comment through the matching `*/` (or EOF).
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+            while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+            if i < bytes.len() {
+                out.push(' ');
+                out.push(' ');
+                i += 2;
+            }
+        } else if b == b'\'' {
+            // Single-quoted string literal; `''` is an escaped quote.
+            out.push(' ');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if bytes.get(i + 1) == Some(&b'\'') {
+                        out.push(' ');
+                        out.push(' ');
+                        i += 2;
+                        continue;
+                    }
+                    out.push(' ');
+                    i += 1;
+                    break;
+                }
+                out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+        } else {
+            // A non-ASCII byte is part of a multibyte UTF-8 sequence; copy the
+            // whole char so `out` stays valid UTF-8.
+            let ch_len = utf8_len(b);
+            out.push_str(&source[i..i + ch_len]);
+            i += ch_len;
+        }
+    }
+    out
+}
+
+/// Byte length of the UTF-8 char starting with lead byte `b`.
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
+}
+
 fn infer(source: &str) -> Inference {
-    let upper = source.to_ascii_uppercase();
-    // Word-boundary-ish containment: wrap the haystack in spaces and search
-    // for ` TOKEN ` / ` TOKEN(` is overkill for advisory hints, so we use
-    // plain `contains` on the uppercased text. False positives inside string
-    // literals or identifiers only nudge confidence; they never override an
-    // explicit request, and the cost of being wrong is a low-confidence
-    // advisory number, not a misparse (we still parse with the resolved
-    // dialect grammar).
+    // Inference scans for dialect-specific *code* tokens, so comments and
+    // string-literal bodies are stripped first: a hint token mentioned in a
+    // comment (`-- TODO: QUALIFY this`) or inside a literal (`'… NVARCHAR …'`)
+    // must not flip the effective parser dialect (Codex P2). Identifiers can
+    // still false-positive, but that only nudges an advisory confidence — the
+    // parse itself uses the resolved grammar.
+    let code = strip_noncode(source);
+    let upper = code.to_ascii_uppercase();
     let has = |needle: &str| upper.contains(needle);
 
     // Each family lists high-signal hints (research foundation §11.2).

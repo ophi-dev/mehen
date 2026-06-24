@@ -83,6 +83,33 @@ fn cte_dependency_graph_is_scoped_per_with_block() {
 }
 
 #[test]
+fn nested_with_does_not_forge_outer_cte_dependency() {
+    // `a`'s body has its own `WITH b`, so `FROM b` reads the *inner* `b`, not
+    // the outer sibling CTE `b`. No `a -> b` edge against the outer `b`
+    // (Codex P2: the dependency scan must stop at nested WITH blocks).
+    let m = metrics(
+        "WITH b AS (SELECT 1 AS x), \
+              a AS (WITH b AS (SELECT 2 AS y) SELECT * FROM b) \
+         SELECT * FROM a",
+    );
+    assert_eq!(get(&m, "sql.cte.dependency_edges"), 0.0);
+    assert_eq!(get(&m, "sql.cte.max_dependency_depth"), 1.0);
+}
+
+#[test]
+fn dialect_inference_ignores_comments_and_literals() {
+    // A dialect hint that appears only in a comment or a string literal must
+    // not flip the effective parser dialect (Codex P2). These files are ANSI.
+    let comment = metrics("-- TODO: QUALIFY this later\nSELECT a FROM t");
+    assert_eq!(get(&comment, "sql.dialect.is_ansi"), 1.0);
+    let literal = metrics("SELECT 'mentions NVARCHAR here' AS note FROM t");
+    assert_eq!(get(&literal, "sql.dialect.is_ansi"), 1.0);
+    // A genuine code hint is still detected.
+    let real = metrics("SELECT a::text FROM t");
+    assert_eq!(get(&real, "sql.dialect.is_postgres"), 1.0);
+}
+
+#[test]
 fn join_count_and_kinds() {
     let sql = "SELECT * FROM a \
                INNER JOIN b ON a.id = b.id \
