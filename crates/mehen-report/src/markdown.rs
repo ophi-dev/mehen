@@ -466,9 +466,17 @@ fn write_nested_spaces(out: &mut String, spaces: &[MetricSpace], depth: usize, l
         // family metrics (`markdown.*` / `sql.*`); their nested spaces
         // (Markdown sections / embedded code, SQL per-statement spans)
         // carry no source-code roll-ups, so the Cyclomatic / Cognitive
-        // / LOC tables would all be zero. Skip them in that case rather
-        // than emit misleading numbers.
-        if language != Language::Markdown && language != Language::Sql {
+        // / LOC tables would all be zero.
+        if language == Language::Sql {
+            // A SQL per-statement space carries only its line span. Emit that
+            // one fact so the heading isn't a content-free stub (the
+            // source-code metric tables would all be zero here).
+            let lines = read_metric(&space.metrics, "sql.statement.lines");
+            if lines > 0.0 {
+                let _ = writeln!(out);
+                let _ = writeln!(out, "- Lines: {}", lines as i64);
+            }
+        } else if language != Language::Markdown {
             let families = MetricsFamilies::from_metrics(&space.metrics);
             write_cyclomatic(out, &families.cyclomatic);
             write_cognitive(out, &families.cognitive);
@@ -914,5 +922,44 @@ mod tests {
         // own table.
         let space_section = md.split("## Spaces").nth(1).expect("Spaces section");
         assert!(space_section.contains("| 2 |"));
+    }
+
+    #[test]
+    fn sql_statement_spaces_render_their_line_count_not_empty_headings() {
+        // Regression: a SQL per-statement space carries only `sql.statement.lines`
+        // and no source-code roll-ups, so the renderer skipped its metric tables
+        // — leaving a `### custom <kind>` heading with no content (Codex P3).
+        // It must instead surface the statement's line count.
+        let mut root = MetricSpace::new(SpaceId(0), SpaceKind::Unit, SourceSpan::empty());
+        root.metrics
+            .insert(MetricKey::new("sql.statement.count"), 1.0);
+        let mut stmt = MetricSpace::new(
+            SpaceId(1),
+            SpaceKind::Custom(mehen_core::SmolStr::new("sql.statement")),
+            SourceSpan::empty(),
+        );
+        stmt.name = Some("select".to_string());
+        stmt.metrics
+            .insert(MetricKey::new("sql.statement.lines"), 3.0);
+        root.spaces.push(stmt);
+        let report = MetricsReport {
+            schema_version: "1.0".to_string(),
+            tool: "mehen".to_string(),
+            path: "q.sql".into(),
+            language: Language::Sql,
+            analysis_backend: AnalysisBackend::Sqruff,
+            diagnostics: Vec::new(),
+            root,
+        };
+        let md = render_metrics_markdown(&report);
+        let space_section = md.split("## Spaces").nth(1).expect("Spaces section");
+        assert!(space_section.contains("custom `select`"));
+        // The line count is surfaced, so the heading isn't a content-free stub.
+        assert!(
+            space_section.contains("- Lines: 3"),
+            "SQL statement space should show its line count: {space_section}"
+        );
+        // No misleading source-code tables.
+        assert!(!space_section.contains("### Cyclomatic"));
     }
 }

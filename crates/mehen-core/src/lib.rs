@@ -54,6 +54,10 @@ pub use report::{
 pub use selector::{MetricSelector, SelectorAggregator, SelectorParseError};
 pub use source::SourceFile;
 pub use space::{MetricSpace, SpaceId, SpaceKind};
+// `SmolStr` is part of the public API via `SpaceKind::Custom(SmolStr)`, so
+// re-export it — callers (and tests) can construct custom spaces without a
+// separate `smol_str` dependency.
+pub use smol_str::SmolStr;
 pub use span::{SourceSpan, byte_offset_checked, byte_offset_clamped};
 pub use threshold::{Polarity, Threshold, ThresholdEvaluation, ThresholdViolation};
 
