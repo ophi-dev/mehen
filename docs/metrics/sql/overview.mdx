@@ -32,8 +32,9 @@ When present, the directive overrides inference: `sql.dialect.confidence` is rep
 
 mehen mirrors SQLFluff's parsing of this directive:
 
-- Both `-- sqlfluff:dialect:<name>` and `--sqlfluff:dialect:<name>` (no space) are accepted; whitespace
-  around the colons is ignored.
+- Both `-- sqlfluff:dialect:<name>` and `--sqlfluff:dialect:<name>` (no space) are accepted.
+  Whitespace around the `dialect:<name>` separator is ignored, but the `sqlfluff:` prefix itself must
+  be exact.
 - The directive must start at the beginning of the line — an **indented** directive is ignored (this
   matches SQLFluff).
 - Only `--` line comments are honored; **block comments** (`/* sqlfluff:dialect:… */`) are not.

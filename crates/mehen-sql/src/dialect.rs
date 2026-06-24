@@ -120,7 +120,6 @@ pub(crate) fn resolve_with_dialect(
         _ => None,
     };
 
-    let mut authoritative = directive_kind.is_some() || requested.is_some();
     let mut effective = directive_kind.or(requested).unwrap_or(inference.kind);
     let dialect = loop {
         if let Some(d) = dialect_for_kind(effective) {
@@ -134,16 +133,21 @@ pub(crate) fn resolve_with_dialect(
             dir.status = DirectiveStatus::Unsupported;
         }
         // Fall back to a caller request if it differs and is compiled, else to
-        // inference. Either way the pin was not honored, so confidence is no
-        // longer authoritative.
-        authoritative = false;
+        // inference.
         effective = match requested {
             Some(req) if req != effective => req,
             _ => inference.kind,
         };
     };
 
-    let confidence = if authoritative {
+    // Authority is recomputed from the *final* effective source: a pin is
+    // authoritative only if `effective` still equals the (compiled) directive
+    // or caller request. This correctly keeps confidence 100 when an
+    // unsupported directive falls through to a compiled `requested` dialect,
+    // and drops it to inference confidence when both pins were dropped.
+    let directive_authoritative = directive_kind == Some(effective);
+    let request_authoritative = requested == Some(effective);
+    let confidence = if directive_authoritative || request_authoritative {
         100
     } else {
         inference.confidence
@@ -540,6 +544,20 @@ mod tests {
         let ok = resolve("SELECT 1", Some(DialectKind::Postgres));
         assert_eq!(ok.effective, DialectKind::Postgres);
         assert_eq!(ok.confidence, 100);
+    }
+
+    #[test]
+    fn unsupported_directive_falls_through_to_compiled_request_authoritatively() {
+        // An unsupported directive (`duckdb`) falling through to a *compiled*
+        // caller request must keep confidence 100 — authority is recomputed
+        // from the final effective source, not cleared on the first fallback.
+        let r = resolve(
+            "-- sqlfluff:dialect:duckdb\nSELECT 1",
+            Some(DialectKind::Postgres),
+        );
+        assert_eq!(r.effective, DialectKind::Postgres);
+        assert_eq!(r.confidence, 100);
+        assert_eq!(r.directive.unwrap().status, DirectiveStatus::Unsupported);
     }
 
     #[test]
