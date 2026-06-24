@@ -586,6 +586,12 @@ fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
             JoinWord::Full
         } else if has_kw("CROSS") {
             JoinWord::Cross
+        } else if has_kw("OUTER") {
+            // T-SQL `OUTER APPLY` is a left-outer lateral join (it preserves
+            // left rows), so it counts toward `outer_count` like a LEFT join —
+            // not as an inner join (Codex P2). `APPLY` also sets the lateral
+            // flag below.
+            JoinWord::Left
         } else {
             JoinWord::Inner
         };
@@ -668,11 +674,15 @@ fn join_condition_has_equality(clause: &ErasedSegment, has_using: bool) -> bool 
     if has_using {
         return true;
     }
+    // Only *this* join's own `ON` condition counts: stop at any nested
+    // `JoinClause` so a subquery's join condition in the `ON` clause
+    // (`… AND EXISTS (SELECT … JOIN d ON c.id = d.id)`) isn't read as the
+    // outer join's equality (Codex P2).
     let conds = clause.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::JoinOnCondition),
         true,
-        &SyntaxSet::EMPTY,
-        true,
+        &SyntaxSet::single(SyntaxKind::JoinClause),
+        false,
     );
     // An equi-join needs an equality (`=`) *between two column references* —
     // `ON a.id = b.id`. A `=` against a literal or constant (`ON 1 = 1`,
@@ -712,8 +722,14 @@ fn expression_has_column_equality(node: &ErasedSegment) -> bool {
         }
     }
     // Recurse into nested expression/bracketed groups (e.g. compound ON with
-    // AND/OR, or parenthesized conditions).
-    node.segments().iter().any(expression_has_column_equality)
+    // AND/OR, or parenthesized conditions) — but NOT into a nested subquery
+    // (`EXISTS (SELECT … ON c.id = d.id)`): an equality inside the subquery is
+    // that query's join key, not this join's, and must not mark this join as
+    // equi (Codex P2).
+    node.segments()
+        .iter()
+        .filter(|child| !child.is_type(SyntaxKind::SelectStatement))
+        .any(expression_has_column_equality)
 }
 
 /// Whether an `=` operand is (after unwrapping any parentheses/expression

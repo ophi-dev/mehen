@@ -145,6 +145,35 @@ fn join_count_and_kinds() {
 }
 
 #[test]
+fn outer_apply_is_an_outer_lateral_join() {
+    // T-SQL `OUTER APPLY` is a left-outer lateral join: it counts toward
+    // outer_count and lateral, not inner (Codex P2).
+    let outer = metrics("SELECT * FROM t OUTER APPLY dbo.fn(t.id) AS x");
+    assert_eq!(get(&outer, "sql.join.outer_count"), 1.0);
+    assert_eq!(get(&outer, "sql.join.kind_count.lateral"), 1.0);
+    assert_eq!(get(&outer, "sql.join.kind_count.inner"), 0.0);
+    // `CROSS APPLY` is lateral but not outer.
+    let cross = metrics("SELECT * FROM t CROSS APPLY dbo.fn(t.id) AS x");
+    assert_eq!(get(&cross, "sql.join.kind_count.lateral"), 1.0);
+    assert_eq!(get(&cross, "sql.join.outer_count"), 0.0);
+}
+
+#[test]
+fn non_equi_join_ignores_nested_subquery_equalities() {
+    // A range/non-equi outer join whose ON clause contains a subquery with its
+    // own `col = col` must still count as non-equi: the nested equality is the
+    // subquery's join key, not the outer join's (Codex P2).
+    let m = metrics(
+        "SELECT * FROM a JOIN b ON a.ts > b.ts \
+         AND EXISTS (SELECT 1 FROM c JOIN d ON c.id = d.id)",
+    );
+    assert_eq!(get(&m, "sql.join.non_equi_count"), 1.0);
+    // A genuine equi join is still not flagged.
+    let equi = metrics("SELECT * FROM a JOIN b ON a.id = b.id");
+    assert_eq!(get(&equi, "sql.join.non_equi_count"), 0.0);
+}
+
+#[test]
 fn case_count_and_nesting() {
     let sql = "SELECT CASE WHEN a > 1 THEN \
                           CASE WHEN b > 2 THEN 'x' ELSE 'y' END \
