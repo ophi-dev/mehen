@@ -1,16 +1,55 @@
 ---
-title: "SQL metrics — preview"
-description: "What the upcoming mehen-sql analyzer will measure: query-block structure, CTE graphs, join graphs, predicate complexity, object-touch risk, and an SQL Halstead."
+title: "SQL metrics"
+description: "What the mehen-sql analyzer measures: query-block structure, CTE graphs, join graphs, predicate complexity, object-touch risk, and an SQL Halstead."
 keywords: ["sql metrics", "mehen-sql", "query complexity", "cte", "halstead sql"]
 ---
 
-A dedicated SQL analyzer (`mehen-sql`) is on mehen's roadmap. It will introduce a new `sql.*` metric
-namespace tailored to standalone `.sql` files — ad-hoc queries, analytics models, migration scripts,
-stored-program bodies, DDL packages, and mixed scripts.
+A dedicated SQL analyzer (`mehen-sql`) introduces a new `sql.*` metric namespace tailored to
+standalone `.sql` files — ad-hoc queries, analytics models, migration scripts, stored-program
+bodies, DDL packages, and mixed scripts. It is backed by the
+[sqruff](https://github.com/quarylabs/sqruff) dialect-aware SQL parser.
 
 <Note>
-SQL support is **not yet shipped**. This page documents the design so consumers of mehen can plan
-ahead. Tracking issue: [ophi-dev/mehen#sql-metrics](https://github.com/ophi-dev/mehen/issues).
+SQL files (`.sql`, `.ddl`, `.dml`) are analyzed automatically. The dialect is inferred from syntax
+hints with a reported confidence (`sql.dialect.confidence`), falling back to ANSI. mehen compiles
+ANSI, postgres, T-SQL, snowflake, bigquery, mysql, sqlite, oracle, clickhouse, redshift, sparksql,
+athena, and db2.
+</Note>
+
+## Selecting a dialect
+
+Dialect inference is a best-effort guess. To pin a file's dialect deterministically, add an in-file
+directive on its own line, using the same syntax as
+[SQLFluff's in-file configuration](https://docs.sqlfluff.com/en/stable/configuration/setting_configuration.html#in-file-configuration-directives):
+
+```sql
+-- sqlfluff:dialect:postgres
+SELECT id FROM users RETURNING id;
+```
+
+When present, the directive overrides inference: `sql.dialect.confidence` is reported as `1.0`,
+`sql.dialect.directive_present` is `1`, and `sql.dialect.is_<dialect>` reflects the pinned dialect.
+
+mehen mirrors SQLFluff's parsing of this directive:
+
+- Both `-- sqlfluff:dialect:<name>` and `--sqlfluff:dialect:<name>` (no space) are accepted.
+  Whitespace around the `dialect:<name>` separator is ignored, but the `sqlfluff:` prefix itself must
+  be exact.
+- The directive must start at the beginning of the line — an **indented** directive is ignored (this
+  matches SQLFluff).
+- Only `--` line comments are honored; **block comments** (`/* sqlfluff:dialect:… */`) are not.
+- If several directives appear, the **last** one wins.
+- An **unknown** dialect name (`sql.dialect.unknown`) or one **not compiled** into this build such as
+  `databricks`, `duckdb`, or `trino` (`sql.dialect.unsupported`) emits a non-blocking warning and
+  falls back to inference — it never aborts the analysis.
+
+<Note>
+sqruff (mehen's parser) does **not** itself consume SQLFluff in-file configuration — it silently
+ignores the directive (and older builds panic on some inline-config forms). mehen therefore parses
+the `dialect` directive itself and only ever hands sqruff a resolved, validated dialect. One
+intentional divergence from SQLFluff: SQLFluff matches dialect names **case-sensitively**, and so
+does mehen — `-- sqlfluff:dialect:Postgres` (capital P) is reported as an unknown dialect, exactly as
+SQLFluff would reject it.
 </Note>
 
 ## Why SQL gets its own family
@@ -26,39 +65,45 @@ control flow:
 - Object-touch risk (DROP, TRUNCATE, MERGE without WHERE) often dominates "review burden" in migration
   scripts.
 
-## Planned metric namespaces
+## Metric namespaces
 
-| Namespace | Examples |
+These `sql.*` keys are published today (raw metrics — research foundation §15):
+
+| Namespace | Keys |
 |---|---|
-| `sql.loc.*` | `physical`, `code`, `comment`, `blank`, `logical`, `comment_density`, `max_statement_lines`. |
+| `sql.loc.*` | `physical`, `code`, `comment`, `blank`, `logical`, `comment_density`, `max_statement_lines`, `avg_statement_lines`. |
 | `sql.statement.*` | `count`, `kind_count.<kind>`, `kind_distinct`, `kind_entropy`, `unparsed_count`. |
 | `sql.query_block.*` | `count`, `max_depth`, `avg_select_items`, `max_select_items`. |
-| `sql.cte.*` | `count`, `recursive_count`, `dependency_edges`, `max_dependency_depth`, `unused_count`, `trivial_count`. |
-| `sql.join.*` | `count`, `kind_count.<kind>`, `outer_count`, `cross_count`, `non_equi_count`, `complex_condition_count`. |
-| `sql.subquery.*` | `count`, `max_depth`, `correlated_count`, `scalar_count`, `exists_count`. |
-| `sql.predicate.*` | `boolean_operator_count`, `max_boolean_depth`, `null_semantics_risk_count`, `sargability_risk_count`. |
-| `sql.case.*` | `count`, `max_depth`, `when_count`, `missing_else_count`. |
-| `sql.aggregate.*` | `function_count`, `distinct_count`, `group_by.*`, `having.count`. |
-| `sql.window.*` | `function_count`, `distinct_spec_count`, `frame_count`. |
+| `sql.cte.*` | `count`, `recursive_count`, `dependency_edges`, `max_dependency_depth`, `max_fan_out`, `unused_count`. |
+| `sql.join.*` | `count`, `kind_count.<kind>`, `outer_count`, `cross_count`, `natural_count`, `non_equi_count`, `missing_condition_count`. |
+| `sql.subquery.*`, `sql.derived_table.*` | `count`, `max_depth`, `correlated_count`, `scalar_count`, `exists_count`, `in_count`. |
+| `sql.predicate.*` | `boolean_operator_count`, `max_boolean_depth`, `not_count`, `comparison_count`, `null_semantics_risk_count`. |
+| `sql.case.*` | `count`, `max_depth`, `when_count`, `max_when_count`, `missing_else_count`. |
+| `sql.aggregate.*`, `sql.group_by.*`, `sql.having.*` | `function_count`, `distinct_count`, `count`, `rollup_count`, `cube_count`, `grouping_sets_count`. |
+| `sql.window.*` | `function_count`, `frame_count`, `partition_expression_count`, `order_expression_count`. |
 | `sql.set_op.*` | `count`, `kind_count.<kind>`, `union_all_ratio`. |
-| `sql.expression.*` | `count`, `max_depth`, `function.call_count`, `function.nested_call_depth`. |
-| `sql.select.*` | `star_count`, `outer_star_count`, `expression_without_alias_count`. |
-| `sql.identifier.*` | `unqualified_column_ratio`, `quoted_count`, `keyword_identifier_count`. |
-| `sql.object.*`, `sql.dml.*`, `sql.ddl.*`, `sql.dcl.*` | Object-touch and migration-risk metrics. |
-| `sql.dialect.*` | `requested`, `inferred`, `confidence`, `feature_count.<feature>`, `portability_risk_count`. |
-| `sql.parser.*` | `diagnostic_count`, `unparsable_segment_count`, `unparsable_ratio`, `recovery_count`. |
-| `sql.halstead.*` | SQL-flavored Halstead with explicit operator/operand taxonomy. |
-| `sql.procedural.*` | Cyclomatic and cognitive complexity for PL/SQL / T-SQL routines. |
+| `sql.expression.*`, `sql.function.*`, `sql.cast.*` | `max_depth`, `call_count`, `distinct_count`, `nested_call_depth`, `count`. |
+| `sql.select.*` | `star_count`, `outer_star_count`, `expression_without_alias_count`, `output_alias_coverage`. |
+| `sql.identifier.*`, `sql.alias.*`, `sql.relation.*` | `unqualified_column_ratio`, `quoted_count`, `table_alias_count`, `ref_count`. |
+| `sql.object.*`, `sql.dml.*`, `sql.ddl.*`, `sql.dcl.*`, `sql.transaction.*` | Object-touch and migration-risk counts (`read_count`, `write_count`, `drop_count`, `truncate_count`, `update_without_where_count`, …). |
+| `sql.dialect.*` | `confidence`, `conflict_count`, `requested`, `directive_present`, `is_<dialect>`. |
+| `sql.parser.*` | `diagnostic_count`, `unparsable_segment_count`, `unparsable_line_count`, `unparsable_ratio`. |
+| `sql.halstead.*` | `distinct_operators`, `distinct_operands`, `total_operators`, `total_operands`, `vocabulary`, `length`, `volume`, `difficulty`, `effort`. |
 
-## Planned composite scores
+Procedural-SQL metrics (`sql.procedural.*` — cyclomatic/cognitive complexity for PL/SQL and T-SQL
+routines) remain on the [roadmap](/metrics/sql/roadmap).
+
+## Composite scores
+
+All six explainable composite scores ship today (research foundation §8):
 
 - `sql.structural_complexity` — CTE depth, join count, subquery depth, CASE depth, window count, set op
   count.
 - `sql.cognitive_complexity` — SQL analogue of code cognitive complexity.
-- `sql.review_burden_index` — file-level rank for likely PR review effort.
+- `sql.review_burden_index` — file-level rank (0–100) for likely PR review effort.
 - `sql.change_risk_score` — operational risk in migration scripts.
-- `sql.maintainability_index` — composite with band interpretation.
-- `sql.modularity_health` — CTE use ratio, fan-out, derived-table penalty.
+- `sql.maintainability_index` — composite (0–100, higher is better) with band interpretation.
+- `sql.modularity_health` — CTE use ratio, fan-out, derived-table penalty (0–100; N/A without CTEs).
 
 ## Prior art and scientific basis
 

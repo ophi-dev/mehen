@@ -165,10 +165,10 @@
         ]
       },
       {
-        "tab": "SQL metrics (preview)",
+        "tab": "SQL metrics",
         "groups": [
           {
-            "group": "Preview",
+            "group": "SQL",
             "pages": [
               "metrics/sql/overview",
               "metrics/sql/roadmap"

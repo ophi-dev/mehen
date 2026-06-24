@@ -1,0 +1,49 @@
+[package]
+name = "mehen-sql"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Mehen 1.0 — SQL language analyzer (internal)."
+publish = false
+
+[dependencies]
+mehen-core = { workspace = true }
+smol_str = { workspace = true }
+
+# sqruff is the SQL parser backend (research: design-docs/sql_parser_comparison.md).
+# Pinned to a tagged git ref, mirroring the ruff pattern. It builds as a plain
+# `cargo build` (no Python/codegen), exposes one dialect-agnostic `SyntaxKind`
+# node model, and ships CTE/scope/wildcard analysis. We depend only on
+# `lib-core` (lexer+parser+segment model+analysis utils) and `lib-dialects`
+# (feature-gated dialect grammars) — never the heavier `lib` crate, so no
+# Jinja templater plumbing or `pyo3` is pulled in.
+sqruff-lib-core = { git = "https://github.com/quarylabs/sqruff", tag = "v0.38.0" }
+# `ansi` is always compiled by sqruff (not a feature gate) and is the
+# inference fallback, so it is not listed here. `sparksql` transitively pulls
+# in `hive`. We deliberately omit `duckdb` (its dialect is a thin layer over
+# `postgres`, which we already ship).
+sqruff-lib-dialects = { git = "https://github.com/quarylabs/sqruff", tag = "v0.38.0", default-features = false, features = [
+    "postgres",
+    "tsql",
+    "snowflake",
+    "bigquery",
+    "mysql",
+    "sqlite",
+    "oracle",
+    "clickhouse",
+    "redshift",
+    "sparksql",
+    "athena",
+    "db2",
+] }
+
+[dev-dependencies]
+insta = { workspace = true }
+mehen-report = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

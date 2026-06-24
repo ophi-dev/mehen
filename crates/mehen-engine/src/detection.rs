@@ -11,7 +11,8 @@ use mehen_core::Language;
 /// - `.py` → Python (no `.pyi` until Phase 6 explicitly adds stub fixtures);
 /// - `.ts/.mts/.cts` → TypeScript; `.js/.mjs/.cjs` → JavaScript;
 /// - `.tsx` → TSX; `.jsx` → JSX (split out from TS in 1.0);
-/// - `.md/.mdx` (and legacy variants) → Markdown.
+/// - `.md/.mdx` (and legacy variants) → Markdown;
+/// - `.sql/.ddl/.dml` → SQL.
 pub fn detect_language(path: &Utf8Path) -> Option<Language> {
     let ext = path.extension()?.to_ascii_lowercase();
     let lang = match ext.as_str() {
@@ -28,6 +29,7 @@ pub fn detect_language(path: &Utf8Path) -> Option<Language> {
         "c" | "h" => Language::C,
         "php" | "php3" | "php4" | "php5" | "php7" | "php8" | "phtml" => Language::Php,
         "md" | "markdown" | "mdown" | "mkd" | "mkdn" | "mdx" => Language::Markdown,
+        "sql" | "ddl" | "dml" => Language::Sql,
         _ => return None,
     };
     Some(lang)

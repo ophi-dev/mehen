@@ -60,11 +60,18 @@ Markdown gets a dedicated documentation metric suite — code-style metrics like
 and NOM/NPA/NPM/WMC do not apply because Markdown has no functions or classes. See
 [Markdown metrics](/metrics/markdown/overview) for the full set.
 
-## SQL (preview)
+## SQL
 
-A dedicated SQL analyzer (`mehen-sql`) is on the roadmap with its own metric family — query-block
-structure, CTE graphs, join graphs, predicate complexity, object-touch risk, dialect portability, and
-an SQL-flavored Halstead. See [SQL metrics overview](/metrics/sql/overview) for the design.
+| Format | Extensions | Parser |
+|---|---|---|
+| **SQL** | `.sql`, `.ddl`, `.dml` | [sqruff](https://github.com/quarylabs/sqruff) |
+
+A dedicated SQL analyzer (`mehen-sql`) ships its own metric family — query-block structure, CTE
+graphs, join graphs, predicate complexity, object-touch risk, dialect portability, and an
+SQL-flavored Halstead. Code-style metrics like cyclomatic complexity and NOM/NPA/NPM/WMC do not
+apply to declarative SQL. The dialect is inferred from syntax hints (postgres, T-SQL, snowflake,
+bigquery, mysql, sqlite, oracle, clickhouse, redshift, sparksql, athena, db2) with a reported
+confidence, defaulting to ANSI. See [SQL metrics overview](/metrics/sql/overview) for the full set.
 
 ## Polyglot monorepos
 

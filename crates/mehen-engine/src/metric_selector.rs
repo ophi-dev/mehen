@@ -54,6 +54,61 @@ pub(crate) const DEFAULT_METRICS: &[&str] = &[
     "mi.visual_studio",
 ];
 
+/// Default selectors for SQL files. The source-code defaults
+/// ([`DEFAULT_METRICS`]) are all keys the SQL analyzer never publishes, so a
+/// SQL file diffed with them reads `0.0` for every column and is dropped as
+/// "unchanged". SQL files instead default to the first-release composite set
+/// (research foundation §15) so `mehen diff` surfaces SQL changes without the
+/// caller needing to know the `sql.*` keys (Codex P2).
+pub(crate) const DEFAULT_SQL_METRICS: &[&str] = &[
+    "sql.change_risk_score",
+    "sql.maintainability_index",
+    "sql.review_burden_index",
+    "sql.cognitive_complexity",
+    "sql.loc.code",
+];
+
+/// Default metric specs for a language, used when the caller passes no
+/// explicit `--metric`. SQL owns a disjoint metric namespace, so it gets its
+/// own defaults; every other language uses the source-code defaults.
+pub(crate) fn default_metrics_for_language(
+    language: mehen_core::Language,
+) -> &'static [&'static str] {
+    match language {
+        mehen_core::Language::Sql => DEFAULT_SQL_METRICS,
+        _ => DEFAULT_METRICS,
+    }
+}
+
+/// Resolve the default selectors for a language (no explicit `--metric`).
+///
+/// SQL defaults are `'static` names, so they are built into `MetricSelector`s
+/// directly (no `String` allocation / `Box::leak` round-trip through the
+/// namespaced-parsing path). Other languages use the source-code catalogue.
+pub(crate) fn default_selectors_for_language(
+    language: mehen_core::Language,
+) -> Vec<MetricSelector> {
+    default_metrics_for_language(language)
+        .iter()
+        .map(|&name| {
+            // A KNOWN_METRICS entry carries a curated label/polarity; a
+            // namespaced key (`sql.*`) is its own label with a by-key polarity.
+            match KNOWN_METRICS.iter().find(|(n, ..)| *n == name) {
+                Some(&(n, label, polarity)) => MetricSelector {
+                    name: n,
+                    label,
+                    polarity,
+                },
+                None => MetricSelector {
+                    name,
+                    label: name,
+                    polarity: default_namespaced_polarity(name),
+                },
+            }
+        })
+        .collect()
+}
+
 /// Parse a list of metric specs into resolved [`MetricSelector`]s.
 ///
 /// A spec is a bare metric name (`cognitive`) or a polarity-prefixed name
@@ -88,6 +143,19 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
                 label,
                 polarity: polarity_override.unwrap_or(default_polarity),
             });
+        } else if is_namespaced_metric(name) {
+            // Language-owned families (`sql.*`, `markdown.*`) publish flat keys
+            // that aren't in the source-code `KNOWN_METRICS` catalogue. Accept
+            // any such key verbatim so e.g. `--metric sql.change_risk_score`
+            // works. `read_metric` reads the bare key from the `MetricSpace`.
+            // The name/label must be `'static`; leak the (short-lived, CLI-run)
+            // string, matching `metric_set_key_for`'s fallback.
+            let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+            selectors.push(MetricSelector {
+                name: leaked,
+                label: leaked,
+                polarity: polarity_override.unwrap_or_else(|| default_namespaced_polarity(name)),
+            });
         } else {
             log::warn!("Unknown metric '{name}', skipping.");
         }
@@ -96,15 +164,66 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
     selectors
 }
 
+/// Whether `name` is a language-owned namespaced metric key (`sql.*`,
+/// `markdown.*`) that the CLI should accept even though it is not in the
+/// source-code `KNOWN_METRICS` catalogue.
+fn is_namespaced_metric(name: &str) -> bool {
+    name.starts_with("sql.") || name.starts_with("markdown.")
+}
+
+/// Namespaced (`sql.*` / `markdown.*`) metric keys where a *larger* value is
+/// healthier. Substring inference is too crude (e.g.
+/// `markdown.maintainability.artifact_debt_score` is a penalty despite
+/// containing "maintainability", and `sql.dialect.confidence` is
+/// higher-is-better), so the higher-is-better metrics are enumerated by exact
+/// key and everything else defaults to higher-is-worse. This is the single
+/// source of truth shared by the `diff` selector polarity and the
+/// `top-offenders` ranking polarity ([`crate::top_offenders`]).
+pub(crate) const NAMESPACED_HIGHER_IS_BETTER: &[&str] = &[
+    // SQL composite/quality scores where larger is healthier.
+    "sql.maintainability_index",
+    "sql.modularity_health",
+    "sql.select.output_alias_coverage",
+    "sql.dialect.confidence",
+    // Markdown quality scores where larger is healthier.
+    "markdown.maintainability.documentation_maintainability_index",
+    "markdown.maintainability.section_balance_score",
+    "markdown.maintainability.good_scaffold_score",
+    "markdown.grounding.repository_grounding_score",
+    "markdown.grounding.evidence_coverage_score",
+    "markdown.links.information_scent_score",
+];
+
+/// Whether a namespaced metric key is higher-is-better (see
+/// [`NAMESPACED_HIGHER_IS_BETTER`]).
+pub(crate) fn is_namespaced_higher_is_better(name: &str) -> bool {
+    NAMESPACED_HIGHER_IS_BETTER.contains(&name)
+}
+
+/// Default polarity for a namespaced metric, by *exact* key. Users can always
+/// override with a `+`/`-` prefix.
+fn default_namespaced_polarity(name: &str) -> Polarity {
+    if is_namespaced_higher_is_better(name) {
+        Polarity::HigherIsBetter
+    } else {
+        Polarity::LowerIsBetter
+    }
+}
+
 /// Translate a CLI selector name (e.g. `cyclomatic`, `nom.functions`,
 /// `mi.visual_studio`) to the `MetricSet` key the shared walker
 /// publishes onto the root `MetricSpace`.
 ///
 /// Most names map verbatim; the rolled-up scalar metrics
 /// (`cyclomatic`, `cognitive`) live under their `*.sum` key. Any
-/// unknown selector falls back to its bare name; missing keys read as
-/// `0.0` from `read_metric`.
-pub(crate) fn metric_set_key_for(name: &str) -> &'static str {
+/// unknown selector (e.g. a namespaced `sql.*`/`markdown.*` key) falls
+/// back to its bare name; missing keys read as `0.0` from `read_metric`.
+///
+/// The result borrows from `name` for the fallback case, so this never
+/// allocates — `read_metric` builds a `MetricKey` from it immediately.
+/// (A previous version returned `&'static str` and `Box::leak`ed the
+/// fallback, leaking one string per metric-read on namespaced selectors.)
+pub(crate) fn metric_set_key_for(name: &str) -> &str {
     match name {
         "cyclomatic" => "cyclomatic.sum",
         "cognitive" => "cognitive.sum",
@@ -115,7 +234,7 @@ pub(crate) fn metric_set_key_for(name: &str) -> &'static str {
         "mi.visual_studio" => "mi.visual_studio",
         "halstead.volume" => "halstead.volume",
         "abc" => "abc",
-        other => Box::leak(other.to_string().into_boxed_str()),
+        other => other,
     }
 }
 
@@ -146,6 +265,26 @@ mod tests {
     }
 
     #[test]
+    fn sql_files_default_to_sql_metrics_not_source_code_metrics() {
+        // A SQL file diffed with the source-code defaults would read 0 for
+        // every column (the SQL analyzer publishes none of them) and be
+        // dropped as unchanged. SQL must default to its own composite set.
+        let sql = default_selectors_for_language(mehen_core::Language::Sql);
+        let names: Vec<&str> = sql.iter().map(|s| s.name).collect();
+        assert_eq!(names, DEFAULT_SQL_METRICS);
+        // `sql.maintainability_index` is a higher-is-better quality score.
+        let mi = sql
+            .iter()
+            .find(|s| s.name == "sql.maintainability_index")
+            .expect("maintainability default present");
+        assert_eq!(mi.polarity, Polarity::HigherIsBetter);
+        // A non-SQL language keeps the source-code defaults.
+        let ts = default_selectors_for_language(mehen_core::Language::TypeScript);
+        let ts_names: Vec<&str> = ts.iter().map(|s| s.name).collect();
+        assert_eq!(ts_names, DEFAULT_METRICS);
+    }
+
+    #[test]
     fn polarity_prefix_overrides_default() {
         let specs = vec!["+loc.lloc".to_string(), "-mi.visual_studio".to_string()];
         let selectors = parse_metric_selectors(&specs);
@@ -169,5 +308,40 @@ mod tests {
         let specs = vec!["mi".to_string()];
         let selectors = parse_metric_selectors(&specs);
         assert!(selectors.is_empty());
+    }
+
+    #[test]
+    fn namespaced_sql_and_markdown_metrics_are_accepted() {
+        // Language-owned `sql.*`/`markdown.*` keys aren't in KNOWN_METRICS but
+        // must be usable as `top-offenders`/`diff` selectors.
+        let specs = vec![
+            "sql.change_risk_score".to_string(),
+            "markdown.review.review_criticality_index".to_string(),
+        ];
+        let selectors = parse_metric_selectors(&specs);
+        assert_eq!(selectors.len(), 2);
+        assert_eq!(selectors[0].name, "sql.change_risk_score");
+        assert_eq!(
+            selectors[1].name,
+            "markdown.review.review_criticality_index"
+        );
+    }
+
+    #[test]
+    fn namespaced_metric_default_polarity() {
+        // Risk/complexity scores are higher-is-worse; health/maintainability
+        // scores are higher-is-better.
+        assert_eq!(
+            default_namespaced_polarity("sql.change_risk_score"),
+            Polarity::LowerIsBetter
+        );
+        assert_eq!(
+            default_namespaced_polarity("sql.maintainability_index"),
+            Polarity::HigherIsBetter
+        );
+        assert_eq!(
+            default_namespaced_polarity("sql.modularity_health"),
+            Polarity::HigherIsBetter
+        );
     }
 }

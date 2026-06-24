@@ -91,6 +91,16 @@ fn write_unit_metrics(out: &mut String, metrics: &MetricSet, language: Language)
         return;
     }
 
+    if language == Language::Sql {
+        // SQL has its own relational/dataflow metric family (`sql.*`):
+        // statements, query blocks, CTE graph, joins, predicates,
+        // object-touch risk, and an SQL-flavored Halstead. Like
+        // Markdown, the source-code families (cyclomatic/cognitive/…)
+        // don't apply, so render the SQL groups directly.
+        write_sql_metrics(out, metrics);
+        return;
+    }
+
     let families = MetricsFamilies::from_metrics(metrics);
     write_cyclomatic(out, &families.cyclomatic);
     write_cognitive(out, &families.cognitive);
@@ -291,6 +301,118 @@ fn write_markdown_metrics(out: &mut String, metrics: &MetricSet) {
     );
 }
 
+/// Render the `sql.*` metric family as Markdown tables, one per documented
+/// group. Mirrors the catalogue in `docs/metrics/sql/overview.mdx`.
+fn write_sql_metrics(out: &mut String, metrics: &MetricSet) {
+    write_markdown_group(
+        out,
+        "LOC",
+        &[
+            ("physical", "sql.loc.physical"),
+            ("code", "sql.loc.code"),
+            ("comment", "sql.loc.comment"),
+            ("blank", "sql.loc.blank"),
+            ("logical", "sql.loc.logical"),
+            ("comment_density", "sql.loc.comment_density"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Statements",
+        &[
+            ("count", "sql.statement.count"),
+            ("kind_distinct", "sql.statement.kind_distinct"),
+            ("kind_entropy", "sql.statement.kind_entropy"),
+            ("unparsed_count", "sql.statement.unparsed_count"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Query structure",
+        &[
+            ("query_block.count", "sql.query_block.count"),
+            ("query_block.max_depth", "sql.query_block.max_depth"),
+            ("cte.count", "sql.cte.count"),
+            ("cte.max_dependency_depth", "sql.cte.max_dependency_depth"),
+            ("cte.unused_count", "sql.cte.unused_count"),
+            ("join.count", "sql.join.count"),
+            ("subquery.correlated_count", "sql.subquery.correlated_count"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Expression complexity",
+        &[
+            (
+                "predicate.boolean_operator_count",
+                "sql.predicate.boolean_operator_count",
+            ),
+            ("case.count", "sql.case.count"),
+            ("case.max_depth", "sql.case.max_depth"),
+            ("window.function_count", "sql.window.function_count"),
+            ("set_op.count", "sql.set_op.count"),
+            ("expression.max_depth", "sql.expression.max_depth"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Object touch / risk",
+        &[
+            ("object.write_count", "sql.object.write_count"),
+            ("ddl.drop_count", "sql.ddl.drop_count"),
+            ("ddl.truncate_count", "sql.ddl.truncate_count"),
+            (
+                "dml.update_without_where_count",
+                "sql.dml.update_without_where_count",
+            ),
+            (
+                "dml.delete_without_where_count",
+                "sql.dml.delete_without_where_count",
+            ),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Halstead",
+        &[
+            ("vocabulary", "sql.halstead.vocabulary"),
+            ("length", "sql.halstead.length"),
+            ("volume", "sql.halstead.volume"),
+            ("difficulty", "sql.halstead.difficulty"),
+            ("effort", "sql.halstead.effort"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Composite scores",
+        &[
+            ("structural_complexity", "sql.structural_complexity"),
+            ("cognitive_complexity", "sql.cognitive_complexity"),
+            ("change_risk_score", "sql.change_risk_score"),
+            ("review_burden_index", "sql.review_burden_index"),
+            ("maintainability_index", "sql.maintainability_index"),
+            ("modularity_health", "sql.modularity_health"),
+        ],
+        metrics,
+    );
+    write_markdown_group(
+        out,
+        "Parser health",
+        &[
+            ("diagnostic_count", "sql.parser.diagnostic_count"),
+            ("unparsable_ratio", "sql.parser.unparsable_ratio"),
+            ("dialect.confidence", "sql.dialect.confidence"),
+        ],
+        metrics,
+    );
+}
+
 fn write_markdown_group(
     out: &mut String,
     title: &str,
@@ -340,12 +462,21 @@ fn write_nested_spaces(out: &mut String, spaces: &[MetricSpace], depth: usize, l
         };
         let _ = writeln!(out);
         let _ = writeln!(out, "{header} {label}");
-        // The Markdown analyzer only publishes flat unit-level
-        // `markdown.*` metrics; nested spaces (sections, embedded
-        // code) carry no source-code roll-ups, so the Cyclomatic /
-        // Cognitive / LOC tables would all be zero. Skip them in
-        // that case rather than emit misleading numbers.
-        if language != Language::Markdown {
+        // The Markdown and SQL analyzers only publish flat unit-level
+        // family metrics (`markdown.*` / `sql.*`); their nested spaces
+        // (Markdown sections / embedded code, SQL per-statement spans)
+        // carry no source-code roll-ups, so the Cyclomatic / Cognitive
+        // / LOC tables would all be zero.
+        if language == Language::Sql {
+            // A SQL per-statement space carries only its line span. Emit that
+            // one fact so the heading isn't a content-free stub (the
+            // source-code metric tables would all be zero here).
+            let lines = read_metric(&space.metrics, "sql.statement.lines");
+            if lines > 0.0 {
+                let _ = writeln!(out);
+                let _ = writeln!(out, "- Lines: {}", lines as i64);
+            }
+        } else if language != Language::Markdown {
             let families = MetricsFamilies::from_metrics(&space.metrics);
             write_cyclomatic(out, &families.cyclomatic);
             write_cognitive(out, &families.cognitive);
@@ -791,5 +922,44 @@ mod tests {
         // own table.
         let space_section = md.split("## Spaces").nth(1).expect("Spaces section");
         assert!(space_section.contains("| 2 |"));
+    }
+
+    #[test]
+    fn sql_statement_spaces_render_their_line_count_not_empty_headings() {
+        // Regression: a SQL per-statement space carries only `sql.statement.lines`
+        // and no source-code roll-ups, so the renderer skipped its metric tables
+        // — leaving a `### custom <kind>` heading with no content (Codex P3).
+        // It must instead surface the statement's line count.
+        let mut root = MetricSpace::new(SpaceId(0), SpaceKind::Unit, SourceSpan::empty());
+        root.metrics
+            .insert(MetricKey::new("sql.statement.count"), 1.0);
+        let mut stmt = MetricSpace::new(
+            SpaceId(1),
+            SpaceKind::Custom(mehen_core::SmolStr::new("sql.statement")),
+            SourceSpan::empty(),
+        );
+        stmt.name = Some("select".to_string());
+        stmt.metrics
+            .insert(MetricKey::new("sql.statement.lines"), 3.0);
+        root.spaces.push(stmt);
+        let report = MetricsReport {
+            schema_version: "1.0".to_string(),
+            tool: "mehen".to_string(),
+            path: "q.sql".into(),
+            language: Language::Sql,
+            analysis_backend: AnalysisBackend::Sqruff,
+            diagnostics: Vec::new(),
+            root,
+        };
+        let md = render_metrics_markdown(&report);
+        let space_section = md.split("## Spaces").nth(1).expect("Spaces section");
+        assert!(space_section.contains("custom `select`"));
+        // The line count is surfaced, so the heading isn't a content-free stub.
+        assert!(
+            space_section.contains("- Lines: 3"),
+            "SQL statement space should show its line count: {space_section}"
+        );
+        // No misleading source-code tables.
+        assert!(!space_section.contains("### Cyclomatic"));
     }
 }

@@ -28,6 +28,7 @@ pub enum Language {
     PowerShell,
     C,
     Markdown,
+    Sql,
 }
 
 /// Error returned by [`Language::from_str`] for unknown identifiers.
@@ -59,6 +60,7 @@ impl Language {
             Language::PowerShell => "powershell",
             Language::C => "c",
             Language::Markdown => "markdown",
+            Language::Sql => "sql",
         }
     }
 }
@@ -89,6 +91,7 @@ impl FromStr for Language {
             "powershell" | "pwsh" | "ps1" | "psm1" | "psd1" => Language::PowerShell,
             "c" | "h" => Language::C,
             "markdown" | "md" | "mdx" | "mdown" | "mkd" | "mkdn" => Language::Markdown,
+            "sql" | "ddl" | "dml" => Language::Sql,
             _ => return Err(LanguageParseError(s.to_string())),
         };
         Ok(lang)
@@ -112,6 +115,7 @@ pub fn language_aliases(lang: Language) -> &'static [&'static str] {
         Language::PowerShell => &["powershell", "pwsh", "ps1", "psm1", "psd1"],
         Language::C => &["c", "h"],
         Language::Markdown => &["markdown", "md", "mdx", "mdown", "mkd", "mkdn"],
+        Language::Sql => &["sql", "ddl", "dml"],
     }
 }
 

@@ -17,7 +17,7 @@ mehen diff [OPTIONS]
 | `--from <FROM>` | Base revision to compare from. |
 | `--to <TO>` | Head revision to compare to. |
 | `-p, --paths <PATHS>...` | Repository-relative files or directories to compare. |
-| `-M, --metrics <METRICS>` | Comma-separated metrics. Defaults to `cyclomatic,cognitive,nom.functions,loc.lloc,mi.visual_studio`. Prefix with `+` for higher-is-better, `-` for lower-is-better. |
+| `-M, --metrics <METRICS>` | Comma-separated metrics. When omitted, defaults are resolved **per file language**: source-code files use `cyclomatic,cognitive,nom.functions,loc.lloc,mi.visual_studio`; SQL files use `sql.change_risk_score,sql.maintainability_index,sql.review_burden_index,sql.cognitive_complexity,sql.loc.code`. An explicit list applies to every file. Prefix with `+` for higher-is-better, `-` for lower-is-better. |
 | `-I, --include <INCLUDE>...` | Glob to include files. |
 | `-X, --exclude <EXCLUDE>...` | Glob to exclude files. |
 | `-O, --output-format <OUTPUT_FORMAT>` | `markdown` or `json`. |
@@ -71,6 +71,13 @@ mehen diff [OPTIONS]
 mehen runs the equivalent of `mehen metrics` against each side, joins by repository-relative path, and
 computes per-metric deltas. Files that exist on only one side are reported as new or deleted. Files
 matched by `linguist-generated` are skipped by default.
+
+When no `--metrics` are given, a mixed pull request (e.g. both `.ts` and `.sql`
+files) produces a single table whose columns are the union of each language's
+default metrics. Every row populates only the columns its analyzer publishes;
+columns from another language render as `–`. This keeps SQL changes visible in
+the default GitHub Action path — without it, SQL files would be measured only
+against source-code metrics they never emit and silently drop out as unchanged.
 
 ## `--fail-on` thresholds
 

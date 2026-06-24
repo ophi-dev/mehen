@@ -37,6 +37,12 @@ impl From<i64> for MetricValue {
     }
 }
 
+impl From<u32> for MetricValue {
+    fn from(v: u32) -> Self {
+        MetricValue::Int(i64::from(v))
+    }
+}
+
 impl From<u64> for MetricValue {
     fn from(v: u64) -> Self {
         // Saturate large counts into a `Float` so values that exceed
