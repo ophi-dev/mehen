@@ -54,6 +54,43 @@ pub(crate) const DEFAULT_METRICS: &[&str] = &[
     "mi.visual_studio",
 ];
 
+/// Default selectors for SQL files. The source-code defaults
+/// ([`DEFAULT_METRICS`]) are all keys the SQL analyzer never publishes, so a
+/// SQL file diffed with them reads `0.0` for every column and is dropped as
+/// "unchanged". SQL files instead default to the first-release composite set
+/// (research foundation §15) so `mehen diff` surfaces SQL changes without the
+/// caller needing to know the `sql.*` keys (Codex P2).
+pub(crate) const DEFAULT_SQL_METRICS: &[&str] = &[
+    "sql.change_risk_score",
+    "sql.maintainability_index",
+    "sql.review_burden_index",
+    "sql.cognitive_complexity",
+    "sql.loc.code",
+];
+
+/// Default metric specs for a language, used when the caller passes no
+/// explicit `--metric`. SQL owns a disjoint metric namespace, so it gets its
+/// own defaults; every other language uses the source-code defaults.
+pub(crate) fn default_metrics_for_language(
+    language: mehen_core::Language,
+) -> &'static [&'static str] {
+    match language {
+        mehen_core::Language::Sql => DEFAULT_SQL_METRICS,
+        _ => DEFAULT_METRICS,
+    }
+}
+
+/// Resolve the default selectors for a language (no explicit `--metric`).
+pub(crate) fn default_selectors_for_language(
+    language: mehen_core::Language,
+) -> Vec<MetricSelector> {
+    let specs: Vec<String> = default_metrics_for_language(language)
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    parse_metric_selectors(&specs)
+}
+
 /// Parse a list of metric specs into resolved [`MetricSelector`]s.
 ///
 /// A spec is a bare metric name (`cognitive`) or a polarity-prefixed name
@@ -191,6 +228,26 @@ mod tests {
         for (sel, expected) in selectors.iter().zip(DEFAULT_METRICS.iter()) {
             assert_eq!(sel.name, *expected);
         }
+    }
+
+    #[test]
+    fn sql_files_default_to_sql_metrics_not_source_code_metrics() {
+        // A SQL file diffed with the source-code defaults would read 0 for
+        // every column (the SQL analyzer publishes none of them) and be
+        // dropped as unchanged. SQL must default to its own composite set.
+        let sql = default_selectors_for_language(mehen_core::Language::Sql);
+        let names: Vec<&str> = sql.iter().map(|s| s.name).collect();
+        assert_eq!(names, DEFAULT_SQL_METRICS);
+        // `sql.maintainability_index` is a higher-is-better quality score.
+        let mi = sql
+            .iter()
+            .find(|s| s.name == "sql.maintainability_index")
+            .expect("maintainability default present");
+        assert_eq!(mi.polarity, Polarity::HigherIsBetter);
+        // A non-SQL language keeps the source-code defaults.
+        let ts = default_selectors_for_language(mehen_core::Language::TypeScript);
+        let ts_names: Vec<&str> = ts.iter().map(|s| s.name).collect();
+        assert_eq!(ts_names, DEFAULT_METRICS);
     }
 
     #[test]

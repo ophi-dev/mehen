@@ -29,8 +29,8 @@ use crate::ci;
 use crate::concurrent_files::mk_globset;
 use crate::detection::detect_language;
 use crate::metric_selector::{
-    MetricSelector, Polarity as SelectorPolarity, parse_metric_selectors,
-    read_metric as read_selector_metric,
+    MetricSelector, Polarity as SelectorPolarity, default_selectors_for_language,
+    parse_metric_selectors, read_metric as read_selector_metric,
 };
 use crate::registry::AnalyzerRegistry;
 use crate::top_offenders::read_metric;
@@ -435,6 +435,12 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     let include = mk_globset(opts.include);
     let exclude = mk_globset(opts.exclude);
     let paths = normalize_path_filters(&opts.paths);
+    // When the caller passes explicit `--metric` names, that one list applies
+    // to every file. With no `--metric`, defaults are resolved *per file's
+    // language*: SQL files publish only `sql.*` keys, so the source-code
+    // defaults (`cyclomatic`, …) would read 0 for them and drop the file as
+    // unchanged (Codex P2). `explicit_metrics` selects between the two modes.
+    let explicit_metrics = !opts.metrics.is_empty();
     let selectors = parse_metric_selectors(&opts.metrics);
     let mut generated_filter = opts
         .ignore_generated
@@ -490,6 +496,16 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     //    metrics from a broken parse must not pass CI silently.
     let mut diffs = Vec::new();
     let mut analysis_failed = false;
+    // The union of selectors actually displayed, in first-seen order. With
+    // explicit `--metric` this is just `selectors`; with per-language defaults
+    // it accumulates each language's default columns as files are seen, so a
+    // mixed PR shows source-code columns and SQL columns side by side (each
+    // file populates only its own language's columns).
+    let mut display_selectors: Vec<MetricSelector> = if explicit_metrics {
+        selectors.clone()
+    } else {
+        Vec::new()
+    };
     for (cf, utf8_path, language) in &filtered {
         let is_deleted = cf.status == ChangeStatus::Deleted;
         let is_new = cf.status == ChangeStatus::Added;
@@ -497,6 +513,20 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         let analyzer = match registry.analyzer_for(*language) {
             Some(a) => a,
             None => continue,
+        };
+
+        // Selectors for *this* file: the explicit list, or this language's
+        // defaults. Register any new default columns into the display union.
+        let file_selectors: Vec<MetricSelector> = if explicit_metrics {
+            selectors.clone()
+        } else {
+            let langs = default_selectors_for_language(*language);
+            for sel in &langs {
+                if !display_selectors.iter().any(|d| d.name == sel.name) {
+                    display_selectors.push(sel.clone());
+                }
+            }
+            langs
         };
 
         let mut analyze = |bytes: Vec<u8>, side: &str| -> Option<MetricSpace> {
@@ -558,7 +588,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        let metric_diffs: Vec<MetricDiff> = selectors
+        let metric_diffs: Vec<MetricDiff> = file_selectors
             .iter()
             .map(|sel| {
                 let baseline = baseline_space
@@ -650,7 +680,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     let format = opts.output_format.unwrap_or(DiffFormat::Markdown);
     match format {
         DiffFormat::Markdown => {
-            print_markdown(&diffs, &selectors, &from_label, &from_ref, &to_ref);
+            print_markdown(&diffs, &display_selectors, &from_label, &from_ref, &to_ref);
             if !doc_files.is_empty() {
                 let mut ctx = DocRenderCtx::new(&from_label);
                 let repo_url = ci_ctx
@@ -968,12 +998,18 @@ fn print_markdown(
     }
     out.push('\n');
 
-    // Rows
+    // Rows. Each cell is looked up by selector *name* against the file's
+    // metrics, so a file that doesn't publish a given column (e.g. a SQL file
+    // under the `cyclomatic` column of a mixed PR) renders an em dash rather
+    // than a misaligned value.
     for diff in diffs {
         out.push_str(&format!("| {} |", diff.path.display()));
-        for md in &diff.metrics {
+        for sel in selectors {
             out.push(' ');
-            out.push_str(&format_metric_cell(md, from_label));
+            match diff.metrics.iter().find(|m| m.name == sel.name) {
+                Some(md) => out.push_str(&format_metric_cell(md, from_label)),
+                None => out.push('\u{2013}'), // – (column not applicable to this file)
+            }
             out.push_str(" |");
         }
         out.push('\n');
