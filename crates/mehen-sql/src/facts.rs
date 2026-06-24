@@ -1973,24 +1973,19 @@ fn collect_touched_objects(
     let mut read = BTreeSet::new();
     let mut write = BTreeSet::new();
 
-    // CTE names are query-local aliases scoped to their *owning* statement, not
-    // database objects. They must be collected per top-level statement: a CTE
-    // named `tmp` in `WITH tmp AS (…) SELECT … FROM tmp;` must not suppress a
-    // real `tmp` table read in a *later* statement (`SELECT … FROM tmp;`),
-    // which a file-wide CTE-name set would wrongly do (CodeRabbit). Iterate
-    // each top-level `Statement` and collect/filter within that scope.
+    // CTE names are query-local aliases scoped to their *owning query block*,
+    // not database objects. Scope matters at two levels:
+    //   - per statement: a CTE `tmp` in `WITH tmp AS (…) SELECT … FROM tmp;`
+    //     must not suppress a real `tmp` read in a *later* statement;
+    //   - per nested query block: a CTE `tmp` defined inside a subquery
+    //     (`SELECT … FROM tmp WHERE EXISTS (WITH tmp AS (…) SELECT … FROM tmp)`)
+    //     must not suppress the *outer* real `tmp` read (CodeRabbit).
+    // So a reference is treated as CTE-local only when an *ancestor*
+    // `WithCompoundStatement` defines its name. We resolve that by node
+    // identity (`cte_local_refs`), not by a flat name set.
     for stmt in &top_level_statements(root) {
-        let cte_names: BTreeSet<String> = stmt
-            .recursive_crawl(
-                &SyntaxSet::single(SyntaxKind::CommonTableExpression),
-                true,
-                &SyntaxSet::EMPTY,
-                true,
-            )
-            .iter()
-            .map(|c| cte_name(c).to_ascii_uppercase())
-            .collect();
-        collect_statement_objects(stmt, &cte_names, &mut read, &mut write);
+        let cte_local = cte_local_refs(stmt);
+        collect_statement_objects(stmt, &cte_local, &mut read, &mut write);
     }
 
     (read, write)
@@ -2008,14 +2003,59 @@ fn top_level_statements(root: &ErasedSegment) -> Vec<ErasedSegment> {
     )
 }
 
-/// Collect read/write objects for a single top-level statement, given the set
-/// of CTE names local to that statement.
+/// The `TableReference` nodes within `stmt` that resolve to a CTE alias visible
+/// in their own query-block scope. A reference is CTE-local iff some ancestor
+/// `WithCompoundStatement` defines a CTE with that name. Returned as node
+/// identities so the read/write passes exclude exactly those references (and
+/// not a same-named real table read in a sibling/outer scope).
+fn cte_local_refs(stmt: &ErasedSegment) -> Vec<ErasedSegment> {
+    let mut local = Vec::new();
+    let with_blocks = stmt.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::WithCompoundStatement),
+        true,
+        &SyntaxSet::EMPTY,
+        true,
+    );
+    for w in &with_blocks {
+        // Names this WITH defines: its *direct* `CommonTableExpression`
+        // children (a nested WITH's CTEs belong to that nested scope, not this
+        // one, and are covered when this loop reaches the nested `w`).
+        let names: std::collections::BTreeSet<String> = w
+            .segments()
+            .iter()
+            .filter(|c| c.is_type(SyntaxKind::CommonTableExpression))
+            .map(|c| cte_name(c).to_ascii_uppercase())
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        // Every table reference in this WITH's subtree (the CTE bodies and the
+        // main query) is in-scope for these names; mark the ones whose name
+        // matches as CTE-local.
+        for tr in w.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::TableReference),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        ) {
+            if names.contains(&tr.raw().to_ascii_uppercase()) {
+                local.push(tr);
+            }
+        }
+    }
+    local
+}
+
+/// Collect read/write objects for a single top-level statement. `cte_local`
+/// holds the node identities of table references that resolve to an in-scope
+/// CTE alias and must therefore be excluded from object-touch counts.
 fn collect_statement_objects(
     stmt: &ErasedSegment,
-    cte_names: &std::collections::BTreeSet<String>,
+    cte_local: &[ErasedSegment],
     read: &mut std::collections::BTreeSet<String>,
     write: &mut std::collections::BTreeSet<String>,
 ) {
+    let is_cte_local = |tr: &ErasedSegment| cte_local.iter().any(|c| c.is(tr));
     // The objects a write statement targets are not always `TableReference`s:
     // `DROP FUNCTION foo` targets a `FunctionName`, `CREATE INDEX idx …` a
     // `DatabaseReference`, etc. Match those outer reference kinds. The crawl
@@ -2065,10 +2105,10 @@ fn collect_statement_objects(
         );
         let all_targets = !first_target_only;
         for (i, tr) in stmt_tables.iter().enumerate() {
-            let name = tr.raw().to_ascii_uppercase();
-            if cte_names.contains(&name) {
+            if is_cte_local(tr) {
                 continue; // a CTE used as a DML/MERGE target/source is query-local
             }
+            let name = tr.raw().to_ascii_uppercase();
             if i == 0 || all_targets {
                 write.insert(name);
                 write_target_nodes.push(tr.clone());
@@ -2099,10 +2139,9 @@ fn collect_statement_objects(
             &SyntaxSet::EMPTY,
             true,
         ) {
-            let name = tr.raw().to_ascii_uppercase();
             let is_write_target = write_target_nodes.iter().any(|w| w.is(&tr));
-            if !cte_names.contains(&name) && !is_write_target {
-                read.insert(name);
+            if !is_cte_local(&tr) && !is_write_target {
+                read.insert(tr.raw().to_ascii_uppercase());
             }
         }
     }

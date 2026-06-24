@@ -884,6 +884,18 @@ fn cte_names_are_scoped_to_their_owning_statement() {
 }
 
 #[test]
+fn cte_names_are_scoped_by_query_block_not_whole_statement() {
+    // A CTE `tmp` defined inside a *subquery* must not suppress the outer
+    // real `tmp` table read: CTE scope is per query block (CodeRabbit). The
+    // outer `FROM tmp` reads a real table; the inner `WITH tmp … FROM tmp` is
+    // query-local to the EXISTS subquery.
+    let m =
+        metrics("SELECT * FROM tmp WHERE EXISTS (WITH tmp AS (SELECT 1 AS x) SELECT 1 FROM tmp)");
+    assert_eq!(get(&m, "sql.object.read_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.touch_count"), 1.0);
+}
+
+#[test]
 fn cube_rollup_classified_by_function_name() {
     // `ROLLUP(cube_id)` is a rollup, not a cube (the arg name must not match).
     let r = metrics("SELECT a FROM t GROUP BY ROLLUP(cube_id)");

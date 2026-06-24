@@ -81,14 +81,32 @@ pub(crate) fn default_metrics_for_language(
 }
 
 /// Resolve the default selectors for a language (no explicit `--metric`).
+///
+/// SQL defaults are `'static` names, so they are built into `MetricSelector`s
+/// directly (no `String` allocation / `Box::leak` round-trip through the
+/// namespaced-parsing path). Other languages use the source-code catalogue.
 pub(crate) fn default_selectors_for_language(
     language: mehen_core::Language,
 ) -> Vec<MetricSelector> {
-    let specs: Vec<String> = default_metrics_for_language(language)
+    default_metrics_for_language(language)
         .iter()
-        .map(|s| s.to_string())
-        .collect();
-    parse_metric_selectors(&specs)
+        .map(|&name| {
+            // A KNOWN_METRICS entry carries a curated label/polarity; a
+            // namespaced key (`sql.*`) is its own label with a by-key polarity.
+            match KNOWN_METRICS.iter().find(|(n, ..)| *n == name) {
+                Some(&(n, label, polarity)) => MetricSelector {
+                    name: n,
+                    label,
+                    polarity,
+                },
+                None => MetricSelector {
+                    name,
+                    label: name,
+                    polarity: default_namespaced_polarity(name),
+                },
+            }
+        })
+        .collect()
 }
 
 /// Parse a list of metric specs into resolved [`MetricSelector`]s.
