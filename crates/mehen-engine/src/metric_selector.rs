@@ -216,9 +216,14 @@ fn default_namespaced_polarity(name: &str) -> Polarity {
 ///
 /// Most names map verbatim; the rolled-up scalar metrics
 /// (`cyclomatic`, `cognitive`) live under their `*.sum` key. Any
-/// unknown selector falls back to its bare name; missing keys read as
-/// `0.0` from `read_metric`.
-pub(crate) fn metric_set_key_for(name: &str) -> &'static str {
+/// unknown selector (e.g. a namespaced `sql.*`/`markdown.*` key) falls
+/// back to its bare name; missing keys read as `0.0` from `read_metric`.
+///
+/// The result borrows from `name` for the fallback case, so this never
+/// allocates — `read_metric` builds a `MetricKey` from it immediately.
+/// (A previous version returned `&'static str` and `Box::leak`ed the
+/// fallback, leaking one string per metric-read on namespaced selectors.)
+pub(crate) fn metric_set_key_for(name: &str) -> &str {
     match name {
         "cyclomatic" => "cyclomatic.sum",
         "cognitive" => "cognitive.sum",
@@ -229,7 +234,7 @@ pub(crate) fn metric_set_key_for(name: &str) -> &'static str {
         "mi.visual_studio" => "mi.visual_studio",
         "halstead.volume" => "halstead.volume",
         "abc" => "abc",
-        other => Box::leak(other.to_string().into_boxed_str()),
+        other => other,
     }
 }
 
