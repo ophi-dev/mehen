@@ -20,8 +20,8 @@ mehen-metrics = { workspace = true }
 # `bumpalo` is the arena allocator mago's parser writes into.
 mago-syntax = "=1.30.0"
 mago-syntax-core = "=1.30.0"
-mago-database = "=1.30.0"
-mago-span = "=1.30.0"
+mago-database = "=1.42.0"
+mago-span = "=1.42.0"
 bumpalo = "^3.20"
 smol_str = { workspace = true }
 
