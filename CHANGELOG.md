@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/ophi-dev/mehen/compare/v1.1.0...v1.2.0) (2026-07-02)
+
+
+### Features
+
+* **sql:** SQL metrics analyzer (mehen-sql, sqruff-backed) ([#152](https://github.com/ophi-dev/mehen/issues/152)) ([1ff3be5](https://github.com/ophi-dev/mehen/commit/1ff3be549259c36d439b3a01fe5090caf17d4e7b))
+
 ## [1.1.0](https://github.com/ophi-dev/mehen/compare/v1.0.2...v1.1.0) (2026-06-22)
 
 
