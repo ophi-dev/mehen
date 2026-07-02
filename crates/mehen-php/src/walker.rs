@@ -52,7 +52,7 @@
 
 use mago_database::file::FileId;
 use mago_span::{HasSpan, Span};
-use mago_syntax::ast::{
+use mago_syntax::cst::{
     AnonymousClass, ArrowFunction, Assignment, Binary, BinaryOperator, Call, Class, Closure,
     Conditional, Construct, DoWhile, Enum, EnumCase, ExpressionStatement, For, Foreach, Function,
     If, IfBody, Instantiation, Interface, Match, Method, MethodBody, Modifier, NullSafeMethodCall,
@@ -170,7 +170,7 @@ impl<'a> Visitor<'a> {
 
     fn observe_trivia(
         &mut self,
-        trivia: &mago_syntax::ast::Sequence<'_, mago_syntax::ast::Trivia<'_>>,
+        trivia: &mago_syntax::cst::Sequence<'_, mago_syntax::cst::Trivia<'_>>,
     ) {
         // Route each comment to the deepest enclosing scope so a
         // `// foo` inside a method body lands on that method's
@@ -704,6 +704,15 @@ fn classify_token(kind: TokenKind) -> TokenClass {
         T::False => Operand("False"),
         T::Null => Operand("Null"),
 
+        // ---------- STRING SUBSCRIPT / INTERPOLATION OFFSETS (operands) ----------
+        // `$a[5]` numeric offset, `$a[bar]` bareword offset, and the
+        // `foo` name in `${foo}` interpolation. Mago 1.42 split these
+        // out of the generic identifier/literal tokens; each names a
+        // value, so they classify as operands alongside literals.
+        T::OffsetNumber => Operand("Integer"),
+        T::OffsetString => Operand("String"),
+        T::StringVariableName => Operand("Variable"),
+
         // ---------- MAGIC CONSTANTS (operands) ----------
         T::ClassConstant
         | T::TraitConstant
@@ -722,7 +731,7 @@ fn classify_token(kind: TokenKind) -> TokenClass {
 /// normalized the modifier into a typed `Modifier` enum, so the
 /// scan is a clean enum match (no string comparison needed).
 fn php_modifiers_are_public(
-    modifiers: &mago_syntax::ast::sequence::Sequence<'_, Modifier<'_>>,
+    modifiers: &mago_syntax::cst::sequence::Sequence<'_, Modifier<'_>>,
 ) -> bool {
     !modifiers.iter().any(|m| {
         matches!(
@@ -994,7 +1003,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_if_statement_body_else_if_clause(
         &self,
-        _clause: &mago_syntax::ast::IfStatementBodyElseIfClause<'arena>,
+        _clause: &mago_syntax::cst::IfStatementBodyElseIfClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         // `elseif` keyword form: flat +1 cognitive, no extra nesting.
@@ -1008,7 +1017,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_if_colon_delimited_body_else_if_clause(
         &self,
-        _clause: &mago_syntax::ast::IfColonDelimitedBodyElseIfClause<'arena>,
+        _clause: &mago_syntax::cst::IfColonDelimitedBodyElseIfClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().cyclomatic.record_decision();
@@ -1019,7 +1028,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_if_statement_body_else_clause(
         &self,
-        clause: &mago_syntax::ast::IfStatementBodyElseClause<'arena>,
+        clause: &mago_syntax::cst::IfStatementBodyElseClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         // ABC.C: `else` counts as a condition per Fitzpatrick's
@@ -1037,14 +1046,14 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         // that's fine — legacy did the same, an `else if` chain
         // contributes both an `else` condition and an `elseif`
         // condition.
-        if matches!(&clause.statement, mago_syntax::ast::Statement::If(_)) {
+        if matches!(&clause.statement, mago_syntax::cst::Statement::If(_)) {
             ctx.suppress_next_if_nesting = true;
         }
     }
 
     fn walk_in_if_colon_delimited_body_else_clause(
         &self,
-        _clause: &mago_syntax::ast::IfColonDelimitedBodyElseClause<'arena>,
+        _clause: &mago_syntax::cst::IfColonDelimitedBodyElseClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().abc.record_condition();
@@ -1125,7 +1134,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_switch_expression_case(
         &self,
-        _c: &mago_syntax::ast::SwitchExpressionCase<'arena>,
+        _c: &mago_syntax::cst::SwitchExpressionCase<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         // Each `case <expr>:` is its own LLOC line and a cyclomatic
@@ -1137,7 +1146,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_switch_default_case(
         &self,
-        _c: &mago_syntax::ast::SwitchDefaultCase<'arena>,
+        _c: &mago_syntax::cst::SwitchDefaultCase<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         // `default` is its own LLOC line. It's *not* a cyclomatic
@@ -1161,7 +1170,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_match_expression_arm(
         &self,
-        _a: &mago_syntax::ast::MatchExpressionArm<'arena>,
+        _a: &mago_syntax::cst::MatchExpressionArm<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().cyclomatic.record_decision();
@@ -1170,7 +1179,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_match_default_arm(
         &self,
-        _a: &mago_syntax::ast::MatchDefaultArm<'arena>,
+        _a: &mago_syntax::cst::MatchDefaultArm<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().abc.record_condition();
@@ -1189,7 +1198,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_try_catch_clause(
         &self,
-        _c: &mago_syntax::ast::TryCatchClause<'arena>,
+        _c: &mago_syntax::cst::TryCatchClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().cyclomatic.record_decision();
@@ -1201,7 +1210,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
     }
     fn walk_out_try_catch_clause(
         &self,
-        _c: &mago_syntax::ast::TryCatchClause<'arena>,
+        _c: &mago_syntax::cst::TryCatchClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.restore_cognitive();
@@ -1289,10 +1298,10 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_unary_postfix(
         &self,
-        u: &mago_syntax::ast::UnaryPostfix<'arena>,
+        u: &mago_syntax::cst::UnaryPostfix<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
-        use mago_syntax::ast::UnaryPostfixOperator;
+        use mago_syntax::cst::UnaryPostfixOperator;
         if matches!(
             u.operator,
             UnaryPostfixOperator::PostIncrement(_) | UnaryPostfixOperator::PostDecrement(_)
@@ -1367,64 +1376,64 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.current().nexit.record_exit();
     }
 
-    fn walk_in_break(&self, _b: &mago_syntax::ast::Break<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_break(&self, _b: &mago_syntax::cst::Break<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_continue(&self, _c: &mago_syntax::ast::Continue<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_continue(&self, _c: &mago_syntax::cst::Continue<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_goto(&self, _g: &mago_syntax::ast::Goto<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_goto(&self, _g: &mago_syntax::cst::Goto<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_label(&self, _l: &mago_syntax::ast::Label<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_label(&self, _l: &mago_syntax::cst::Label<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_echo(&self, _e: &mago_syntax::ast::Echo<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_echo(&self, _e: &mago_syntax::cst::Echo<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_echo_tag(&self, _e: &mago_syntax::ast::EchoTag<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_echo_tag(&self, _e: &mago_syntax::cst::EchoTag<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_unset(&self, _u: &mago_syntax::ast::Unset<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_unset(&self, _u: &mago_syntax::cst::Unset<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_namespace(&self, _n: &mago_syntax::ast::Namespace<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_namespace(&self, _n: &mago_syntax::cst::Namespace<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_use(&self, _u: &mago_syntax::ast::Use<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_use(&self, _u: &mago_syntax::cst::Use<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_global(&self, _g: &mago_syntax::ast::Global<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_global(&self, _g: &mago_syntax::cst::Global<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_static(&self, _s: &mago_syntax::ast::Static<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_static(&self, _s: &mago_syntax::cst::Static<'arena>, ctx: &mut Visitor<'_>) {
         // PHP's `static $x = …;` *function-static-declaration* form.
         // (NOT the `static` modifier on a method.)
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_declare(&self, _d: &mago_syntax::ast::Declare<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_declare(&self, _d: &mago_syntax::cst::Declare<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
     }
 
-    fn walk_in_constant(&self, _c: &mago_syntax::ast::Constant<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_constant(&self, _c: &mago_syntax::cst::Constant<'arena>, ctx: &mut Visitor<'_>) {
         // Top-level `const X = 1;` declaration (legacy `ConstDeclaration`).
         ctx.current().loc.observe_lloc();
     }
 
     fn walk_in_class_like_constant(
         &self,
-        _c: &mago_syntax::ast::ClassLikeConstant<'arena>,
+        _c: &mago_syntax::cst::ClassLikeConstant<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         // `class C { const X = 1; }` — legacy `ConstDeclaration2`.

@@ -22,7 +22,7 @@
 
 mod walker;
 
-use bumpalo::Bump;
+use mago_allocator::LocalArena;
 use mago_database::file::FileId;
 
 use mehen_core::{
@@ -58,8 +58,10 @@ impl LanguageAnalyzer for PhpAnalyzer {
         // arena lives only for this `analyze` call; everything we
         // put into `LanguageAnalysis` must be owned (no borrow
         // back into the arena), which the per-space `State`
-        // accumulator pattern already guarantees.
-        let arena = Bump::new();
+        // accumulator pattern already guarantees. As of mago 1.42
+        // the parser writes into mago's own `LocalArena` rather than
+        // the external `bumpalo::Bump`.
+        let arena = LocalArena::new();
         let file_id = FileId::zero();
         let program =
             mago_syntax::parser::parse_file_content(&arena, file_id, source.text.as_bytes());
