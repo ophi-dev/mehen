@@ -16,7 +16,7 @@ complexity.
 
 ## Why teams use mehen
 
-- **Polyglot by design** — per-file language detection across ten source languages plus Markdown
+- **Polyglot by design** — per-file language detection across eleven source languages plus Markdown
   and SQL. Useful for monorepos.
 - **Real language parsers** — Ruff for Python, Oxc for TS/JS/JSX/TSX, Mago for PHP, Prism for Ruby,
   `ra_ap_syntax` for Rust, ANTLR (Kotlin spec grammar for Kotlin, grammars-v4 for Java),
