@@ -399,23 +399,52 @@ fn atn() -> &'static Atn {
     })
 }
 
+/// Result from [`parse_with_parser`].
+///
+/// Keeps the generated parser available after the entry rule runs so callers
+/// can inspect diagnostics or recover the parser-owned token stream.
+#[derive(Debug)]
+pub struct KotlinParserParseOutput<R, L>
+where
+    L: TokenSource,
+{
+    pub result: R,
+    pub parser: KotlinParser<L>,
+}
+
 /// Parses UTF-8 text by constructing the lexer, token stream, parser, and
 /// caller-selected entry rule in one call.
 ///
 /// Pass the generated lexer constructor and a parser entry rule, for example
 /// `parse(src, MyGrammarLexer::new, KotlinParser::file)`.
-pub fn parse<L, R>(
+///
+/// Use [`parse_with_parser`] instead when the caller needs parser diagnostics
+/// or the parser-owned token stream after the entry rule runs.
+pub fn parse<L: TokenSource, R>(
     input: impl AsRef<str>,
     lexer: impl FnOnce(antlr4_runtime::InputStream) -> L,
     entry: impl FnOnce(&mut KotlinParser<L>) -> Result<R, antlr4_runtime::AntlrError>,
 ) -> Result<R, antlr4_runtime::AntlrError>
-where
-    L: TokenSource,
+{
+    parse_with_parser(input, lexer, entry).map(|output| output.result)
+}
+
+/// Parses UTF-8 text like [`parse`] while returning the parser after the entry
+/// rule has run.
+///
+/// This keeps the compact generated setup path available for callers that also
+/// need `Parser::number_of_syntax_errors()` or `KotlinParser::into_token_stream()`.
+pub fn parse_with_parser<L: TokenSource, R>(
+    input: impl AsRef<str>,
+    lexer: impl FnOnce(antlr4_runtime::InputStream) -> L,
+    entry: impl FnOnce(&mut KotlinParser<L>) -> Result<R, antlr4_runtime::AntlrError>,
+) -> Result<KotlinParserParseOutput<R, L>, antlr4_runtime::AntlrError>
 {
     let lexer = lexer(antlr4_runtime::InputStream::new(input.as_ref()));
     let tokens = CommonTokenStream::new(lexer);
     let mut parser = KotlinParser::new(tokens);
-    entry(&mut parser)
+    let result = entry(&mut parser)?;
+    Ok(KotlinParserParseOutput { result, parser })
 }
 
 /// Generated parser. Each grammar rule is exposed as a public method.

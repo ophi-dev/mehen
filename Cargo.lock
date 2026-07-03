@@ -69,9 +69,9 @@ dependencies = [
 
 [[package]]
 name = "antlr-rust-runtime"
-version = "0.5.0"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08f343ee0a2264d0372a848fff0094dd33754a97668414b7bcb732dd84a109eb"
+checksum = "4eb63ecc82fa58f2204d55b70f50f2f70bc462b93b4be4495e3fd3c21cc564dd"
 dependencies = [
  "thiserror",
 ]
@@ -2063,6 +2063,7 @@ dependencies = [
  "mehen-core",
  "mehen-git",
  "mehen-go",
+ "mehen-java",
  "mehen-kotlin",
  "mehen-markdown",
  "mehen-metrics",
@@ -2104,6 +2105,20 @@ dependencies = [
  "smol_str",
  "tree-sitter",
  "tree-sitter-go",
+]
+
+[[package]]
+name = "mehen-java"
+version = "1.2.0"
+dependencies = [
+ "antlr-rust-runtime",
+ "insta",
+ "mehen-antlr",
+ "mehen-core",
+ "mehen-metrics",
+ "mehen-report",
+ "serde_json",
+ "smol_str",
 ]
 
 [[package]]

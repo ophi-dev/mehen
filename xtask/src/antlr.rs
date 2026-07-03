@@ -49,13 +49,22 @@ impl AntlrTarget {
 }
 
 /// Every ANTLR-backed analyzer with checked-in generated modules.
-pub(crate) const TARGETS: &[AntlrTarget] = &[AntlrTarget {
-    slug: "kotlin",
-    crate_dir: "crates/mehen-kotlin",
-    grammar_dir: "crates/mehen-kotlin/grammar",
-    lexer_g4: "KotlinLexer.g4",
-    parser_g4: "KotlinParser.g4",
-}];
+pub(crate) const TARGETS: &[AntlrTarget] = &[
+    AntlrTarget {
+        slug: "kotlin",
+        crate_dir: "crates/mehen-kotlin",
+        grammar_dir: "crates/mehen-kotlin/grammar",
+        lexer_g4: "KotlinLexer.g4",
+        parser_g4: "KotlinParser.g4",
+    },
+    AntlrTarget {
+        slug: "java",
+        crate_dir: "crates/mehen-java",
+        grammar_dir: "crates/mehen-java/grammar",
+        lexer_g4: "JavaLexer.g4",
+        parser_g4: "JavaParser.g4",
+    },
+];
 
 /// Resolve a target by slug.
 pub(crate) fn target_for(slug: &str) -> Option<&'static AntlrTarget> {

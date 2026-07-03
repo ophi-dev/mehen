@@ -16,11 +16,11 @@ complexity.
 
 ## Why teams use mehen
 
-- **Polyglot by design** — per-file language detection across nine source languages plus Markdown
+- **Polyglot by design** — per-file language detection across ten source languages plus Markdown
   and SQL. Useful for monorepos.
 - **Real language parsers** — Ruff for Python, Oxc for TS/JS/JSX/TSX, Mago for PHP, Prism for Ruby,
-  `ra_ap_syntax` for Rust, the official Kotlin spec ANTLR grammar for Kotlin, pulldown-cmark for
-  Markdown, sqruff for SQL, tree-sitter for Go, C, PowerShell.
+  `ra_ap_syntax` for Rust, ANTLR (Kotlin spec grammar for Kotlin, grammars-v4 for Java),
+  pulldown-cmark for Markdown, sqruff for SQL, tree-sitter for Go, C, PowerShell.
 - **Code, documentation, and SQL in one tool** — source-code complexity, Markdown documentation
   health, *and* a dedicated relational metric family for `.sql` files.
 - **Deterministic, no network** — pure static analysis. Same input → same output. Safe for air-gapped

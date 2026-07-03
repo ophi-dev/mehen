@@ -25,7 +25,7 @@ is available.
 | Parser style | Examples in mehen | When to pick |
 |---|---|---|
 | Language-specific | Ruff (Python), Oxc (TS/JS), Mago (PHP), Prism (Ruby), `ra_ap_syntax` (Rust), pulldown-cmark (Markdown) | A maintained Rust crate with a typed AST, semantic model, or rich grammar coverage exists. |
-| ANTLR | Kotlin (official Kotlin spec grammar) | A high-quality, maintained ANTLR v4 grammar exists but no Rust-native parser does. Generated via [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime); the CST is far more semantically named than tree-sitter's. |
+| ANTLR | Kotlin (official Kotlin spec grammar), Java (grammars-v4) | A high-quality, maintained ANTLR v4 grammar exists but no Rust-native parser does. Generated via [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime); the CST is far more semantically named than tree-sitter's. |
 | Tree-sitter | Go, C, PowerShell | No mature language-specific or ANTLR parser is available, or tree-sitter's grammar quality is the best fit. |
 
 ## Adding a language-specific parser

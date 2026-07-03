@@ -25,6 +25,7 @@ pub fn detect_language(path: &Utf8Path) -> Option<Language> {
         "go" => Language::Go,
         "rb" => Language::Ruby,
         "kt" | "kts" => Language::Kotlin,
+        "java" => Language::Java,
         "ps1" | "psm1" | "psd1" => Language::PowerShell,
         "c" | "h" => Language::C,
         "php" | "php3" | "php4" | "php5" | "php7" | "php8" | "phtml" => Language::Php,
