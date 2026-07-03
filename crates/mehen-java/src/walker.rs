@@ -104,6 +104,7 @@ pub(crate) fn walk(
         tree: MetricTreeBuilder::new(unit_span),
         stack: vec![unit_state],
         kinds: vec![SpaceKind::Unit],
+        suppress_parent_wmc: vec![false],
         cognitive: CognitiveContext::default(),
         loc_routing: SpaceRangeTracker::new(),
     };
@@ -195,6 +196,15 @@ struct ChildHint {
     /// a Halstead *operand* regardless of its token type (mirrors the Kotlin
     /// walker's `simpleIdentifier` handling).
     in_identifier: bool,
+    /// We are inside a constant-specific enum-constant body
+    /// (`enum E { A { … } }`), which opens no metric space of its own. Its
+    /// members belong to `A`'s anonymous subclass, not the lexically-enclosing
+    /// enum, so their `classBodyDeclaration`s must NOT seed `in_class_member`
+    /// (NPA/NPM) and their methods must NOT roll into the enum's WMC. Cleared
+    /// once a *real* nested class-like declaration opens its own space (its
+    /// members belong to that class). Mirrors the Kotlin walker's
+    /// `in_anon_body`.
+    in_anon_body: bool,
 }
 
 /// A short-circuit boolean operator, for parent-relative cognitive
@@ -211,6 +221,12 @@ struct Walker<'a> {
     tree: MetricTreeBuilder,
     stack: Vec<State>,
     kinds: Vec<SpaceKind>,
+    /// Parallel to `stack`/`kinds`: whether the closing function space must
+    /// NOT contribute its cyclomatic to the parent's WMC. Set for functions
+    /// opened inside a constant-specific enum-constant body — that body opens
+    /// no space of its own, so the function closes with the *enum* as parent,
+    /// but it belongs to the constant's anonymous subclass, not the enum.
+    suppress_parent_wmc: Vec<bool>,
     cognitive: CognitiveContext,
     loc_routing: SpaceRangeTracker,
 }
@@ -308,7 +324,17 @@ impl Walker<'_> {
         // `else if` chain is recognized even when the grammar nests the inner
         // `if` under the outer statement's `else` position. A `block` stops
         // the flow (`else { if … }` is genuinely nested).
-        let propagate_else = hint.is_else_branch && ri == jp::RULE_STATEMENT && !ctx_is_block(ctx);
+        //
+        // It must NOT flow through an actual `if` statement, though: `if`
+        // targets its else child precisely via `else_body_idx`, so blanket
+        // propagation here would (wrongly) stamp `is_else_branch` onto the
+        // *then*-branch too. That would make a braceless nested `if` in the
+        // then-branch of an `else if` (`else if (b) if (d) {}`) skip its
+        // nesting increment and under-count cognitive complexity.
+        let propagate_else = hint.is_else_branch
+            && ri == jp::RULE_STATEMENT
+            && !ctx_is_block(ctx)
+            && !is_if_statement(ctx, ri);
 
         // Class/interface body member positions originate at
         // `classBodyDeclaration` / `interfaceBodyDeclaration`, then flow
@@ -352,6 +378,18 @@ impl Walker<'_> {
         // Halstead operand (covers contextual keywords used as identifiers).
         let in_identifier = matches!(ri, jp::RULE_IDENTIFIER | jp::RULE_TYPE_IDENTIFIER);
 
+        // Track whether we're inside a constant-specific enum-constant body
+        // (`enum E { A { … } }`), which opens no space of its own — its members
+        // belong to `A`'s anonymous subclass, not the enclosing enum. Set on
+        // entering `enumConstant`; CLEARED once a *real* nested class-like
+        // declaration opens its own space (its members belong to that class,
+        // e.g. `A { class Inner { void m() {} } }` — `m` belongs to `Inner`).
+        let in_anon_body = if opens_class_like(ri) {
+            false
+        } else {
+            hint.in_anon_body || ri == jp::RULE_ENUM_CONSTANT
+        };
+
         for (idx, child) in children.iter().enumerate() {
             let mut child_hint = ChildHint::default();
             if Some(idx) == else_body_idx || propagate_else {
@@ -363,6 +401,7 @@ impl Walker<'_> {
             child_hint.parent_bool_op = child_bool_op;
             child_hint.in_for_init = in_for_init;
             child_hint.in_identifier = in_identifier;
+            child_hint.in_anon_body = in_anon_body;
             self.visit(child, child_hint);
         }
     }
@@ -378,6 +417,14 @@ impl Walker<'_> {
         ri: usize,
         hint: ChildHint,
     ) -> (bool, Option<ContainerKind>, Option<bool>) {
+        // A `classBodyDeclaration` reached *inside* a constant-specific
+        // enum-constant body belongs to that constant's anonymous subclass,
+        // which opens no space here — so it must NOT seed a member position on
+        // the lexically-enclosing enum (NPA/NPM), mirroring the WMC
+        // suppression at close time.
+        if hint.in_anon_body {
+            return (false, None, None);
+        }
         match ri {
             // The body-declaration wrappers open a member position; the
             // container is the class-like currently on the kinds stack, and
@@ -436,13 +483,15 @@ impl Walker<'_> {
 
     /// Open a metric space for space-introducing rules. Returns whether a
     /// space was pushed.
-    fn maybe_open_space(&mut self, ctx: &ParserRuleContext, ri: usize, _hint: ChildHint) -> bool {
+    fn maybe_open_space(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) -> bool {
         match ri {
             // One function space per method shape. Interface methods reach
             // their name/params/body via `interfaceCommonBodyDeclaration`
             // (wrapped by `interfaceMethodDeclaration` /
             // `genericInterfaceMethodDeclaration`), so the space is opened
-            // there — opening at the wrapper too would double-count.
+            // there — opening at the wrapper too would double-count. A function
+            // opened inside an enum-constant body must not roll into the enum's
+            // WMC (it belongs to the constant's anonymous subclass).
             jp::RULE_METHOD_DECLARATION
             | jp::RULE_CONSTRUCTOR_DECLARATION
             | jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION
@@ -452,7 +501,7 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_function();
                 state.nargs.record_function_args(count_formal_params(ctx));
-                self.push_space(SpaceKind::Function, name, ctx, state);
+                self.push_space(SpaceKind::Function, name, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
             }
@@ -460,7 +509,7 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_closure();
                 state.nargs.record_closure_args(count_lambda_args(ctx));
-                self.push_space(SpaceKind::Function, None, ctx, state);
+                self.push_space(SpaceKind::Function, None, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
             }
@@ -473,7 +522,10 @@ impl Walker<'_> {
                 // Record component parameters (`record R(int x, int y)`) as
                 // class attributes.
                 record_record_components(ctx, &mut state);
-                self.push_space(SpaceKind::Class, name, ctx, state);
+                // A class-like space owns its own WMC, so it never suppresses a
+                // parent contribution (and it opens its own space, clearing any
+                // enclosing enum-constant-body suppression for its members).
+                self.push_space(SpaceKind::Class, name, ctx, state, false);
                 true
             }
             jp::RULE_ENUM_DECLARATION => {
@@ -482,7 +534,7 @@ impl Walker<'_> {
                 state.npa.record_class_like();
                 state.npm.record_class_like();
                 state.wmc.record_class_like();
-                self.push_space(SpaceKind::Enum, name, ctx, state);
+                self.push_space(SpaceKind::Enum, name, ctx, state, false);
                 true
             }
             jp::RULE_INTERFACE_DECLARATION | jp::RULE_ANNOTATION_TYPE_DECLARATION => {
@@ -490,7 +542,7 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.npa.record_class_like();
                 state.npm.record_class_like();
-                self.push_space(SpaceKind::Interface, name, ctx, state);
+                self.push_space(SpaceKind::Interface, name, ctx, state, false);
                 true
             }
             _ => false,
@@ -514,6 +566,7 @@ impl Walker<'_> {
         name: Option<String>,
         ctx: &ParserRuleContext,
         state: State,
+        suppress_parent_wmc: bool,
     ) {
         let span = ctx_span(ctx, self.line_index, self.source_len);
         let space_id = self.tree.open(kind.clone(), span, name);
@@ -521,6 +574,7 @@ impl Walker<'_> {
             .record_open(space_id, span.start_byte, span.end_byte);
         self.stack.push(state);
         self.kinds.push(kind);
+        self.suppress_parent_wmc.push(suppress_parent_wmc);
     }
 
     fn enter_function_cognitive(&mut self) {
@@ -539,6 +593,7 @@ impl Walker<'_> {
 
     fn close_space(&mut self) {
         let closed_kind = self.kinds.pop().expect("kinds underflow");
+        let suppress_wmc = self.suppress_parent_wmc.pop().unwrap_or(false);
         let mut state = self.stack.pop().expect("stack underflow");
         if matches!(closed_kind, SpaceKind::Function) {
             state.wmc.set_cyclomatic(state.cyclomatic.cyclomatic + 1);
@@ -552,7 +607,11 @@ impl Walker<'_> {
         if let Some(parent) = self.stack.last_mut() {
             let parent_kind = self.kinds.last().cloned().unwrap_or(SpaceKind::Unit);
             merge_child_into_parent(parent, &state);
-            if matches!(closed_kind, SpaceKind::Function) {
+            // Roll a closing function's cyclomatic into the parent's WMC —
+            // unless it's a function from an enum-constant body, which belongs
+            // to that constant's anonymous subclass (no space of its own) and
+            // must not inflate the enclosing enum's WMC.
+            if matches!(closed_kind, SpaceKind::Function) && !suppress_wmc {
                 let container = container_kind(parent_kind);
                 state.wmc.finalize_method_into(container, &mut parent.wmc);
             }
@@ -813,6 +872,27 @@ impl Walker<'_> {
             | jp::RULE_INTERFACE_COMMON_BODY_DECLARATION => {
                 self.current().npm.record_method(container, public);
             }
+            // An annotation element (`@interface A { String value(); }`) is an
+            // implicitly-public interface-like method — `annotationMethodRest`
+            // is the declaration reached through the annotation wrappers
+            // (`annotationTypeElementRest → annotationMethodOrConstantRest`).
+            jp::RULE_ANNOTATION_METHOD_REST => {
+                self.current().npm.record_method(container, true);
+            }
+            // An annotation constant (`int X = 1;` in an `@interface`) is an
+            // implicitly-public attribute; `annotationConstantRest` wraps a
+            // `variableDeclarators`, so several constants can be declared at
+            // once (`int X = 1, Y = 2;`).
+            jp::RULE_ANNOTATION_CONSTANT_REST => {
+                let count = ctx
+                    .child_rule(jp::RULE_VARIABLE_DECLARATORS)
+                    .map(|vds| vds.child_rules(jp::RULE_VARIABLE_DECLARATOR).count())
+                    .unwrap_or(0)
+                    .max(1);
+                for _ in 0..count {
+                    self.current().npa.record_attribute(container, true);
+                }
+            }
             _ => {}
         }
     }
@@ -821,6 +901,21 @@ impl Walker<'_> {
 // --------------------------------------------------------------------
 // Free helpers (top-down tree inspection — no parent pointers).
 // --------------------------------------------------------------------
+
+/// Rules that open a class-like metric space (see `maybe_open_space`). Used to
+/// clear the `in_anon_body` suppression once a real nested class/interface/enum
+/// owns the following body — its members belong to that class, not the enum
+/// constant whose body lexically encloses it.
+fn opens_class_like(ri: usize) -> bool {
+    matches!(
+        ri,
+        jp::RULE_CLASS_DECLARATION
+            | jp::RULE_RECORD_DECLARATION
+            | jp::RULE_ENUM_DECLARATION
+            | jp::RULE_INTERFACE_DECLARATION
+            | jp::RULE_ANNOTATION_TYPE_DECLARATION
+    )
+}
 
 /// Whether this `statement` context is an `if` statement (has an `IF` token as
 /// a direct child).
@@ -971,7 +1066,7 @@ fn count_lambda_args(ctx: &ParserRuleContext) -> u32 {
     if let Some(list) = params.child_rule(jp::RULE_LAMBDA_LVTI_LIST) {
         return list.child_rules(jp::RULE_LAMBDA_LVTI_PARAMETER).count() as u32;
     }
-    
+
     params.child_rules(jp::RULE_IDENTIFIER).count() as u32
 }
 
@@ -1075,10 +1170,7 @@ fn has_assignment_op(ctx: &ParserRuleContext) -> bool {
 /// Find the first descendant rule with `rule_index`, searching direct children
 /// then recursing. Used for parameter lists that may sit under an intermediate
 /// wrapper (e.g. `genericMethodDeclaration → methodDeclaration`).
-fn find_descendant(
-    ctx: &ParserRuleContext,
-    rule_index: usize,
-) -> Option<&ParserRuleContext> {
+fn find_descendant(ctx: &ParserRuleContext, rule_index: usize) -> Option<&ParserRuleContext> {
     if let Some(direct) = ctx.child_rule(rule_index) {
         return Some(direct);
     }

@@ -115,6 +115,38 @@ fn else_if_does_not_add_nesting() {
 }
 
 #[test]
+fn braceless_if_in_else_if_then_branch_still_nests() {
+    // Regression (PR #160 review): the `is_else_branch` flag must NOT leak from
+    // an else-if node onto its *then*-branch. Here `else if (b > 0)` has a
+    // braceless then-branch containing `if (d > 0)`, which is a genuine nested
+    // `if` and must add nesting.
+    //   if (a > 0)          -> +1
+    //   else if (b > 0)     -> flat else +1 (the `if` is an else-branch: no nest)
+    //     if (d > 0) ...    -> +2 (nested at level 1 inside the else-if body)
+    // = 4. If the flag leaked, the inner `if` would be mis-tagged as an
+    // else-branch and skip its nesting, giving 2.
+    let a = analyze(
+        "class C {
+             int f(int a, int b, int d) {
+                 if (a > 0) { return 1; }
+                 else if (b > 0)
+                     if (d > 0) return 2;
+                 return 0;
+             }
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    insta::assert_json_snapshot!(cog, @r###"
+    {
+      "sum": 4.0,
+      "average": 4.0,
+      "min": 0.0,
+      "max": 4.0
+    }
+    "###);
+}
+
+#[test]
 fn switch_expression_scores_like_switch_statement() {
     // Regression (audit): a switch *expression* (Java 14+) must get the same
     // cognitive nesting as the statement form. Here: switch expr(+1) then a

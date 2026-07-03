@@ -110,3 +110,25 @@ fn record_components_are_public_attributes() {
     }
     "#);
 }
+
+#[test]
+fn annotation_constants_are_public_attributes() {
+    // Regression (PR #160 review): annotation constants (`int X = 1;` in an
+    // `@interface`) reach the walker via annotationConstantRest and are
+    // implicitly-public interface attributes. `int Y = 2, Z = 3;` declares two.
+    let a = analyze("@interface Ann { int X = 1; int Y = 2, Z = 3; }");
+    let npa = mehen_report::metrics_json::npa(&a.root.metrics);
+    insta::assert_json_snapshot!(npa, @r#"
+    {
+      "classes": 0.0,
+      "interfaces": 3.0,
+      "class_attributes": 0.0,
+      "interface_attributes": 3.0,
+      "classes_average": null,
+      "interfaces_average": 1.0,
+      "total": 3.0,
+      "total_attributes": 3.0,
+      "average": 1.0
+    }
+    "#);
+}

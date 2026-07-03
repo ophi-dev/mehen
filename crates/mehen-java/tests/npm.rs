@@ -124,3 +124,54 @@ fn interface_methods_are_public() {
     }
     "#);
 }
+
+#[test]
+fn annotation_elements_are_public_interface_methods() {
+    // Regression (PR #160 review): annotation elements (`String value();`)
+    // reach the walker via annotationMethodRest and are implicitly-public
+    // interface-like methods — they must count toward interface NPM.
+    let a = analyze("@interface Ann { String value(); int count(); }");
+    let npm = mehen_report::metrics_json::npm(&a.root.metrics);
+    insta::assert_json_snapshot!(npm, @r#"
+    {
+      "classes": 0.0,
+      "interfaces": 2.0,
+      "class_methods": 0.0,
+      "interface_methods": 2.0,
+      "classes_average": null,
+      "interfaces_average": 1.0,
+      "total": 2.0,
+      "total_methods": 2.0,
+      "average": 1.0
+    }
+    "#);
+}
+
+#[test]
+fn enum_constant_body_methods_are_not_enum_members() {
+    // Regression (PR #160 review): a method inside a constant-specific enum
+    // body belongs to that constant's anonymous subclass, not the enum, so it
+    // must NOT count toward the enum's NPM. The enum declares no methods of its
+    // own here.
+    let a = analyze(
+        "enum E {
+             A {
+                 public void m() {}
+             };
+         }",
+    );
+    let npm = mehen_report::metrics_json::npm(&a.root.metrics);
+    insta::assert_json_snapshot!(npm, @r#"
+    {
+      "classes": 0.0,
+      "interfaces": 0.0,
+      "class_methods": 0.0,
+      "interface_methods": 0.0,
+      "classes_average": null,
+      "interfaces_average": null,
+      "total": 0.0,
+      "total_methods": 0.0,
+      "average": null
+    }
+    "#);
+}

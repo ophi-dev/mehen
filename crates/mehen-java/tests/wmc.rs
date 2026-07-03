@@ -38,3 +38,26 @@ fn class_sums_method_cyclomatics() {
     }
     "#);
 }
+
+#[test]
+fn enum_constant_body_method_does_not_inflate_enum_wmc() {
+    // Regression (PR #160 review): a method inside a constant-specific enum
+    // body (`A { void m() {…} }`) belongs to `A`'s anonymous subclass, not the
+    // enum, so it must NOT roll into the enum's WMC. The enum here declares no
+    // methods of its own, so WMC stays 0.
+    let a = analyze(
+        "enum E {
+             A {
+                 public void m() { if (true) {} }
+             };
+         }",
+    );
+    let wmc = mehen_report::metrics_json::wmc(&a.root.metrics);
+    insta::assert_json_snapshot!(wmc, @r#"
+    {
+      "classes": 0.0,
+      "interfaces": 0.0,
+      "total": 0.0
+    }
+    "#);
+}
