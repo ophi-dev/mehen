@@ -211,6 +211,29 @@ fn suffix_routed_calls_are_branches() {
 }
 
 #[test]
+fn qualified_super_field_access_is_not_a_branch() {
+    // Regression (PR #160 review): `superSuffix` also represents qualified
+    // super *field* access (`Outer.super.field`), where the grammar's
+    // `arguments` child is optional. A bare field read is NOT a call, so it
+    // must not count as an ABC branch — only a `superSuffix` with an
+    // `arguments` child (a real call) does.
+    let a = analyze(
+        "class Outer {
+             int field;
+             class Inner extends Outer {
+                 int f() { return Outer.super.field; }
+             }
+         }",
+    );
+    let abc = serde_json::to_value(mehen_report::metrics_json::abc(&a.root.metrics)).unwrap();
+    assert_eq!(
+        abc["branches"],
+        serde_json::json!(0.0),
+        "a super field read is not a branch"
+    );
+}
+
+#[test]
 fn object_creation_is_a_branch() {
     // B: `new Object()` (1) + no other calls. A: `Object o = …` initializer (1).
     let a = analyze(

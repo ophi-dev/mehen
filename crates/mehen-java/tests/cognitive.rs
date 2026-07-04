@@ -162,6 +162,28 @@ fn operator_expression_resets_boolean_run() {
 }
 
 #[test]
+fn lambda_inside_anonymous_class_method_inherits_method_depth() {
+    // Regression (PR #160 review): `in_anon_body` is a subtree-wide flag, but a
+    // lambda nested *inside* an anonymous class's method is enclosed by the
+    // method (a function), not the anon body — so it must inherit the method's
+    // cognitive depth. The lambda's `if` scores the same whether the method is
+    // in an anonymous class or a plain class.
+    let anon = analyze(
+        "class C { void outer() { new Runnable() { public void run() { Runnable r = () -> { if (x) {} }; } }; } }",
+    );
+    let plain = analyze("class C { void run() { Runnable r = () -> { if (x) {} }; } }");
+    let a =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&anon.root.metrics)).unwrap();
+    let p =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&plain.root.metrics)).unwrap();
+    assert_eq!(
+        a["sum"], p["sum"],
+        "a lambda inside an anon-class method must inherit the method's depth"
+    );
+    assert_eq!(a["sum"], serde_json::json!(2.0));
+}
+
+#[test]
 fn method_in_anonymous_class_does_not_inherit_outer_depth() {
     // Regression (PR #160 review): an anonymous class opens no metric space
     // (tracked only via `in_anon_body`), so the ancestor scan can't see a

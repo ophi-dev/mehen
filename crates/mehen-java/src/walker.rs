@@ -418,7 +418,14 @@ impl Walker<'_> {
         // nested class-like declaration opens its own space (its members belong
         // to that class, e.g. `new Runnable() { class Inner { void m() {} } }`
         // — `m` belongs to `Inner`).
-        let in_anon_body = if opens_class_like(ri) {
+        // Also cleared once a function space opens: the anon body's direct
+        // method is the boundary, but a lambda nested inside that method is
+        // directly enclosed by the *method* (a function), not the anon body, so
+        // it must inherit the method's cognitive depth rather than being reset.
+        // The method's own NPA/NPM/WMC suppression is captured from its inbound
+        // hint before its children are visited, so clearing here only affects
+        // descendants.
+        let in_anon_body = if opens_class_like(ri) || opens_function_space(ri) {
             false
         } else {
             hint.in_anon_body || matches!(ri, jp::RULE_ENUM_CONSTANT | jp::RULE_CLASS_CREATOR_REST)
@@ -899,7 +906,14 @@ impl Walker<'_> {
             //     explicit-type-argument call. Its `SUPER superSuffix` form is
             //     counted via the nested `superSuffix` above, so it's excluded
             //     here by the direct-`arguments` guard.
-            jp::RULE_SUPER_SUFFIX => self.current().abc.record_branch(),
+            // `superSuffix` is also qualified super *field* access
+            // (`Outer.super.field`) — its grammar alternative
+            // `'.' typeArguments? identifier arguments?` makes `arguments`
+            // optional. Only count it as a branch when it actually carries an
+            // `arguments` child (a call), not a bare field read.
+            jp::RULE_SUPER_SUFFIX if ctx.child_rule(jp::RULE_ARGUMENTS).is_some() => {
+                self.current().abc.record_branch();
+            }
             jp::RULE_EXPLICIT_GENERIC_INVOCATION_SUFFIX
                 if ctx.child_rule(jp::RULE_ARGUMENTS).is_some() =>
             {
@@ -1077,6 +1091,22 @@ fn opens_class_like(ri: usize) -> bool {
             | jp::RULE_ENUM_DECLARATION
             | jp::RULE_INTERFACE_DECLARATION
             | jp::RULE_ANNOTATION_TYPE_DECLARATION
+    )
+}
+
+/// Rules that open a function/closure metric space (mirrors the function arms
+/// of `maybe_open_space`). Used to clear the `in_anon_body` flag: the anon
+/// body's direct method is the boundary, and a lambda nested *inside* that
+/// method is enclosed by the method (a function), not the anon body.
+fn opens_function_space(ri: usize) -> bool {
+    matches!(
+        ri,
+        jp::RULE_METHOD_DECLARATION
+            | jp::RULE_CONSTRUCTOR_DECLARATION
+            | jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION
+            | jp::RULE_INTERFACE_COMMON_BODY_DECLARATION
+            | jp::RULE_ANNOTATION_METHOD_REST
+            | jp::RULE_LAMBDA_EXPRESSION
     )
 }
 
