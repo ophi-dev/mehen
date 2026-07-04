@@ -1005,6 +1005,16 @@ impl Walker<'_> {
         if ri == jp::RULE_LOCAL_VARIABLE_DECLARATION && hint.in_for_init {
             return;
         }
+        // An *expression-bodied* lambda (`x -> x + 1`) opens a closure space but
+        // its body (`lambdaBody: expression`) contains no statement/declaration,
+        // so the closure would report `lloc = 0`. Count the lambda itself as one
+        // logical line to match a block-bodied lambda (whose inner statements
+        // already count) and method declarations. A block body is skipped here
+        // — its statements are counted individually.
+        if ri == jp::RULE_LAMBDA_EXPRESSION && lambda_body_is_expression(ctx) {
+            self.current().loc.observe_lloc();
+            return;
+        }
         // LLOC: statement- and declaration-shaped rules. Interface methods
         // (`interfaceCommonBodyDeclaration`) and annotation elements/constants
         // (`annotationMethodRest`/`annotationConstantRest`) are the
@@ -1180,6 +1190,18 @@ fn expression_has_operator_token(ctx: &ParserRuleContext) -> bool {
     ctx.children()
         .iter()
         .any(|c| matches!(c, ParseTree::Terminal(_)))
+}
+
+/// Whether a `lambdaExpression`'s body is an expression (`lambdaBody:
+/// expression`) rather than a block. An expression body is a single logical
+/// line for LLOC; a block body's statements are counted individually.
+fn lambda_body_is_expression(ctx: &ParserRuleContext) -> bool {
+    ctx.child_rule(jp::RULE_LAMBDA_BODY)
+        .map(|body| {
+            body.child_rule(jp::RULE_EXPRESSION).is_some()
+                && body.child_rule(jp::RULE_BLOCK).is_none()
+        })
+        .unwrap_or(false)
 }
 
 /// Whether this `statement` context is an `if` statement (has an `IF` token as

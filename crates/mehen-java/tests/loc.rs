@@ -153,6 +153,38 @@ fn enum_constants_count_as_lloc() {
 }
 
 #[test]
+fn expression_bodied_lambda_counts_one_lloc() {
+    // Regression (PR #160 review): an expression-bodied lambda (`x -> x + 1`)
+    // opens a closure space whose body is an `expression`, not a statement, so
+    // its own `loc.lloc` would be 0. It must count as one logical line, like a
+    // block-bodied lambda (whose inner statements count) and method decls. Find
+    // the closure space and assert its LLOC.
+    fn closure_lloc(sp: &mehen_core::MetricSpace) -> Option<f64> {
+        if sp.kind == mehen_core::SpaceKind::Closure {
+            return Some(
+                sp.metrics
+                    .get(&mehen_core::MetricKey::new("loc.lloc"))
+                    .map(|m| m.as_f64())
+                    .unwrap_or(0.0),
+            );
+        }
+        sp.spaces.iter().find_map(closure_lloc)
+    }
+    let expr = analyze("class C { java.util.function.Function<Integer, Integer> f = x -> x + 1; }");
+    assert_eq!(
+        closure_lloc(&expr.root),
+        Some(1.0),
+        "an expression-bodied lambda is one logical line"
+    );
+    let block = analyze("class C { Runnable r = () -> { g(); }; }");
+    assert_eq!(
+        closure_lloc(&block.root),
+        Some(1.0),
+        "a block-bodied lambda counts its inner statement (no double-count)"
+    );
+}
+
+#[test]
 fn module_descriptor_directives_count_as_lloc() {
     // Regression (PR #160 review): a `module-info.java` descriptor parses via
     // `modularCompilationUnit → moduleDeclaration` with `moduleDirective`
