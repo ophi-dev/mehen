@@ -413,22 +413,28 @@ impl Walker<'_> {
         // (`enum E { A { … } }`) or an anonymous class expression
         // (`new Runnable() { … }`, via `classCreatorRest → classBody`). Their
         // members belong to the anonymous subclass, not the lexically-enclosing
-        // class/enum, so they must not seed NPA/NPM or roll into its WMC. Set
-        // on entering `enumConstant`/`classCreatorRest`; CLEARED once a *real*
-        // nested class-like declaration opens its own space (its members belong
-        // to that class, e.g. `new Runnable() { class Inner { void m() {} } }`
-        // — `m` belongs to `Inner`).
-        // Also cleared once a function space opens: the anon body's direct
-        // method is the boundary, but a lambda nested inside that method is
-        // directly enclosed by the *method* (a function), not the anon body, so
-        // it must inherit the method's cognitive depth rather than being reset.
-        // The method's own NPA/NPM/WMC suppression is captured from its inbound
-        // hint before its children are visited, so clearing here only affects
-        // descendants.
+        // class/enum, so they must not seed NPA/NPM or roll into its WMC.
+        //
+        // The anon body is ONLY the `classBody` child of `classCreatorRest` /
+        // `enumConstant` — NOT their sibling `arguments`/`identifier`. Tagging
+        // the whole node would wrongly suppress a lambda passed as a plain
+        // constructor argument (`new Foo(() -> …)`), resetting its cognitive
+        // depth. So the trigger is applied per-child below (only the
+        // `classBody`); here we just propagate the inbound flag, CLEARING it
+        // once a real nested class-like or a function space opens (the latter
+        // so a lambda inside the anon body's direct method still inherits the
+        // method's depth). The method's own NPA/NPM/WMC suppression is captured
+        // from its inbound hint before its children are visited.
+        let anon_body_child = if matches!(ri, jp::RULE_ENUM_CONSTANT | jp::RULE_CLASS_CREATOR_REST)
+        {
+            child_index_of_rule(children, jp::RULE_CLASS_BODY)
+        } else {
+            None
+        };
         let in_anon_body = if opens_class_like(ri) || opens_function_space(ri) {
             false
         } else {
-            hint.in_anon_body || matches!(ri, jp::RULE_ENUM_CONSTANT | jp::RULE_CLASS_CREATOR_REST)
+            hint.in_anon_body
         };
 
         // Thread the record's component count down so a compact constructor
@@ -454,7 +460,10 @@ impl Walker<'_> {
             child_hint.parent_bool_op = child_bool_op;
             child_hint.in_for_init = in_for_init;
             child_hint.in_identifier = in_identifier;
-            child_hint.in_anon_body = in_anon_body;
+            // The anon-body `classBody` child gets the suppression; its sibling
+            // `arguments`/`identifier` (a plain constructor call, an enum
+            // constant's args) do not.
+            child_hint.in_anon_body = in_anon_body || Some(idx) == anon_body_child;
             child_hint.record_component_count = record_component_count;
             self.visit(child, child_hint);
         }
@@ -1078,6 +1087,15 @@ impl Walker<'_> {
 // --------------------------------------------------------------------
 // Free helpers (top-down tree inspection — no parent pointers).
 // --------------------------------------------------------------------
+
+/// Index of the first direct child that is a rule with `rule_index`, if any.
+/// Used to tag only the `classBody` child of `classCreatorRest`/`enumConstant`
+/// as the anonymous body (its sibling `arguments` is a plain call).
+fn child_index_of_rule(children: &[ParseTree], rule_index: usize) -> Option<usize> {
+    children.iter().position(
+        |c| matches!(c, ParseTree::Rule(rule) if rule.context().rule_index() == rule_index),
+    )
+}
 
 /// Rules that open a class-like metric space (see `maybe_open_space`). Used to
 /// clear the `in_anon_body` suppression once a real nested class/interface/enum

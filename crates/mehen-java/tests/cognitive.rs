@@ -162,6 +162,26 @@ fn operator_expression_resets_boolean_run() {
 }
 
 #[test]
+fn lambda_in_plain_constructor_argument_inherits_method_depth() {
+    // Regression (PR #160 review): `new Foo(() -> …)` routes through
+    // `classCreatorRest: arguments classBody?`, but only the optional
+    // `classBody` is an anonymous body — the `arguments` (a plain constructor
+    // call) is not. A lambda passed as a constructor argument must inherit the
+    // enclosing method's depth, exactly like a lambda passed to a method call.
+    let ctor = analyze("class C { void m() { new Foo(() -> { if (x) {} }); } }");
+    let call = analyze("class C { void m() { bar(() -> { if (x) {} }); } }");
+    let cc =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&ctor.root.metrics)).unwrap();
+    let ca =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&call.root.metrics)).unwrap();
+    assert_eq!(
+        cc["sum"], ca["sum"],
+        "a lambda in a constructor argument must score like one in a method-call argument"
+    );
+    assert_eq!(cc["sum"], serde_json::json!(2.0));
+}
+
+#[test]
 fn lambda_inside_anonymous_class_method_inherits_method_depth() {
     // Regression (PR #160 review): `in_anon_body` is a subtree-wide flag, but a
     // lambda nested *inside* an anonymous class's method is enclosed by the
