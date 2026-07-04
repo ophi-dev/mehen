@@ -904,7 +904,13 @@ impl Walker<'_> {
         if let Some(op) = this_op {
             self.current().cyclomatic.record_decision();
             self.current().abc.record_condition();
-            if hint.parent_bool_op != Some(op) {
+            // A boolean node adds +1 when its operator differs from the
+            // enclosing boolean operator (parent-relative run collapse) — OR
+            // when one of its operands is a prefix `!` negation, which breaks
+            // the run per SonarSource (`a && !b && c` is +2, not +1: the `!`
+            // separates the two `&&`). Matches the Kotlin walker's
+            // `not_operator` behavior.
+            if hint.parent_bool_op != Some(op) || has_negated_operand(ctx) {
                 self.current().cognitive.increment_by_one();
             }
         }
@@ -1195,6 +1201,20 @@ fn opens_function_space(ri: usize) -> bool {
             | jp::RULE_ANNOTATION_METHOD_REST
             | jp::RULE_LAMBDA_EXPRESSION
     )
+}
+
+/// Whether a boolean `expression` (`&&`/`||`) has a directly-negated operand —
+/// a prefix `!` (`BANG`) unary sub-expression. Per SonarSource's cognitive
+/// rule, a negation breaks a same-operator boolean run (`a && !b && c` is +2,
+/// not +1). The negation is a `UnaryOperatorExpression` operand: an
+/// `expression` child that carries a `BANG` token. The postfix behaviors of
+/// other unary operators don't apply — only logical `!` breaks the run.
+fn has_negated_operand(ctx: &ParserRuleContext) -> bool {
+    ctx.children().iter().any(|c| {
+        matches!(c, ParseTree::Rule(rule)
+            if rule.context().rule_index() == jp::RULE_EXPRESSION
+                && rule.context().has_token(jl::BANG))
+    })
 }
 
 /// Whether an `expression` context carries its own operator — i.e. has any

@@ -136,6 +136,43 @@ fn parentheses_do_not_break_boolean_run_collapse() {
 }
 
 #[test]
+fn negation_breaks_boolean_run() {
+    // Regression (PR #160 review): a prefix `!` negation breaks a same-operator
+    // boolean run (SonarSource rule; matches the Kotlin walker). For
+    // `a && !b && c` the two `&&` do NOT collapse — the `!` on `b` separates
+    // them: if(+1), first `&&`(+1), second `&&` after the negation(+1) = 3.
+    let a = analyze(
+        "class C {
+             boolean f(boolean a, boolean b, boolean c) {
+                 if (a && !b && c) return true;
+                 return false;
+             }
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    insta::assert_json_snapshot!(cog, @r###"
+    {
+      "sum": 3.0,
+      "average": 3.0,
+      "min": 0.0,
+      "max": 3.0
+    }
+    "###);
+    // Control: without the negation, the two `&&` collapse into one run → 2.
+    let plain = analyze(
+        "class C {
+             boolean f(boolean a, boolean b, boolean c) {
+                 if (a && b && c) return true;
+                 return false;
+             }
+         }",
+    );
+    let pj =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&plain.root.metrics)).unwrap();
+    assert_eq!(pj["sum"], serde_json::json!(2.0));
+}
+
+#[test]
 fn operator_expression_resets_boolean_run() {
     // Regression (PR #160 review): only *transparent* wrappers (parens/bare
     // operands) preserve a boolean run; an expression with its own operator
