@@ -225,6 +225,33 @@ fn method_in_anonymous_class_does_not_inherit_outer_depth() {
 }
 
 #[test]
+fn anonymous_class_body_initializer_does_not_inherit_enclosing_nesting() {
+    // Regression (PR #160 review): an anonymous class body (`new X() { … }`) is
+    // a fresh class scope but opens no metric space, so — like a named class
+    // (which resets via `enter_class_cognitive`) — its class-body-level code
+    // (an instance initializer block) must not inherit the enclosing `if`'s
+    // nesting. `if (a) { new Object() { { if (b) {} } }; }`:
+    //   if (a) → +1; the anon body's initializer `if (b)` is a fresh scope → +1
+    // = 2, not 3.
+    let nested = analyze("class C { void m() { if (a) { new Object() { { if (b) {} } }; } } }");
+    let flat = analyze("class C { void m() { new Object() { { if (b) {} } }; } }");
+    let n =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&nested.root.metrics)).unwrap();
+    let f =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&flat.root.metrics)).unwrap();
+    assert_eq!(
+        f["sum"],
+        serde_json::json!(1.0),
+        "anon initializer `if` is a fresh scope"
+    );
+    assert_eq!(
+        n["sum"],
+        serde_json::json!(2.0),
+        "outer if (1) + anon initializer if at baseline (1), not nested (2)"
+    );
+}
+
+#[test]
 fn class_body_initializer_does_not_inherit_enclosing_nesting() {
     // Regression (PR #160 review): a class-like scope resets the cognitive
     // context, so code that runs *directly* in a class body (an instance

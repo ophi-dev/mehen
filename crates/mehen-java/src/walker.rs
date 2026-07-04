@@ -463,9 +463,25 @@ impl Walker<'_> {
             // The anon-body `classBody` child gets the suppression; its sibling
             // `arguments`/`identifier` (a plain constructor call, an enum
             // constant's args) do not.
-            child_hint.in_anon_body = in_anon_body || Some(idx) == anon_body_child;
+            let is_anon_body_child = Some(idx) == anon_body_child;
+            child_hint.in_anon_body = in_anon_body || is_anon_body_child;
             child_hint.record_component_count = record_component_count;
-            self.visit(child, child_hint);
+            // An anonymous class body (`new X() { … }`) is a fresh class scope
+            // but opens no metric space, so — unlike a named class, which
+            // resets via `enter_class_cognitive` in `maybe_open_space` — its
+            // class-body-level code (initializer blocks, field initializers)
+            // would otherwise inherit the enclosing statement's cognitive
+            // nesting. Reset the cognitive context for that subtree and restore
+            // it afterward (the sibling `arguments` were already visited, and
+            // this scopes the reset to just the anon body).
+            if is_anon_body_child {
+                let saved = self.cognitive;
+                self.cognitive = CognitiveContext::default();
+                self.visit(child, child_hint);
+                self.cognitive = saved;
+            } else {
+                self.visit(child, child_hint);
+            }
         }
     }
 
