@@ -25,7 +25,7 @@ sqruff-lib-core = { git = "https://github.com/quarylabs/sqruff", tag = "v0.38.0"
 # inference fallback, so it is not listed here. `sparksql` transitively pulls
 # in `hive`. We deliberately omit `duckdb` (its dialect is a thin layer over
 # `postgres`, which we already ship).
-sqruff-lib-dialects = { git = "https://github.com/quarylabs/sqruff", tag = "v0.38.0", default-features = false, features = [
+sqruff-lib-dialects = { git = "https://github.com/quarylabs/sqruff", tag = "v0.39.0", default-features = false, features = [
     "postgres",
     "tsql",
     "snowflake",
