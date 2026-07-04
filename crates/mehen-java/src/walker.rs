@@ -805,6 +805,16 @@ impl Walker<'_> {
                 self.current().abc.record_condition();
             }
         }
+        // A pattern-switch guard (`case String s when expr -> …`, grammar
+        // `guard: 'when' expression`) is a distinct boolean test — like an extra
+        // `if` on the case — so it records one ABC condition of its own (any
+        // operators *inside* the guard expression still count on top, via
+        // `classify_expression`). It is its own rule, so `default` and unguarded
+        // cases are unaffected. Cyclomatic/cognitive are unchanged: the `case`
+        // already carries the decision and the `switch` the nesting.
+        if ri == jp::RULE_GUARD {
+            self.current().abc.record_condition();
+        }
         // A `switch` *expression* (Java 14+) owns its `SWITCH` token in the
         // separate `switchExpression` rule — the statement-form handler in
         // `classify_statement` (keyed on `statement`'s direct `SWITCH` token)

@@ -283,6 +283,70 @@ fn annotation_named_element_is_not_an_assignment() {
 }
 
 #[test]
+fn switch_guard_is_a_condition() {
+    // Regression (PR #160 review): a Java pattern-switch guard
+    // (`case String s when ready -> …`, grammar `guard: 'when' expression`) is
+    // a distinct boolean test — like an extra `if` on the case — so it must
+    // record an ABC condition. Using a bare boolean operand (`ready`) isolates
+    // the guard: without the fix no expression operator fires, so the guard's
+    // test would be uncounted. Here: C = the `case` (1) + the guard (1) = 2.
+    let a = analyze(
+        "class C {
+             boolean ready;
+             int f(Object o) {
+                 return switch (o) {
+                     case String s when ready -> 1;
+                     default -> 0;
+                 };
+             }
+         }",
+    );
+    let abc = serde_json::to_value(mehen_report::metrics_json::abc(&a.root.metrics)).unwrap();
+    assert_eq!(
+        abc["conditions"],
+        serde_json::json!(2.0),
+        "a guarded pattern case counts the case AND the guard as conditions"
+    );
+    // Guard: operators inside the guard still count on top of the guard test.
+    // `case String s when a > b` → case (1) + guard (1) + `>` (1) = 3.
+    let with_op = analyze(
+        "class C {
+             int f(Object o, int a, int b) {
+                 return switch (o) {
+                     case String s when a > b -> 1;
+                     default -> 0;
+                 };
+             }
+         }",
+    );
+    let wabc =
+        serde_json::to_value(mehen_report::metrics_json::abc(&with_op.root.metrics)).unwrap();
+    assert_eq!(
+        wabc["conditions"],
+        serde_json::json!(3.0),
+        "an operator inside the guard adds a condition on top of the guard test"
+    );
+    // Guard: an unguarded pattern case (no `when`) counts only the case.
+    let unguarded = analyze(
+        "class C {
+             int f(Object o) {
+                 return switch (o) {
+                     case String s -> 1;
+                     default -> 0;
+                 };
+             }
+         }",
+    );
+    let uabc =
+        serde_json::to_value(mehen_report::metrics_json::abc(&unguarded.root.metrics)).unwrap();
+    assert_eq!(
+        uabc["conditions"],
+        serde_json::json!(1.0),
+        "an unguarded pattern case counts only the case, not a phantom guard"
+    );
+}
+
+#[test]
 fn object_creation_is_a_branch() {
     // B: `new Object()` (1) + no other calls. A: `Object o = …` initializer (1).
     let a = analyze(
