@@ -173,6 +173,42 @@ fn negation_breaks_boolean_run() {
 }
 
 #[test]
+fn parenthesized_negation_still_breaks_boolean_run() {
+    // Regression (PR #160 review): the negation that breaks a boolean run may
+    // be wrapped in transparent parentheses (`primary: '(' expression ')'`), so
+    // `a && (!b) && c` and `a && ((!b)) && c` must break the run just like the
+    // bare `a && !b && c` → cognitive 3.
+    for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (!b) && c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && ((!b)) && c) return true; return false; } }",
+    ] {
+        let a = analyze(src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(3.0),
+            "paren negation should break the run: {src}"
+        );
+    }
+    // Guard: a parenthesized *non-negation* operand still collapses (no `!`),
+    // and `!=` inside a paren operand is not mistaken for `!`.
+    for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (b) && c) return true; return false; } }",
+        "class C { boolean f(boolean a, int b, boolean c) { if (a && (b != 0) && c) return true; return false; } }",
+    ] {
+        let a = analyze(src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(2.0),
+            "no spurious run break: {src}"
+        );
+    }
+}
+
+#[test]
 fn operator_expression_resets_boolean_run() {
     // Regression (PR #160 review): only *transparent* wrappers (parens/bare
     // operands) preserve a boolean run; an expression with its own operator

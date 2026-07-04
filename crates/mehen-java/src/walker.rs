@@ -1203,18 +1203,51 @@ fn opens_function_space(ri: usize) -> bool {
     )
 }
 
-/// Whether a boolean `expression` (`&&`/`||`) has a directly-negated operand —
-/// a prefix `!` (`BANG`) unary sub-expression. Per SonarSource's cognitive
-/// rule, a negation breaks a same-operator boolean run (`a && !b && c` is +2,
-/// not +1). The negation is a `UnaryOperatorExpression` operand: an
-/// `expression` child that carries a `BANG` token. The postfix behaviors of
-/// other unary operators don't apply — only logical `!` breaks the run.
+/// Whether a boolean `expression` (`&&`/`||`) has a prefix `!` (`BANG`)
+/// negated operand. Per SonarSource's cognitive rule a negation breaks a
+/// same-operator boolean run (`a && !b && c` is +2, not +1). The negation is
+/// a `UnaryOperatorExpression` (an `expression` carrying a `BANG` token), but
+/// it may be wrapped in *transparent* layers — parentheses
+/// (`primary: '(' expression ')'`) or pass-through expressions — as in
+/// `a && (!b) && c`, so each operand is unwrapped through those wrappers
+/// before checking for the `BANG`.
 fn has_negated_operand(ctx: &ParserRuleContext) -> bool {
-    ctx.children().iter().any(|c| {
-        matches!(c, ParseTree::Rule(rule)
-            if rule.context().rule_index() == jp::RULE_EXPRESSION
-                && rule.context().has_token(jl::BANG))
+    ctx.children().iter().any(|c| match c {
+        ParseTree::Rule(rule) => operand_is_negation(rule.context(), 0),
+        _ => false,
     })
+}
+
+/// Whether an operand node is (or transparently wraps) a prefix `!` negation.
+/// Unwraps parenthesized `primary` and single-sub-expression `expression`
+/// wrappers up to a small depth bound.
+fn operand_is_negation(ctx: &ParserRuleContext, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match ctx.rule_index() {
+        jp::RULE_EXPRESSION => {
+            // A prefix `!` unary expression carries the `BANG` token directly.
+            if ctx.has_token(jl::BANG) {
+                return true;
+            }
+            // A transparent expression (single sub-expression / `primary`
+            // operand, no operator token of its own) — unwrap and recurse.
+            if !expression_has_operator_token(ctx) {
+                return ctx.children().iter().any(|c| match c {
+                    ParseTree::Rule(rule) => operand_is_negation(rule.context(), depth + 1),
+                    _ => false,
+                });
+            }
+            false
+        }
+        // `primary: '(' expression ')'` — unwrap the parenthesized expression.
+        jp::RULE_PRIMARY => ctx.children().iter().any(|c| match c {
+            ParseTree::Rule(rule) => operand_is_negation(rule.context(), depth + 1),
+            _ => false,
+        }),
+        _ => false,
+    }
 }
 
 /// Whether an `expression` context carries its own operator — i.e. has any
