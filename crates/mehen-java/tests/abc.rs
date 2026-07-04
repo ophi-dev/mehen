@@ -257,6 +257,32 @@ fn qualified_super_field_access_is_not_a_branch() {
 }
 
 #[test]
+fn annotation_named_element_is_not_an_assignment() {
+    // Regression (PR #160 review): the vendored grammar's `IsNotIdentifierAssign`
+    // predicate is dropped by the Rust generator, so `@Ann(value = 1)`'s named
+    // element value parses through the assignment-expression path with an `=`.
+    // Annotation metadata is not executable code, so it must NOT count as an
+    // ABC assignment.
+    let a = analyze("class C { @Ann(value = 1) void m() {} }");
+    let abc = serde_json::to_value(mehen_report::metrics_json::abc(&a.root.metrics)).unwrap();
+    assert_eq!(
+        abc["assignments"],
+        serde_json::json!(0.0),
+        "an annotation named-element value is not an assignment"
+    );
+    // Guard: a real assignment in the body of an annotated method still counts
+    // (the `in_annotation` flag must not leak past the annotation subtree).
+    let with_body = analyze("class C { @Ann(value = 1) void m() { int x = 5; } }");
+    let wb =
+        serde_json::to_value(mehen_report::metrics_json::abc(&with_body.root.metrics)).unwrap();
+    assert_eq!(
+        wb["assignments"],
+        serde_json::json!(1.0),
+        "a real assignment in an annotated method's body still counts"
+    );
+}
+
+#[test]
 fn object_creation_is_a_branch() {
     // B: `new Object()` (1) + no other calls. A: `Object o = …` initializer (1).
     let a = analyze(

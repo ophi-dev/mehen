@@ -211,6 +211,14 @@ struct ChildHint {
     /// components — so its NArgs must come from this count. `None` outside a
     /// record.
     record_component_count: Option<u32>,
+    /// We are inside an `annotation` (`@Ann(value = 1)`). Annotation values are
+    /// compile-time metadata, not executable code, so ABC assignment
+    /// accounting must be suppressed here: the grammar's `IsNotIdentifierAssign`
+    /// predicate (which would parse `value = 1` as `identifier '=' …` rather
+    /// than an assignment expression) is dropped by the Rust generator, so a
+    /// named element value otherwise reaches the `RULE_EXPRESSION` assignment
+    /// arm with an `=` token and inflates ABC.
+    in_annotation: bool,
 }
 
 /// A short-circuit boolean operator, for parent-relative cognitive
@@ -436,6 +444,11 @@ impl Walker<'_> {
             hint.in_anon_body
         };
 
+        // Once inside an `annotation`, stay inside for the whole subtree so
+        // named element values (`@Ann(value = 1)`) don't record ABC
+        // assignments (annotation metadata is not executable code).
+        let in_annotation = hint.in_annotation || ri == jp::RULE_ANNOTATION;
+
         // Thread the record's component count down so a compact constructor
         // (which has no `formalParameters`) can report the components as its
         // NArgs. Set on entering `recordDeclaration`; a nested type resets it
@@ -465,6 +478,7 @@ impl Walker<'_> {
             let is_anon_body_child = Some(idx) == anon_body_child;
             child_hint.in_anon_body = in_anon_body || is_anon_body_child;
             child_hint.record_component_count = record_component_count;
+            child_hint.in_annotation = in_annotation;
             // An anonymous class body (`new X() { … }`) is a fresh class scope
             // but opens no metric space, so — unlike a named class, which
             // resets via `enter_class_cognitive` in `maybe_open_space` — its
@@ -813,7 +827,7 @@ impl Walker<'_> {
                 .record_attribute(ContainerKind::Class, true);
         }
         self.classify_expression(ctx, ri, hint);
-        self.classify_abc_rule(ctx, ri);
+        self.classify_abc_rule(ctx, ri, hint);
         self.classify_loc_rule(ctx, ri, hint);
     }
 
@@ -925,7 +939,7 @@ impl Walker<'_> {
         }
     }
 
-    fn classify_abc_rule(&mut self, ctx: &ParserRuleContext, ri: usize) {
+    fn classify_abc_rule(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
         match ri {
             // A method/constructor call, or object creation, is a branch.
             jp::RULE_METHOD_CALL => self.current().abc.record_branch(),
@@ -971,8 +985,13 @@ impl Walker<'_> {
             // An `expression` carrying an assignment operator is an assignment.
             // Compound assigns (`+=`, `-=`, …) and the increment/decrement
             // operators (`++`, `--`) count too (Fitzpatrick's ABC lists both
-            // under A). `has_assignment_op` covers all of them.
-            jp::RULE_EXPRESSION if has_assignment_op(ctx) => {
+            // under A). `has_assignment_op` covers all of them. Suppressed
+            // inside an annotation: a named element value (`@Ann(value = 1)`)
+            // is compile-time metadata, not an executable assignment — and the
+            // grammar's `IsNotIdentifierAssign` predicate that would keep it out
+            // of the assignment-expression path is dropped by the Rust
+            // generator.
+            jp::RULE_EXPRESSION if has_assignment_op(ctx) && !hint.in_annotation => {
                 self.current().abc.record_assignment();
             }
             // A local variable / field / record-component declarator with an
