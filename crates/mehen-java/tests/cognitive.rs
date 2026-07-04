@@ -225,6 +225,36 @@ fn method_in_anonymous_class_does_not_inherit_outer_depth() {
 }
 
 #[test]
+fn class_body_initializer_does_not_inherit_enclosing_nesting() {
+    // Regression (PR #160 review): a class-like scope resets the cognitive
+    // context, so code that runs *directly* in a class body (an instance
+    // initializer block) does not inherit the enclosing statement's nesting.
+    // Methods reset via `enter_function_cognitive`; class-body code opens no
+    // function space, so the class-open must reset it. Here a local class with
+    // an initializer block is declared inside `if (a)`:
+    //   if (a) → +1; the initializer's `if (b)` is a fresh scope → +1 = 2.
+    // Without the reset the inner `if` would be scored nested (+2), giving 3.
+    let nested = analyze("class C { void m() { if (a) { class L { { if (b) {} } } } } }");
+    let flat = analyze("class C { void m() { class L { { if (b) {} } } } }");
+    let n =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&nested.root.metrics)).unwrap();
+    let f =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&flat.root.metrics)).unwrap();
+    // The local class's initializer `if` scores the same (baseline 1) whether
+    // or not the class is declared inside the outer `if`.
+    assert_eq!(
+        f["sum"],
+        serde_json::json!(1.0),
+        "initializer `if` is a fresh scope"
+    );
+    assert_eq!(
+        n["sum"],
+        serde_json::json!(2.0),
+        "outer if (1) + initializer if at baseline (1), not nested (2)"
+    );
+}
+
+#[test]
 fn method_in_local_class_does_not_inherit_outer_depth() {
     // Regression (PR #160 review): a method in a local/anonymous class nested
     // in another method must NOT inherit the outer method's cognitive depth —

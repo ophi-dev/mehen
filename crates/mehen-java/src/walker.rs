@@ -612,6 +612,7 @@ impl Walker<'_> {
                 // parent contribution (and it opens its own space, clearing any
                 // enclosing enum-constant-body suppression for its members).
                 self.push_space(SpaceKind::Class, name, ctx, state, false);
+                self.enter_class_cognitive();
                 true
             }
             jp::RULE_ENUM_DECLARATION => {
@@ -621,6 +622,7 @@ impl Walker<'_> {
                 state.npm.record_class_like();
                 state.wmc.record_class_like();
                 self.push_space(SpaceKind::Enum, name, ctx, state, false);
+                self.enter_class_cognitive();
                 true
             }
             jp::RULE_INTERFACE_DECLARATION | jp::RULE_ANNOTATION_TYPE_DECLARATION => {
@@ -629,6 +631,7 @@ impl Walker<'_> {
                 state.npa.record_class_like();
                 state.npm.record_class_like();
                 self.push_space(SpaceKind::Interface, name, ctx, state, false);
+                self.enter_class_cognitive();
                 true
             }
             _ => false,
@@ -661,6 +664,17 @@ impl Walker<'_> {
         self.stack.push(state);
         self.kinds.push(kind);
         self.suppress_parent_wmc.push(suppress_parent_wmc);
+    }
+
+    /// Reset the cognitive context when opening a class-like space. A class
+    /// body is a fresh scope: code that runs *directly* in it (instance/static
+    /// initializer blocks, field initializers) must not inherit the enclosing
+    /// method's or statement's nesting. Methods do this via
+    /// `enter_function_cognitive`, but class-body-level code opens no function
+    /// space, so the class-open must reset it. `visit_rule`'s `saved_cognitive`
+    /// restore unwinds it when the class-like node's subtree is done.
+    fn enter_class_cognitive(&mut self) {
+        self.cognitive = CognitiveContext::default();
     }
 
     fn enter_function_cognitive(&mut self, in_anon_body: bool) {
