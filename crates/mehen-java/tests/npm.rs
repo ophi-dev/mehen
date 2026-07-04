@@ -148,6 +148,29 @@ fn annotation_elements_are_public_interface_methods() {
 }
 
 #[test]
+fn compact_record_constructor_counts_as_public_method() {
+    // Regression (PR #160 review): a compact record constructor is a direct
+    // `compactConstructorDeclaration` child of `recordBody` (not wrapped in
+    // `classBodyDeclaration`), so the member position must be seeded from
+    // `recordBody`. Its visibility comes from its own modifiers.
+    let a = analyze("record R(int x) { public R { } }");
+    let npm = mehen_report::metrics_json::npm(&a.root.metrics);
+    insta::assert_json_snapshot!(npm, @r#"
+    {
+      "classes": 1.0,
+      "interfaces": 0.0,
+      "class_methods": 1.0,
+      "interface_methods": 0.0,
+      "classes_average": 1.0,
+      "interfaces_average": null,
+      "total": 1.0,
+      "total_methods": 1.0,
+      "average": 1.0
+    }
+    "#);
+}
+
+#[test]
 fn enum_constant_body_methods_are_not_enum_members() {
     // Regression (PR #160 review): a method inside a constant-specific enum
     // body belongs to that constant's anonymous subclass, not the enum, so it

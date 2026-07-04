@@ -116,6 +116,27 @@ fn empty_and_labeled_statements_are_not_their_own_lloc() {
 }
 
 #[test]
+fn interface_and_annotation_members_count_as_lloc() {
+    // Regression (PR #160 review): an interface method
+    // (`interfaceCommonBodyDeclaration`) and an annotation element
+    // (`annotationMethodRest`) are declaration nodes and must count as LLOC,
+    // just like a class abstract method — an interface API should not
+    // under-report logical LOC vs the equivalent abstract class.
+    let iface = analyze("interface I { void m(); }");
+    let cls = analyze("abstract class C { abstract void m(); }");
+    let i = serde_json::to_value(mehen_report::metrics_json::loc(&iface.root.metrics)).unwrap();
+    let c = serde_json::to_value(mehen_report::metrics_json::loc(&cls.root.metrics)).unwrap();
+    assert_eq!(
+        i["lloc"], c["lloc"],
+        "interface method LLOC should match the equivalent abstract class method"
+    );
+    // Annotation element + constant each count: type decl + method + constant.
+    let anno = analyze("@interface An { String v(); int X = 1; }");
+    let av = serde_json::to_value(mehen_report::metrics_json::loc(&anno.root.metrics)).unwrap();
+    assert_eq!(av["lloc"], serde_json::json!(3.0));
+}
+
+#[test]
 fn block_only_statement_is_not_its_own_lloc() {
     // A bare `{ … }` block statement is not a logical line; the inner
     // statements each count.

@@ -429,10 +429,19 @@ impl Walker<'_> {
             // The body-declaration wrappers open a member position; the
             // container is the class-like currently on the kinds stack, and
             // the visibility is resolved from this wrapper's own `modifier`s.
+            //
+            // `recordBody` is included because a *compact* constructor is a
+            // direct `compactConstructorDeclaration` child of `recordBody`
+            // (not wrapped in `classBodyDeclaration`), so without seeding the
+            // member position here it would be visited with
+            // `in_class_member == false` and dropped from NPM. Its own
+            // `modifier`s live on the declaration, so visibility is resolved
+            // in `classify_class_member` rather than from this wrapper.
             jp::RULE_CLASS_BODY_DECLARATION
             | jp::RULE_INTERFACE_BODY_DECLARATION
             | jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION
-            | jp::RULE_ENUM_BODY_DECLARATIONS => {
+            | jp::RULE_ENUM_BODY_DECLARATIONS
+            | jp::RULE_RECORD_BODY => {
                 let container = self.enclosing_container();
                 // Java visibility semantics (not Kotlin's): a class member with
                 // no access modifier is *package-private*, which is NOT public,
@@ -509,7 +518,11 @@ impl Walker<'_> {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_closure();
                 state.nargs.record_closure_args(count_lambda_args(ctx));
-                self.push_space(SpaceKind::Function, None, ctx, state, hint.in_anon_body);
+                // A lambda is a `Closure`, not a `Function`: NOM/NArgs already
+                // record it as a closure, and its cyclomatic must NOT roll into
+                // the enclosing class's WMC (WMC weights *methods*). A lambda in
+                // a field initializer would otherwise inflate the class's WMC.
+                self.push_space(SpaceKind::Closure, None, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
             }
@@ -583,7 +596,7 @@ impl Walker<'_> {
             .iter()
             .rev()
             .skip(1)
-            .any(|k| matches!(k, SpaceKind::Function));
+            .any(|k| matches!(k, SpaceKind::Function | SpaceKind::Closure));
         self.cognitive.nesting = 0;
         self.cognitive.lambda = 0;
         if nested_inside_function {
@@ -595,7 +608,9 @@ impl Walker<'_> {
         let closed_kind = self.kinds.pop().expect("kinds underflow");
         let suppress_wmc = self.suppress_parent_wmc.pop().unwrap_or(false);
         let mut state = self.stack.pop().expect("stack underflow");
-        if matches!(closed_kind, SpaceKind::Function) {
+        // A function OR closure space carries its own McCabe value (base + 1),
+        // used for its per-space cyclomatic and (for methods) the WMC rollup.
+        if matches!(closed_kind, SpaceKind::Function | SpaceKind::Closure) {
             state.wmc.set_cyclomatic(state.cyclomatic.cyclomatic + 1);
         }
         finalize_state(&mut state);
@@ -803,7 +818,13 @@ impl Walker<'_> {
         if ri == jp::RULE_LOCAL_VARIABLE_DECLARATION && hint.in_for_init {
             return;
         }
-        // LLOC: statement- and declaration-shaped rules.
+        // LLOC: statement- and declaration-shaped rules. Interface methods
+        // (`interfaceCommonBodyDeclaration`) and annotation elements/constants
+        // (`annotationMethodRest`/`annotationConstantRest`) are the
+        // declaration nodes for their member kinds — a class abstract method
+        // counts via `methodDeclaration`, so their interface/annotation
+        // equivalents must count too, or interface/annotation APIs
+        // under-report LLOC.
         if matches!(
             ri,
             jp::RULE_STATEMENT
@@ -812,6 +833,9 @@ impl Walker<'_> {
                 | jp::RULE_METHOD_DECLARATION
                 | jp::RULE_CONSTRUCTOR_DECLARATION
                 | jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION
+                | jp::RULE_INTERFACE_COMMON_BODY_DECLARATION
+                | jp::RULE_ANNOTATION_METHOD_REST
+                | jp::RULE_ANNOTATION_CONSTANT_REST
                 | jp::RULE_CONST_DECLARATION
                 | jp::RULE_CLASS_DECLARATION
                 | jp::RULE_INTERFACE_DECLARATION
@@ -868,9 +892,16 @@ impl Walker<'_> {
             // double-count the non-generic interface method.
             jp::RULE_METHOD_DECLARATION
             | jp::RULE_CONSTRUCTOR_DECLARATION
-            | jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION
             | jp::RULE_INTERFACE_COMMON_BODY_DECLARATION => {
                 self.current().npm.record_method(container, public);
+            }
+            // A compact record constructor (`record R(int x) { public R {} }`)
+            // is reached directly under `recordBody`, so the threaded `public`
+            // comes from the (modifier-less) record body. Its `modifier`s are
+            // its own children, so resolve visibility from `ctx` itself.
+            jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION => {
+                let is_public = visibility_from_modifiers(ctx).unwrap_or(public);
+                self.current().npm.record_method(container, is_public);
             }
             // An annotation element (`@interface A { String value(); }`) is an
             // implicitly-public interface-like method — `annotationMethodRest`

@@ -61,3 +61,20 @@ fn enum_constant_body_method_does_not_inflate_enum_wmc() {
     }
     "#);
 }
+
+#[test]
+fn lambda_in_field_initializer_does_not_inflate_class_wmc() {
+    // Regression (PR #160 review): a lambda is a Closure, not a method — its
+    // cyclomatic must NOT roll into the class's WMC (WMC weights methods). The
+    // class declares no methods, so WMC stays 0 even though the lambda body
+    // contains an `if`.
+    let a = analyze("class C { Runnable r = () -> { if (flag) {} }; }");
+    let wmc = mehen_report::metrics_json::wmc(&a.root.metrics);
+    insta::assert_json_snapshot!(wmc, @r#"
+    {
+      "classes": 0.0,
+      "interfaces": 0.0,
+      "total": 0.0
+    }
+    "#);
+}
