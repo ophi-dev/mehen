@@ -657,8 +657,17 @@ impl Walker<'_> {
             // Roll a closing function's cyclomatic into the parent's WMC —
             // unless it's a function from an enum-constant body, which belongs
             // to that constant's anonymous subclass (no space of its own) and
-            // must not inflate the enclosing enum's WMC.
-            if matches!(closed_kind, SpaceKind::Function) && !suppress_wmc {
+            // must not inflate the enclosing enum's WMC. Java WMC is *per
+            // class* — an interface's methods (`default`/`static`/abstract) are
+            // NOT weighted, so only roll into a class/enum parent. A method
+            // whose parent is an interface contributes nothing to WMC.
+            if matches!(closed_kind, SpaceKind::Function)
+                && !suppress_wmc
+                && matches!(
+                    parent_kind,
+                    SpaceKind::Class | SpaceKind::Impl | SpaceKind::Enum
+                )
+            {
                 let container = container_kind(parent_kind);
                 state.wmc.finalize_method_into(container, &mut parent.wmc);
             }
@@ -827,6 +836,13 @@ impl Walker<'_> {
             // A method/constructor call, or object creation, is a branch.
             jp::RULE_METHOD_CALL => self.current().abc.record_branch(),
             jp::RULE_CREATOR | jp::RULE_INNER_CREATOR => self.current().abc.record_branch(),
+            // An explicit type-argument invocation (`this.<String>m()`,
+            // `obj.<String>m()`, `<T>super.m()`) routes through
+            // `explicitGenericInvocation`, NOT `methodCall`, so it would
+            // otherwise be missed. It wraps exactly one call (its nested
+            // `explicitGenericInvocationSuffix`/`superSuffix` arguments), so
+            // counting it once here does not double-count.
+            jp::RULE_EXPLICIT_GENERIC_INVOCATION => self.current().abc.record_branch(),
             // An `expression` carrying an assignment operator is an assignment.
             // Compound assigns (`+=`, `-=`, …) and the increment/decrement
             // operators (`++`, `--`) count too (Fitzpatrick's ABC lists both

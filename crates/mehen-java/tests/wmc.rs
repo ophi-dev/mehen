@@ -63,6 +63,28 @@ fn enum_constant_body_method_does_not_inflate_enum_wmc() {
 }
 
 #[test]
+fn interface_methods_are_excluded_from_wmc() {
+    // Regression (PR #160 review): Java WMC is per class — an interface's
+    // methods (including `default`) must not accumulate WMC, even in a file
+    // that also contains a class. Here the class has no methods, so total WMC
+    // is 0 despite the interface's `default` method containing an `if`.
+    let a = analyze(
+        "class C {}
+         interface I {
+             default int m() { if (flag) {} return 1; }
+         }",
+    );
+    let wmc = mehen_report::metrics_json::wmc(&a.root.metrics);
+    insta::assert_json_snapshot!(wmc, @r#"
+    {
+      "classes": 0.0,
+      "interfaces": 0.0,
+      "total": 0.0
+    }
+    "#);
+}
+
+#[test]
 fn anonymous_class_body_method_does_not_inflate_enclosing_wmc() {
     // Regression (PR #160 review): a method in an anonymous class body
     // (`new Runnable() { void run() {…} }`, reached via

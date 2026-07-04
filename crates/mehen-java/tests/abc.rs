@@ -149,6 +149,37 @@ fn var_and_resource_initializers_count_as_assignments() {
 }
 
 #[test]
+fn explicit_generic_invocation_is_a_branch() {
+    // Regression (PR #160 review): `this.<String>m()` routes through
+    // `explicitGenericInvocation`, not `methodCall`, so it must be counted as
+    // an ABC branch too. Here: B=1 (the generic call).
+    let a = analyze(
+        "class C {
+             <T> T m() { return null; }
+             void f() { this.<String>m(); }
+         }",
+    );
+    let abc = mehen_report::metrics_json::abc(&a.root.metrics);
+    insta::assert_json_snapshot!(abc, @r#"
+    {
+      "assignments": 0.0,
+      "branches": 1.0,
+      "conditions": 0.0,
+      "magnitude": 1.0,
+      "assignments_average": 0.0,
+      "branches_average": 0.25,
+      "conditions_average": 0.0,
+      "assignments_min": 0.0,
+      "assignments_max": 0.0,
+      "branches_min": 0.0,
+      "branches_max": 1.0,
+      "conditions_min": 0.0,
+      "conditions_max": 0.0
+    }
+    "#);
+}
+
+#[test]
 fn object_creation_is_a_branch() {
     // B: `new Object()` (1) + no other calls. A: `Object o = …` initializer (1).
     let a = analyze(
