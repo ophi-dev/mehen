@@ -116,6 +116,25 @@ fn empty_and_labeled_statements_are_not_their_own_lloc() {
 }
 
 #[test]
+fn module_descriptor_directives_count_as_lloc() {
+    // Regression (PR #160 review): a `module-info.java` descriptor parses via
+    // `modularCompilationUnit → moduleDeclaration` with `moduleDirective`
+    // children; these must count as LLOC or a module file reports lloc == 0.
+    // Here: module declaration (1) + requires (1) + exports (1) = 3.
+    let a = analyze("module com.example { requires java.base; exports com.example.api; }");
+    let loc = serde_json::to_value(mehen_report::metrics_json::loc(&a.root.metrics)).unwrap();
+    assert_eq!(
+        loc["lloc"],
+        serde_json::json!(3.0),
+        "module declaration + 2 directives should be 3 logical lines"
+    );
+    assert!(
+        a.diagnostics.is_empty(),
+        "module descriptor should parse cleanly"
+    );
+}
+
+#[test]
 fn interface_and_annotation_members_count_as_lloc() {
     // Regression (PR #160 review): an interface method
     // (`interfaceCommonBodyDeclaration`) and an annotation element

@@ -63,6 +63,24 @@ fn enum_constant_body_method_does_not_inflate_enum_wmc() {
 }
 
 #[test]
+fn anonymous_class_body_method_does_not_inflate_enclosing_wmc() {
+    // Regression (PR #160 review): a method in an anonymous class body
+    // (`new Runnable() { void run() {…} }`, reached via
+    // `classCreatorRest → classBody`) belongs to the anonymous subclass, not
+    // the enclosing class C, so it must NOT roll into C's WMC. C declares no
+    // methods of its own.
+    let a = analyze("class C { Runnable r = new Runnable() { public void run() { if (x) {} } }; }");
+    let wmc = mehen_report::metrics_json::wmc(&a.root.metrics);
+    insta::assert_json_snapshot!(wmc, @r#"
+    {
+      "classes": 0.0,
+      "interfaces": 0.0,
+      "total": 0.0
+    }
+    "#);
+}
+
+#[test]
 fn lambda_in_field_initializer_does_not_inflate_class_wmc() {
     // Regression (PR #160 review): a lambda is a Closure, not a method — its
     // cyclomatic must NOT roll into the class's WMC (WMC weights methods). The

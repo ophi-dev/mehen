@@ -171,6 +171,29 @@ fn compact_record_constructor_counts_as_public_method() {
 }
 
 #[test]
+fn anonymous_class_body_methods_are_not_enclosing_members() {
+    // Regression (PR #160 review): a method in an anonymous class expression
+    // (`new Runnable() { void run() {} }`) belongs to the anonymous subclass,
+    // not the enclosing class, so it must NOT count toward the enclosing
+    // class's NPM.
+    let a = analyze("class C { Runnable r = new Runnable() { public void run() {} }; }");
+    let npm = mehen_report::metrics_json::npm(&a.root.metrics);
+    insta::assert_json_snapshot!(npm, @r#"
+    {
+      "classes": 0.0,
+      "interfaces": 0.0,
+      "class_methods": 0.0,
+      "interface_methods": 0.0,
+      "classes_average": null,
+      "interfaces_average": null,
+      "total": 0.0,
+      "total_methods": 0.0,
+      "average": null
+    }
+    "#);
+}
+
+#[test]
 fn enum_constant_body_methods_are_not_enum_members() {
     // Regression (PR #160 review): a method inside a constant-specific enum
     // body belongs to that constant's anonymous subclass, not the enum, so it

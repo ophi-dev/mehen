@@ -378,16 +378,20 @@ impl Walker<'_> {
         // Halstead operand (covers contextual keywords used as identifiers).
         let in_identifier = matches!(ri, jp::RULE_IDENTIFIER | jp::RULE_TYPE_IDENTIFIER);
 
-        // Track whether we're inside a constant-specific enum-constant body
-        // (`enum E { A { … } }`), which opens no space of its own — its members
-        // belong to `A`'s anonymous subclass, not the enclosing enum. Set on
-        // entering `enumConstant`; CLEARED once a *real* nested class-like
-        // declaration opens its own space (its members belong to that class,
-        // e.g. `A { class Inner { void m() {} } }` — `m` belongs to `Inner`).
+        // Track whether we're inside an anonymous class body that opens no
+        // metric space of its own — a constant-specific enum-constant body
+        // (`enum E { A { … } }`) or an anonymous class expression
+        // (`new Runnable() { … }`, via `classCreatorRest → classBody`). Their
+        // members belong to the anonymous subclass, not the lexically-enclosing
+        // class/enum, so they must not seed NPA/NPM or roll into its WMC. Set
+        // on entering `enumConstant`/`classCreatorRest`; CLEARED once a *real*
+        // nested class-like declaration opens its own space (its members belong
+        // to that class, e.g. `new Runnable() { class Inner { void m() {} } }`
+        // — `m` belongs to `Inner`).
         let in_anon_body = if opens_class_like(ri) {
             false
         } else {
-            hint.in_anon_body || ri == jp::RULE_ENUM_CONSTANT
+            hint.in_anon_body || matches!(ri, jp::RULE_ENUM_CONSTANT | jp::RULE_CLASS_CREATOR_REST)
         };
 
         for (idx, child) in children.iter().enumerate() {
@@ -844,6 +848,11 @@ impl Walker<'_> {
                 | jp::RULE_ANNOTATION_TYPE_DECLARATION
                 | jp::RULE_IMPORT_DECLARATION
                 | jp::RULE_PACKAGE_DECLARATION
+                // Java 9+ module descriptors (`module-info.java`): the module
+                // declaration and each directive (`requires`/`exports`/…) are
+                // logical lines, or a module file reports lloc == 0.
+                | jp::RULE_MODULE_DECLARATION
+                | jp::RULE_MODULE_DIRECTIVE
         ) {
             // Some `statement` shapes are pure wrappers that are not their own
             // logical line — the statement(s) they contain each count:
