@@ -205,6 +205,12 @@ struct ChildHint {
     /// members belong to that class). Mirrors the Kotlin walker's
     /// `in_anon_body`.
     in_anon_body: bool,
+    /// The enclosing record's component count, threaded down from
+    /// `recordDeclaration`. A *compact* constructor (`record R(int x) { R {} }`)
+    /// has no `formalParameters` node — its parameter list *is* the record's
+    /// components — so its NArgs must come from this count. `None` outside a
+    /// record.
+    record_component_count: Option<u32>,
 }
 
 /// A short-circuit boolean operator, for parent-relative cognitive
@@ -277,9 +283,22 @@ impl Walker<'_> {
         // PLOC: a visible code token's start row is a code line, recorded into
         // the current space during the AST walk. Comments are hidden-channel
         // (routed after the walk), and EOF (`tt < 0`) is not code.
+        //
+        // A single visible token can span multiple physical lines — a Java
+        // text block (`"""…"""`, `TEXT_BLOCK`) is one token covering several
+        // rows. Record *every* row it covers as code, or the interior rows sit
+        // inside the enclosing span with no PLOC observation and are reported
+        // as phantom blank lines (`blank = sloc - ploc - only_comment`).
         if tt >= 0 {
-            let row = (term.symbol().line() as u32).saturating_sub(1);
-            self.current().loc.observe_code_line(row);
+            let start_row = (term.symbol().line() as u32).saturating_sub(1);
+            let extra_rows = term
+                .symbol()
+                .text()
+                .map(|t| t.bytes().filter(|&b| b == b'\n').count() as u32)
+                .unwrap_or(0);
+            for row in start_row..=start_row.saturating_add(extra_rows) {
+                self.current().loc.observe_code_line(row);
+            }
         }
     }
 
@@ -405,6 +424,18 @@ impl Walker<'_> {
             hint.in_anon_body || matches!(ri, jp::RULE_ENUM_CONSTANT | jp::RULE_CLASS_CREATOR_REST)
         };
 
+        // Thread the record's component count down so a compact constructor
+        // (which has no `formalParameters`) can report the components as its
+        // NArgs. Set on entering `recordDeclaration`; a nested type resets it
+        // (a nested class/record's members are not this record's components).
+        let record_component_count = if ri == jp::RULE_RECORD_DECLARATION {
+            Some(count_record_components(ctx))
+        } else if opens_class_like(ri) {
+            None
+        } else {
+            hint.record_component_count
+        };
+
         for (idx, child) in children.iter().enumerate() {
             let mut child_hint = ChildHint::default();
             if Some(idx) == else_body_idx || propagate_else {
@@ -417,6 +448,7 @@ impl Walker<'_> {
             child_hint.in_for_init = in_for_init;
             child_hint.in_identifier = in_identifier;
             child_hint.in_anon_body = in_anon_body;
+            child_hint.record_component_count = record_component_count;
             self.visit(child, child_hint);
         }
     }
@@ -524,7 +556,17 @@ impl Walker<'_> {
                 let name = method_name(ctx);
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_function();
-                state.nargs.record_function_args(count_formal_params(ctx));
+                // A compact record constructor has no `formalParameters` — its
+                // parameter list *is* the record's components, so its NArgs is
+                // the enclosing record's component count (threaded down via
+                // `ChildHint`). Every other method shape counts its own
+                // `formalParameters`.
+                let nargs = if ri == jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION {
+                    hint.record_component_count.unwrap_or(0)
+                } else {
+                    count_formal_params(ctx)
+                };
+                state.nargs.record_function_args(nargs);
                 self.push_space(SpaceKind::Function, name, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
@@ -899,6 +941,9 @@ impl Walker<'_> {
                 | jp::RULE_ANNOTATION_METHOD_REST
                 | jp::RULE_ANNOTATION_CONSTANT_REST
                 | jp::RULE_CONST_DECLARATION
+                // An enum constant (`A`, `B` in `enum E { A, B }`) is a
+                // declaration — a logical line, like a field.
+                | jp::RULE_ENUM_CONSTANT
                 | jp::RULE_CLASS_DECLARATION
                 | jp::RULE_INTERFACE_DECLARATION
                 | jp::RULE_ENUM_DECLARATION
@@ -1193,16 +1238,21 @@ fn field_variable_count(ctx: &ParserRuleContext) -> u32 {
 /// Record a record's component parameters as class attributes (NPA). Walks
 /// `recordDeclaration → recordHeader → recordComponentList → recordComponent`.
 fn record_record_components(ctx: &ParserRuleContext, state: &mut State) {
-    let Some(header) = ctx.child_rule(jp::RULE_RECORD_HEADER) else {
-        return;
-    };
-    let Some(list) = header.child_rule(jp::RULE_RECORD_COMPONENT_LIST) else {
-        return;
-    };
-    let count = list.child_rules(jp::RULE_RECORD_COMPONENT).count();
+    let count = count_record_components(ctx);
     for _ in 0..count {
         state.npa.record_attribute(ContainerKind::Class, true);
     }
+}
+
+/// Count a record's declared components via
+/// `recordDeclaration → recordHeader → recordComponentList → recordComponent`.
+/// These are both the record's public attributes (NPA) and the parameter list
+/// of its (canonical/compact) constructor (NArgs).
+fn count_record_components(ctx: &ParserRuleContext) -> u32 {
+    ctx.child_rule(jp::RULE_RECORD_HEADER)
+        .and_then(|header| header.child_rule(jp::RULE_RECORD_COMPONENT_LIST))
+        .map(|list| list.child_rules(jp::RULE_RECORD_COMPONENT).count() as u32)
+        .unwrap_or(0)
 }
 
 /// Resolve an explicit visibility from a body-declaration wrapper's

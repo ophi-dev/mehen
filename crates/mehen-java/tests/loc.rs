@@ -116,6 +116,43 @@ fn empty_and_labeled_statements_are_not_their_own_lloc() {
 }
 
 #[test]
+fn text_block_interior_rows_count_as_ploc() {
+    // Regression (PR #160 review): a Java text block (`"""…"""`) is a single
+    // `TEXT_BLOCK` token spanning multiple physical lines. Every row it covers
+    // is code (PLOC), not blank — otherwise the interior rows are reported as
+    // phantom blank lines.
+    let a = analyze(
+        "class C {\n\
+         \x20   String s = \"\"\"\n\
+         \x20       line one\n\
+         \x20       line two\n\
+         \x20       \"\"\";\n\
+         }\n",
+    );
+    let loc = serde_json::to_value(mehen_report::metrics_json::loc(&a.root.metrics)).unwrap();
+    // 6 physical lines, all code, none blank.
+    assert_eq!(
+        loc["ploc"],
+        serde_json::json!(6.0),
+        "all text-block rows are code"
+    );
+    assert_eq!(
+        loc["blank"],
+        serde_json::json!(0.0),
+        "no phantom blank lines"
+    );
+}
+
+#[test]
+fn enum_constants_count_as_lloc() {
+    // Regression (PR #160 review): each enum constant is a declaration → a
+    // logical line. `enum E { A, B, C }` = enum decl (1) + 3 constants = 4.
+    let a = analyze("enum E { A, B, C }");
+    let loc = serde_json::to_value(mehen_report::metrics_json::loc(&a.root.metrics)).unwrap();
+    assert_eq!(loc["lloc"], serde_json::json!(4.0));
+}
+
+#[test]
 fn module_descriptor_directives_count_as_lloc() {
     // Regression (PR #160 review): a `module-info.java` descriptor parses via
     // `modularCompilationUnit → moduleDeclaration` with `moduleDirective`

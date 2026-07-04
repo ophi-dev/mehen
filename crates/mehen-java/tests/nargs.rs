@@ -85,3 +85,26 @@ fn varargs_parameter_counts() {
     }
     "#);
 }
+
+#[test]
+fn compact_record_constructor_reports_component_count() {
+    // Regression (PR #160 review): a compact record constructor has no
+    // `formalParameters` node — its parameter list is the record's components,
+    // so its NArgs is the record's component count (2 here), not 0.
+    let a = analyze("record R(int x, int y) { public R { } }");
+    let nargs = mehen_report::metrics_json::nargs(&a.root.metrics);
+    insta::assert_json_snapshot!(nargs, @r#"
+    {
+      "total_functions": 2.0,
+      "total_closures": 0.0,
+      "average_functions": 2.0,
+      "average_closures": 0.0,
+      "total": 2.0,
+      "average": 2.0,
+      "functions_min": 2.0,
+      "functions_max": 2.0,
+      "closures_min": 0.0,
+      "closures_max": 0.0
+    }
+    "#);
+}
