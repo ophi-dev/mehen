@@ -162,6 +162,27 @@ fn operator_expression_resets_boolean_run() {
 }
 
 #[test]
+fn method_in_anonymous_class_does_not_inherit_outer_depth() {
+    // Regression (PR #160 review): an anonymous class opens no metric space
+    // (tracked only via `in_anon_body`), so the ancestor scan can't see a
+    // class boundary. A method in `new Runnable(){ void run(){…} }` inside
+    // `outer()` must still start at the baseline depth, not inherit `outer`'s.
+    let nested =
+        analyze("class C { void outer() { new Runnable() { public void run() { if (x) {} } }; } }");
+    let flat =
+        analyze("class C { Runnable r = new Runnable() { public void run() { if (x) {} } }; }");
+    let n =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&nested.root.metrics)).unwrap();
+    let f =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&flat.root.metrics)).unwrap();
+    assert_eq!(
+        n["sum"], f["sum"],
+        "an anonymous-class method must not inherit the enclosing method's depth"
+    );
+    assert_eq!(n["sum"], serde_json::json!(1.0));
+}
+
+#[test]
 fn method_in_local_class_does_not_inherit_outer_depth() {
     // Regression (PR #160 review): a method in a local/anonymous class nested
     // in another method must NOT inherit the outer method's cognitive depth —

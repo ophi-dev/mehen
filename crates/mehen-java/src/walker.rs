@@ -568,7 +568,7 @@ impl Walker<'_> {
                 };
                 state.nargs.record_function_args(nargs);
                 self.push_space(SpaceKind::Function, name, ctx, state, hint.in_anon_body);
-                self.enter_function_cognitive();
+                self.enter_function_cognitive(hint.in_anon_body);
                 true
             }
             jp::RULE_LAMBDA_EXPRESSION => {
@@ -580,7 +580,7 @@ impl Walker<'_> {
                 // the enclosing class's WMC (WMC weights *methods*). A lambda in
                 // a field initializer would otherwise inflate the class's WMC.
                 self.push_space(SpaceKind::Closure, None, ctx, state, hint.in_anon_body);
-                self.enter_function_cognitive();
+                self.enter_function_cognitive(hint.in_anon_body);
                 true
             }
             jp::RULE_CLASS_DECLARATION | jp::RULE_RECORD_DECLARATION => {
@@ -647,30 +647,37 @@ impl Walker<'_> {
         self.suppress_parent_wmc.push(suppress_parent_wmc);
     }
 
-    fn enter_function_cognitive(&mut self) {
+    fn enter_function_cognitive(&mut self, in_anon_body: bool) {
         // Depth is inherited only from an *enclosing function/closure within
         // the same class scope* — a lambda or nested function nested directly
-        // in another function's body. A class scope (a local/anonymous class,
-        // `void outer(){ class L { void inner(){…} } }`) resets the baseline:
-        // `inner` is a fresh method whose cognitive nesting must start at 0,
-        // not inherit `outer`'s depth. So scan ancestors nearest-first and stop
-        // at the first class-like scope.
-        let nested_inside_function = self
-            .kinds
-            .iter()
-            .rev()
-            .skip(1)
-            .take_while(|k| {
-                !matches!(
-                    k,
-                    SpaceKind::Class
-                        | SpaceKind::Interface
-                        | SpaceKind::Trait
-                        | SpaceKind::Impl
-                        | SpaceKind::Enum
-                )
-            })
-            .any(|k| matches!(k, SpaceKind::Function | SpaceKind::Closure));
+        // in another function's body. A class scope resets the baseline: a
+        // method in a nested class is fresh, so its cognitive nesting starts at
+        // 0, not inheriting the enclosing method's depth. Two kinds of class
+        // scope must be honored:
+        //   - a *named* local/anonymous class pushes a `Class` SpaceKind
+        //     (`void outer(){ class L { void inner(){…} } }`), caught by the
+        //     `take_while` boundary below;
+        //   - an *anonymous* class expression (`new Runnable(){ void run(){…} }`)
+        //     opens NO space — it's tracked only by `in_anon_body` — so the
+        //     ancestor scan would otherwise walk past it to `outer`. When we're
+        //     directly in such a body, do not inherit depth at all.
+        let nested_inside_function = !in_anon_body
+            && self
+                .kinds
+                .iter()
+                .rev()
+                .skip(1)
+                .take_while(|k| {
+                    !matches!(
+                        k,
+                        SpaceKind::Class
+                            | SpaceKind::Interface
+                            | SpaceKind::Trait
+                            | SpaceKind::Impl
+                            | SpaceKind::Enum
+                    )
+                })
+                .any(|k| matches!(k, SpaceKind::Function | SpaceKind::Closure));
         self.cognitive.nesting = 0;
         self.cognitive.lambda = 0;
         if nested_inside_function {
@@ -878,13 +885,26 @@ impl Walker<'_> {
             // A method/constructor call, or object creation, is a branch.
             jp::RULE_METHOD_CALL => self.current().abc.record_branch(),
             jp::RULE_CREATOR | jp::RULE_INNER_CREATOR => self.current().abc.record_branch(),
-            // An explicit type-argument invocation (`this.<String>m()`,
-            // `obj.<String>m()`, `<T>super.m()`) routes through
-            // `explicitGenericInvocation`, NOT `methodCall`, so it would
-            // otherwise be missed. It wraps exactly one call (its nested
-            // `explicitGenericInvocationSuffix`/`superSuffix` arguments), so
-            // counting it once here does not double-count.
-            jp::RULE_EXPLICIT_GENERIC_INVOCATION => self.current().abc.record_branch(),
+            // Calls that don't route through `methodCall`. The Java grammar
+            // reaches several call forms via suffix rules; count each call
+            // exactly once at the innermost call-bearing node to avoid the
+            // double-counting that would arise from also counting the
+            // enclosing `explicitGenericInvocation` wrapper:
+            //   - `superSuffix` — a qualified super call (`I.super.m()`) and
+            //     the `SUPER superSuffix` form of an explicit generic
+            //     invocation (`<T>super.m()`).
+            //   - `explicitGenericInvocationSuffix` in its `identifier
+            //     arguments` form (a direct `arguments` child) — a qualified
+            //     (`C.this.<String>m()`) or unqualified (`<String>m()`)
+            //     explicit-type-argument call. Its `SUPER superSuffix` form is
+            //     counted via the nested `superSuffix` above, so it's excluded
+            //     here by the direct-`arguments` guard.
+            jp::RULE_SUPER_SUFFIX => self.current().abc.record_branch(),
+            jp::RULE_EXPLICIT_GENERIC_INVOCATION_SUFFIX
+                if ctx.child_rule(jp::RULE_ARGUMENTS).is_some() =>
+            {
+                self.current().abc.record_branch();
+            }
             // An `expression` carrying an assignment operator is an assignment.
             // Compound assigns (`+=`, `-=`, …) and the increment/decrement
             // operators (`++`, `--`) count too (Fitzpatrick's ABC lists both

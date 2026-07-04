@@ -180,6 +180,37 @@ fn explicit_generic_invocation_is_a_branch() {
 }
 
 #[test]
+fn suffix_routed_calls_are_branches() {
+    // Regression (PR #160 review): calls that don't route through `methodCall`
+    // must still count as ABC branches, exactly once each:
+    //   - `I.super.d()`   → superSuffix
+    //   - `<String>m()`   → explicitGenericInvocationSuffix (unqualified)
+    //   - `this.<String>m()` → explicitGenericInvocation(Suffix) (qualified)
+    for (src, label) in [
+        (
+            "interface I { default void d() {} } class C implements I { void f() { I.super.d(); } }",
+            "I.super.d()",
+        ),
+        (
+            "class C { <T> T m() { return null; } void f() { <String>m(); } }",
+            "<String>m()",
+        ),
+        (
+            "class C { <T> T m() { return null; } void f() { this.<String>m(); } }",
+            "this.<String>m()",
+        ),
+    ] {
+        let a = analyze(src);
+        let abc = serde_json::to_value(mehen_report::metrics_json::abc(&a.root.metrics)).unwrap();
+        assert_eq!(
+            abc["branches"],
+            serde_json::json!(1.0),
+            "exactly one branch for: {label}"
+        );
+    }
+}
+
+#[test]
 fn object_creation_is_a_branch() {
     // B: `new Object()` (1) + no other calls. A: `Object o = …` initializer (1).
     let a = analyze(
