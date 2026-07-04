@@ -136,6 +136,32 @@ fn parentheses_do_not_break_boolean_run_collapse() {
 }
 
 #[test]
+fn operator_expression_resets_boolean_run() {
+    // Regression (PR #160 review): only *transparent* wrappers (parens/bare
+    // operands) preserve a boolean run; an expression with its own operator
+    // (here `==`) is a distinct boolean context. For `a && ((b && c) == d)`
+    // the inner `b && c` must NOT collapse with the outer `&&`:
+    //   if(+1), outer `&&`(+1), inner `&&` (fresh run after `==`)(+1) = 3.
+    let a = analyze(
+        "class C {
+             boolean f(int a, int b, int c, int d) {
+                 if (a > 0 && ((b > 0 && c > 0) == (d > 0))) return true;
+                 return false;
+             }
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    insta::assert_json_snapshot!(cog, @r###"
+    {
+      "sum": 3.0,
+      "average": 3.0,
+      "min": 0.0,
+      "max": 3.0
+    }
+    "###);
+}
+
+#[test]
 fn method_in_local_class_does_not_inherit_outer_depth() {
     // Regression (PR #160 review): a method in a local/anonymous class nested
     // in another method must NOT inherit the outer method's cognitive depth —

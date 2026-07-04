@@ -112,6 +112,29 @@ fn record_components_are_public_attributes() {
 }
 
 #[test]
+fn enum_constants_are_public_attributes() {
+    // Regression (PR #160 review): enum constants (`enum E { A, B, C }`) are
+    // public static final fields → public class attributes. They live under
+    // `enumConstants` (before the `;`), so they don't reach the member-position
+    // path and must be counted directly.
+    let a = analyze("enum E { A, B, C }");
+    let npa = mehen_report::metrics_json::npa(&a.root.metrics);
+    insta::assert_json_snapshot!(npa, @r#"
+    {
+      "classes": 3.0,
+      "interfaces": 0.0,
+      "class_attributes": 3.0,
+      "interface_attributes": 0.0,
+      "classes_average": 1.0,
+      "interfaces_average": null,
+      "total": 3.0,
+      "total_attributes": 3.0,
+      "average": 1.0
+    }
+    "#);
+}
+
+#[test]
 fn annotation_constants_are_public_attributes() {
     // Regression (PR #160 review): annotation constants (`int X = 1;` in an
     // `@interface`) reach the walker via annotationConstantRest and are

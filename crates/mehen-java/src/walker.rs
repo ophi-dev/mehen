@@ -348,20 +348,27 @@ impl Walker<'_> {
 
         // Thread the enclosing boolean operator down through `expression`
         // descendants for the parent-relative cognitive boolean-run collapse.
-        // A boolean `expression` sets the operator; a non-boolean `expression`
-        // (an operand, unary/cast wrapper) and a `primary` are *transparent*
-        // and keep the enclosing operator, so `a && (b && c)` and `(a && b) &&
-        // c` collapse — the parenthesized run is `primary: '(' expression ')'`,
-        // and without threading through `primary` the inner `&&` would see no
-        // parent and add a spurious cognitive point. Any *other* node clears it
-        // (`None`) so a boolean run inside a method-call argument, a nested
-        // statement, etc. starts fresh — isolating it from the enclosing run
-        // exactly as SonarJava's per-tree scoping does.
+        //
+        // - A boolean `expression` (`&&`/`||`) sets the operator for its
+        //   operands.
+        // - A *transparent* `expression` — one that carries NO operator token
+        //   of its own (a bare operand: `a`, or a single sub-expression) — and
+        //   a `primary` (`'(' expression ')'`) forward the enclosing operator,
+        //   so `a && (b && c)` and `(a && b) && c` collapse into one run.
+        // - Any expression that introduces its OWN operator other than
+        //   `&&`/`||` — equality (`==`), comparison, ternary (`? :`), index
+        //   (`[]`), unary, `instanceof`, a method call, etc. — is a distinct
+        //   boolean context and RESETS the run (`None`), so a `&&` nested
+        //   inside `(b && c) == d` is not wrongly collapsed with an outer `&&`.
+        // - Every other node kind also resets, isolating method-call arguments
+        //   and nested statements from the enclosing run.
         let child_bool_op = if ri == jp::RULE_EXPRESSION {
             if ctx.has_token(jl::AND) {
                 Some(BoolOp::And)
             } else if ctx.has_token(jl::OR) {
                 Some(BoolOp::Or)
+            } else if expression_has_operator_token(ctx) {
+                None
             } else {
                 hint.parent_bool_op
             }
@@ -688,6 +695,20 @@ impl Walker<'_> {
             self.current().cognitive.increase_nesting(eff);
             self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
         }
+        // An enum constant (`enum E { A, B }`) is a public static final field
+        // of the enum → a public class attribute (NPA). Constants live under
+        // `enumConstants` (before the `;`), not `enumBodyDeclarations`, so they
+        // never reach the `classify_class_member` member-position path; count
+        // them directly here. The enclosing space must be the enum itself (not
+        // a nested anonymous body, which owns no space).
+        if ri == jp::RULE_ENUM_CONSTANT
+            && !hint.in_anon_body
+            && matches!(self.kinds.last(), Some(SpaceKind::Enum))
+        {
+            self.current()
+                .npa
+                .record_attribute(ContainerKind::Class, true);
+        }
         self.classify_expression(ctx, ri, hint);
         self.classify_abc_rule(ctx, ri);
         self.classify_loc_rule(ctx, ri, hint);
@@ -976,6 +997,20 @@ fn opens_class_like(ri: usize) -> bool {
             | jp::RULE_INTERFACE_DECLARATION
             | jp::RULE_ANNOTATION_TYPE_DECLARATION
     )
+}
+
+/// Whether an `expression` context carries its own operator — i.e. has any
+/// direct terminal (token) child. A transparent operand expression (`a`, or a
+/// single wrapped sub-expression) has only rule children and no tokens; an
+/// operator form (`==`, `<`, ternary `? :`, index `[]`, unary, `instanceof`, a
+/// method/creator call, `.` access, …) always has at least one token child.
+/// Used by the cognitive boolean-run collapse: only a token-less (transparent)
+/// expression forwards the enclosing `&&`/`||`; anything with its own operator
+/// starts a fresh boolean context.
+fn expression_has_operator_token(ctx: &ParserRuleContext) -> bool {
+    ctx.children()
+        .iter()
+        .any(|c| matches!(c, ParseTree::Terminal(_)))
 }
 
 /// Whether this `statement` context is an `if` statement (has an `IF` token as
