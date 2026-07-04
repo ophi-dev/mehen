@@ -348,21 +348,25 @@ impl Walker<'_> {
 
         // Thread the enclosing boolean operator down through `expression`
         // descendants for the parent-relative cognitive boolean-run collapse.
-        // Any non-`expression` node clears it (`None`), so a boolean run inside
-        // a method-call argument, a nested statement, etc. starts fresh —
-        // isolating it from the enclosing run exactly as SonarJava's per-tree
-        // scoping does.
+        // A boolean `expression` sets the operator; a non-boolean `expression`
+        // (an operand, unary/cast wrapper) and a `primary` are *transparent*
+        // and keep the enclosing operator, so `a && (b && c)` and `(a && b) &&
+        // c` collapse — the parenthesized run is `primary: '(' expression ')'`,
+        // and without threading through `primary` the inner `&&` would see no
+        // parent and add a spurious cognitive point. Any *other* node clears it
+        // (`None`) so a boolean run inside a method-call argument, a nested
+        // statement, etc. starts fresh — isolating it from the enclosing run
+        // exactly as SonarJava's per-tree scoping does.
         let child_bool_op = if ri == jp::RULE_EXPRESSION {
             if ctx.has_token(jl::AND) {
                 Some(BoolOp::And)
             } else if ctx.has_token(jl::OR) {
                 Some(BoolOp::Or)
             } else {
-                // A non-boolean `expression` (e.g. the operand of `&&`, or a
-                // parenthesized/unary wrapper) is transparent: keep the
-                // enclosing operator so `a && (b) && c` still collapses.
                 hint.parent_bool_op
             }
+        } else if ri == jp::RULE_PRIMARY {
+            hint.parent_bool_op
         } else {
             None
         };
@@ -595,11 +599,28 @@ impl Walker<'_> {
     }
 
     fn enter_function_cognitive(&mut self) {
+        // Depth is inherited only from an *enclosing function/closure within
+        // the same class scope* — a lambda or nested function nested directly
+        // in another function's body. A class scope (a local/anonymous class,
+        // `void outer(){ class L { void inner(){…} } }`) resets the baseline:
+        // `inner` is a fresh method whose cognitive nesting must start at 0,
+        // not inherit `outer`'s depth. So scan ancestors nearest-first and stop
+        // at the first class-like scope.
         let nested_inside_function = self
             .kinds
             .iter()
             .rev()
             .skip(1)
+            .take_while(|k| {
+                !matches!(
+                    k,
+                    SpaceKind::Class
+                        | SpaceKind::Interface
+                        | SpaceKind::Trait
+                        | SpaceKind::Impl
+                        | SpaceKind::Enum
+                )
+            })
             .any(|k| matches!(k, SpaceKind::Function | SpaceKind::Closure));
         self.cognitive.nesting = 0;
         self.cognitive.lambda = 0;

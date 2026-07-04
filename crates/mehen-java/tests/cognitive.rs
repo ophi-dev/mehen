@@ -115,6 +115,46 @@ fn else_if_does_not_add_nesting() {
 }
 
 #[test]
+fn parentheses_do_not_break_boolean_run_collapse() {
+    // Regression (PR #160 review): a parenthesized boolean sub-expression
+    // (`primary: '(' expression ')'`) must stay in the same boolean run. All
+    // three forms below are a single `&&` run → cognitive 2 (if=1, one run=1).
+    for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c) { if ((a && b) && c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (b && c)) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && b && c) return true; return false; } }",
+    ] {
+        let a = analyze(src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(2.0),
+            "boolean run should collapse for: {src}"
+        );
+    }
+}
+
+#[test]
+fn method_in_local_class_does_not_inherit_outer_depth() {
+    // Regression (PR #160 review): a method in a local/anonymous class nested
+    // in another method must NOT inherit the outer method's cognitive depth —
+    // a class scope resets the baseline. `inner`'s `if` scores 1, matching the
+    // same method declared without the enclosing method.
+    let local = analyze("class C { void outer() { class L { void inner() { if (x) {} } } } }");
+    let flat = analyze("class C { class L { void inner() { if (x) {} } } }");
+    let l =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&local.root.metrics)).unwrap();
+    let f =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&flat.root.metrics)).unwrap();
+    assert_eq!(
+        l["sum"], f["sum"],
+        "a method in a local class must not inherit the enclosing method's depth"
+    );
+    assert_eq!(l["sum"], serde_json::json!(1.0));
+}
+
+#[test]
 fn braceless_if_in_else_if_then_branch_still_nests() {
     // Regression (PR #160 review): the `is_else_branch` flag must NOT leak from
     // an else-if node onto its *then*-branch. Here `else if (b > 0)` has a
