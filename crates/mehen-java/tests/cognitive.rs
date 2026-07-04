@@ -301,6 +301,37 @@ fn method_in_local_class_does_not_inherit_outer_depth() {
 }
 
 #[test]
+fn else_if_flag_does_not_leak_through_a_loop_body() {
+    // Regression (PR #160 review): the `is_else_branch` flag must only flow
+    // through a *transparent* wrapper statement toward an else-if, NOT through
+    // a loop/switch/try in the else position. For `if (a) {} else while (c) if
+    // (b) {}` the `while` body's `if (b)` is a genuinely nested `if`, not an
+    // `else if`, so it must keep its cognitive nesting increment. If the flag
+    // leaked, `if (b)` would be scored as an else-if (no nesting) and the score
+    // would drop by its nesting contribution.
+    let leaked = analyze(
+        "class C { void m(int a, int c, int b) { if (a > 0) {} else while (c > 0) if (b > 0) {} } }",
+    );
+    let no_body_if =
+        analyze("class C { void m(int a, int c) { if (a > 0) {} else while (c > 0) {} } }");
+    let l =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&leaked.root.metrics)).unwrap();
+    let n = serde_json::to_value(mehen_report::metrics_json::cognitive(
+        &no_body_if.root.metrics,
+    ))
+    .unwrap();
+    // Adding the nested `if (b)` inside the else-branch loop must increase the
+    // cognitive score — it is NOT an else-if and must not be suppressed.
+    assert!(
+        l["sum"].as_f64().unwrap() > n["sum"].as_f64().unwrap(),
+        "the loop-body `if` must add cognitive nesting (not be treated as else-if): \
+         with-if={} without-if={}",
+        l["sum"],
+        n["sum"]
+    );
+}
+
+#[test]
 fn braceless_if_in_else_if_then_branch_still_nests() {
     // Regression (PR #160 review): the `is_else_branch` flag must NOT leak from
     // an else-if node onto its *then*-branch. Here `else if (b > 0)` has a

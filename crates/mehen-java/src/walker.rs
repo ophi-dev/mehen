@@ -339,21 +339,20 @@ impl Walker<'_> {
         } else {
             None
         };
-        // `is_else_branch` also flows through a bare `statement` wrapper so an
-        // `else if` chain is recognized even when the grammar nests the inner
-        // `if` under the outer statement's `else` position. A `block` stops
-        // the flow (`else { if … }` is genuinely nested).
-        //
-        // It must NOT flow through an actual `if` statement, though: `if`
-        // targets its else child precisely via `else_body_idx`, so blanket
-        // propagation here would (wrongly) stamp `is_else_branch` onto the
-        // *then*-branch too. That would make a braceless nested `if` in the
-        // then-branch of an `else if` (`else if (b) if (d) {}`) skip its
-        // nesting increment and under-count cognitive complexity.
-        let propagate_else = hint.is_else_branch
-            && ri == jp::RULE_STATEMENT
-            && !ctx_is_block(ctx)
-            && !is_if_statement(ctx, ri);
+        // `is_else_branch` also flows through a *transparent* `statement`
+        // wrapper so an `else if` chain is recognized even when the grammar
+        // nests the inner `if` under the outer statement's `else` position
+        // (e.g. a label wrapper `else lbl: if …`). It must NOT flow through:
+        //   - a `block` (`else { if … }` is genuinely nested);
+        //   - an actual `if` statement (`if` targets its else child precisely
+        //     via `else_body_idx`; blanket propagation would wrongly stamp the
+        //     flag onto the *then*-branch too — `else if (b) if (d) {}`);
+        //   - any statement that introduces its OWN control-flow construct
+        //     (`while`/`for`/`do`/`switch`/`try`/`synchronized`/…). Such a
+        //     statement's body is a genuinely nested scope, not an else-if — so
+        //     an `if` in an `else while (c) if (b) {}` loop body must keep its
+        //     nesting increment.
+        let propagate_else = hint.is_else_branch && statement_is_else_transparent(ctx, ri);
 
         // Class/interface body member positions originate at
         // `classBodyDeclaration` / `interfaceBodyDeclaration`, then flow
@@ -1176,6 +1175,39 @@ fn expression_has_operator_token(ctx: &ParserRuleContext) -> bool {
 /// a direct child).
 fn is_if_statement(ctx: &ParserRuleContext, ri: usize) -> bool {
     ri == jp::RULE_STATEMENT && ctx.has_token(jl::IF)
+}
+
+/// Whether the `is_else_branch` flag may propagate through this `statement`
+/// toward a nested `if` (marking it an `else if`).
+///
+/// True only for a *transparent wrapper* statement — one that introduces no
+/// control-flow construct of its own and isn't a block. That covers a label
+/// wrapper (`lbl: stmt`) or a bare-expression statement whose subtree leads to
+/// the `if`. It is FALSE for:
+///   - a `block` (`else { if … }` is genuinely nested);
+///   - an `if` statement itself (its else child is targeted precisely via
+///     `else_branch_index`, so the flag must not blanket-tag the then-branch);
+///   - any statement carrying its own control-flow keyword
+///     (`for`/`while`/`do`/`switch`/`try`/`synchronized`/`return`/`throw`/
+///     `break`/`continue`/`yield`/`assert`) — its body is a real nested scope,
+///     not an else-if, so e.g. an `if` in `else while (c) if (b) {}` keeps its
+///     nesting increment.
+fn statement_is_else_transparent(ctx: &ParserRuleContext, ri: usize) -> bool {
+    ri == jp::RULE_STATEMENT
+        && !ctx_is_block(ctx)
+        && !ctx.has_token(jl::IF)
+        && !ctx.has_token(jl::FOR)
+        && !ctx.has_token(jl::WHILE)
+        && !ctx.has_token(jl::DO)
+        && !ctx.has_token(jl::SWITCH)
+        && !ctx.has_token(jl::TRY)
+        && !ctx.has_token(jl::SYNCHRONIZED)
+        && !ctx.has_token(jl::RETURN)
+        && !ctx.has_token(jl::THROW)
+        && !ctx.has_token(jl::BREAK)
+        && !ctx.has_token(jl::CONTINUE)
+        && !ctx.has_token(jl::YIELD)
+        && !ctx.has_token(jl::ASSERT)
 }
 
 /// Whether this context is a bare block statement (`{ … }`) — a `statement`
