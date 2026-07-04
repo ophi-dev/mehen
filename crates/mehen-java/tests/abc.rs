@@ -211,6 +211,29 @@ fn suffix_routed_calls_are_branches() {
 }
 
 #[test]
+fn generic_explicit_this_constructor_call_is_a_branch() {
+    // Regression (PR #160 review): a generic explicit constructor invocation
+    // (`<String>this(arg)`) routes through `primary: nonWildcardTypeArguments
+    // THIS arguments`, not `methodCall`, so it must be counted as an ABC
+    // branch too. The plain `this(…)`/`super(…)` forms go through `methodCall`.
+    let a = analyze("class C { <T> C(T t) {} C() { <String>this(null); } }");
+    let abc = serde_json::to_value(mehen_report::metrics_json::abc(&a.root.metrics)).unwrap();
+    assert_eq!(
+        abc["branches"],
+        serde_json::json!(1.0),
+        "a generic explicit this-constructor call is a branch"
+    );
+    // Guard: a bare `this` / `this.field` access (no `arguments`) is not a call.
+    let field = analyze("class C { int x; int m() { return this.x; } }");
+    let fabc = serde_json::to_value(mehen_report::metrics_json::abc(&field.root.metrics)).unwrap();
+    assert_eq!(
+        fabc["branches"],
+        serde_json::json!(0.0),
+        "a bare `this` field access is not a branch"
+    );
+}
+
+#[test]
 fn qualified_super_field_access_is_not_a_branch() {
     // Regression (PR #160 review): `superSuffix` also represents qualified
     // super *field* access (`Outer.super.field`), where the grammar's

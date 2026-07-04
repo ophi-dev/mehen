@@ -957,6 +957,17 @@ impl Walker<'_> {
             {
                 self.current().abc.record_branch();
             }
+            // A generic explicit constructor invocation (`<String>this(arg)`)
+            // routes through `primary: nonWildcardTypeArguments THIS arguments`
+            // — not `methodCall` (which handles the plain `this(…)`/`super(…)`
+            // forms). Count it when the `primary` carries a `THIS` token AND a
+            // direct `arguments` child; a bare `this` / `this.field` (no
+            // `arguments`) is not a call.
+            jp::RULE_PRIMARY
+                if ctx.has_token(jl::THIS) && ctx.child_rule(jp::RULE_ARGUMENTS).is_some() =>
+            {
+                self.current().abc.record_branch();
+            }
             // An `expression` carrying an assignment operator is an assignment.
             // Compound assigns (`+=`, `-=`, …) and the increment/decrement
             // operators (`++`, `--`) count too (Fitzpatrick's ABC lists both
