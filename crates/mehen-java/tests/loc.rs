@@ -225,6 +225,53 @@ fn interface_and_annotation_members_count_as_lloc() {
 }
 
 #[test]
+fn for_init_suppression_does_not_leak_into_nested_lambda_body() {
+    // Regression (PR #160 review): the classic-`for` header suppresses its
+    // initializer declaration's own LLOC (it is part of the `for` statement's
+    // single logical line). That suppression must apply ONLY to the direct
+    // `forInit` declaration — not to real local declarations nested inside a
+    // lambda/anonymous-class body that happens to live in the header
+    // initializer. Here the lambda body's `int x = 0;` is genuine code and must
+    // count. The same lambda scores identically whether it initializes a `for`
+    // header variable or a plain field.
+    fn closure_lloc(sp: &mehen_core::MetricSpace) -> Option<f64> {
+        if sp.kind == mehen_core::SpaceKind::Closure {
+            return Some(
+                sp.metrics
+                    .get(&mehen_core::MetricKey::new("loc.lloc"))
+                    .map(|m| m.as_f64())
+                    .unwrap_or(0.0),
+            );
+        }
+        sp.spaces.iter().find_map(closure_lloc)
+    }
+    let in_for = analyze(
+        "class C {
+             void f() {
+                 for (java.util.function.Supplier<Integer> s = () -> { int x = 0; return x; }; ; ) { break; }
+             }
+         }",
+    );
+    let plain = analyze(
+        "class C {
+             java.util.function.Supplier<Integer> s = () -> { int x = 0; return x; };
+         }",
+    );
+    // The lambda body has two logical lines (`int x = 0;` + `return x;`); the
+    // for-init suppression must not drop the declaration.
+    assert_eq!(
+        closure_lloc(&in_for.root),
+        Some(2.0),
+        "the lambda body's declaration must count even inside a for-init"
+    );
+    assert_eq!(
+        closure_lloc(&in_for.root),
+        closure_lloc(&plain.root),
+        "a lambda body scores the same in a for-init as in a field initializer"
+    );
+}
+
+#[test]
 fn block_only_statement_is_not_its_own_lloc() {
     // A bare `{ … }` block statement is not a logical line; the inner
     // statements each count.

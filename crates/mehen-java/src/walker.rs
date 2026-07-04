@@ -405,11 +405,17 @@ impl Walker<'_> {
         };
 
         // A classic `for` header (`forControl → forInit → localVariableDeclaration`)
-        // must not let its initializer declaration add a second LLOC. Mark the
-        // header subtree so `classify_loc_rule` suppresses the forInit
-        // declaration's own LLOC.
-        let in_for_init =
-            hint.in_for_init || matches!(ri, jp::RULE_FOR_CONTROL | jp::RULE_FOR_INIT);
+        // must not let its initializer declaration add a second LLOC. Tag ONLY
+        // the direct children of `forInit` (the header declaration) — NOT the
+        // whole subtree. A sticky, subtree-wide flag would also suppress a real
+        // local declaration nested inside a lambda or anonymous-class body that
+        // lives in the initializer, e.g.
+        // `for (Supplier<Integer> s = () -> { int x = 0; return x; }; ; ) {}` —
+        // the lambda body's `int x = 0;` is genuine code and must count.
+        // `localVariableDeclaration` is a direct child of `forInit`, so a
+        // non-sticky flag reaches exactly the header declaration and stops one
+        // level down (mirrors the per-child `anon_body_child` tagging below).
+        let in_for_init = ri == jp::RULE_FOR_INIT;
 
         // A terminal directly under `identifier`/`typeIdentifier` is a name →
         // Halstead operand (covers contextual keywords used as identifiers).
