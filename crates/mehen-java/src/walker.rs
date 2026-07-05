@@ -1219,19 +1219,29 @@ fn opens_function_space(ri: usize) -> bool {
     )
 }
 
-/// Whether a boolean `expression` (`&&`/`||`) has a prefix `!` (`BANG`)
-/// negated operand. Per SonarSource's cognitive rule a negation breaks a
-/// same-operator boolean run (`a && !b && c` is +2, not +1). The negation is
-/// a `UnaryOperatorExpression` (an `expression` carrying a `BANG` token), but
-/// it may be wrapped in *transparent* layers — parentheses
-/// (`primary: '(' expression ')'`) or pass-through expressions — as in
-/// `a && (!b) && c`, so each operand is unwrapped through those wrappers
-/// before checking for the `BANG`.
+/// Whether a boolean `expression` (`&&`/`||`) has a `!`-negated RIGHT operand
+/// that breaks a same-operator run. Per SonarSource's cognitive rule a
+/// negation breaks a run only when a like operator *precedes* it
+/// (`a && !b && c` is +2, not +1). A `&&`/`||` node is
+/// `expression op expression` (left-associative: `!a && b && c` parses as
+/// `((!a && b) && c)`), so a run-breaking (middle) negation is always the
+/// RIGHT operand; a *leading* negation (`!a`) is the left operand of the
+/// innermost node and has no preceding operator to split — it must NOT break
+/// the run. So inspect only the right operand: the last `Rule` child, i.e. the
+/// `expression` after the operator token. The negation itself is a
+/// `UnaryOperatorExpression` (an `expression` carrying a `BANG`), possibly
+/// wrapped in *transparent* layers — parentheses (`primary: '(' expression ')'`)
+/// or pass-through expressions, as in `a && (!b) && c` — so the operand is
+/// unwrapped through those wrappers before checking for the `BANG`.
 fn has_negated_operand(ctx: &ParserRuleContext) -> bool {
-    ctx.children().iter().any(|c| match c {
-        ParseTree::Rule(rule) => operand_is_negation(rule.context(), 0),
-        _ => false,
-    })
+    ctx.children()
+        .iter()
+        .rev()
+        .find_map(|c| match c {
+            ParseTree::Rule(rule) => Some(operand_is_negation(rule.context(), 0)),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// Whether an operand node is (or transparently wraps) a prefix `!` negation.

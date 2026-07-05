@@ -209,6 +209,43 @@ fn parenthesized_negation_still_breaks_boolean_run() {
 }
 
 #[test]
+fn leading_negation_does_not_break_boolean_run() {
+    // Regression (PR #160 review): a negation only breaks a same-operator run
+    // when it sits *between* two like operators (`a && !b && c` = 3). A
+    // *leading* negation — before the first operator, i.e. the left operand of
+    // the innermost `&&` in the left-associative chain `((!a && b) && c)` — has
+    // no preceding operator to split, so it must NOT break the run (matches the
+    // Kotlin walker's order-sensitive `not_operator` behavior). Each of these
+    // is a single `&&` run → cognitive 2 (if=1, one run=1).
+    for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (!a && b && c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if ((!a) && b && c) return true; return false; } }",
+    ] {
+        let a = analyze(src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(2.0),
+            "a leading negation must not break the run: {src}"
+        );
+    }
+    // Guard: a negation on a *later* operand still breaks the run. `!a && !b && c`
+    // — the first `!a` is leading (no split), but the second `!b` sits between
+    // the two `&&` and splits them → two runs → cognitive 3.
+    let mid = analyze(
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (!a && !b && c) return true; return false; } }",
+    );
+    let mj =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&mid.root.metrics)).unwrap();
+    assert_eq!(
+        mj["sum"],
+        serde_json::json!(3.0),
+        "a non-leading negation still breaks the run"
+    );
+}
+
+#[test]
 fn operator_expression_resets_boolean_run() {
     // Regression (PR #160 review): only *transparent* wrappers (parens/bare
     // operands) preserve a boolean run; an expression with its own operator
