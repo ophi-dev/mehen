@@ -246,6 +246,46 @@ fn leading_negation_does_not_break_boolean_run() {
 }
 
 #[test]
+fn negation_in_parenthesized_continuation_breaks_boolean_run() {
+    // Regression (PR #160 review): a negation breaks a same-operator run
+    // whenever a like operator *precedes* it in the FLATTENED run — including
+    // when the negated operand starts a parenthesized continuation of the run.
+    // `&&` is left-associative, so `a && !b && c` parses as `((a && !b) && c)`
+    // (the `!b` is a right operand — caught by `has_negated_operand`), but
+    // `a && (!b && c)` parses as `a && (…)` where `!b` is the LEFT operand of
+    // the parenthesized sub-run. Parentheses are transparent to the run, so the
+    // flattened form is the same `a && !b && c` and it must score 3, not 2.
+    for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (!b && c)) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && ((!b && c))) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if ((a && (!b && c))) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a || (!b || c)) return true; return false; } }",
+    ] {
+        let a = analyze(src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(3.0),
+            "a negation continuing a run (in parens) must break it: {src}"
+        );
+    }
+    // Guard: a *globally leading* negation inside parentheses still does NOT
+    // break the run — nothing precedes it in the flattened run.
+    // `(!b) && a && c` is one `&&` run → 2.
+    let leading = analyze(
+        "class C { boolean f(boolean a, boolean b, boolean c) { if ((!b) && a && c) return true; return false; } }",
+    );
+    let lj =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&leading.root.metrics)).unwrap();
+    assert_eq!(
+        lj["sum"],
+        serde_json::json!(2.0),
+        "a leading negation (even parenthesized) does not break the run"
+    );
+}
+
+#[test]
 fn operator_expression_resets_boolean_run() {
     // Regression (PR #160 review): only *transparent* wrappers (parens/bare
     // operands) preserve a boolean run; an expression with its own operator

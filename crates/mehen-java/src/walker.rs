@@ -184,6 +184,16 @@ struct ChildHint {
     /// independent boolean expressions (e.g. a method-call argument) from the
     /// enclosing run. `None` outside a boolean expression.
     parent_bool_op: Option<BoolOp>,
+    /// Whether a like-operator operand precedes this node in the flattened
+    /// boolean run — i.e. the node was reached as (a transparent continuation
+    /// of) the *right* operand of a same-operator ancestor. Used so a `!`
+    /// negation on a `&&`/`||` node's LEFT operand breaks the run only when
+    /// something precedes it: `a && (!b && c)` (the parenthesized continuation's
+    /// `!b` follows the outer `a &&`) breaks, but a globally-leading negation
+    /// `!a && b && c` (left spine of the run) does not. A node's right operand
+    /// always has a predecessor; its left operand inherits this flag only while
+    /// the node continues the parent run.
+    bool_run_has_predecessor: bool,
     /// This node is (within) a `for` statement's `forControl` header, so a
     /// `localVariableDeclaration` reached through it is the loop initializer,
     /// not a standalone statement — it must not add its own LLOC (the `for`
@@ -388,11 +398,23 @@ impl Walker<'_> {
         //   inside `(b && c) == d` is not wrongly collapsed with an outer `&&`.
         // - Every other node kind also resets, isolating method-call arguments
         //   and nested statements from the enclosing run.
-        let child_bool_op = if ri == jp::RULE_EXPRESSION {
+        // The operator THIS node itself introduces (only a `&&`/`||` expression
+        // does), used both to set the operands' run operator and to place a
+        // predecessor for the run (its right operand follows its left).
+        let this_bool_op = if ri == jp::RULE_EXPRESSION {
             if ctx.has_token(jl::AND) {
                 Some(BoolOp::And)
             } else if ctx.has_token(jl::OR) {
                 Some(BoolOp::Or)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let child_bool_op = if ri == jp::RULE_EXPRESSION {
+            if this_bool_op.is_some() {
+                this_bool_op
             } else if expression_has_operator_token(ctx) {
                 None
             } else {
@@ -403,6 +425,12 @@ impl Walker<'_> {
         } else {
             None
         };
+        // Index of the last `Rule` child — for a `&&`/`||` node
+        // (`expression op expression`) that is the RIGHT operand, which always
+        // has a same-operator predecessor within the run (its left operand).
+        let last_rule_idx = children
+            .iter()
+            .rposition(|c| matches!(c, ParseTree::Rule(_)));
 
         // A classic `for` header (`forControl → forInit → localVariableDeclaration`)
         // must not let its initializer declaration add a second LLOC. Tag ONLY
@@ -476,6 +504,28 @@ impl Walker<'_> {
             child_hint.member_container = member_container;
             child_hint.member_is_public = member_is_public;
             child_hint.parent_bool_op = child_bool_op;
+            // Place a predecessor for a same-operator run so a leading `!` on a
+            // LEFT operand breaks the run only when something precedes it.
+            child_hint.bool_run_has_predecessor = if this_bool_op.is_some() {
+                // This node introduces the operator: its right operand (last
+                // rule child) follows its left → has a predecessor. Its left
+                // operand's predecessor status is inherited from this node's
+                // own (were this whole node preceded in the parent run?).
+                if Some(idx) == last_rule_idx {
+                    true
+                } else {
+                    hint.bool_run_has_predecessor
+                }
+            } else if child_bool_op.is_some() {
+                // Transparent continuation (paren / pass-through operand): the
+                // enclosing operator is forwarded unchanged, so predecessor
+                // status carries through too.
+                hint.bool_run_has_predecessor
+            } else {
+                // A distinct boolean context (own operator) or a non-boolean
+                // boundary starts a fresh run with no predecessor.
+                false
+            };
             child_hint.in_for_init = in_for_init;
             child_hint.in_identifier = in_identifier;
             // The anon-body `classBody` child gets the suppression; its sibling
@@ -922,11 +972,17 @@ impl Walker<'_> {
             self.current().abc.record_condition();
             // A boolean node adds +1 when its operator differs from the
             // enclosing boolean operator (parent-relative run collapse) — OR
-            // when one of its operands is a prefix `!` negation, which breaks
-            // the run per SonarSource (`a && !b && c` is +2, not +1: the `!`
-            // separates the two `&&`). Matches the Kotlin walker's
-            // `not_operator` behavior.
-            if hint.parent_bool_op != Some(op) || has_negated_operand(ctx) {
+            // when a `!` negation breaks the run per SonarSource (`a && !b && c`
+            // is +2, not +1: the `!` separates the two `&&`). A negation breaks
+            // the run only when a like operator *precedes* it: the RIGHT operand
+            // always has one (`has_negated_operand`), while the LEFT operand
+            // breaks only when this node itself continues a run
+            // (`bool_run_has_predecessor`) — that covers a parenthesized
+            // continuation `a && (!b && c)` while leaving a globally-leading
+            // `!a && b && c` intact. Matches the Kotlin walker's `not_operator`.
+            let negation_breaks_run = has_negated_operand(ctx)
+                || (hint.bool_run_has_predecessor && has_negated_left_operand(ctx));
+            if hint.parent_bool_op != Some(op) || negation_breaks_run {
                 self.current().cognitive.increment_by_one();
             }
         }
@@ -1237,6 +1293,21 @@ fn has_negated_operand(ctx: &ParserRuleContext) -> bool {
     ctx.children()
         .iter()
         .rev()
+        .find_map(|c| match c {
+            ParseTree::Rule(rule) => Some(operand_is_negation(rule.context(), 0)),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Whether a boolean `expression`'s LEFT operand (first `Rule` child) is (or
+/// transparently wraps) a `!` negation. A leading negation breaks the run only
+/// when a like operator precedes THIS node in the flattened run (the caller
+/// guards on `bool_run_has_predecessor`), so that `a && (!b && c)` breaks like
+/// `a && !b && c` while `!a && b && c` (left spine, no predecessor) does not.
+fn has_negated_left_operand(ctx: &ParserRuleContext) -> bool {
+    ctx.children()
+        .iter()
         .find_map(|c| match c {
             ParseTree::Rule(rule) => Some(operand_is_negation(rule.context(), 0)),
             _ => None,
