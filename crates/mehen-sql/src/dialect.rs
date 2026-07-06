@@ -470,6 +470,7 @@ pub(crate) fn dialect_label(kind: DialectKind) -> &'static str {
         DialectKind::Databricks => "databricks",
         DialectKind::Db2 => "db2",
         DialectKind::Duckdb => "duckdb",
+        DialectKind::Greenplum => "greenplum",
         DialectKind::Mysql => "mysql",
         DialectKind::Oracle => "oracle",
         DialectKind::Postgres => "postgres",

@@ -711,9 +711,9 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
+checksum = "e1e1dacd0d2082dfcf1351c4bdd566bbe89a2b263235a2b50058f1e130a47277"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -1602,8 +1602,6 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -1615,6 +1613,8 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -3543,14 +3543,14 @@ dependencies = [
 
 [[package]]
 name = "sqruff-lib-core"
-version = "0.38.0"
-source = "git+https://github.com/quarylabs/sqruff?tag=v0.38.0#cd01b8d6fe9c12d41d2e27db04c0bbbaacdedddc"
+version = "0.39.0"
+source = "git+https://github.com/quarylabs/sqruff?tag=v0.39.0#839628591d651da69c26fd84e17bb3a15b519665"
 dependencies = [
  "enum_dispatch",
  "fancy-regex",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
  "indexmap",
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "log",
  "nohash-hasher",
  "pretty_assertions",
@@ -3563,11 +3563,11 @@ dependencies = [
 
 [[package]]
 name = "sqruff-lib-dialects"
-version = "0.38.0"
-source = "git+https://github.com/quarylabs/sqruff?tag=v0.38.0#cd01b8d6fe9c12d41d2e27db04c0bbbaacdedddc"
+version = "0.39.0"
+source = "git+https://github.com/quarylabs/sqruff?tag=v0.39.0#839628591d651da69c26fd84e17bb3a15b519665"
 dependencies = [
- "hashbrown 0.16.1",
- "itertools 0.14.0",
+ "hashbrown 0.17.1",
+ "itertools 0.15.0",
  "serde_yaml",
  "sqruff-lib-core",
  "strum",
