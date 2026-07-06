@@ -251,6 +251,12 @@ struct ChildHint {
     /// method space widens both its LOC span (row attribution) and its
     /// comment-routing byte range. `None` outside a member position.
     member_decl_start: Option<(u32, u32)>,
+    /// This method/constructor declaration's function space was already opened
+    /// by its enclosing body-declaration wrapper (so the wrapper's own-line
+    /// modifiers/annotations are visited *inside* the method space, giving the
+    /// method correct Halstead/PLOC/span). The declaration node must therefore
+    /// NOT open a second space of its own.
+    space_opened_by_wrapper: bool,
     /// We are inside an `annotation` (`@Ann(value = 1)`). Annotation values are
     /// compile-time metadata, not executable code, so ABC assignment
     /// accounting must be suppressed here: the grammar's `IsNotIdentifierAssign`
@@ -357,7 +363,12 @@ impl Walker<'_> {
         // NPA / NPM: classify a direct member of the enclosing class/interface
         // body before opening any space for this node (so the kinds stack
         // still has the class on top).
+        // A method/constructor whose space was already opened by its wrapper
+        // had its NPM recorded there (into the class, before the space opened);
+        // skip re-classifying here (this node now sits inside the method space,
+        // so it would misroute NPM into the method).
         if hint.in_class_member
+            && !hint.space_opened_by_wrapper
             && let Some(container) = hint.member_container
         {
             let public = hint.member_is_public.unwrap_or(true);
@@ -565,11 +576,27 @@ impl Walker<'_> {
             hint.enclosing_record_public
         };
 
+        // When this `classBodyDeclaration` opened the method space itself (to
+        // capture own-line modifiers), tell the inner method/constructor
+        // declaration to skip its own open. The flag flows through the
+        // transparent `memberDeclaration` / generic-method wrappers to the
+        // declaration node, which consumes it; a real space open clears it so a
+        // nested method inside the body still opens normally.
+        let opened_method_at_wrapper = ri == jp::RULE_CLASS_BODY_DECLARATION
+            && !hint.in_anon_body
+            && wrapper_inner_method(ctx).is_some();
+        let space_opened_by_wrapper = if opens_function_space(ri) || opens_class_like(ri) {
+            false
+        } else {
+            opened_method_at_wrapper || hint.space_opened_by_wrapper
+        };
+
         for (idx, child) in children.iter().enumerate() {
             let mut child_hint = ChildHint::default();
             if Some(idx) == else_body_idx || propagate_else {
                 child_hint.is_else_branch = true;
             }
+            child_hint.space_opened_by_wrapper = space_opened_by_wrapper;
             child_hint.in_class_member = propagate_member;
             child_hint.member_container = member_container;
             child_hint.member_is_public = member_is_public;
@@ -741,6 +768,80 @@ impl Walker<'_> {
         }
     }
 
+    /// Open a `Function` space for a method/constructor. `span_ctx` supplies
+    /// the span (the `classBodyDeclaration` wrapper when opening at the wrapper,
+    /// so the span covers own-line modifiers/annotations; otherwise the
+    /// declaration itself); `method_ctx` supplies the name and NArgs. When
+    /// opening at the declaration node (`span_ctx == method_ctx`) the own-line
+    /// modifiers of a *different* wrapper (interface/annotation) are pulled in
+    /// via PLOC-range adoption from the parent; when opening at the wrapper the
+    /// modifiers are walked inside this space directly, so no adoption is
+    /// needed.
+    fn open_method_space(
+        &mut self,
+        span_ctx: &ParserRuleContext,
+        method_ctx: &ParserRuleContext,
+        hint: ChildHint,
+    ) {
+        let name = method_name(method_ctx);
+        let opened_at_wrapper = !std::ptr::eq(span_ctx, method_ctx);
+        // When opening at the wrapper, NPM must be recorded into the enclosing
+        // class BEFORE the method space is pushed (member classification
+        // normally runs at the inner declaration, but that node now sits inside
+        // this method space and would misroute NPM into the method). The inner
+        // declaration skips its own classification via `space_opened_by_wrapper`.
+        if opened_at_wrapper && let Some(container) = self.enclosing_container() {
+            let default_public = matches!(container, ContainerKind::Interface);
+            let public = visibility_from_modifiers(span_ctx).unwrap_or(default_public);
+            self.current().npm.record_method(container, public);
+        }
+        // Widen the declaration-node span up to its body-declaration wrapper so
+        // own-line modifiers belong to the method. Unused when opening at the
+        // wrapper (the span already starts at the wrapper).
+        let widened = if opened_at_wrapper {
+            None
+        } else {
+            hint.member_decl_start
+        };
+        let mut state = self.new_space_state_widened(span_ctx, widened);
+        // When opening at the declaration node, the modifier/annotation rows
+        // were already visited (PLOC-counted) on the enclosing class before
+        // this space is pushed, so adopt those rows into the method. When
+        // opening at the wrapper, the modifiers are walked *inside* this space,
+        // so they are counted directly (no adoption).
+        if let Some((_, wrapper_start_line)) = widened {
+            let method_start_line = ctx_span(span_ctx, self.line_index, self.source_len).start_line;
+            if wrapper_start_line < method_start_line {
+                let parent_loc = self.current().loc.clone();
+                state.loc.adopt_code_lines_in_range(
+                    &parent_loc,
+                    wrapper_start_line.saturating_sub(1),
+                    method_start_line.saturating_sub(1),
+                );
+            }
+        }
+        state.nom.record_function();
+        // A compact record constructor has no `formalParameters` — its
+        // parameter list *is* the record's components, so its NArgs is the
+        // enclosing record's component count (threaded down via `ChildHint`).
+        // Every other method shape counts its own `formalParameters`.
+        let nargs = if method_ctx.rule_index() == jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION {
+            hint.record_component_count.unwrap_or(0)
+        } else {
+            count_formal_params(method_ctx)
+        };
+        state.nargs.record_function_args(nargs);
+        self.push_space_widened(
+            SpaceKind::Function,
+            name,
+            span_ctx,
+            state,
+            hint.in_anon_body,
+            widened,
+        );
+        self.enter_function_cognitive(hint.in_anon_body);
+    }
+
     /// Open a metric space for space-introducing rules. Returns whether a
     /// space was pushed.
     fn maybe_open_space(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) -> bool {
@@ -752,56 +853,40 @@ impl Walker<'_> {
             // there — opening at the wrapper too would double-count. A function
             // opened inside an enum-constant body must not roll into the enum's
             // WMC (it belongs to the constant's anonymous subclass).
+            // A `classBodyDeclaration` wrapping a plain method/constructor opens
+            // the function space HERE (not at the inner declaration) so the
+            // wrapper's own-line modifiers/annotations — siblings of the
+            // declaration, visited before it — are walked *inside* the method
+            // space and count toward its LOC/Halstead/span. The inner
+            // declaration then skips its own open (`space_opened_by_wrapper`).
+            // Only plain method/constructor members route this way; fields,
+            // nested types, and compact/interface/annotation members keep their
+            // existing open sites.
+            jp::RULE_CLASS_BODY_DECLARATION
+                if !hint.in_anon_body && wrapper_inner_method(ctx).is_some() =>
+            {
+                let method = wrapper_inner_method(ctx).expect("guarded by match arm");
+                self.open_method_space(ctx, method, hint);
+                true
+            }
+            jp::RULE_METHOD_DECLARATION | jp::RULE_CONSTRUCTOR_DECLARATION
+                if hint.space_opened_by_wrapper =>
+            {
+                // The wrapper already opened this method's space; do not open a
+                // second one. (Its children are still visited into that space.)
+                false
+            }
             jp::RULE_METHOD_DECLARATION
             | jp::RULE_CONSTRUCTOR_DECLARATION
             | jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION
             | jp::RULE_INTERFACE_COMMON_BODY_DECLARATION
             | jp::RULE_ANNOTATION_METHOD_REST => {
-                let name = method_name(ctx);
-                // Widen the method span up to its body-declaration wrapper so
-                // own-line modifiers/annotations (`@Deprecated\npublic void
-                // m() {}`) belong to the method, not the enclosing class.
-                let widened = hint.member_decl_start;
-                let mut state = self.new_space_state_widened(ctx, widened);
-                // The modifier/annotation rows were visited (and their PLOC
-                // recorded) on the enclosing class *before* this method space is
-                // pushed. Adopt those code rows so the method's PLOC covers its
-                // full declaration; PLOC is hierarchical, so the class keeps
-                // them too. Only the own-line-modifier rows in
-                // `[wrapper_start, method_start)` are adopted.
-                if let Some((_, wrapper_start_line)) = widened {
-                    let method_start_line =
-                        ctx_span(ctx, self.line_index, self.source_len).start_line;
-                    if wrapper_start_line < method_start_line {
-                        let parent_loc = self.current().loc.clone();
-                        state.loc.adopt_code_lines_in_range(
-                            &parent_loc,
-                            wrapper_start_line.saturating_sub(1),
-                            method_start_line.saturating_sub(1),
-                        );
-                    }
-                }
-                state.nom.record_function();
-                // A compact record constructor has no `formalParameters` — its
-                // parameter list *is* the record's components, so its NArgs is
-                // the enclosing record's component count (threaded down via
-                // `ChildHint`). Every other method shape counts its own
-                // `formalParameters`.
-                let nargs = if ri == jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION {
-                    hint.record_component_count.unwrap_or(0)
-                } else {
-                    count_formal_params(ctx)
-                };
-                state.nargs.record_function_args(nargs);
-                self.push_space_widened(
-                    SpaceKind::Function,
-                    name,
-                    ctx,
-                    state,
-                    hint.in_anon_body,
-                    widened,
-                );
-                self.enter_function_cognitive(hint.in_anon_body);
+                // Opened at the declaration node itself (compact ctor, interface
+                // method, annotation element, or a method not reached through a
+                // `classBodyDeclaration` wrapper — e.g. inside an anon body).
+                // Its own-line modifiers, if any, are covered by the PLOC-range
+                // adoption inside `open_method_space`.
+                self.open_method_space(ctx, ctx, hint);
                 true
             }
             jp::RULE_LAMBDA_EXPRESSION => {
@@ -1717,6 +1802,36 @@ fn type_name(ctx: &ParserRuleContext) -> Option<String> {
 /// covered text.
 fn method_name(ctx: &ParserRuleContext) -> Option<String> {
     name_from_identifier(ctx)
+}
+
+/// Given a `classBodyDeclaration` wrapper (`modifier* memberDeclaration`), find
+/// the inner plain method/constructor declaration whose function space should
+/// be opened at the wrapper level — so the wrapper's own-line
+/// modifiers/annotations (siblings of the declaration, visited before the
+/// declaration node) belong to the method's LOC/Halstead/span rather than the
+/// enclosing class. Descends through the transparent `memberDeclaration` and
+/// generic-method/-constructor wrappers. Returns `None` when the member is not
+/// a plain method/constructor (a field, nested type, compact ctor, etc. keep
+/// their existing open sites). Interface/annotation members are handled at
+/// their own (`interfaceCommonBodyDeclaration`/`annotationMethodRest`) node.
+fn wrapper_inner_method(ctx: &ParserRuleContext) -> Option<&ParserRuleContext> {
+    let member = ctx.child_rule(jp::RULE_MEMBER_DECLARATION)?;
+    for child in member.children() {
+        if let ParseTree::Rule(rule) = child {
+            let c = rule.context();
+            match c.rule_index() {
+                jp::RULE_METHOD_DECLARATION | jp::RULE_CONSTRUCTOR_DECLARATION => return Some(c),
+                jp::RULE_GENERIC_METHOD_DECLARATION => {
+                    return c.child_rule(jp::RULE_METHOD_DECLARATION);
+                }
+                jp::RULE_GENERIC_CONSTRUCTOR_DECLARATION => {
+                    return c.child_rule(jp::RULE_CONSTRUCTOR_DECLARATION);
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 fn name_from_identifier(ctx: &ParserRuleContext) -> Option<String> {

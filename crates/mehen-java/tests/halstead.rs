@@ -51,3 +51,54 @@ fn contextual_keyword_used_as_identifier_is_an_operand() {
         "a contextual keyword used as a name must be an operand like any identifier"
     );
 }
+
+#[test]
+fn method_own_line_modifiers_belong_to_the_method() {
+    // Regression (PR #160 review): a method's own-line modifiers/annotations
+    // (`@Deprecated\npublic void m() {}`) are siblings of the declaration on
+    // the `classBodyDeclaration` wrapper. The method space is opened at the
+    // wrapper so those tokens are walked *inside* the method — counting toward
+    // its Halstead (and PLOC), not only the enclosing class. An annotated
+    // method must have strictly more Halstead length than the same method with
+    // the annotation removed.
+    fn method_len(sp: &mehen_core::MetricSpace) -> Option<f64> {
+        if sp.kind == mehen_core::SpaceKind::Function {
+            return Some(
+                sp.metrics
+                    .get(&mehen_core::MetricKey::new("halstead.N1"))
+                    .map(|m| m.as_f64())
+                    .unwrap_or(0.0),
+            );
+        }
+        sp.spaces.iter().find_map(method_len)
+    }
+    let plain = analyze("class C {\n  public void m() {\n    x();\n  }\n}");
+    let annotated = analyze("class C {\n  @Deprecated\n  public void m() {\n    x();\n  }\n}");
+    let p = method_len(&plain.root).expect("method space");
+    let a = method_len(&annotated.root).expect("method space");
+    assert!(
+        a > p,
+        "an annotated method must count the annotation tokens in its Halstead: \
+         annotated N1={a} vs plain N1={p}"
+    );
+
+    // The method's PLOC must include the annotation line too (consistent with
+    // Halstead — both derive from the same tokens now visited inside the space).
+    fn method_ploc(sp: &mehen_core::MetricSpace) -> Option<f64> {
+        if sp.kind == mehen_core::SpaceKind::Function {
+            return Some(
+                sp.metrics
+                    .get(&mehen_core::MetricKey::new("loc.ploc"))
+                    .map(|m| m.as_f64())
+                    .unwrap_or(0.0),
+            );
+        }
+        sp.spaces.iter().find_map(method_ploc)
+    }
+    assert_eq!(
+        method_ploc(&annotated.root),
+        Some(4.0),
+        "the annotation row is part of the method's PLOC"
+    );
+    assert_eq!(method_ploc(&plain.root), Some(3.0));
+}
