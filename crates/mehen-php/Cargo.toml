@@ -22,9 +22,9 @@ mehen-metrics = { workspace = true }
 # with its own allocator).
 mago-syntax = "=1.42.0"
 mago-syntax-core = "=1.42.0"
-mago-database = "=1.42.0"
-mago-span = "=1.42.0"
-mago-allocator = "=1.42.0"
+mago-database = "=1.43.0"
+mago-span = "=1.43.0"
+mago-allocator = "=1.43.0"
 smol_str = { workspace = true }
 
 [dev-dependencies]
