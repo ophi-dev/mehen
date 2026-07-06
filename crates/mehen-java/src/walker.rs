@@ -231,6 +231,26 @@ struct ChildHint {
     /// components — so its NArgs must come from this count. `None` outside a
     /// record.
     record_component_count: Option<u32>,
+    /// The enclosing record's own visibility, threaded down from
+    /// `recordDeclaration`. Java gives a modifier-less *compact* canonical
+    /// constructor (`public record R(int x) { R {} }`) the record's access
+    /// level, but the compact ctor is reached directly under the modifier-less
+    /// `recordBody`, so the ambient `member_is_public` there is always `false`.
+    /// A compact ctor with no explicit modifier falls back to this instead.
+    /// `None` outside a record.
+    enclosing_record_public: Option<bool>,
+    /// The 0-based start line of the enclosing member's body-declaration
+    /// wrapper (`classBodyDeclaration: modifier* memberDeclaration`), threaded
+    /// down so a method/constructor space can widen its span upward to cover
+    /// its own-line modifiers/annotations. In the grammars-v4 Java grammar the
+    /// `modifier`s (including annotations) are SIBLINGS of the declaration on
+    /// the wrapper, so the declaration's own `ctx_span` starts *after* them —
+    /// leaving `@Deprecated\npublic void m() {}`'s annotation row attributed to
+    /// the enclosing class. The wrapper's start line is where the declaration
+    /// truly begins. Carries the wrapper's `(start_byte, start_line)` so the
+    /// method space widens both its LOC span (row attribution) and its
+    /// comment-routing byte range. `None` outside a member position.
+    member_decl_start: Option<(u32, u32)>,
     /// We are inside an `annotation` (`@Ann(value = 1)`). Annotation values are
     /// compile-time metadata, not executable code, so ABC assignment
     /// accounting must be suppressed here: the grammar's `IsNotIdentifierAssign`
@@ -341,7 +361,7 @@ impl Walker<'_> {
             && let Some(container) = hint.member_container
         {
             let public = hint.member_is_public.unwrap_or(true);
-            self.classify_class_member(ctx, ri, container, public);
+            self.classify_class_member(ctx, ri, container, public, hint);
         }
 
         let opened = self.maybe_open_space(ctx, ri, hint);
@@ -391,6 +411,23 @@ impl Walker<'_> {
         // children.
         let (propagate_member, member_container, member_is_public) =
             self.member_propagation(ctx, ri, hint);
+
+        // Capture the member's body-declaration wrapper start line so a
+        // method/constructor space can widen its span upward to cover its
+        // own-line modifiers/annotations (siblings of the declaration on the
+        // wrapper). Set at the wrapper that opens the member position; a
+        // transparent wrapper inherits it; a nested class/function resets it
+        // (its members' spans are computed from their own wrappers). Cleared
+        // once a space actually opens so an inner declaration doesn't reuse an
+        // outer member's start.
+        let member_decl_start = if is_member_body_wrapper(ri) {
+            let span = ctx_span(ctx, self.line_index, self.source_len);
+            Some((span.start_byte, span.start_line))
+        } else if opens_class_like(ri) || opens_function_space(ri) {
+            None
+        } else {
+            hint.member_decl_start
+        };
 
         // Thread the enclosing boolean operator down through `expression`
         // descendants for the parent-relative cognitive boolean-run collapse.
@@ -510,6 +547,24 @@ impl Walker<'_> {
             hint.record_component_count
         };
 
+        // Thread the enclosing record's visibility down so a modifier-less
+        // compact canonical constructor can inherit the record's access level
+        // (Java rule). The record's visibility is what was resolved for the
+        // record declaration itself as a member (`member_is_public`, set by its
+        // enclosing class/type wrapper); a top-level record has no such wrapper,
+        // so fall back to modifiers on the record declaration. A nested type
+        // resets it (its own members are not this record's).
+        let enclosing_record_public = if ri == jp::RULE_RECORD_DECLARATION {
+            Some(
+                hint.member_is_public.unwrap_or(false)
+                    || visibility_from_modifiers(ctx) == Some(true),
+            )
+        } else if opens_class_like(ri) {
+            None
+        } else {
+            hint.enclosing_record_public
+        };
+
         for (idx, child) in children.iter().enumerate() {
             let mut child_hint = ChildHint::default();
             if Some(idx) == else_body_idx || propagate_else {
@@ -568,6 +623,8 @@ impl Walker<'_> {
             let is_anon_body_child = Some(idx) == anon_body_child;
             child_hint.in_anon_body = in_anon_body || is_anon_body_child;
             child_hint.record_component_count = record_component_count;
+            child_hint.enclosing_record_public = enclosing_record_public;
+            child_hint.member_decl_start = member_decl_start;
             child_hint.in_annotation = in_annotation;
             // An anonymous class body (`new X() { … }`) is a fresh class scope
             // but opens no metric space, so — unlike a named class, which
@@ -635,6 +692,18 @@ impl Walker<'_> {
                 let public = visibility_from_modifiers(ctx).unwrap_or(default_public);
                 (true, container, Some(public))
             }
+            // A top-level / local type's access modifiers live on the
+            // `typeDeclaration` / `localTypeDeclaration` wrapper (a sibling of
+            // the declaration, which has no parent pointer). Thread that
+            // visibility down as `member_is_public` so a record declaration can
+            // inherit it for its modifier-less compact canonical constructor —
+            // WITHOUT marking the type itself as a class member (a top-level
+            // type is not counted in NPA/NPM), so `propagate_member` stays
+            // false. A top-level type with no modifier is package-private.
+            jp::RULE_TYPE_DECLARATION | jp::RULE_LOCAL_TYPE_DECLARATION => {
+                let public = visibility_from_modifiers(ctx).unwrap_or(false);
+                (false, None, Some(public))
+            }
             // Transparent member wrappers keep the inbound member position.
             // The generic wrappers (`<T> …`) and the interface-method wrapper
             // must be transparent too: they nest the real declaration
@@ -689,7 +758,29 @@ impl Walker<'_> {
             | jp::RULE_INTERFACE_COMMON_BODY_DECLARATION
             | jp::RULE_ANNOTATION_METHOD_REST => {
                 let name = method_name(ctx);
-                let mut state = self.new_space_state(ctx);
+                // Widen the method span up to its body-declaration wrapper so
+                // own-line modifiers/annotations (`@Deprecated\npublic void
+                // m() {}`) belong to the method, not the enclosing class.
+                let widened = hint.member_decl_start;
+                let mut state = self.new_space_state_widened(ctx, widened);
+                // The modifier/annotation rows were visited (and their PLOC
+                // recorded) on the enclosing class *before* this method space is
+                // pushed. Adopt those code rows so the method's PLOC covers its
+                // full declaration; PLOC is hierarchical, so the class keeps
+                // them too. Only the own-line-modifier rows in
+                // `[wrapper_start, method_start)` are adopted.
+                if let Some((_, wrapper_start_line)) = widened {
+                    let method_start_line =
+                        ctx_span(ctx, self.line_index, self.source_len).start_line;
+                    if wrapper_start_line < method_start_line {
+                        let parent_loc = self.current().loc.clone();
+                        state.loc.adopt_code_lines_in_range(
+                            &parent_loc,
+                            wrapper_start_line.saturating_sub(1),
+                            method_start_line.saturating_sub(1),
+                        );
+                    }
+                }
                 state.nom.record_function();
                 // A compact record constructor has no `formalParameters` — its
                 // parameter list *is* the record's components, so its NArgs is
@@ -702,7 +793,14 @@ impl Walker<'_> {
                     count_formal_params(ctx)
                 };
                 state.nargs.record_function_args(nargs);
-                self.push_space(SpaceKind::Function, name, ctx, state, hint.in_anon_body);
+                self.push_space_widened(
+                    SpaceKind::Function,
+                    name,
+                    ctx,
+                    state,
+                    hint.in_anon_body,
+                    widened,
+                );
                 self.enter_function_cognitive(hint.in_anon_body);
                 true
             }
@@ -758,10 +856,27 @@ impl Walker<'_> {
     }
 
     fn new_space_state(&self, ctx: &ParserRuleContext) -> State {
+        self.new_space_state_widened(ctx, None)
+    }
+
+    /// Build a space's initial `State`, optionally widening the span's start
+    /// (byte + line) upward to `widened_start`. A method/constructor uses this
+    /// to cover own-line modifiers/annotations that live on its
+    /// `classBodyDeclaration` wrapper (siblings of the declaration, so *before*
+    /// the declaration's own `ctx_span` start).
+    fn new_space_state_widened(
+        &self,
+        ctx: &ParserRuleContext,
+        widened_start: Option<(u32, u32)>,
+    ) -> State {
         let mut state = State::new();
         let span = ctx_span(ctx, self.line_index, self.source_len);
+        let start_line = match widened_start {
+            Some((_, line)) if line < span.start_line => line,
+            _ => span.start_line,
+        };
         state.loc.set_span(
-            span.start_line.saturating_sub(1),
+            start_line.saturating_sub(1),
             span.end_line.saturating_sub(1),
             false,
         );
@@ -776,7 +891,29 @@ impl Walker<'_> {
         state: State,
         suppress_parent_wmc: bool,
     ) {
-        let span = ctx_span(ctx, self.line_index, self.source_len);
+        self.push_space_widened(kind, name, ctx, state, suppress_parent_wmc, None);
+    }
+
+    /// Like [`push_space`], but widens the recorded span's start (byte + line)
+    /// upward to `widened_start` when it precedes the context's own start — so
+    /// comment routing and the tree span cover the member's own-line
+    /// modifiers/annotations.
+    fn push_space_widened(
+        &mut self,
+        kind: SpaceKind,
+        name: Option<String>,
+        ctx: &ParserRuleContext,
+        state: State,
+        suppress_parent_wmc: bool,
+        widened_start: Option<(u32, u32)>,
+    ) {
+        let mut span = ctx_span(ctx, self.line_index, self.source_len);
+        if let Some((start_byte, start_line)) = widened_start
+            && start_byte < span.start_byte
+        {
+            span.start_byte = start_byte;
+            span.start_line = start_line;
+        }
         let space_id = self.tree.open(kind.clone(), span, name);
         self.loc_routing
             .record_open(space_id, span.start_byte, span.end_byte);
@@ -1228,13 +1365,15 @@ impl Walker<'_> {
     /// NPA / NPM classification for a direct member of an enclosing class or
     /// interface body. `ctx` is the member declaration rule itself; `public`
     /// is the visibility resolved from the body-declaration wrapper's
-    /// `modifier`s (threaded down via [`ChildHint`]).
+    /// `modifier`s (threaded down via [`ChildHint`]). `hint` carries the
+    /// enclosing record's visibility for the compact-constructor fallback.
     fn classify_class_member(
         &mut self,
         ctx: &ParserRuleContext,
         ri: usize,
         container: ContainerKind,
         public: bool,
+        hint: ChildHint,
     ) {
         match ri {
             jp::RULE_FIELD_DECLARATION => {
@@ -1262,10 +1401,15 @@ impl Walker<'_> {
             }
             // A compact record constructor (`record R(int x) { public R {} }`)
             // is reached directly under `recordBody`, so the threaded `public`
-            // comes from the (modifier-less) record body. Its `modifier`s are
-            // its own children, so resolve visibility from `ctx` itself.
+            // comes from the (modifier-less) record body and is always `false`.
+            // Its own `modifier`s are its children, so an *explicit* modifier is
+            // resolved from `ctx`; a modifier-less compact canonical constructor
+            // inherits the RECORD's access level (Java rule), threaded via
+            // `enclosing_record_public` — not the record-body default.
             jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION => {
-                let is_public = visibility_from_modifiers(ctx).unwrap_or(public);
+                let is_public = visibility_from_modifiers(ctx)
+                    .or(hint.enclosing_record_public)
+                    .unwrap_or(public);
                 self.current().npm.record_method(container, is_public);
             }
             // An annotation element (`@interface A { String value(); }`) is an
@@ -1335,6 +1479,19 @@ fn opens_function_space(ri: usize) -> bool {
             | jp::RULE_INTERFACE_COMMON_BODY_DECLARATION
             | jp::RULE_ANNOTATION_METHOD_REST
             | jp::RULE_LAMBDA_EXPRESSION
+    )
+}
+
+/// The body-declaration wrappers whose leading `modifier`s (including
+/// annotations) are siblings of the member declaration. Their start line is
+/// where the member truly begins, so a method/constructor space widens its
+/// span up to it to cover own-line modifiers/annotations.
+fn is_member_body_wrapper(ri: usize) -> bool {
+    matches!(
+        ri,
+        jp::RULE_CLASS_BODY_DECLARATION
+            | jp::RULE_INTERFACE_BODY_DECLARATION
+            | jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION
     )
 }
 

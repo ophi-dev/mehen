@@ -171,6 +171,51 @@ fn compact_record_constructor_counts_as_public_method() {
 }
 
 #[test]
+fn modifierless_compact_constructor_inherits_record_visibility() {
+    // Regression (PR #160 review): Java gives a modifier-less compact canonical
+    // constructor the RECORD's access level. The compact ctor is reached under
+    // the (modifier-less) `recordBody`, so it must inherit the record's
+    // visibility — threaded via `enclosing_record_public` — not the record-body
+    // default (always package-private). A `public record` with the common
+    // modifier-less compact ctor therefore has NPM = 1.
+    let public_top = analyze("public record R(int x) { R { } }");
+    let pt =
+        serde_json::to_value(mehen_report::metrics_json::npm(&public_top.root.metrics)).unwrap();
+    assert_eq!(
+        pt["total"],
+        serde_json::json!(1.0),
+        "a modifier-less compact ctor in a public (top-level) record is public"
+    );
+    // Nested public record: visibility comes through the classBodyDeclaration
+    // wrapper. The outer class contributes no methods; only the record's ctor.
+    let public_nested = analyze("class C { public record R(int x) { R { } } }");
+    let pn =
+        serde_json::to_value(mehen_report::metrics_json::npm(&public_nested.root.metrics)).unwrap();
+    assert_eq!(
+        pn["total"],
+        serde_json::json!(1.0),
+        "a modifier-less compact ctor in a nested public record is public"
+    );
+    // Package-private record → its modifier-less compact ctor is NOT public.
+    let pkg = analyze("record R(int x) { R { } }");
+    let pk = serde_json::to_value(mehen_report::metrics_json::npm(&pkg.root.metrics)).unwrap();
+    assert_eq!(
+        pk["total"],
+        serde_json::json!(0.0),
+        "a modifier-less compact ctor in a package-private record is not public"
+    );
+    // An explicit modifier on the compact ctor still wins over the record's.
+    let explicit_priv = analyze("public record R(int x) { private R { } }");
+    let ep =
+        serde_json::to_value(mehen_report::metrics_json::npm(&explicit_priv.root.metrics)).unwrap();
+    assert_eq!(
+        ep["total"],
+        serde_json::json!(0.0),
+        "an explicit private compact ctor overrides the record's public access"
+    );
+}
+
+#[test]
 fn anonymous_class_body_methods_are_not_enclosing_members() {
     // Regression (PR #160 review): a method in an anonymous class expression
     // (`new Runnable() { void run() {} }`) belongs to the anonymous subclass,

@@ -221,6 +221,21 @@ impl LocStats {
         }
     }
 
+    /// Adopt the source's code rows that fall in `[start_row, end_row)` into
+    /// this space's PLOC set. Used when a member's own-line modifiers/
+    /// annotations were observed on the enclosing class (they are visited
+    /// before the member's space is pushed): the member space adopts those
+    /// rows so its PLOC covers its full declaration. PLOC is hierarchical, so
+    /// the enclosing space legitimately keeps the rows too. Only rows the
+    /// source actually recorded as code are adopted (blank lines are skipped).
+    pub fn adopt_code_lines_in_range(&mut self, source: &LocStats, start_row: u32, end_row: u32) {
+        for line in &source.ploc_lines {
+            if *line >= start_row && *line < end_row {
+                self.ploc_lines.insert(*line);
+            }
+        }
+    }
+
     /// Absorb a sibling's *token-only* observations into this state.
     ///
     /// Used by [`crate::SpaceRangeTracker`] to fold post-AST token
