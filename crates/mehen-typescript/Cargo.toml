@@ -19,7 +19,7 @@ mehen-metrics = { workspace = true }
 oxc_allocator = "=0.139.0"
 oxc_ast = "=0.139.0"
 oxc_ast_visit = "=0.139.0"
-oxc_parser = "=0.138.0"
+oxc_parser = "=0.139.0"
 oxc_span = "=0.139.0"
 oxc_syntax = "=0.139.0"
 smol_str = { workspace = true }
