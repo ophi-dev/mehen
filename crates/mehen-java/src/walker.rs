@@ -194,6 +194,16 @@ struct ChildHint {
     /// always has a predecessor; its left operand inherits this flag only while
     /// the node continues the parent run.
     bool_run_has_predecessor: bool,
+    /// Symmetric to `bool_run_has_predecessor`: whether a like-operator operand
+    /// FOLLOWS this node in the flattened boolean run. Used so a `!` negation on
+    /// a `&&`/`||` node's RIGHT operand breaks the run only when a like operator
+    /// follows it: `a && !b && c` (the `!b` precedes the second `&&`) breaks,
+    /// but a *trailing* negation `a && b && !c` (and its parenthesized form
+    /// `a && (b && !c)`) does not — nothing follows it. A node's left operand is
+    /// followed by the node's own operator (so it always has a successor within
+    /// the run); its right operand inherits this flag only while the node
+    /// continues the parent run.
+    bool_run_has_successor: bool,
     /// This node is (within) a `for` statement's `forControl` header, so a
     /// `localVariableDeclaration` reached through it is the loop initializer,
     /// not a standalone statement — it must not add its own LLOC (the `for`
@@ -425,9 +435,14 @@ impl Walker<'_> {
         } else {
             None
         };
-        // Index of the last `Rule` child — for a `&&`/`||` node
-        // (`expression op expression`) that is the RIGHT operand, which always
-        // has a same-operator predecessor within the run (its left operand).
+        // Indices of the first/last `Rule` children — for a `&&`/`||` node
+        // (`expression op expression`) these are the LEFT and RIGHT operands.
+        // The right operand always has a same-operator predecessor (its left
+        // operand); the left operand always has a same-operator successor (the
+        // node's own operator).
+        let first_rule_idx = children
+            .iter()
+            .position(|c| matches!(c, ParseTree::Rule(_)));
         let last_rule_idx = children
             .iter()
             .rposition(|c| matches!(c, ParseTree::Rule(_)));
@@ -524,6 +539,25 @@ impl Walker<'_> {
             } else {
                 // A distinct boolean context (own operator) or a non-boolean
                 // boundary starts a fresh run with no predecessor.
+                false
+            };
+            // Symmetric successor flag so a `!` on a RIGHT operand breaks the
+            // run only when a like operator follows (a trailing negation does
+            // not).
+            child_hint.bool_run_has_successor = if this_bool_op.is_some() {
+                // This node introduces the operator: its left operand (first
+                // rule child) is followed by that operator → has a successor.
+                // Its right operand's successor status is inherited from this
+                // node's own (does a like operator follow this whole node?).
+                if Some(idx) == first_rule_idx {
+                    true
+                } else {
+                    hint.bool_run_has_successor
+                }
+            } else if child_bool_op.is_some() {
+                // Transparent continuation forwards successor status unchanged.
+                hint.bool_run_has_successor
+            } else {
                 false
             };
             child_hint.in_for_init = in_for_init;
@@ -973,14 +1007,19 @@ impl Walker<'_> {
             // A boolean node adds +1 when its operator differs from the
             // enclosing boolean operator (parent-relative run collapse) — OR
             // when a `!` negation breaks the run per SonarSource (`a && !b && c`
-            // is +2, not +1: the `!` separates the two `&&`). A negation breaks
-            // the run only when a like operator *precedes* it: the RIGHT operand
-            // always has one (`has_negated_operand`), while the LEFT operand
-            // breaks only when this node itself continues a run
-            // (`bool_run_has_predecessor`) — that covers a parenthesized
-            // continuation `a && (!b && c)` while leaving a globally-leading
-            // `!a && b && c` intact. Matches the Kotlin walker's `not_operator`.
-            let negation_breaks_run = has_negated_operand(ctx)
+            // is +2, not +1). The Kotlin `not_operator` model is order-sensitive:
+            // a `!` splits a run only when a like operator BOTH precedes AND
+            // follows that operand in the flattened run (the `!` makes the
+            // *following* like operator start a fresh run). So:
+            //   - a RIGHT-operand negation (`… op !x`) splits only when a like
+            //     operator FOLLOWS it (`bool_run_has_successor`); a trailing
+            //     negation at the run head — `a && b && !c` and its
+            //     parenthesized form `a && (b && !c)` — does NOT split.
+            //   - a LEFT-operand negation (`!x op …`, notably a parenthesized
+            //     continuation `a && (!b && c)`) splits only when a like operator
+            //     PRECEDES it (`bool_run_has_predecessor`); a globally-leading
+            //     `!a && b && c` does NOT split.
+            let negation_breaks_run = (hint.bool_run_has_successor && has_negated_operand(ctx))
                 || (hint.bool_run_has_predecessor && has_negated_left_operand(ctx));
             if hint.parent_bool_op != Some(op) || negation_breaks_run {
                 self.current().cognitive.increment_by_one();

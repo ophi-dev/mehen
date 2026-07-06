@@ -286,6 +286,46 @@ fn negation_in_parenthesized_continuation_breaks_boolean_run() {
 }
 
 #[test]
+fn trailing_negation_does_not_break_boolean_run() {
+    // Regression (PR #160 review): a `!` breaks a run only when a like operator
+    // both PRECEDES and FOLLOWS it in the flattened run. A *trailing* negation
+    // at the end of the run has no following operator, so it must NOT split —
+    // and a parenthesized continuation must match its unparenthesized form:
+    // `a && (b && !c)` scores like `a && b && !c` (both a single run → 2), not
+    // 3. This is the dual of the round-22 parenthesized-continuation case.
+    for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && b && !c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (b && !c)) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c, boolean d) { if (a && (b && c && !d)) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a || (b || !c)) return true; return false; } }",
+    ] {
+        let a = analyze(src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(2.0),
+            "a trailing negation must not break the run: {src}"
+        );
+    }
+    // Cross-check: the parenthesized form scores identically to the flat form.
+    let flat = analyze(
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && b && !c) return true; return false; } }",
+    );
+    let paren = analyze(
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (b && !c)) return true; return false; } }",
+    );
+    let fj =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&flat.root.metrics)).unwrap();
+    let pj =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&paren.root.metrics)).unwrap();
+    assert_eq!(
+        fj["sum"], pj["sum"],
+        "parentheses must not change cognitive complexity for the same run"
+    );
+}
+
+#[test]
 fn operator_expression_resets_boolean_run() {
     // Regression (PR #160 review): only *transparent* wrappers (parens/bare
     // operands) preserve a boolean run; an expression with its own operator
