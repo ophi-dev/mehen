@@ -557,10 +557,16 @@ impl Walker<'_> {
             hint.in_anon_body
         };
 
-        // Once inside an `annotation`, stay inside for the whole subtree so
-        // named element values (`@Ann(value = 1)`) don't record ABC
-        // assignments (annotation metadata is not executable code).
-        let in_annotation = hint.in_annotation || ri == jp::RULE_ANNOTATION;
+        // Once inside an `annotation` OR an annotation element's `defaultValue`,
+        // stay inside for the whole subtree so annotation metadata does not
+        // record executable complexity (ABC assignments/conditions, cyclomatic
+        // decisions, cognitive nesting). Two entry points: a use-site annotation
+        // (`@Ann(value = 1)`, `RULE_ANNOTATION`) and an element default
+        // (`@interface A { boolean v() default true && false; }`, parsed under
+        // `annotationMethodRest → defaultValue → elementValue → expression`, NOT
+        // under `RULE_ANNOTATION`).
+        let in_annotation =
+            hint.in_annotation || ri == jp::RULE_ANNOTATION || ri == jp::RULE_DEFAULT_VALUE;
 
         // Thread the record's component count down so a compact constructor
         // (which has no `formalParameters`) can report the components as its

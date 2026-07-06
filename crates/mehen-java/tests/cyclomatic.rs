@@ -169,3 +169,28 @@ fn annotation_value_expressions_do_not_add_complexity() {
         "a real decision in an annotated method's body still counts"
     );
 }
+
+#[test]
+fn annotation_element_default_expressions_do_not_add_complexity() {
+    // Regression (PR #160 review): an annotation element's DEFAULT value
+    // (`@interface A { boolean v() default true && false; }`) is metadata too,
+    // parsed under `annotationMethodRest → defaultValue → elementValue →
+    // expression` — NOT under `RULE_ANNOTATION`. The `in_annotation` guard must
+    // also trigger on `defaultValue`, or a composed constant in a default
+    // inflates the annotation method's cyclomatic/cognitive/ABC.
+    let plain = analyze("@interface A { boolean v(); }");
+    let p =
+        serde_json::to_value(mehen_report::metrics_json::cyclomatic(&plain.root.metrics)).unwrap();
+    for src in [
+        "@interface A { boolean v() default true && false; }",
+        "@interface A { int v() default cond ? 1 : 2; }",
+    ] {
+        let a = analyze(src);
+        let av =
+            serde_json::to_value(mehen_report::metrics_json::cyclomatic(&a.root.metrics)).unwrap();
+        assert_eq!(
+            av["sum"], p["sum"],
+            "an annotation element default expression must not add complexity: {src}"
+        );
+    }
+}
