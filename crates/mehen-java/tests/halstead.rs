@@ -102,3 +102,44 @@ fn method_own_line_modifiers_belong_to_the_method() {
     );
     assert_eq!(method_ploc(&plain.root), Some(3.0));
 }
+
+#[test]
+fn anon_and_interface_method_modifiers_belong_to_the_method() {
+    // Regression (PR #160 review): the wrapper-open fix must also cover methods
+    // whose space is opened at a NON-class wrapper — anonymous-class methods
+    // (opened at the anon body's `classBodyDeclaration`), interface methods
+    // (opened at `interfaceBodyDeclaration → … → interfaceCommonBodyDeclaration`),
+    // and annotation elements. Their own-line modifiers/annotations must count
+    // toward the method's Halstead, consistent with its (already-widened) PLOC —
+    // otherwise PLOC and Halstead disagree about the annotation row.
+    fn method_len(sp: &mehen_core::MetricSpace) -> Option<f64> {
+        if sp.kind == mehen_core::SpaceKind::Function {
+            return Some(
+                sp.metrics
+                    .get(&mehen_core::MetricKey::new("halstead.N1"))
+                    .map(|m| m.as_f64())
+                    .unwrap_or(0.0),
+            );
+        }
+        sp.spaces.iter().find_map(method_len)
+    }
+    // Anonymous-class method.
+    let anon_plain = analyze(
+        "class C {\n  Runnable r = new Runnable() {\n    public void run() {\n      x();\n    }\n  };\n}",
+    );
+    let anon_annot = analyze(
+        "class C {\n  Runnable r = new Runnable() {\n    @Deprecated\n    public void run() {\n      x();\n    }\n  };\n}",
+    );
+    assert!(
+        method_len(&anon_annot.root).unwrap() > method_len(&anon_plain.root).unwrap(),
+        "an anon-class method's annotation must count toward its Halstead"
+    );
+    // Interface (default) method.
+    let iface_plain = analyze("interface I {\n  default void m() {\n    x();\n  }\n}");
+    let iface_annot =
+        analyze("interface I {\n  @Deprecated\n  default void m() {\n    x();\n  }\n}");
+    assert!(
+        method_len(&iface_annot.root).unwrap() > method_len(&iface_plain.root).unwrap(),
+        "an interface method's annotation must count toward its Halstead"
+    );
+}

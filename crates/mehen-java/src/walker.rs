@@ -582,9 +582,12 @@ impl Walker<'_> {
         // transparent `memberDeclaration` / generic-method wrappers to the
         // declaration node, which consumes it; a real space open clears it so a
         // nested method inside the body still opens normally.
-        let opened_method_at_wrapper = ri == jp::RULE_CLASS_BODY_DECLARATION
-            && !hint.in_anon_body
-            && wrapper_inner_method(ctx).is_some();
+        let opened_method_at_wrapper = matches!(
+            ri,
+            jp::RULE_CLASS_BODY_DECLARATION
+                | jp::RULE_INTERFACE_BODY_DECLARATION
+                | jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION
+        ) && wrapper_inner_method(ctx).is_some();
         let space_opened_by_wrapper = if opens_function_space(ri) || opens_class_like(ri) {
             false
         } else {
@@ -790,7 +793,13 @@ impl Walker<'_> {
         // normally runs at the inner declaration, but that node now sits inside
         // this method space and would misroute NPM into the method). The inner
         // declaration skips its own classification via `space_opened_by_wrapper`.
-        if opened_at_wrapper && let Some(container) = self.enclosing_container() {
+        // A method in an anonymous-class body belongs to the anon subclass (no
+        // space of its own) and must NOT count toward the enclosing container's
+        // NPM — mirrors the `in_anon_body` suppression in `member_propagation`.
+        if opened_at_wrapper
+            && !hint.in_anon_body
+            && let Some(container) = self.enclosing_container()
+        {
             let default_public = matches!(container, ContainerKind::Interface);
             let public = visibility_from_modifiers(span_ctx).unwrap_or(default_public);
             self.current().npm.record_method(container, public);
@@ -863,13 +872,18 @@ impl Walker<'_> {
             // nested types, and compact/interface/annotation members keep their
             // existing open sites.
             jp::RULE_CLASS_BODY_DECLARATION
-                if !hint.in_anon_body && wrapper_inner_method(ctx).is_some() =>
+            | jp::RULE_INTERFACE_BODY_DECLARATION
+            | jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION
+                if wrapper_inner_method(ctx).is_some() =>
             {
                 let method = wrapper_inner_method(ctx).expect("guarded by match arm");
                 self.open_method_space(ctx, method, hint);
                 true
             }
-            jp::RULE_METHOD_DECLARATION | jp::RULE_CONSTRUCTOR_DECLARATION
+            jp::RULE_METHOD_DECLARATION
+            | jp::RULE_CONSTRUCTOR_DECLARATION
+            | jp::RULE_INTERFACE_COMMON_BODY_DECLARATION
+            | jp::RULE_ANNOTATION_METHOD_REST
                 if hint.space_opened_by_wrapper =>
             {
                 // The wrapper already opened this method's space; do not open a
@@ -1804,34 +1818,61 @@ fn method_name(ctx: &ParserRuleContext) -> Option<String> {
     name_from_identifier(ctx)
 }
 
-/// Given a `classBodyDeclaration` wrapper (`modifier* memberDeclaration`), find
-/// the inner plain method/constructor declaration whose function space should
-/// be opened at the wrapper level — so the wrapper's own-line
-/// modifiers/annotations (siblings of the declaration, visited before the
-/// declaration node) belong to the method's LOC/Halstead/span rather than the
-/// enclosing class. Descends through the transparent `memberDeclaration` and
-/// generic-method/-constructor wrappers. Returns `None` when the member is not
-/// a plain method/constructor (a field, nested type, compact ctor, etc. keep
-/// their existing open sites). Interface/annotation members are handled at
-/// their own (`interfaceCommonBodyDeclaration`/`annotationMethodRest`) node.
+/// Given a member body-declaration wrapper, find the inner method/constructor
+/// declaration whose function space should be opened at the wrapper level — so
+/// the wrapper's own-line modifiers/annotations (siblings of the declaration,
+/// visited before the declaration node) belong to the method's
+/// LOC/Halstead/span rather than the enclosing class/interface. Handles:
+///   - `classBodyDeclaration` → (generic) method/constructor declaration;
+///   - `interfaceBodyDeclaration` → `interfaceMethodDeclaration` /
+///     `genericInterfaceMethodDeclaration` → `interfaceCommonBodyDeclaration`;
+///   - `annotationTypeElementDeclaration` → `annotationTypeElementRest` →
+///     `annotationMethodOrConstantRest` → `annotationMethodRest`.
+/// Returns the node that would otherwise open the space (the same node the
+/// declaration-arm opens), or `None` when the member is not a method-shaped
+/// declaration (a field, nested type, const, compact ctor — those keep their
+/// existing open sites).
 fn wrapper_inner_method(ctx: &ParserRuleContext) -> Option<&ParserRuleContext> {
-    let member = ctx.child_rule(jp::RULE_MEMBER_DECLARATION)?;
-    for child in member.children() {
-        if let ParseTree::Rule(rule) = child {
-            let c = rule.context();
-            match c.rule_index() {
-                jp::RULE_METHOD_DECLARATION | jp::RULE_CONSTRUCTOR_DECLARATION => return Some(c),
-                jp::RULE_GENERIC_METHOD_DECLARATION => {
-                    return c.child_rule(jp::RULE_METHOD_DECLARATION);
+    match ctx.rule_index() {
+        jp::RULE_CLASS_BODY_DECLARATION => {
+            let member = ctx.child_rule(jp::RULE_MEMBER_DECLARATION)?;
+            for child in member.children() {
+                if let ParseTree::Rule(rule) = child {
+                    let c = rule.context();
+                    match c.rule_index() {
+                        jp::RULE_METHOD_DECLARATION | jp::RULE_CONSTRUCTOR_DECLARATION => {
+                            return Some(c);
+                        }
+                        jp::RULE_GENERIC_METHOD_DECLARATION => {
+                            return c.child_rule(jp::RULE_METHOD_DECLARATION);
+                        }
+                        jp::RULE_GENERIC_CONSTRUCTOR_DECLARATION => {
+                            return c.child_rule(jp::RULE_CONSTRUCTOR_DECLARATION);
+                        }
+                        _ => {}
+                    }
                 }
-                jp::RULE_GENERIC_CONSTRUCTOR_DECLARATION => {
-                    return c.child_rule(jp::RULE_CONSTRUCTOR_DECLARATION);
-                }
-                _ => {}
             }
+            None
         }
+        // Interface method: interfaceBodyDeclaration → interfaceMemberDeclaration
+        // → (generic)interfaceMethodDeclaration → interfaceCommonBodyDeclaration
+        // (the node the declaration-arm opens).
+        jp::RULE_INTERFACE_BODY_DECLARATION => {
+            let member = ctx.child_rule(jp::RULE_INTERFACE_MEMBER_DECLARATION)?;
+            let decl = member
+                .child_rule(jp::RULE_INTERFACE_METHOD_DECLARATION)
+                .or_else(|| member.child_rule(jp::RULE_GENERIC_INTERFACE_METHOD_DECLARATION))?;
+            find_descendant(decl, jp::RULE_INTERFACE_COMMON_BODY_DECLARATION)
+        }
+        // Annotation element: annotationTypeElementDeclaration →
+        // annotationTypeElementRest → annotationMethodOrConstantRest →
+        // annotationMethodRest (the node the declaration-arm opens).
+        jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION => {
+            find_descendant(ctx, jp::RULE_ANNOTATION_METHOD_REST)
+        }
+        _ => None,
     }
-    None
 }
 
 fn name_from_identifier(ctx: &ParserRuleContext) -> Option<String> {
