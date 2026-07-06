@@ -1822,12 +1822,15 @@ fn method_name(ctx: &ParserRuleContext) -> Option<String> {
 /// declaration whose function space should be opened at the wrapper level — so
 /// the wrapper's own-line modifiers/annotations (siblings of the declaration,
 /// visited before the declaration node) belong to the method's
-/// LOC/Halstead/span rather than the enclosing class/interface. Handles:
-///   - `classBodyDeclaration` → (generic) method/constructor declaration;
-///   - `interfaceBodyDeclaration` → `interfaceMethodDeclaration` /
-///     `genericInterfaceMethodDeclaration` → `interfaceCommonBodyDeclaration`;
-///   - `annotationTypeElementDeclaration` → `annotationTypeElementRest` →
-///     `annotationMethodOrConstantRest` → `annotationMethodRest`.
+/// LOC/Halstead/span rather than the enclosing class/interface.
+///
+/// Handles:
+/// - `classBodyDeclaration` → (generic) method/constructor declaration;
+/// - `interfaceBodyDeclaration` → `interfaceMethodDeclaration` /
+///   `genericInterfaceMethodDeclaration` → `interfaceCommonBodyDeclaration`;
+/// - `annotationTypeElementDeclaration` → `annotationTypeElementRest` →
+///   `annotationMethodOrConstantRest` → `annotationMethodRest`.
+///
 /// Returns the node that would otherwise open the space (the same node the
 /// declaration-arm opens), or `None` when the member is not a method-shaped
 /// declaration (a field, nested type, const, compact ctor — those keep their
