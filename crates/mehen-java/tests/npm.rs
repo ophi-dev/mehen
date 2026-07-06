@@ -189,10 +189,10 @@ fn modifierless_compact_constructor_inherits_record_visibility() {
     // Nested public record: visibility comes through the classBodyDeclaration
     // wrapper. The outer class contributes no methods; only the record's ctor.
     let public_nested = analyze("class C { public record R(int x) { R { } } }");
-    let pn =
+    let nested =
         serde_json::to_value(mehen_report::metrics_json::npm(&public_nested.root.metrics)).unwrap();
     assert_eq!(
-        pn["total"],
+        nested["total"],
         serde_json::json!(1.0),
         "a modifier-less compact ctor in a nested public record is public"
     );
