@@ -1,0 +1,38 @@
+[package]
+name = "mehen-java"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Mehen 1.0 — Java language analyzer (internal)."
+publish = false
+
+[dependencies]
+mehen-core = { workspace = true }
+mehen-metrics = { workspace = true }
+# Java is parsed by a parser generated from the grammars-v4 Java ANTLR
+# grammar (vendored in `grammar/`) running on the ANTLR Rust runtime.
+# The runtime is reached through `mehen-antlr`, which owns the version pin
+# and the shared span/comment/diagnostic helpers, so this crate never
+# depends on `antlr4_runtime` directly for the helpers. The generated
+# parser/lexer modules live in `src/generated/` and are produced by
+# `cargo run -p xtask -- antlr generate java`.
+mehen-antlr = { workspace = true }
+# The generated lexer/parser modules in `src/generated/` reference the
+# runtime by its real crate name (`use antlr4_runtime::…`), so the runtime
+# must be a direct dependency here in addition to being re-exported by
+# `mehen-antlr`. The version is still pinned in exactly one place — the
+# workspace `[workspace.dependencies]` `antlr4_runtime` entry — so there is
+# no risk of `mehen-java` and `mehen-antlr` linking different revisions.
+antlr4_runtime = { workspace = true }
+smol_str = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+mehen-report = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

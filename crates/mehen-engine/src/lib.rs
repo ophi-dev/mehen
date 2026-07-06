@@ -113,6 +113,7 @@ mod markdown_dispatch {
             // accepts top-level declarations), avoiding a cascade of recovered
             // syntax errors that would otherwise drop the fence's metrics.
             FenceLanguage::Kotlin => "fence.kts",
+            FenceLanguage::Java => "fence.java",
             FenceLanguage::Powershell => "fence.ps1",
             FenceLanguage::C => "fence.c",
             FenceLanguage::Php => "fence.php",
@@ -130,6 +131,7 @@ mod markdown_dispatch {
             FenceLanguage::Go => Language::Go,
             FenceLanguage::Ruby => Language::Ruby,
             FenceLanguage::Kotlin => Language::Kotlin,
+            FenceLanguage::Java => Language::Java,
             FenceLanguage::Powershell => Language::PowerShell,
             FenceLanguage::C => Language::C,
             FenceLanguage::Php => Language::Php,

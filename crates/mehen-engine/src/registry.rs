@@ -134,6 +134,10 @@ fn register_default_analyzers(registry: &mut AnalyzerRegistry) {
             Box::new(mehen_kotlin::KotlinAnalyzer::new())
         });
     }
+    #[cfg(feature = "lang-java")]
+    {
+        let _ = registry.register(Language::Java, || Box::new(mehen_java::JavaAnalyzer::new()));
+    }
     #[cfg(feature = "lang-powershell")]
     {
         let _ = registry.register(Language::PowerShell, || {
