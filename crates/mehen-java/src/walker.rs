@@ -710,13 +710,28 @@ impl Walker<'_> {
         hint: ChildHint,
         container_before_open: Option<ContainerKind>,
     ) -> (bool, Option<ContainerKind>, Option<bool>) {
-        // A `classBodyDeclaration` reached *inside* a constant-specific
-        // enum-constant body belongs to that constant's anonymous subclass,
-        // which opens no space here — so it must NOT seed a member position on
-        // the lexically-enclosing enum (NPA/NPM), mirroring the WMC
-        // suppression at close time.
+        // A body-declaration reached *inside* an anonymous class / enum-constant
+        // body belongs to that anonymous subclass, which opens no space here —
+        // so it must NOT seed a member position on the lexically-enclosing space
+        // (NPA/NPM), mirroring the WMC suppression at close time. But the
+        // wrapper's resolved *visibility* must still be threaded (as
+        // `member_is_public`) so a NESTED type inside the anon body can inherit
+        // it — e.g. `new Object(){ public record R(int x) { R {} } }` needs the
+        // record's `public` for its modifier-less compact ctor. So keep
+        // `propagate_member = false` and `container = None` (no attribution to
+        // the anon owner) but resolve visibility from the wrapper's modifiers.
         if hint.in_anon_body {
-            return (false, None, None);
+            // Resolve the wrapper's own visibility from its modifiers; a
+            // transparent inner wrapper (`memberDeclaration`, generic wrappers)
+            // has no modifiers of its own, so it must INHERIT the visibility
+            // already threaded down rather than reset it to `None` — otherwise
+            // it clobbers the value before it reaches a nested type declaration.
+            let public = if is_member_body_wrapper(ri) {
+                visibility_from_modifiers(ctx)
+            } else {
+                hint.member_is_public
+            };
+            return (false, None, public);
         }
         match ri {
             // The body-declaration wrappers open a member position; the

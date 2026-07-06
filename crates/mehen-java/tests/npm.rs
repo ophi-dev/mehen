@@ -290,3 +290,36 @@ fn interface_nested_record_compact_ctor_is_public() {
         "a class-nested record's modifier-less compact ctor is package-private"
     );
 }
+
+#[test]
+fn anon_body_nested_record_preserves_record_visibility() {
+    // Regression (PR #160 review): the `in_anon_body` early return in
+    // member_propagation must not discard visibility a nested type needs. A
+    // `public record` inside an anonymous class body must keep its `public` so
+    // its modifier-less compact canonical constructor is counted public — even
+    // though the anon body's OWN members are not attributed to any enclosing
+    // space. `new Object(){ public record R(int x) { R {} } }` → NPM 1.
+    let public_rec =
+        analyze("class C { Object o = new Object(){ public record R(int x) { R {} } }; }");
+    let pr =
+        serde_json::to_value(mehen_report::metrics_json::npm(&public_rec.root.metrics)).unwrap();
+    assert_eq!(
+        pr["total"],
+        serde_json::json!(1.0),
+        "a public record's compact ctor stays public inside an anon body"
+    );
+    // A package-private record in an anon body → its compact ctor is not public.
+    let pkg_rec = analyze("class C { Object o = new Object(){ record R(int x) { R {} } }; }");
+    let kr = serde_json::to_value(mehen_report::metrics_json::npm(&pkg_rec.root.metrics)).unwrap();
+    assert_eq!(kr["total"], serde_json::json!(0.0));
+    // Guard: the anon body's OWN public method must still NOT count toward the
+    // enclosing class's NPM (it belongs to the anonymous subclass).
+    let own_method = analyze("class C { Object o = new Object(){ public void m() {} }; }");
+    let om =
+        serde_json::to_value(mehen_report::metrics_json::npm(&own_method.root.metrics)).unwrap();
+    assert_eq!(
+        om["total"],
+        serde_json::json!(0.0),
+        "an anonymous class's own method must not count toward the enclosing NPM"
+    );
+}
