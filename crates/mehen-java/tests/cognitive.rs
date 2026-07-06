@@ -136,12 +136,14 @@ fn parentheses_do_not_break_boolean_run_collapse() {
 }
 
 #[test]
-fn negation_breaks_boolean_run() {
-    // Regression (PR #160 review): a prefix `!` negation breaks a same-operator
-    // boolean run (SonarSource rule; matches the Kotlin walker). For
-    // `a && !b && c` the two `&&` do NOT collapse — the `!` on `b` separates
-    // them: if(+1), first `&&`(+1), second `&&` after the negation(+1) = 3.
-    let a = analyze(
+fn negation_does_not_break_boolean_run() {
+    // A prefix `!` negation does NOT break a same-operator boolean run. Both
+    // SonarJava (`CognitiveComplexityVisitor.flattenLogicalExpression`) and
+    // SonarKotlin (`CognitiveComplexity.flattenOperators`) flatten only the
+    // `&&`/`||` operators and treat a negated operand as a plain operand where
+    // flattening stops — the `!` is invisible to the run. So `a && !b && c` is
+    // a single `&&` run: if(+1) + one run(+1) = 2, exactly like `a && b && c`.
+    let neg = analyze(
         "class C {
              boolean f(boolean a, boolean b, boolean c) {
                  if (a && !b && c) return true;
@@ -149,16 +151,14 @@ fn negation_breaks_boolean_run() {
              }
          }",
     );
-    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
-    insta::assert_json_snapshot!(cog, @r###"
-    {
-      "sum": 3.0,
-      "average": 3.0,
-      "min": 0.0,
-      "max": 3.0
-    }
-    "###);
-    // Control: without the negation, the two `&&` collapse into one run → 2.
+    let nj =
+        serde_json::to_value(mehen_report::metrics_json::cognitive(&neg.root.metrics)).unwrap();
+    assert_eq!(
+        nj["sum"],
+        serde_json::json!(2.0),
+        "negation must not break the run"
+    );
+    // Same score without the negation.
     let plain = analyze(
         "class C {
              boolean f(boolean a, boolean b, boolean c) {
@@ -170,30 +170,31 @@ fn negation_breaks_boolean_run() {
     let pj =
         serde_json::to_value(mehen_report::metrics_json::cognitive(&plain.root.metrics)).unwrap();
     assert_eq!(pj["sum"], serde_json::json!(2.0));
-}
-
-#[test]
-fn parenthesized_negation_still_breaks_boolean_run() {
-    // Regression (PR #160 review): the negation that breaks a boolean run may
-    // be wrapped in transparent parentheses (`primary: '(' expression ')'`), so
-    // `a && (!b) && c` and `a && ((!b)) && c` must break the run just like the
-    // bare `a && !b && c` → cognitive 3.
+    // Multiple negations, leading/trailing/middle — still one run.
     for src in [
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (!b) && c) return true; return false; } }",
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && ((!b)) && c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (!a && b && c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && b && !c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (!a && !b && !c) return true; return false; } }",
     ] {
         let a = analyze(src);
         let cog =
             serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
         assert_eq!(
             cog["sum"],
-            serde_json::json!(3.0),
-            "paren negation should break the run: {src}"
+            serde_json::json!(2.0),
+            "negations are ignored: {src}"
         );
     }
-    // Guard: a parenthesized *non-negation* operand still collapses (no `!`),
-    // and `!=` inside a paren operand is not mistaken for `!`.
+}
+
+#[test]
+fn parenthesized_negation_does_not_break_boolean_run() {
+    // A `!` negation is ignored by the boolean-run flatten regardless of
+    // parenthesization, so `a && (!b) && c` / `a && ((!b)) && c` are a single
+    // `&&` run → cognitive 2, exactly like `a && (b) && c`.
     for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (!b) && c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && ((!b)) && c) return true; return false; } }",
         "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (b) && c) return true; return false; } }",
         "class C { boolean f(boolean a, int b, boolean c) { if (a && (b != 0) && c) return true; return false; } }",
     ] {
@@ -203,20 +204,44 @@ fn parenthesized_negation_still_breaks_boolean_run() {
         assert_eq!(
             cog["sum"],
             serde_json::json!(2.0),
-            "no spurious run break: {src}"
+            "paren negation is ignored, single run: {src}"
+        );
+    }
+}
+
+#[test]
+fn mixed_operator_through_parentheses_splits_the_run() {
+    // Regression (PR #160 review): SonarSource flattens the boolean tree in
+    // source order, SKIPPING parentheses, then +1 per operator-kind change. So
+    // a parenthesized *opposite* operator interrupts the outer run:
+    // `a && (b || c) && d` flattens to `&& || &&` → 3 boolean increments, +
+    // if(1) = 4 — the same as the unparenthesized `a && b || c && d`. A
+    // parenthesized *same* operator stays one run: `a && (b && c) && d` = 2.
+    let cases = [
+        ("if (a && (b || c) && d)", 4.0),
+        ("if (a || (b && c) || d)", 4.0),
+        ("if (a && (b && c) && d)", 2.0),
+        ("if (a && (b || c))", 3.0),
+    ];
+    for (cond, want) in cases {
+        let src = format!(
+            "class C {{ boolean f(boolean a, boolean b, boolean c, boolean d) {{ {cond} return true; return false; }} }}"
+        );
+        let a = analyze(&src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(want),
+            "mixed-operator flatten (skip parens): {cond}"
         );
     }
 }
 
 #[test]
 fn leading_negation_does_not_break_boolean_run() {
-    // Regression (PR #160 review): a negation only breaks a same-operator run
-    // when it sits *between* two like operators (`a && !b && c` = 3). A
-    // *leading* negation — before the first operator, i.e. the left operand of
-    // the innermost `&&` in the left-associative chain `((!a && b) && c)` — has
-    // no preceding operator to split, so it must NOT break the run (matches the
-    // Kotlin walker's order-sensitive `not_operator` behavior). Each of these
-    // is a single `&&` run → cognitive 2 (if=1, one run=1).
+    // A leading `!` is ignored like any negation: `!a && b && c` is a single
+    // `&&` run → cognitive 2.
     for src in [
         "class C { boolean f(boolean a, boolean b, boolean c) { if (!a && b && c) return true; return false; } }",
         "class C { boolean f(boolean a, boolean b, boolean c) { if ((!a) && b && c) return true; return false; } }",
@@ -230,9 +255,8 @@ fn leading_negation_does_not_break_boolean_run() {
             "a leading negation must not break the run: {src}"
         );
     }
-    // Guard: a negation on a *later* operand still breaks the run. `!a && !b && c`
-    // — the first `!a` is leading (no split), but the second `!b` sits between
-    // the two `&&` and splits them → two runs → cognitive 3.
+    // Multiple negations in one run are all ignored — `!a && !b && c` is still a
+    // single `&&` run → cognitive 2.
     let mid = analyze(
         "class C { boolean f(boolean a, boolean b, boolean c) { if (!a && !b && c) return true; return false; } }",
     );
@@ -240,117 +264,17 @@ fn leading_negation_does_not_break_boolean_run() {
         serde_json::to_value(mehen_report::metrics_json::cognitive(&mid.root.metrics)).unwrap();
     assert_eq!(
         mj["sum"],
-        serde_json::json!(3.0),
-        "a non-leading negation still breaks the run"
-    );
-}
-
-#[test]
-fn negation_in_parenthesized_continuation_breaks_boolean_run() {
-    // Regression (PR #160 review): a negation breaks a same-operator run
-    // whenever a like operator *precedes* it in the FLATTENED run — including
-    // when the negated operand starts a parenthesized continuation of the run.
-    // `&&` is left-associative, so `a && !b && c` parses as `((a && !b) && c)`
-    // (the `!b` is a right operand — caught by `has_negated_operand`), but
-    // `a && (!b && c)` parses as `a && (…)` where `!b` is the LEFT operand of
-    // the parenthesized sub-run. Parentheses are transparent to the run, so the
-    // flattened form is the same `a && !b && c` and it must score 3, not 2.
-    for src in [
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (!b && c)) return true; return false; } }",
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && ((!b && c))) return true; return false; } }",
-        "class C { boolean f(boolean a, boolean b, boolean c) { if ((a && (!b && c))) return true; return false; } }",
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a || (!b || c)) return true; return false; } }",
-    ] {
-        let a = analyze(src);
-        let cog =
-            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
-        assert_eq!(
-            cog["sum"],
-            serde_json::json!(3.0),
-            "a negation continuing a run (in parens) must break it: {src}"
-        );
-    }
-    // Guard: a *globally leading* negation inside parentheses still does NOT
-    // break the run — nothing precedes it in the flattened run.
-    // `(!b) && a && c` is one `&&` run → 2.
-    let leading = analyze(
-        "class C { boolean f(boolean a, boolean b, boolean c) { if ((!b) && a && c) return true; return false; } }",
-    );
-    let lj =
-        serde_json::to_value(mehen_report::metrics_json::cognitive(&leading.root.metrics)).unwrap();
-    assert_eq!(
-        lj["sum"],
         serde_json::json!(2.0),
-        "a leading negation (even parenthesized) does not break the run"
+        "multiple negations do not break the run"
     );
 }
 
 #[test]
-fn trailing_negation_does_not_break_boolean_run() {
-    // Regression (PR #160 review): a `!` breaks a run only when a like operator
-    // both PRECEDES and FOLLOWS it in the flattened run. A *trailing* negation
-    // at the end of the run has no following operator, so it must NOT split —
-    // and a parenthesized continuation must match its unparenthesized form:
-    // `a && (b && !c)` scores like `a && b && !c` (both a single run → 2), not
-    // 3. This is the dual of the round-22 parenthesized-continuation case.
-    for src in [
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && b && !c) return true; return false; } }",
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (b && !c)) return true; return false; } }",
-        "class C { boolean f(boolean a, boolean b, boolean c, boolean d) { if (a && (b && c && !d)) return true; return false; } }",
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a || (b || !c)) return true; return false; } }",
-    ] {
-        let a = analyze(src);
-        let cog =
-            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
-        assert_eq!(
-            cog["sum"],
-            serde_json::json!(2.0),
-            "a trailing negation must not break the run: {src}"
-        );
-    }
-    // Cross-check: the parenthesized form scores identically to the flat form.
-    let flat = analyze(
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && b && !c) return true; return false; } }",
-    );
-    let paren = analyze(
-        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (b && !c)) return true; return false; } }",
-    );
-    let fj =
-        serde_json::to_value(mehen_report::metrics_json::cognitive(&flat.root.metrics)).unwrap();
-    let pj =
-        serde_json::to_value(mehen_report::metrics_json::cognitive(&paren.root.metrics)).unwrap();
-    assert_eq!(
-        fj["sum"], pj["sum"],
-        "parentheses must not change cognitive complexity for the same run"
-    );
-}
-
-#[test]
-fn two_negations_in_a_run_count_two_splits() {
-    // Regression (PR #160 review): a single boolean node whose BOTH operands
-    // are run-breaking negations must count TWO splits, not one. In
-    // `a && (!b && !c) && d` the flattened run is `a && !b && !c && d`: `!b`
-    // (a like op precedes and follows) and `!c` (likewise) are both internal
-    // break points, so the run splits into three → cognitive 4. Counting the
-    // two breaks with a single OR'd increment would lose one and give 3.
-    for src in [
-        "class C { boolean f(boolean a, boolean b, boolean c, boolean d) { if (a && (!b && !c) && d) return true; return false; } }",
-        "class C { boolean f(boolean a, boolean b, boolean c, boolean d) { if (a && !b && !c && d) return true; return false; } }",
-        "class C { boolean f(boolean a, boolean b, boolean c, boolean d) { if (a && ((!b && !c)) && d) return true; return false; } }",
-    ] {
-        let a = analyze(src);
-        let cog =
-            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
-        assert_eq!(
-            cog["sum"],
-            serde_json::json!(4.0),
-            "two internal negations must count two run splits: {src}"
-        );
-    }
-    // Guard: a negation adjacent to a DIFFERENT operator must NOT add a split
-    // on top of the operator-switch increment — the two sides are not like
-    // operators. `(a && !b) || c` is one `&&` run (trailing `!b`, no split) +
-    // one `||` run → 3, not 4.
+fn negation_adjacent_to_operator_switch_counts_only_the_switch() {
+    // A `!` never adds a boolean increment; only operator-kind changes do. So
+    // `(a && !b) || c` flattens (negation ignored) to `&& ||` → 2 increments +
+    // if(1) = 3, and the parenthesized-`&&`-run forms score the same as their
+    // flat equivalents.
     for src in [
         "class C { boolean f(boolean a, boolean b, boolean c) { if ((a && !b) || c) return true; return false; } }",
         "class C { boolean f(boolean a, boolean b, boolean c) { if (a || (!b && c)) return true; return false; } }",
@@ -362,7 +286,23 @@ fn two_negations_in_a_run_count_two_splits() {
         assert_eq!(
             cog["sum"],
             serde_json::json!(3.0),
-            "a negation by a different operator adds no extra split: {src}"
+            "negation ignored; only the operator switch counts: {src}"
+        );
+    }
+    // A trailing negation and multiple negations in a single-operator run add
+    // nothing: these are all one run → 2.
+    for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && b && !c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a && (b && !c)) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c, boolean d) { if (a && (!b && !c) && d) return true; return false; } }",
+    ] {
+        let a = analyze(src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(2.0),
+            "negations in a single-operator run are ignored: {src}"
         );
     }
 }

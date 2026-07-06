@@ -176,34 +176,17 @@ struct ChildHint {
     /// position.
     member_is_public: Option<bool>,
     /// The immediately-enclosing short-circuit boolean operator (`&&` / `||`),
-    /// threaded down through `expression` descendants so the cognitive
-    /// boolean-run collapse can be *parent-relative* (SonarJava's rule): a
-    /// `&&`/`||` adds a flat +1 only when its operator differs from its
-    /// parent's. Threading stops (resets to `None`) at any non-`expression`
-    /// boundary — statement, `arguments`, `methodCall` — which isolates
-    /// independent boolean expressions (e.g. a method-call argument) from the
-    /// enclosing run. `None` outside a boolean expression.
+    /// threaded down through `expression` descendants (transparent parens
+    /// included) so the cognitive boolean-run counter fires only at the ROOT of
+    /// a logical-operator tree. A `&&`/`||` node whose `parent_bool_op` is
+    /// `None` is a run root: it flattens its whole subtree in source order and
+    /// counts +1 per operator-kind change (SonarSource's rule). A nested
+    /// `&&`/`||` reached as a logical operand has `parent_bool_op == Some(_)`
+    /// and is consumed by the root's flatten, so it does not count again.
+    /// Threading resets to `None` at any non-`expression`/`primary` boundary —
+    /// statement, `arguments`, `methodCall`, a comparison/ternary expression —
+    /// which isolates independent boolean expressions. `None` outside one.
     parent_bool_op: Option<BoolOp>,
-    /// Whether a like-operator operand precedes this node in the flattened
-    /// boolean run — i.e. the node was reached as (a transparent continuation
-    /// of) the *right* operand of a same-operator ancestor. Used so a `!`
-    /// negation on a `&&`/`||` node's LEFT operand breaks the run only when
-    /// something precedes it: `a && (!b && c)` (the parenthesized continuation's
-    /// `!b` follows the outer `a &&`) breaks, but a globally-leading negation
-    /// `!a && b && c` (left spine of the run) does not. A node's right operand
-    /// always has a predecessor; its left operand inherits this flag only while
-    /// the node continues the parent run.
-    bool_run_has_predecessor: bool,
-    /// Symmetric to `bool_run_has_predecessor`: whether a like-operator operand
-    /// FOLLOWS this node in the flattened boolean run. Used so a `!` negation on
-    /// a `&&`/`||` node's RIGHT operand breaks the run only when a like operator
-    /// follows it: `a && !b && c` (the `!b` precedes the second `&&`) breaks,
-    /// but a *trailing* negation `a && b && !c` (and its parenthesized form
-    /// `a && (b && !c)`) does not — nothing follows it. A node's left operand is
-    /// followed by the node's own operator (so it always has a successor within
-    /// the run); its right operand inherits this flag only while the node
-    /// continues the parent run.
-    bool_run_has_successor: bool,
     /// This node is (within) a `for` statement's `forControl` header, so a
     /// `localVariableDeclaration` reached through it is the loop initializer,
     /// not a standalone statement — it must not add its own LLOC (the `for`
@@ -499,18 +482,6 @@ impl Walker<'_> {
         } else {
             None
         };
-        // Indices of the first/last `Rule` children — for a `&&`/`||` node
-        // (`expression op expression`) these are the LEFT and RIGHT operands.
-        // The right operand always has a same-operator predecessor (its left
-        // operand); the left operand always has a same-operator successor (the
-        // node's own operator).
-        let first_rule_idx = children
-            .iter()
-            .position(|c| matches!(c, ParseTree::Rule(_)));
-        let last_rule_idx = children
-            .iter()
-            .rposition(|c| matches!(c, ParseTree::Rule(_)));
-
         // A classic `for` header (`forControl → forInit → localVariableDeclaration`)
         // must not let its initializer declaration add a second LLOC. Tag ONLY
         // the direct children of `forInit` (the header declaration) — NOT the
@@ -627,47 +598,6 @@ impl Walker<'_> {
             child_hint.member_container = member_container;
             child_hint.member_is_public = member_is_public;
             child_hint.parent_bool_op = child_bool_op;
-            // Place a predecessor for a same-operator run so a leading `!` on a
-            // LEFT operand breaks the run only when something precedes it.
-            child_hint.bool_run_has_predecessor = if this_bool_op.is_some() {
-                // This node introduces the operator: its right operand (last
-                // rule child) follows its left → has a predecessor. Its left
-                // operand's predecessor status is inherited from this node's
-                // own (were this whole node preceded in the parent run?).
-                if Some(idx) == last_rule_idx {
-                    true
-                } else {
-                    hint.bool_run_has_predecessor
-                }
-            } else if child_bool_op.is_some() {
-                // Transparent continuation (paren / pass-through operand): the
-                // enclosing operator is forwarded unchanged, so predecessor
-                // status carries through too.
-                hint.bool_run_has_predecessor
-            } else {
-                // A distinct boolean context (own operator) or a non-boolean
-                // boundary starts a fresh run with no predecessor.
-                false
-            };
-            // Symmetric successor flag so a `!` on a RIGHT operand breaks the
-            // run only when a like operator follows (a trailing negation does
-            // not).
-            child_hint.bool_run_has_successor = if this_bool_op.is_some() {
-                // This node introduces the operator: its left operand (first
-                // rule child) is followed by that operator → has a successor.
-                // Its right operand's successor status is inherited from this
-                // node's own (does a like operator follow this whole node?).
-                if Some(idx) == first_rule_idx {
-                    true
-                } else {
-                    hint.bool_run_has_successor
-                }
-            } else if child_bool_op.is_some() {
-                // Transparent continuation forwards successor status unchanged.
-                hint.bool_run_has_successor
-            } else {
-                false
-            };
             child_hint.in_for_init = in_for_init;
             child_hint.in_identifier = in_identifier;
             // The anon-body `classBody` child gets the suppression; its sibling
@@ -1317,14 +1247,8 @@ impl Walker<'_> {
             return;
         }
         // Short-circuit `&&`/`||`: a cyclomatic decision and an ABC condition
-        // per operator, plus a *parent-relative* cognitive increment. Per
-        // SonarSource's cognitive-complexity rule, a run of like operators
-        // costs +1 once; a boolean node adds +1 only when its operator differs
-        // from the enclosing boolean operator (`hint.parent_bool_op`). This is
-        // tree-structural, not traversal-order — so `a && b || c && d` scores 3
-        // (the `||` differs from the enclosing `if`, and each `&&` differs from
-        // the `||`), where an order-sensitive `last_op` would collapse the two
-        // `&&` runs to 2.
+        // per operator (both independent of the cognitive run-collapse), plus
+        // the cognitive boolean-sequence cost.
         let this_op = if ctx.has_token(jl::AND) {
             Some(BoolOp::And)
         } else if ctx.has_token(jl::OR) {
@@ -1332,52 +1256,40 @@ impl Walker<'_> {
         } else {
             None
         };
-        if let Some(op) = this_op {
+        if let Some(_op) = this_op {
             self.current().cyclomatic.record_decision();
             self.current().abc.record_condition();
-            // A boolean node's cognitive cost is the sum of INDEPENDENT run
-            // increments (each a distinct break point in the flattened run):
+            // Cognitive: SonarSource counts +1 per *sequence of like logical
+            // operators*, computed by flattening the boolean expression in
+            // SOURCE ORDER and adding +1 whenever the operator kind changes
+            // (SonarJava `CognitiveComplexityVisitor.flattenLogicalExpression`;
+            // SonarKotlin `CognitiveComplexity.flattenOperators`). Parentheses
+            // are transparent to the flattening, and — critically — a `!`
+            // negation is NOT special: it is just an operand where flattening
+            // stops, so it never breaks a run (`a && !b && c` is one `&&` run).
             //
-            // 1. A base run increment when this node's operator differs from the
-            //    enclosing boolean operator (parent-relative run collapse) — the
-            //    node starts a new run relative to its parent.
-            // 2. Per `!` negation that breaks the run. Per SonarSource's
-            //    order-sensitive `not_operator` model a `!` splits a run only
-            //    when a like operator BOTH precedes AND follows that operand:
-            //      - the RIGHT operand (`… op !x`) splits when a like operator
-            //        FOLLOWS (`bool_run_has_successor`); a trailing negation
-            //        (`a && b && !c`, `a && (b && !c)`) does NOT split.
-            //      - the LEFT operand (`!x op …`, notably a parenthesized
-            //        continuation `a && (!b && c)`) splits when a like operator
-            //        PRECEDES (`bool_run_has_predecessor`); a globally-leading
-            //        `!a && b && c` does NOT split.
-            //
-            // The two negation splits are counted SEPARATELY, not OR'd: a node
-            // whose BOTH operands are run-breaking negations (`a && (!b && !c)
-            // && d`, flattened `a && !b && !c && d`) has two internal break
-            // points and must add +2, not +1.
-            // The base increment and the negation splits are MUTUALLY
-            // EXCLUSIVE: the negation rule requires a LIKE operator on both
-            // sides of the `!`, which holds only when this node continues its
-            // parent's run (`parent_bool_op == op`) — exactly when the base
-            // increment does NOT fire. When the operator differs, the
-            // surrounding operators are a different kind, so an adjacent `!` is
-            // not between two like operators and adds nothing beyond the base
-            // switch increment (e.g. `(a && !b) || c` is 3, not 4).
-            let increments = if hint.parent_bool_op != Some(op) {
-                1
-            } else {
-                let mut splits = 0u32;
-                if hint.bool_run_has_successor && has_negated_operand(ctx) {
-                    splits += 1;
+            // Only the ROOT of a logical-operator tree does the counting: a
+            // `&&`/`||` node whose enclosing boolean operator is `None`
+            // (`hint.parent_bool_op` — threaded through transparent parens).
+            // A nested `&&`/`||` reached as a logical operand is consumed by its
+            // root's flatten and must not double-count. So `a && b || c && d`
+            // (root `||`, flattened `&& || &&`) scores 3, and `a && (b || c) &&
+            // d` (flattened `&& || &&` after skipping parens) also scores 3 —
+            // the parenthesized `||` interrupts the `&&` sequence.
+            if hint.parent_bool_op.is_none() {
+                let mut ops = Vec::new();
+                flatten_logical_operators(ctx, &mut ops);
+                let mut prev: Option<BoolOp> = None;
+                let mut increments = 0u32;
+                for op in ops {
+                    if prev != Some(op) {
+                        increments += 1;
+                    }
+                    prev = Some(op);
                 }
-                if hint.bool_run_has_predecessor && has_negated_left_operand(ctx) {
-                    splits += 1;
+                if increments > 0 {
+                    self.current().cognitive.record_increment(increments);
                 }
-                splits
-            };
-            if increments > 0 {
-                self.current().cognitive.record_increment(increments);
             }
         }
         // Ternary `? :` — a decision, an ABC condition, and a cognitive nesting
@@ -1689,75 +1601,86 @@ fn is_member_body_wrapper(ri: usize) -> bool {
     )
 }
 
-/// Whether a boolean `expression` (`&&`/`||`) has a `!`-negated RIGHT operand
-/// that breaks a same-operator run. Per SonarSource's cognitive rule a
-/// negation breaks a run only when a like operator *precedes* it
-/// (`a && !b && c` is +2, not +1). A `&&`/`||` node is
-/// `expression op expression` (left-associative: `!a && b && c` parses as
-/// `((!a && b) && c)`), so a run-breaking (middle) negation is always the
-/// RIGHT operand; a *leading* negation (`!a`) is the left operand of the
-/// innermost node and has no preceding operator to split — it must NOT break
-/// the run. So inspect only the right operand: the last `Rule` child, i.e. the
-/// `expression` after the operator token. The negation itself is a
-/// `UnaryOperatorExpression` (an `expression` carrying a `BANG`), possibly
-/// wrapped in *transparent* layers — parentheses (`primary: '(' expression ')'`)
-/// or pass-through expressions, as in `a && (!b) && c` — so the operand is
-/// unwrapped through those wrappers before checking for the `BANG`.
-fn has_negated_operand(ctx: &ParserRuleContext) -> bool {
-    ctx.children()
-        .iter()
-        .rev()
-        .find_map(|c| match c {
-            ParseTree::Rule(rule) => Some(operand_is_negation(rule.context(), 0)),
-            _ => None,
-        })
-        .unwrap_or(false)
+/// Flatten a logical-operator (`&&`/`||`) expression tree into its operator
+/// sequence in SOURCE ORDER, mirroring SonarJava's
+/// `CognitiveComplexityVisitor.flattenLogicalExpression` and SonarKotlin's
+/// `CognitiveComplexity.flattenOperators`: recurse into the left operand,
+/// emit this node's operator, recurse into the right operand — descending only
+/// into logical-binary children and skipping transparent parentheses /
+/// pass-through wrappers. A `!` negation, a comparison (`==`, `<`, …), a
+/// method call, etc. are NOT logical-binary, so flattening stops there (they
+/// are plain operands) — matching SonarSource, where negation never breaks a
+/// boolean run. The caller counts +1 whenever the operator kind changes across
+/// the resulting sequence. A depth bound guards against pathological nesting.
+fn flatten_logical_operators(ctx: &ParserRuleContext, out: &mut Vec<BoolOp>) {
+    flatten_logical_operators_inner(ctx, out, 0);
 }
 
-/// Whether a boolean `expression`'s LEFT operand (first `Rule` child) is (or
-/// transparently wraps) a `!` negation. A leading negation breaks the run only
-/// when a like operator precedes THIS node in the flattened run (the caller
-/// guards on `bool_run_has_predecessor`), so that `a && (!b && c)` breaks like
-/// `a && !b && c` while `!a && b && c` (left spine, no predecessor) does not.
-fn has_negated_left_operand(ctx: &ParserRuleContext) -> bool {
-    ctx.children()
+fn flatten_logical_operators_inner(ctx: &ParserRuleContext, out: &mut Vec<BoolOp>, depth: usize) {
+    if depth > 64 {
+        return;
+    }
+    // Unwrap a transparent operand — a parenthesized `primary` (`'(' expression
+    // ')'`) or a pass-through `expression` with no operator token of its own —
+    // to the logical-binary expression it may contain.
+    let Some(logical) = unwrap_to_logical(ctx, depth) else {
+        return;
+    };
+    let op = if logical.has_token(jl::AND) {
+        BoolOp::And
+    } else if logical.has_token(jl::OR) {
+        BoolOp::Or
+    } else {
+        return;
+    };
+    // `expression op expression` — left operand, this operator, right operand.
+    let operands: Vec<&ParserRuleContext> = logical
+        .children()
         .iter()
-        .find_map(|c| match c {
-            ParseTree::Rule(rule) => Some(operand_is_negation(rule.context(), 0)),
+        .filter_map(|c| match c {
+            ParseTree::Rule(rule) => Some(rule.context()),
             _ => None,
         })
-        .unwrap_or(false)
+        .collect();
+    if let Some(left) = operands.first() {
+        flatten_logical_operators_inner(left, out, depth + 1);
+    }
+    out.push(op);
+    if let Some(right) = operands.get(1) {
+        flatten_logical_operators_inner(right, out, depth + 1);
+    }
 }
 
-/// Whether an operand node is (or transparently wraps) a prefix `!` negation.
-/// Unwraps parenthesized `primary` and single-sub-expression `expression`
-/// wrappers up to a small depth bound.
-fn operand_is_negation(ctx: &ParserRuleContext, depth: usize) -> bool {
-    if depth > 8 {
-        return false;
+/// Resolve `ctx` to a logical-binary (`&&`/`||`) `expression`, unwrapping
+/// transparent parenthesis (`primary`) and single-child pass-through
+/// `expression` wrappers. Returns `None` when `ctx` is not (and does not
+/// transparently wrap) a logical-binary expression — i.e. it is a plain
+/// operand (identifier, comparison, negation, call, …) where flattening stops.
+fn unwrap_to_logical(ctx: &ParserRuleContext, depth: usize) -> Option<&ParserRuleContext> {
+    if depth > 64 {
+        return None;
     }
     match ctx.rule_index() {
         jp::RULE_EXPRESSION => {
-            // A prefix `!` unary expression carries the `BANG` token directly.
-            if ctx.has_token(jl::BANG) {
-                return true;
+            if ctx.has_token(jl::AND) || ctx.has_token(jl::OR) {
+                return Some(ctx);
             }
-            // A transparent expression (single sub-expression / `primary`
-            // operand, no operator token of its own) — unwrap and recurse.
+            // A transparent expression (a bare operand or single wrapped
+            // sub-expression, no operator token of its own) — unwrap and retry.
             if !expression_has_operator_token(ctx) {
-                return ctx.children().iter().any(|c| match c {
-                    ParseTree::Rule(rule) => operand_is_negation(rule.context(), depth + 1),
-                    _ => false,
+                return ctx.children().iter().find_map(|c| match c {
+                    ParseTree::Rule(rule) => unwrap_to_logical(rule.context(), depth + 1),
+                    _ => None,
                 });
             }
-            false
+            None
         }
         // `primary: '(' expression ')'` — unwrap the parenthesized expression.
-        jp::RULE_PRIMARY => ctx.children().iter().any(|c| match c {
-            ParseTree::Rule(rule) => operand_is_negation(rule.context(), depth + 1),
-            _ => false,
+        jp::RULE_PRIMARY => ctx.children().iter().find_map(|c| match c {
+            ParseTree::Rule(rule) => unwrap_to_logical(rule.context(), depth + 1),
+            _ => None,
         }),
-        _ => false,
+        _ => None,
     }
 }
 
