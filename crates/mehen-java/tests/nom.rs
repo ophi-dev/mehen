@@ -98,3 +98,31 @@ fn lambda_is_a_closure() {
     assert_eq!(a.root.spaces.len(), 1);
     assert_eq!(a.root.spaces[0].kind, SpaceKind::Class);
 }
+
+#[test]
+fn nested_annotation_element_is_not_counted_on_the_outer_type() {
+    // Regression (PR #160 review): the wrapper-open logic resolves an
+    // annotation element via the DIRECT `annotationTypeElementDeclaration →
+    // annotationTypeElementRest → annotationMethodOrConstantRest →
+    // annotationMethodRest` path — NOT an unbounded descendant search, which
+    // would reach a *nested* annotation's element and open a phantom method on
+    // the outer type. `@interface A { @interface B { String v(); } }` has ONE
+    // method total (`B.v()`), not two.
+    let nested = analyze("@interface A { @interface B { String v(); } }");
+    let nom = serde_json::to_value(mehen_report::metrics_json::nom(&nested.root.metrics)).unwrap();
+    assert_eq!(
+        nom["total"],
+        serde_json::json!(1.0),
+        "a nested annotation's element must not also count on the outer annotation"
+    );
+    let npm = serde_json::to_value(mehen_report::metrics_json::npm(&nested.root.metrics)).unwrap();
+    assert_eq!(
+        npm["total"],
+        serde_json::json!(1.0),
+        "the nested element must not inflate the outer annotation's NPM"
+    );
+    // Control: a flat annotation with two elements has exactly two methods.
+    let flat = analyze("@interface A { String v(); int c(); }");
+    let fnom = serde_json::to_value(mehen_report::metrics_json::nom(&flat.root.metrics)).unwrap();
+    assert_eq!(fnom["total"], serde_json::json!(2.0));
+}

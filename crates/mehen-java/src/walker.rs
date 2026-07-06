@@ -1858,22 +1858,33 @@ fn wrapper_inner_method(ctx: &ParserRuleContext) -> Option<&ParserRuleContext> {
             }
             None
         }
-        // Interface method: interfaceBodyDeclaration → interfaceMemberDeclaration
-        // → (generic)interfaceMethodDeclaration → interfaceCommonBodyDeclaration
-        // (the node the declaration-arm opens).
+        // Interface method: walk the DIRECT path interfaceBodyDeclaration →
+        // interfaceMemberDeclaration → (generic)interfaceMethodDeclaration →
+        // interfaceCommonBodyDeclaration. `interfaceCommonBodyDeclaration` is a
+        // direct child of both method-declaration forms (`interfaceMethodModifier*
+        // [typeParameters] interfaceCommonBodyDeclaration`), so use `child_rule`
+        // — an unbounded search could reach a nested type's method.
         jp::RULE_INTERFACE_BODY_DECLARATION => {
             let member = ctx.child_rule(jp::RULE_INTERFACE_MEMBER_DECLARATION)?;
             let decl = member
                 .child_rule(jp::RULE_INTERFACE_METHOD_DECLARATION)
                 .or_else(|| member.child_rule(jp::RULE_GENERIC_INTERFACE_METHOD_DECLARATION))?;
-            find_descendant(decl, jp::RULE_INTERFACE_COMMON_BODY_DECLARATION)
+            decl.child_rule(jp::RULE_INTERFACE_COMMON_BODY_DECLARATION)
         }
-        // Annotation element: annotationTypeElementDeclaration →
-        // annotationTypeElementRest → annotationMethodOrConstantRest →
-        // annotationMethodRest (the node the declaration-arm opens).
-        jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION => {
-            find_descendant(ctx, jp::RULE_ANNOTATION_METHOD_REST)
-        }
+        // Annotation element: walk the DIRECT path
+        // annotationTypeElementDeclaration → annotationTypeElementRest →
+        // annotationMethodOrConstantRest → annotationMethodRest. A plain
+        // `child_rule` chain (not an unbounded `find_descendant`) is required
+        // because `annotationTypeElementRest` also has nested-type alternatives
+        // (`annotationTypeDeclaration`, `classDeclaration`, …) — descending into
+        // those would find a *nested* annotation's element and open a phantom
+        // method for the outer type (`@interface A { @interface B { String
+        // v(); } }` must have no method on `A`). `None` when the element is a
+        // nested type or a constant, not a method.
+        jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION => ctx
+            .child_rule(jp::RULE_ANNOTATION_TYPE_ELEMENT_REST)?
+            .child_rule(jp::RULE_ANNOTATION_METHOD_OR_CONSTANT_REST)?
+            .child_rule(jp::RULE_ANNOTATION_METHOD_REST),
         _ => None,
     }
 }
