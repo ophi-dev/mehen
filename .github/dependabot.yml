@@ -5,6 +5,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 99
+    # Wait 1 day after a release before opening an update. Multi-crate
+    # families (oxc, ruff, sqruff, mago) publish their members over a short
+    # window; without a cooldown Dependabot can open a group PR mid-publish
+    # and bump only the crates indexed so far, breaking the version lockstep
+    # and failing CI with duplicate-crate errors.
+    cooldown:
+      default-days: 1
     groups:
       tree-sitter:
         patterns:
