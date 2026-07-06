@@ -143,3 +143,46 @@ fn anon_and_interface_method_modifiers_belong_to_the_method() {
         "an interface method's annotation must count toward its Halstead"
     );
 }
+
+#[test]
+fn type_own_line_modifiers_belong_to_the_type() {
+    // Regression (PR #160 review): a class-like type's own-line
+    // modifiers/annotations (`@Deprecated\npublic class C {}`, a nested
+    // `public static class Inner {}`) live on the `typeDeclaration` /
+    // `classBodyDeclaration` wrapper, visited before the type space opens. The
+    // type space is opened at the wrapper so those tokens count toward the
+    // type's Halstead/PLOC, not the enclosing unit/class.
+    fn type_len(sp: &mehen_core::MetricSpace, name: &str) -> Option<f64> {
+        if matches!(
+            sp.kind,
+            mehen_core::SpaceKind::Class
+                | mehen_core::SpaceKind::Interface
+                | mehen_core::SpaceKind::Enum
+        ) && sp.name.as_deref() == Some(name)
+        {
+            return Some(
+                sp.metrics
+                    .get(&mehen_core::MetricKey::new("halstead.N1"))
+                    .map(|m| m.as_f64())
+                    .unwrap_or(0.0),
+            );
+        }
+        sp.spaces.iter().find_map(|c| type_len(c, name))
+    }
+    // Top-level annotated class.
+    let top_plain = analyze("class C {\n  int x;\n}");
+    let top_annot = analyze("@Deprecated\npublic class C {\n  int x;\n}");
+    assert!(
+        type_len(&top_annot.root, "C").unwrap() > type_len(&top_plain.root, "C").unwrap(),
+        "a top-level type's own-line annotation/modifier must count in its Halstead"
+    );
+    // Nested class with own-line modifiers.
+    let nested_plain = analyze("class O {\n  class Inner {\n    int x;\n  }\n}");
+    let nested_mods =
+        analyze("class O {\n  @Deprecated\n  public static class Inner {\n    int x;\n  }\n}");
+    assert!(
+        type_len(&nested_mods.root, "Inner").unwrap()
+            > type_len(&nested_plain.root, "Inner").unwrap(),
+        "a nested type's own-line modifiers must count in its Halstead"
+    );
+}

@@ -576,22 +576,23 @@ impl Walker<'_> {
             hint.enclosing_record_public
         };
 
-        // When this `classBodyDeclaration` opened the method space itself (to
-        // capture own-line modifiers), tell the inner method/constructor
-        // declaration to skip its own open. The flag flows through the
-        // transparent `memberDeclaration` / generic-method wrappers to the
+        // When this wrapper opened the method OR type space itself (to capture
+        // own-line modifiers), tell the inner declaration to skip its own open.
+        // The flag flows through the transparent `memberDeclaration` /
+        // generic-method / `annotationTypeElementRest` wrappers to the
         // declaration node, which consumes it; a real space open clears it so a
-        // nested method inside the body still opens normally.
-        let opened_method_at_wrapper = matches!(
+        // nested declaration inside the body still opens normally.
+        let opened_at_wrapper = (matches!(
             ri,
             jp::RULE_CLASS_BODY_DECLARATION
                 | jp::RULE_INTERFACE_BODY_DECLARATION
                 | jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION
-        ) && wrapper_inner_method(ctx).is_some();
+        ) && wrapper_inner_method(ctx).is_some())
+            || (is_type_wrapper(ri) && wrapper_inner_type(ctx).is_some());
         let space_opened_by_wrapper = if opens_function_space(ri) || opens_class_like(ri) {
             false
         } else {
-            opened_method_at_wrapper || hint.space_opened_by_wrapper
+            opened_at_wrapper || hint.space_opened_by_wrapper
         };
 
         for (idx, child) in children.iter().enumerate() {
@@ -851,6 +852,49 @@ impl Walker<'_> {
         self.enter_function_cognitive(hint.in_anon_body);
     }
 
+    /// Open a class-like (`Class`/`Enum`/`Interface`) space for `type_ctx`.
+    /// `span_ctx` supplies the span — the wrapper (`typeDeclaration` / member
+    /// body-declaration) when opening at the wrapper, so own-line
+    /// modifiers/annotations are covered; otherwise the declaration itself
+    /// (with PLOC-range adoption for own-line modifiers on a different wrapper).
+    /// Mirrors `open_method_space` but for class-like scopes: nested types are
+    /// not member-classified into NPA/NPM, so there is no member-routing to
+    /// relocate.
+    fn open_type_space(&mut self, span_ctx: &ParserRuleContext, type_ctx: &ParserRuleContext) {
+        let name = type_name(type_ctx);
+        let ri = type_ctx.rule_index();
+        let opened_at_wrapper = !std::ptr::eq(span_ctx, type_ctx);
+        let widened = if opened_at_wrapper {
+            None
+        } else {
+            // (Only used by the self-open path; kept for symmetry — a class's
+            // own-line modifiers are already handled by opening at the wrapper.)
+            None
+        };
+        let mut state = self.new_space_state_widened(span_ctx, widened);
+        state.npa.record_class_like();
+        state.npm.record_class_like();
+        let kind = if matches!(ri, jp::RULE_ENUM_DECLARATION) {
+            state.wmc.record_class_like();
+            SpaceKind::Enum
+        } else if matches!(
+            ri,
+            jp::RULE_INTERFACE_DECLARATION | jp::RULE_ANNOTATION_TYPE_DECLARATION
+        ) {
+            // Interfaces/annotations do not carry WMC (their methods are not
+            // weighted); match the original arm which omits `record_class_like`
+            // on WMC.
+            SpaceKind::Interface
+        } else {
+            state.wmc.record_class_like();
+            // `record R(...)` component parameters are class attributes.
+            record_record_components(type_ctx, &mut state);
+            SpaceKind::Class
+        };
+        self.push_space_widened(kind, name, span_ctx, state, false, None);
+        self.enter_class_cognitive();
+    }
+
     /// Open a metric space for space-introducing rules. Returns whether a
     /// space was pushed.
     fn maybe_open_space(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) -> bool {
@@ -915,39 +959,38 @@ impl Walker<'_> {
                 self.enter_function_cognitive(hint.in_anon_body);
                 true
             }
-            jp::RULE_CLASS_DECLARATION | jp::RULE_RECORD_DECLARATION => {
-                let name = type_name(ctx);
-                let mut state = self.new_space_state(ctx);
-                state.npa.record_class_like();
-                state.npm.record_class_like();
-                state.wmc.record_class_like();
-                // Record component parameters (`record R(int x, int y)`) as
-                // class attributes.
-                record_record_components(ctx, &mut state);
-                // A class-like space owns its own WMC, so it never suppresses a
-                // parent contribution (and it opens its own space, clearing any
-                // enclosing enum-constant-body suppression for its members).
-                self.push_space(SpaceKind::Class, name, ctx, state, false);
-                self.enter_class_cognitive();
+            // A type wrapper (`typeDeclaration`/`localTypeDeclaration` or a
+            // member body-declaration) opens the class-like space HERE so its
+            // own-line modifiers/annotations (`@Deprecated\npublic class C {}`,
+            // `public static class Inner {}`) — siblings of the declaration,
+            // visited before it — are walked *inside* the type space and count
+            // toward its LOC/Halstead/span. The inner declaration then skips its
+            // own open via `space_opened_by_wrapper`.
+            _ if is_type_wrapper(ri) && wrapper_inner_type(ctx).is_some() => {
+                let type_ctx = wrapper_inner_type(ctx).expect("guarded by match arm");
+                self.open_type_space(ctx, type_ctx);
                 true
             }
-            jp::RULE_ENUM_DECLARATION => {
-                let name = type_name(ctx);
-                let mut state = self.new_space_state(ctx);
-                state.npa.record_class_like();
-                state.npm.record_class_like();
-                state.wmc.record_class_like();
-                self.push_space(SpaceKind::Enum, name, ctx, state, false);
-                self.enter_class_cognitive();
-                true
+            jp::RULE_CLASS_DECLARATION
+            | jp::RULE_RECORD_DECLARATION
+            | jp::RULE_ENUM_DECLARATION
+            | jp::RULE_INTERFACE_DECLARATION
+            | jp::RULE_ANNOTATION_TYPE_DECLARATION
+                if hint.space_opened_by_wrapper =>
+            {
+                // The wrapper already opened this type's space; do not open a
+                // second one. (Its children are still visited into that space.)
+                false
             }
-            jp::RULE_INTERFACE_DECLARATION | jp::RULE_ANNOTATION_TYPE_DECLARATION => {
-                let name = type_name(ctx);
-                let mut state = self.new_space_state(ctx);
-                state.npa.record_class_like();
-                state.npm.record_class_like();
-                self.push_space(SpaceKind::Interface, name, ctx, state, false);
-                self.enter_class_cognitive();
+            jp::RULE_CLASS_DECLARATION
+            | jp::RULE_RECORD_DECLARATION
+            | jp::RULE_ENUM_DECLARATION
+            | jp::RULE_INTERFACE_DECLARATION
+            | jp::RULE_ANNOTATION_TYPE_DECLARATION => {
+                // Opened at the declaration node itself (a type not reached
+                // through a wrapper — e.g. inside an anonymous-class body, which
+                // opens no space and whose members are visited directly).
+                self.open_type_space(ctx, ctx);
                 true
             }
             _ => false,
@@ -1887,6 +1930,58 @@ fn wrapper_inner_method(ctx: &ParserRuleContext) -> Option<&ParserRuleContext> {
             .child_rule(jp::RULE_ANNOTATION_METHOD_REST),
         _ => None,
     }
+}
+
+/// The wrapper rules whose own-line modifiers/annotations should be folded into
+/// the type-declaration space opened beneath them (mirrors `wrapper_inner_type`
+/// / the method wrappers). A top-level type wraps in `typeDeclaration`; a
+/// method-local type in `localTypeDeclaration`; a member type in one of the
+/// body-declaration wrappers.
+fn is_type_wrapper(ri: usize) -> bool {
+    matches!(
+        ri,
+        jp::RULE_TYPE_DECLARATION
+            | jp::RULE_LOCAL_TYPE_DECLARATION
+            | jp::RULE_CLASS_BODY_DECLARATION
+            | jp::RULE_INTERFACE_BODY_DECLARATION
+            | jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION
+    )
+}
+
+/// Given a type wrapper (`typeDeclaration`/`localTypeDeclaration` or a member
+/// body-declaration), find the inner class-like declaration whose space should
+/// be opened at the wrapper — so the wrapper's own-line modifiers/annotations
+/// (`@Deprecated\npublic class C {}`, `public static class Inner {}`) belong to
+/// the type's LOC/Halstead/span rather than the enclosing space. Descends the
+/// direct `child_rule` path (never an unbounded search — a body wrapper's
+/// member alternatives include *other* declarations whose own nested types must
+/// not be captured here). Returns `None` when the member is not a class-like
+/// type (a field, method, const, etc. keep their existing sites).
+fn wrapper_inner_type(ctx: &ParserRuleContext) -> Option<&ParserRuleContext> {
+    let holder = match ctx.rule_index() {
+        // typeDeclaration / localTypeDeclaration hold the type declaration as a
+        // direct child (after `classOrInterfaceModifier*`).
+        jp::RULE_TYPE_DECLARATION | jp::RULE_LOCAL_TYPE_DECLARATION => ctx,
+        // A member type is `classBodyDeclaration → memberDeclaration → <type>`
+        // (or the interface/annotation equivalents).
+        jp::RULE_CLASS_BODY_DECLARATION => ctx.child_rule(jp::RULE_MEMBER_DECLARATION)?,
+        jp::RULE_INTERFACE_BODY_DECLARATION => {
+            ctx.child_rule(jp::RULE_INTERFACE_MEMBER_DECLARATION)?
+        }
+        jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION => {
+            ctx.child_rule(jp::RULE_ANNOTATION_TYPE_ELEMENT_REST)?
+        }
+        _ => return None,
+    };
+    for child in holder.children() {
+        if let ParseTree::Rule(rule) = child {
+            let c = rule.context();
+            if opens_class_like(c.rule_index()) {
+                return Some(c);
+            }
+        }
+    }
+    None
 }
 
 fn name_from_identifier(ctx: &ParserRuleContext) -> Option<String> {
