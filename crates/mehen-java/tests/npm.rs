@@ -266,3 +266,27 @@ fn enum_constant_body_methods_are_not_enum_members() {
     }
     "#);
 }
+
+#[test]
+fn interface_nested_record_compact_ctor_is_public() {
+    // Regression (PR #160 review): after class-like spaces open at their
+    // wrapper (round 29), member visibility must be resolved from the container
+    // enclosing the wrapper, NOT the just-opened type space. An interface's
+    // members are implicitly public, so a modifier-less compact canonical
+    // constructor of an interface-nested record inherits public access → NPM 1.
+    let iface = analyze("interface I { record R(int x) { R {} } }");
+    let i = serde_json::to_value(mehen_report::metrics_json::npm(&iface.root.metrics)).unwrap();
+    assert_eq!(
+        i["total"],
+        serde_json::json!(1.0),
+        "an interface-nested record's modifier-less compact ctor is public"
+    );
+    // Control: the same nested in a class is package-private (not public).
+    let cls = analyze("class C { record R(int x) { R {} } }");
+    let c = serde_json::to_value(mehen_report::metrics_json::npm(&cls.root.metrics)).unwrap();
+    assert_eq!(
+        c["total"],
+        serde_json::json!(0.0),
+        "a class-nested record's modifier-less compact ctor is package-private"
+    );
+}

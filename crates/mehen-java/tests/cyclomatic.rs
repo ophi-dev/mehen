@@ -131,3 +131,41 @@ fn ternary_counts_as_decision() {
     }
     "###);
 }
+
+#[test]
+fn annotation_value_expressions_do_not_add_complexity() {
+    // Regression (PR #160 review): annotation values are compile-time metadata,
+    // not executable code. A composed constant in an annotation value
+    // (`@Ann(value = true && false)`, `@Ann(x = c ? 1 : 2)`) must NOT record
+    // cyclomatic decisions (nor cognitive/ABC) — it would otherwise inflate the
+    // annotated method/class complexity. The annotated method scores the same
+    // as the un-annotated one.
+    let plain = analyze("class C { void m() {} }");
+    let p =
+        serde_json::to_value(mehen_report::metrics_json::cyclomatic(&plain.root.metrics)).unwrap();
+    for src in [
+        "class C { @Ann(value = true && false) void m() {} }",
+        "class C { @Ann(x = cond ? 1 : 2) void m() {} }",
+        "class C { @Ann(flags = A || B || C) void m() {} }",
+    ] {
+        let a = analyze(src);
+        let av =
+            serde_json::to_value(mehen_report::metrics_json::cyclomatic(&a.root.metrics)).unwrap();
+        assert_eq!(
+            av["sum"], p["sum"],
+            "annotation-value expressions must not add cyclomatic complexity: {src}"
+        );
+    }
+    // Guard: a real `&&` in the method *body* still counts.
+    let with_body = analyze(
+        "class C { @Ann(value = true) boolean m(boolean a, boolean b) { return a && b; } }",
+    );
+    let wb = serde_json::to_value(mehen_report::metrics_json::cyclomatic(
+        &with_body.root.metrics,
+    ))
+    .unwrap();
+    assert!(
+        wb["sum"].as_f64().unwrap() > p["sum"].as_f64().unwrap(),
+        "a real decision in an annotated method's body still counts"
+    );
+}

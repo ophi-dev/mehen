@@ -375,10 +375,20 @@ impl Walker<'_> {
             self.classify_class_member(ctx, ri, container, public, hint);
         }
 
+        // Capture the enclosing class-like container BEFORE opening any space
+        // for this node. `member_propagation` (run inside `visit_children`,
+        // after the open) resolves a member's container/visibility from the
+        // stack — but a body-declaration wrapper may now open a nested type
+        // space here (round 29), so `self.enclosing_container()` would then see
+        // that just-opened type instead of the real enclosing scope. Passing
+        // the pre-open container keeps interface/annotation member visibility
+        // correct (e.g. an interface-nested record's compact ctor stays public).
+        let container_before_open = self.enclosing_container();
+
         let opened = self.maybe_open_space(ctx, ri, hint);
         self.classify_rule(ctx, ri, hint);
 
-        self.visit_children(ctx, ri, hint);
+        self.visit_children(ctx, ri, hint, container_before_open);
 
         if opened {
             self.close_space();
@@ -386,7 +396,13 @@ impl Walker<'_> {
         self.cognitive = saved_cognitive;
     }
 
-    fn visit_children(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
+    fn visit_children(
+        &mut self,
+        ctx: &ParserRuleContext,
+        ri: usize,
+        hint: ChildHint,
+        container_before_open: Option<ContainerKind>,
+    ) {
         let children = ctx.children();
 
         // For an `if` statement, the `else`-branch body is the `statement`
@@ -421,7 +437,7 @@ impl Walker<'_> {
         // `modifier`s are siblings of the member declaration, not its
         // children.
         let (propagate_member, member_container, member_is_public) =
-            self.member_propagation(ctx, ri, hint);
+            self.member_propagation(ctx, ri, hint, container_before_open);
 
         // Capture the member's body-declaration wrapper start line so a
         // method/constructor space can widen its span upward to cover its
@@ -686,6 +702,7 @@ impl Walker<'_> {
         ctx: &ParserRuleContext,
         ri: usize,
         hint: ChildHint,
+        container_before_open: Option<ContainerKind>,
     ) -> (bool, Option<ContainerKind>, Option<bool>) {
         // A `classBodyDeclaration` reached *inside* a constant-specific
         // enum-constant body belongs to that constant's anonymous subclass,
@@ -712,7 +729,12 @@ impl Walker<'_> {
             | jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION
             | jp::RULE_ENUM_BODY_DECLARATIONS
             | jp::RULE_RECORD_BODY => {
-                let container = self.enclosing_container();
+                // Use the container captured BEFORE this node's `maybe_open_space`
+                // — a body-declaration wrapper may have just opened a nested type
+                // space (round 29), so `self.enclosing_container()` here would
+                // wrongly report that type. The real enclosing scope determines
+                // the member's default visibility (interface members are public).
+                let container = container_before_open;
                 // Java visibility semantics (not Kotlin's): a class member with
                 // no access modifier is *package-private*, which is NOT public,
                 // so a class member's default is `false` — only an explicit
@@ -1205,8 +1227,17 @@ impl Walker<'_> {
                 .npa
                 .record_attribute(ContainerKind::Class, true);
         }
-        self.classify_expression(ctx, ri, hint);
-        self.classify_abc_rule(ctx, ri, hint);
+        // Annotation values (`@Ann(value = true && false)`, `@Ann(x = c ? 1 : 2)`)
+        // are compile-time metadata, not executable code, so a composed constant
+        // in them must NOT record cyclomatic decisions, cognitive nesting, or
+        // ABC conditions/branches/assignments. `in_annotation` covers the whole
+        // annotation subtree; guarding here generalizes the round-16 fix (which
+        // only suppressed ABC *assignments*) to all executable-complexity
+        // accounting. LOC/Halstead still count — the tokens physically exist.
+        if !hint.in_annotation {
+            self.classify_expression(ctx, ri, hint);
+            self.classify_abc_rule(ctx, ri, hint);
+        }
         self.classify_loc_rule(ctx, ri, hint);
     }
 
