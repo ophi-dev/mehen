@@ -1004,25 +1004,49 @@ impl Walker<'_> {
         if let Some(op) = this_op {
             self.current().cyclomatic.record_decision();
             self.current().abc.record_condition();
-            // A boolean node adds +1 when its operator differs from the
-            // enclosing boolean operator (parent-relative run collapse) — OR
-            // when a `!` negation breaks the run per SonarSource (`a && !b && c`
-            // is +2, not +1). The Kotlin `not_operator` model is order-sensitive:
-            // a `!` splits a run only when a like operator BOTH precedes AND
-            // follows that operand in the flattened run (the `!` makes the
-            // *following* like operator start a fresh run). So:
-            //   - a RIGHT-operand negation (`… op !x`) splits only when a like
-            //     operator FOLLOWS it (`bool_run_has_successor`); a trailing
-            //     negation at the run head — `a && b && !c` and its
-            //     parenthesized form `a && (b && !c)` — does NOT split.
-            //   - a LEFT-operand negation (`!x op …`, notably a parenthesized
-            //     continuation `a && (!b && c)`) splits only when a like operator
-            //     PRECEDES it (`bool_run_has_predecessor`); a globally-leading
-            //     `!a && b && c` does NOT split.
-            let negation_breaks_run = (hint.bool_run_has_successor && has_negated_operand(ctx))
-                || (hint.bool_run_has_predecessor && has_negated_left_operand(ctx));
-            if hint.parent_bool_op != Some(op) || negation_breaks_run {
-                self.current().cognitive.increment_by_one();
+            // A boolean node's cognitive cost is the sum of INDEPENDENT run
+            // increments (each a distinct break point in the flattened run):
+            //
+            // 1. A base run increment when this node's operator differs from the
+            //    enclosing boolean operator (parent-relative run collapse) — the
+            //    node starts a new run relative to its parent.
+            // 2. Per `!` negation that breaks the run. Per SonarSource's
+            //    order-sensitive `not_operator` model a `!` splits a run only
+            //    when a like operator BOTH precedes AND follows that operand:
+            //      - the RIGHT operand (`… op !x`) splits when a like operator
+            //        FOLLOWS (`bool_run_has_successor`); a trailing negation
+            //        (`a && b && !c`, `a && (b && !c)`) does NOT split.
+            //      - the LEFT operand (`!x op …`, notably a parenthesized
+            //        continuation `a && (!b && c)`) splits when a like operator
+            //        PRECEDES (`bool_run_has_predecessor`); a globally-leading
+            //        `!a && b && c` does NOT split.
+            //
+            // The two negation splits are counted SEPARATELY, not OR'd: a node
+            // whose BOTH operands are run-breaking negations (`a && (!b && !c)
+            // && d`, flattened `a && !b && !c && d`) has two internal break
+            // points and must add +2, not +1.
+            // The base increment and the negation splits are MUTUALLY
+            // EXCLUSIVE: the negation rule requires a LIKE operator on both
+            // sides of the `!`, which holds only when this node continues its
+            // parent's run (`parent_bool_op == op`) — exactly when the base
+            // increment does NOT fire. When the operator differs, the
+            // surrounding operators are a different kind, so an adjacent `!` is
+            // not between two like operators and adds nothing beyond the base
+            // switch increment (e.g. `(a && !b) || c` is 3, not 4).
+            let increments = if hint.parent_bool_op != Some(op) {
+                1
+            } else {
+                let mut splits = 0u32;
+                if hint.bool_run_has_successor && has_negated_operand(ctx) {
+                    splits += 1;
+                }
+                if hint.bool_run_has_predecessor && has_negated_left_operand(ctx) {
+                    splits += 1;
+                }
+                splits
+            };
+            if increments > 0 {
+                self.current().cognitive.record_increment(increments);
             }
         }
         // Ternary `? :` — a decision, an ABC condition, and a cognitive nesting

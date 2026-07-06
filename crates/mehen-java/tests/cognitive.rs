@@ -326,6 +326,48 @@ fn trailing_negation_does_not_break_boolean_run() {
 }
 
 #[test]
+fn two_negations_in_a_run_count_two_splits() {
+    // Regression (PR #160 review): a single boolean node whose BOTH operands
+    // are run-breaking negations must count TWO splits, not one. In
+    // `a && (!b && !c) && d` the flattened run is `a && !b && !c && d`: `!b`
+    // (a like op precedes and follows) and `!c` (likewise) are both internal
+    // break points, so the run splits into three → cognitive 4. Counting the
+    // two breaks with a single OR'd increment would lose one and give 3.
+    for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c, boolean d) { if (a && (!b && !c) && d) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c, boolean d) { if (a && !b && !c && d) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c, boolean d) { if (a && ((!b && !c)) && d) return true; return false; } }",
+    ] {
+        let a = analyze(src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(4.0),
+            "two internal negations must count two run splits: {src}"
+        );
+    }
+    // Guard: a negation adjacent to a DIFFERENT operator must NOT add a split
+    // on top of the operator-switch increment — the two sides are not like
+    // operators. `(a && !b) || c` is one `&&` run (trailing `!b`, no split) +
+    // one `||` run → 3, not 4.
+    for src in [
+        "class C { boolean f(boolean a, boolean b, boolean c) { if ((a && !b) || c) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if (a || (!b && c)) return true; return false; } }",
+        "class C { boolean f(boolean a, boolean b, boolean c) { if ((a || !b) && c) return true; return false; } }",
+    ] {
+        let a = analyze(src);
+        let cog =
+            serde_json::to_value(mehen_report::metrics_json::cognitive(&a.root.metrics)).unwrap();
+        assert_eq!(
+            cog["sum"],
+            serde_json::json!(3.0),
+            "a negation by a different operator adds no extra split: {src}"
+        );
+    }
+}
+
+#[test]
 fn operator_expression_resets_boolean_run() {
     // Regression (PR #160 review): only *transparent* wrappers (parens/bare
     // operands) preserve a boolean run; an expression with its own operator
