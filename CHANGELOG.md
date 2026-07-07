@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/ophi-dev/mehen/compare/v1.2.0...v1.3.0) (2026-07-07)
+
+
+### Features
+
+* add Java analyzer and upgrade antlr-rust-runtime to 0.6.3 ([#160](https://github.com/ophi-dev/mehen/issues/160)) ([3ec7ccb](https://github.com/ophi-dev/mehen/commit/3ec7ccb2724fdc32528ab39a7d80b015bede38e2))
+
 ## [1.2.0](https://github.com/ophi-dev/mehen/compare/v1.1.0...v1.2.0) (2026-07-02)
 
 
