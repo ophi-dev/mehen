@@ -4,12 +4,13 @@ description: "mehen is a Rust-powered CLI for heuristic source code metrics — 
 keywords: ["mehen", "code metrics", "complexity", "maintainability", "halstead", "documentation metrics", "markdown"]
 ---
 
-**mehen** is a fast, deterministic command-line tool that measures source code and Markdown documentation
-across a repository. It tracks complexity, maintainability, size, and documentation health, and is
-purpose-built for CI runs, pre-PR hooks, and pull request automation.
+**mehen** is a fast, deterministic command-line tool that measures source code, SQL, and Markdown
+documentation across a repository. It tracks complexity, maintainability, size, and documentation
+health, and is purpose-built for CI runs, pre-PR hooks, and pull request automation.
 
 ```bash
 mehen metrics src/main.py --pretty
+mehen metrics migrations/0007_add_orders.sql --pretty
 mehen top-offenders src --metric cognitive
 mehen diff --from main --to HEAD --paths src --output-format markdown
 ```
@@ -48,14 +49,18 @@ mehen diff --from main --to HEAD --paths src --output-format markdown
   </Card>
   <Card title="Real parsers, not regex" icon="microchip">
     Each language uses the best available parser: Ruff for Python, Oxc for TS/JS/JSX/TSX, Mago for
-    PHP, Prism for Ruby, ra_ap_syntax for Rust, pulldown-cmark for Markdown, tree-sitter for Go, C,
-    Kotlin, PowerShell.
+    PHP, Prism for Ruby, ra_ap_syntax for Rust, ANTLR for Kotlin and Java, sqruff for SQL,
+    pulldown-cmark for Markdown, tree-sitter for Go, C, PowerShell.
+  </Card>
+  <Card title="SQL as a first-class language" icon="database">
+    A dedicated SQL analyzer scores CTE graphs, join structure, object-touch risk, and review burden
+    — dataflow complexity that imperative-only tools cannot see. See [SQL metrics](/metrics/sql/overview).
   </Card>
   <Card title="Deterministic, no network" icon="lock">
     Pure static analysis. Same input → same output. Safe for air-gapped CI.
   </Card>
-  <Card title="Code and documentation" icon="files">
-    A single tool covers source-code complexity *and* Markdown documentation health.
+  <Card title="Code, SQL, and documentation" icon="files">
+    A single tool covers source-code complexity, SQL structure, *and* Markdown documentation health.
   </Card>
   <Card title="Pull-request native" icon="git-pull-request">
     Built-in `mehen diff` plus a sticky comment GitHub Action — no glue code required.
@@ -64,6 +69,31 @@ mehen diff --from main --to HEAD --paths src --output-format markdown
     Console, JSON, YAML, TOML, GitHub-flavored Markdown.
   </Card>
 </Columns>
+
+## First-class SQL analysis
+
+SQL is where mehen does something most metric tools do not. Commercial code-quality platforms
+routinely treat `.sql` files as opaque text — or charge for a SQL add-on that still only counts lines
+— because their models are built around imperative control flow. A declarative `SELECT` with ten
+joins and five CTEs has almost no branches, so a cyclomatic-only tool reports it as "simple" while
+reviewers know it is anything but.
+
+mehen ships a dedicated [`mehen-sql` analyzer](/metrics/sql/overview) (backed by the dialect-aware
+[sqruff](https://github.com/quarylabs/sqruff) parser) that measures the complexity mechanism SQL
+actually has — **relational and dataflow structure**:
+
+- **[CTE dependency graphs](/metrics/sql/overview)** — depth, fan-out, recursion, and unused CTEs.
+- **[Join and subquery structure](/metrics/sql/overview)** — outer/cross/non-equi joins, correlated
+  subqueries, missing join conditions.
+- **[Object-touch and change risk](/metrics/sql/overview)** — `DROP`, `TRUNCATE`, `UPDATE`/`DELETE`
+  without a `WHERE`, and other migration-script hazards.
+- **[SQL Halstead](/metrics/sql/overview)** and six explainable composite scores, including a
+  file-level **review-burden index** and **change-risk score**.
+
+Dialect is inferred from syntax with a reported confidence (or pinned with a `-- sqlfluff:dialect:…`
+directive) across postgres, T-SQL, snowflake, bigquery, and more. SQL files are picked up
+automatically — including on pull requests, where the [GitHub Action](/guides/github-action) surfaces
+SQL deltas in the same sticky comment as your source-code metrics.
 
 ## What mehen computes
 
@@ -88,6 +118,15 @@ For Markdown documentation:
 - **[Filler / Lazy Structure Risk](/metrics/markdown/filler-lazy-risk)**, **[Review Criticality Index](/metrics/markdown/review-criticality-index)**
 - An opt-in [English readability ensemble](/metrics/markdown/prose/english-readability) and
   [Japanese script composition](/metrics/markdown/prose/japanese-script-composition) prose layer.
+
+For SQL:
+
+- **[Structural and cognitive complexity](/metrics/sql/overview)** derived from CTE, join, subquery,
+  `CASE`, and window structure.
+- **[Review Burden Index](/metrics/sql/overview)** and **[Change Risk Score](/metrics/sql/overview)**
+  — file-level 0–100 ranks for PR effort and migration risk.
+- **[SQL Maintainability Index](/metrics/sql/overview)**, **modularity health**, and an
+  **[SQL Halstead](/metrics/sql/overview)** family.
 
 ## Get started
 
