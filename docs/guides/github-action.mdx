@@ -8,6 +8,14 @@ The official **`ophi-dev/mehen`** GitHub Action computes changed-file metric tre
 request, compares them against the base branch, and publishes a sticky comment with the deltas. It is
 the primary consumption surface for mehen today.
 
+<Frame caption="The sticky PR comment: a Source Code Metrics table with per-file this-PR-vs-main deltas, followed by a Documentation Metrics table for changed Markdown.">
+  <img src="/images/pr-comment-metrics.png" alt="mehen GitHub Action sticky comment showing a Source Code Metrics table (Cyclomatic, Cognitive, Functions, LLOC, MI columns with green/red/white delta indicators) and a Documentation Metrics table (DMI, Words, FKGL, Link Debt, Filler Risk)." />
+</Frame>
+
+Each cell shows the new value with the base-branch value in parentheses and a colored indicator —
+🟢 improvement, 🔴 regression, ⚪ no material change — so reviewers see at a glance which files a PR
+made more or less complex.
+
 ## Minimal workflow
 
 ```yaml .github/workflows/mehen.yml
@@ -102,17 +110,24 @@ The action posts a single comment on the PR and updates it on each push instead 
 comments. The Markdown layout, cell format, and callout catalog are documented on the
 [PR comment design](/guides/pr-comment-design) page.
 
-## Markdown documentation section (preview)
+## Markdown documentation section
 
-When a PR touches Markdown files, `mehen diff` will also emit a **Documentation Metrics** section
-inside the same sticky comment, anchored by `<!-- mehen-docs -->`. The full specification — anchor
-rules, cell format, callout template catalog, planned `--fail-on` gating — is on the
+When a PR touches Markdown files, `mehen diff` emits a **Documentation Metrics** section inside the
+same sticky comment, anchored by `<!-- mehen-docs -->` (visible in the screenshot above). It carries a
+five-column headline table (DMI, Words, FKGL/Tateishi RS, Link Debt, Filler Risk), severity-ranked
+callouts drawn from a fixed template catalog, and a collapsed drill-down with the deeper structural,
+wording, and readability tables. On code-only PRs the section is suppressed entirely. The full
+specification — anchor rules, cell format, callout catalog, and `--fail-on` gating — is on the
 [PR comment design](/guides/pr-comment-design) page.
 
-<Note>
-Until the Markdown renderer emits the anchor and the callout catalog is wired end-to-end, the GitHub
-Action only publishes the source-code metrics section.
-</Note>
+## SQL in the diff
+
+SQL files are analyzed automatically and appear in the same **Source Code Metrics** table on the PR
+comment. Because SQL and source-code files publish different metric families, a mixed PR renders a
+single table whose columns are the union of each language's defaults — every row fills only the
+columns its analyzer emits, and the rest render as `–`. This keeps SQL changes visible on the default
+action path instead of silently dropping out. See [`mehen diff`](/commands/diff) for how the default
+metric set is resolved per file language.
 
 ## Examples
 

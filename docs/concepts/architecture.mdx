@@ -16,7 +16,9 @@ mehen's internals are organized around a clean separation between parsing, analy
 | `mehen-metrics` | Shared metric formulas, accumulators, finalizers (Halstead, cyclomatic, cognitive, MI, ABC, LOC, NOM, NPA, NPM, WMC). |
 | `mehen-<lang>` | Per-language analyzer crates. Each owns parsing and metric interpretation. |
 | `mehen-tree-sitter` | Shared tree-sitter wrapper and CST traversal helpers, used only by the tree-sitter-backed languages. |
+| `mehen-antlr` | Shared support for ANTLR-backed analyzers (Kotlin, Java) — re-exports the runtime and provides char→byte span conversion, recovered-error diagnostics, and hidden-channel comment (CLOC) extraction. |
 | `mehen-markdown` | Markdown analyzer (pulldown-cmark) with embedded-code dispatch via `LanguageDispatcher`. |
+| `mehen-sql` | SQL analyzer (sqruff). Publishes a dedicated `sql.*` metric family instead of the source-code families; the sqruff CST is confined behind a parser-neutral `SqlFileFacts` adapter. |
 | `mehen-git` | Git operations for `mehen diff`. |
 | `mehen-report` | JSON, YAML, TOML, and GitHub-Markdown rendering. |
 | `xtask` | Developer-only commands (kind-enum codegen, AST dumps, audits). |
@@ -34,6 +36,8 @@ returns the same `LanguageAnalysis` shape. mehen does not force a single AST mod
 | Ruby | [Prism](https://ruby.github.io/prism/) | Blocks, lambdas, numbered params, rescue modifiers, endless methods, pattern matching. |
 | Rust | [`ra_ap_syntax`](https://docs.rs/ra_ap_syntax/) | The same syntax library rust-analyzer uses internally. |
 | Kotlin | [ANTLR](https://www.antlr.org/) (official [Kotlin spec grammar](https://github.com/Kotlin/kotlin-spec)) | Semantically-named rules for `when` entries, elvis `?:`, safe-call `?.`, `catch` blocks, labeled jumps, and property accessors — richer than a tree-sitter CST. |
+| Java | [ANTLR](https://www.antlr.org/) ([grammars-v4 Java grammar](https://github.com/antlr/grammars-v4/tree/master/java/java)) | Records, sealed types, switch expressions, text blocks, pattern matching, modules — as first-class, semantically-named rules. |
+| SQL | [sqruff](https://github.com/quarylabs/sqruff) | Dialect-aware SQL CST (postgres, T-SQL, snowflake, bigquery, …) for CTE/join/subquery structure and object-touch analysis. |
 | Markdown | [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) | CommonMark + GFM with byte-accurate spans. |
 | Go, C, PowerShell | tree-sitter | Mature grammars where tree-sitter's coverage is the best available. |
 
@@ -48,7 +52,8 @@ file path
   ↓
 language detection (extension-driven)
   ↓
-parser (per-language: Ruff / Oxc / Mago / Prism / ra_ap_syntax / pulldown-cmark / tree-sitter)
+parser (per-language: Ruff / Oxc / Mago / Prism / ra_ap_syntax /
+        ANTLR / sqruff / pulldown-cmark / tree-sitter)
   ↓
 analyzer.analyze(tree)              ← per-language metric interpretation
   ↓
@@ -69,6 +74,33 @@ The Markdown analyzer (`mehen-markdown`) parses the document into a block/inline
 code fences back through `LanguageDispatcher`. That is how
 [Markdown Halstead](/metrics/markdown/halstead) and [MCC](/metrics/markdown/mcc) credit embedded code
 blocks without duplicating language logic.
+
+## ANTLR-backed analyzers
+
+Kotlin and Java run through ANTLR v4 grammars generated to Rust ahead of time and checked in, so a
+normal `cargo build` never needs Java or the ANTLR jar. The shared `mehen-antlr` crate carries the
+concerns every ANTLR analyzer needs but tree-sitter and the language-specific parsers handle
+differently:
+
+- **Span conversion.** ANTLR reports positions in character offsets; mehen's spans are byte offsets.
+  `mehen-antlr` converts once, centrally.
+- **Comments live on a hidden channel.** They are absent from the parse tree, so CLOC is recovered
+  from the token stream rather than by walking nodes.
+- **No parent pointers.** ANTLR rule contexts cannot look upward, so analyzers thread parent-dependent
+  context (e.g. else-if detection) top-down as they descend the tree.
+
+Despite those differences, the analyzers still return the same parser-neutral `LanguageAnalysis` as
+every other backend. See [Add a new language → ANTLR](/developers/new-language) for the full flow.
+
+## SQL is its own metric family
+
+SQL does not fit the function/class-centric model that the source-code metrics assume — a declarative
+`SELECT` has no methods, classes, or imperative branches to count. `mehen-sql` therefore publishes a
+dedicated `sql.*` metric namespace (CTE graphs, join/subquery structure, object-touch risk, SQL
+Halstead, composite scores) instead of the shared code families. The [sqruff](https://github.com/quarylabs/sqruff)
+CST is confined to the crate's `facts.rs` behind a parser-neutral `SqlFileFacts` adapter, so the rest
+of the pipeline never sees a sqruff type. Dialect resolution (directive-or-inference, validated before
+sqruff ever runs) also lives inside the crate. See [SQL metrics](/metrics/sql/overview).
 
 ## See also
 

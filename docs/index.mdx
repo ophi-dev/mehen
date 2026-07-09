@@ -4,9 +4,9 @@ description: "Rust-powered CLI for heuristic code and documentation metrics: com
 keywords: ["mehen", "code metrics", "documentation metrics", "complexity", "maintainability"]
 ---
 
-**mehen** is a fast, deterministic CLI for code and documentation metrics. It analyzes nine source
-languages plus Markdown, runs in seconds even on large monorepos, and ships a GitHub Action that
-publishes per-PR metric trends out of the box.
+**mehen** is a fast, deterministic CLI for code and documentation metrics. It analyzes eleven source
+languages plus SQL and Markdown, runs in seconds even on large monorepos, and ships a GitHub Action
+that publishes per-PR metric trends out of the box.
 
 ```bash
 mehen metrics src/main.py --pretty
@@ -24,6 +24,9 @@ mehen diff --from main --to HEAD --paths src
   <Card title="Code metrics" icon="ruler" href="/metrics/code/overview">
     Cyclomatic, cognitive, Halstead, MI, ABC, LOC family, NOM, NPA, NPM, WMC.
   </Card>
+  <Card title="SQL metrics" icon="database" href="/metrics/sql/overview">
+    CTE graphs, join/subquery structure, object-touch risk, SQL Halstead, composite scores.
+  </Card>
   <Card title="Markdown metrics" icon="book-open" href="/metrics/markdown/overview">
     DMI, MRPC, MCC, link debt, filler/lazy risk, English/Japanese prose layer.
   </Card>
@@ -34,11 +37,12 @@ mehen diff --from main --to HEAD --paths src
 <Columns cols={2}>
   <Card title="Real language parsers" icon="microchip">
     Ruff for Python, Oxc for TS/JS/JSX/TSX, Mago for PHP, Prism for Ruby, ra_ap_syntax for Rust,
-    the official Kotlin spec ANTLR grammar for Kotlin, pulldown-cmark for Markdown, tree-sitter for
-    Go, C, PowerShell.
+    ANTLR for Kotlin and Java, sqruff for SQL, pulldown-cmark for Markdown, tree-sitter for Go, C,
+    PowerShell.
   </Card>
-  <Card title="Code and documentation" icon="files">
-    A single tool covers source-code complexity *and* Markdown documentation health.
+  <Card title="Code, SQL, and documentation" icon="files">
+    One tool covers source-code complexity, first-class SQL structure metrics, *and* Markdown
+    documentation health.
   </Card>
   <Card title="Deterministic, no network" icon="lock">
     Pure static analysis. Same input → same output. Safe for air-gapped CI.
@@ -59,6 +63,12 @@ For source code:
   [NEXITS](/metrics/code/nexits), [NPA](/metrics/code/npa), [NPM](/metrics/code/npm),
   [WMC](/metrics/code/wmc).
 - The [LOC family](/metrics/code/loc): SLOC, PLOC, LLOC, CLOC, blanks.
+
+For SQL:
+
+- [Structural and cognitive complexity](/metrics/sql/overview) from CTE, join, subquery, `CASE`, and
+  window structure; a [Review Burden Index](/metrics/sql/overview) and [Change Risk
+  Score](/metrics/sql/overview); an [SQL Halstead](/metrics/sql/overview) and maintainability index.
 
 For Markdown documentation:
 

@@ -7,6 +7,10 @@ keywords: ["pr comment", "github comment", "design", "documentation metrics"]
 The primary consumption surface for **mehen** on a pull request is a sticky GitHub comment posted by
 the [GitHub Action](/guides/github-action). This page is the user-facing reference for that surface.
 
+<Frame caption="A live sticky comment: the Source Code Metrics table (top) is always present; the Documentation Metrics table (bottom) is appended when the PR touches Markdown.">
+  <img src="/images/pr-comment-metrics.png" alt="mehen sticky PR comment with a Source Code Metrics table and a Documentation Metrics table." />
+</Frame>
+
 When a PR touches one or more Markdown files, `mehen diff` emits a **Documentation Metrics** section
 below the existing source-code table.
 
@@ -238,11 +242,13 @@ reference, leaves one generated file unchanged but on-alert, and touches the cha
 - **No suggested edits.** Belongs in a separate `mehen doc lint` command.
 - **No scoring gates by default.** The PR comment is advisory. Gating requires explicit `--fail-on`.
 
-## Planned `--fail-on` flag
+## `--fail-on` gating
 
-The PR comment is advisory by default. A CI gate is planned for a future release — see
-[Concepts → Thresholds and diffs](/concepts/thresholds-and-diffs) for the source-code threshold path
-that is already shipping.
+The PR comment is advisory by default. To turn documentation regressions into a CI failure, pass
+[`mehen diff --fail-on`](/commands/diff) with one or more band-crossing rule IDs — `dmi-drop`,
+`new-broken-link`, `filler-high`, or `all` — which exit non-zero (code `2`) when crossed. These align
+with the severity-1 / severity-2 callouts above. See
+[Concepts → Thresholds and diffs](/concepts/thresholds-and-diffs) for the source-code threshold path.
 
 ## See also
 

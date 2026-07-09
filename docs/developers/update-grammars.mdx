@@ -4,9 +4,9 @@ description: "Bump pinned tree-sitter grammar versions and regenerate the kind e
 keywords: ["grammar update", "tree-sitter", "dependabot", "developers"]
 ---
 
-The languages that go through tree-sitter (Go, C, PowerShell, plus the Markdown text extensions
-used by `mehen-markdown`) are parsed via pinned `tree-sitter-<lang>` crates. Grammars change over
-time and need periodic updates — both for bug fixes and to keep up with new syntax.
+The languages that go through tree-sitter (Go, C, and PowerShell) are parsed via pinned
+`tree-sitter-<lang>` crates. Grammars change over time and need periodic updates — both for bug fixes
+and to keep up with new syntax.
 
 <Note>
 Kotlin is **not** tree-sitter-backed — it uses an ANTLR grammar. To regenerate the Kotlin parser,
@@ -18,44 +18,52 @@ Grammars can be updated on **Linux** and **macOS** natively, or on **Windows** u
 
 ## Currently pinned tree-sitter grammars
 
-The pin lives in `xtask/Cargo.toml` (consumed by the kind-enum generator) and in the owning
-`crates/mehen-<lang>/Cargo.toml` (consumed by the analyzer at runtime). Most grammars are routed
-through `[workspace.dependencies]` in the root `Cargo.toml` and referenced as
-`{ workspace = true }` from both call sites; some, like `tree-sitter-c`, are inline-pinned because
-only one analyzer consumes them.
+Each grammar is **inline-pinned in its owning `crates/mehen-<lang>/Cargo.toml`** — the analyzer crate
+is the single source of truth. `xtask` never pins a grammar itself; the kind-enum generator reaches
+each grammar through the analyzer crate's `__grammar_language()` accessor (a path dependency), so the
+codegen and the runtime parser always link the exact same revision. Bumping the pin in the analyzer's
+`Cargo.toml` is therefore enough — there is no second `[workspace.dependencies]` line to keep in sync.
 
-| Grammar | Used by |
-|---|---|
-| `tree-sitter-c` | `mehen-c` |
-| `tree-sitter-go` | `mehen-go` |
-| `tree-sitter-pwsh` | `mehen-powershell` |
-| `tree-sitter-markdown-text` | `mehen-markdown` (auxiliary) |
+| Grammar | Owning crate | Generated `grammar.rs`? |
+|---|---|---|
+| `tree-sitter-c` | `mehen-c` | Yes — codegen target `c` |
+| `tree-sitter-go` | `mehen-go` | Yes — codegen target `go` |
+| `tree-sitter-pwsh` | `mehen-powershell` | No — matches string node-kinds directly |
 
-The Python, TypeScript / JavaScript / TSX / JSX, PHP, Ruby, Rust, and Kotlin analyzers do **not**
-use tree-sitter; they have no `grammar.rs` and need no kind-enum regeneration. (Kotlin is
-ANTLR-backed — see the note above.) Markdown's primary parser is pulldown-cmark; the tree-sitter
-Markdown grammar is only used for ancillary text extensions.
+<Note>
+PowerShell is tree-sitter-backed but has **no** generated `grammar.rs` and is **not** an `xtask`
+codegen target. `mehen-powershell` matches node kinds by their string names against
+`tree_sitter_pwsh::LANGUAGE` at runtime, so bumping `tree-sitter-pwsh` needs no kind-enum
+regeneration — only C and Go do.
+</Note>
+
+The Python, TypeScript / JavaScript / TSX / JSX, PHP, Ruby, Rust, Kotlin, Java, SQL, and Markdown
+analyzers do **not** use tree-sitter; they have no `grammar.rs` and need no kind-enum regeneration.
+(Kotlin and Java are ANTLR-backed — see the note above; SQL uses sqruff and Markdown uses
+pulldown-cmark.)
 
 ## Update process
 
 <Steps>
   <Step title="Bump the pin">
-    Update **all** locations the grammar is pinned. For workspace-routed grammars, that's the line in
-    root `Cargo.toml` `[workspace.dependencies]`. For inline-pinned grammars, both `xtask/Cargo.toml`
-    and the owning `crates/mehen-<lang>/Cargo.toml`:
+    Update the single inline pin in the owning `crates/mehen-<lang>/Cargo.toml`:
 
     ```toml
     tree-sitter-c = "=x.xx.x"
     ```
+
+    `xtask` picks up the new revision automatically through the `mehen-<lang>` path dependency, so
+    there is no separate `xtask/Cargo.toml` or `[workspace.dependencies]` line to bump.
   </Step>
   <Step title="Regenerate kind enums">
     ```bash
     cargo xtask tree-sitter generate --all
     ```
 
-    This rewrites every tree-sitter-backed crate's `grammar.rs` from the pinned grammar's `node-kind`
-    table. CI runs `cargo xtask tree-sitter check-generated` to ensure pinned-grammar bumps without a
-    regenerate are caught at PR time.
+    This rewrites every codegen-target crate's `grammar.rs` (C and Go) from the pinned grammar's
+    `node-kind` table. CI runs `cargo xtask tree-sitter check-generated` to ensure pinned-grammar
+    bumps without a regenerate are caught at PR time. (PowerShell has no `grammar.rs`, so bumping
+    `tree-sitter-pwsh` skips this step.)
   </Step>
   <Step title="Fix breakage">
     New node kinds may appear (and need handling), and existing node kinds may be renamed or
