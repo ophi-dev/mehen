@@ -620,10 +620,8 @@ fn classify_link(dest: &str) -> LinkClass {
 }
 
 fn extract_domain(dest: &str) -> Option<String> {
-    let rest = match dest.find("://") {
-        Some(pos) => &dest[pos + 3..],
-        None => return None,
-    };
+    let pos = dest.find("://")?;
+    let rest = &dest[pos + 3..];
     let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host = &rest[..host_end];
     if host.is_empty() {
