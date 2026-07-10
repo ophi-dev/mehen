@@ -60,7 +60,8 @@ pub fn render_diff_json(report: &DiffReport, pretty: bool) -> serde_json::Result
 mod tests {
     use super::*;
     use mehen_core::{
-        AnalysisBackend, MetricKey, MetricSpace, MetricsReport, SourceSpan, SpaceId, SpaceKind,
+        AnalysisBackend, ContributionReason, MetricContribution, MetricKey, MetricSpace,
+        MetricsReport, SourceSpan, SpaceId, SpaceKind,
     };
 
     fn report_with(language: Language, key: &str, value: f64) -> MetricsReport {
@@ -74,6 +75,7 @@ mod tests {
             analysis_backend: AnalysisBackend::Sqruff,
             diagnostics: Vec::new(),
             root,
+            contributions: Vec::new(),
         }
     }
 
@@ -108,5 +110,27 @@ mod tests {
             value.get("metrics").is_some(),
             "source-code report must carry the pivoted `metrics` family block"
         );
+    }
+
+    #[test]
+    fn contributions_are_serialized_only_when_present() {
+        let empty = report_with(Language::Sql, "sql.change_risk_score", 0.0);
+        let empty_json: serde_json::Value =
+            serde_json::from_str(&render_metrics_json(&empty, false).unwrap()).unwrap();
+        assert!(empty_json.get("contributions").is_none());
+
+        let mut explained = report_with(Language::Sql, "sql.change_risk_score", 8.0);
+        explained.contributions.push(MetricContribution {
+            metric: MetricKey::new("sql.change_risk_score"),
+            span: SourceSpan::new(0, 12, 1, 1),
+            amount: 8.0,
+            reason: ContributionReason::new("sql.change_risk.drop"),
+        });
+        let json: serde_json::Value =
+            serde_json::from_str(&render_metrics_json(&explained, false).unwrap()).unwrap();
+        assert_eq!(json["contributions"][0]["metric"], "sql.change_risk_score");
+        assert_eq!(json["contributions"][0]["amount"], 8.0);
+        assert_eq!(json["contributions"][0]["reason"], "sql.change_risk.drop");
+        assert_eq!(json["contributions"][0]["span"]["start_line"], 1);
     }
 }

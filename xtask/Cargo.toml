@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 askama = "^0.16"
+serde_json = { workspace = true }
 tree-sitter = { workspace = true }
 # Kind-enum codegen reaches each grammar through the owning analyzer
 # crate's `__grammar_language()` accessor (see

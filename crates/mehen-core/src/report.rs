@@ -5,8 +5,9 @@ use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, MetricSelector, MetricSpace,
-    ParseDiagnostic, SourceFile, SourceSpan, SpaceId, SpaceKind, Threshold, ThresholdViolation,
+    AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, MetricContribution,
+    MetricSelector, MetricSpace, ParseDiagnostic, SourceFile, SourceSpan, SpaceId, SpaceKind,
+    Threshold, ThresholdViolation,
 };
 
 /// Inputs to `analyze_metrics`.
@@ -26,6 +27,10 @@ pub struct MetricsReport {
     pub analysis_backend: AnalysisBackend,
     pub diagnostics: Vec<ParseDiagnostic>,
     pub root: MetricSpace,
+    /// Source-resolved evidence emitted by the analyzer. Empty for analyzers
+    /// or profiles that do not request contribution collection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributions: Vec<MetricContribution>,
 }
 
 impl MetricsReport {
@@ -40,6 +45,7 @@ impl MetricsReport {
             analysis_backend: AnalysisBackend::TreeSitter,
             diagnostics: Vec::new(),
             root: MetricSpace::new(SpaceId(0), SpaceKind::Unit, SourceSpan::empty()),
+            contributions: Vec::new(),
         }
     }
 }
@@ -54,7 +60,34 @@ impl From<LanguageAnalysis> for MetricsReport {
             analysis_backend: analysis.backend,
             diagnostics: analysis.diagnostics,
             root: analysis.root,
+            contributions: analysis.contributions,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContributionReason, MetricContribution, MetricKey};
+
+    #[test]
+    fn language_analysis_conversion_preserves_contributions() {
+        let contribution = MetricContribution {
+            metric: MetricKey::new("sql.change_risk_score"),
+            span: SourceSpan::new(0, 4, 1, 1),
+            amount: 8.0,
+            reason: ContributionReason::new("sql.change_risk.drop"),
+        };
+        let analysis = LanguageAnalysis {
+            language: Language::Sql,
+            backend: AnalysisBackend::Sqruff,
+            diagnostics: Vec::new(),
+            root: MetricSpace::new(SpaceId(0), SpaceKind::Unit, SourceSpan::empty()),
+            contributions: vec![contribution.clone()],
+        };
+
+        let report = MetricsReport::from(analysis);
+        assert_eq!(report.contributions, vec![contribution]);
     }
 }
 

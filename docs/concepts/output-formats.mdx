@@ -44,6 +44,19 @@ mehen emits structured output in formats appropriate to each command's role.
 }
 ```
 
+`contributions` is omitted when the selected profile disables evidence or the analyzer has none.
+Entries are deterministically ordered by source span. `amount` is the signed, weighted number of
+points the source construct contributes to `metric`. For example, a SQL `DROP` contribution is:
+
+```json
+{
+  "metric": "sql.change_risk_score",
+  "span": { "start_byte": 0, "end_byte": 12, "start_line": 1, "end_line": 1 },
+  "amount": 8.0,
+  "reason": "sql.change_risk.drop"
+}
+```
+
 Markdown files emit a top-level `markdown:` block with the
 [documentation suite](/metrics/markdown/overview).
 

@@ -34,8 +34,9 @@ mod loc;
 mod metrics;
 
 use mehen_core::{
-    AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, MetricSpace,
-    ParseDiagnostic, Result, SourceFile, SourceSpan, SpaceId, SpaceKind, byte_offset_clamped,
+    AnalysisBackend, AnalysisConfig, ContributionCollector, Language, LanguageAnalysis,
+    LanguageAnalyzer, MetricSpace, ParseDiagnostic, Result, SourceFile, SourceSpan, SpaceId,
+    SpaceKind, byte_offset_clamped,
 };
 use smol_str::SmolStr;
 
@@ -69,7 +70,7 @@ impl LanguageAnalyzer for SqlAnalyzer {
         AnalysisBackend::Sqruff
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let file_span = SourceSpan {
             start_byte: 0,
             end_byte: byte_offset_clamped(source.text.len()),
@@ -131,7 +132,7 @@ impl LanguageAnalyzer for SqlAnalyzer {
         let line_index = &source.line_index;
         let line_at = |byte: u32| line_index.line_at(byte);
 
-        let mut file_facts = facts::extract(&parsed, &dialect, line_at);
+        let mut file_facts = facts::extract(&parsed, &dialect, line_at, config.emit_contributions);
         // Lexer errors (malformed tokens) are distinct from unparsable parse
         // segments. The current sqruff release never populates this vector, but
         // surface them into parser-health so a future version cannot make
@@ -147,6 +148,16 @@ impl LanguageAnalyzer for SqlAnalyzer {
         let mut root = MetricSpace::new(SpaceId(0), SpaceKind::Unit, file_span);
         metrics::publish(&file_facts, &loc_stats, &resolution, &mut root.metrics);
         publish_dialect_labels(&mut root, &resolution);
+
+        let mut contribution_collector = ContributionCollector::new(config.emit_contributions);
+        for item in &file_facts.change_risk_evidence {
+            contribution_collector.record(
+                "sql.change_risk_score",
+                item.span,
+                item.factor.amount(),
+                item.factor.reason(),
+            );
+        }
 
         // Per-statement spaces so top-offenders / nested reporting can attribute
         // metrics to a statement's line range (research foundation §4.4).
@@ -203,7 +214,7 @@ impl LanguageAnalyzer for SqlAnalyzer {
             backend: AnalysisBackend::Sqruff,
             diagnostics,
             root,
-            contributions: Vec::new(),
+            contributions: contribution_collector.finish(),
         })
     }
 }

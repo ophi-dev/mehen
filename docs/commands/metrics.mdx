@@ -71,17 +71,34 @@ Markdown Halstead, link debt, table burden, visual scaffold, artifact debt, repo
 evidence coverage, filler/lazy risk, review criticality, section balance, good scaffold. The opt-in
 [prose layer](/metrics/markdown/prose/overview) ships behind Cargo features.
 
+When an analyzer supports source-resolved evidence, the default profile also emits a
+`contributions` array. Each entry identifies the metric, weighted amount, stable reason code, and
+byte/line span responsible for that amount. SQL change risk is the first supported metric:
+`sql.change_risk_score` explains destructive DDL/DML and distinct object-touch terms. The
+`ci`/`strict` profiles skip this optional evidence to keep automated payloads lean.
+
 ## Profiles
 
 `--profile` selects a built-in preset for what gets reported and how thresholds are interpreted:
 
 | Profile | Use case |
 |---|---|
-| `default` | Local developer output. No implicit failure policy. |
-| `ci` | GitHub Action-friendly defaults. Stable tables, standard metric selector set. |
-| `strict` | Same output as `ci`, with tighter built-in threshold suggestions. |
+| `default` | Local developer output, including supported contribution evidence. No implicit failure policy. |
+| `ci` | GitHub Action-friendly defaults without contribution evidence. Stable tables, standard metric selector set. |
+| `strict` | Same evidence behavior as `ci`, with tighter built-in threshold suggestions. |
 
 Explicit CLI flags always override profile defaults.
+
+## Inspecting contribution evidence
+
+Maintainers can print only the contribution array for a file through the developer task:
+
+```bash
+cargo xtask metric-contributions migrations/2026-07-10.sql
+```
+
+The task runs the production analyzer through the real `mehen metrics` path, so language detection,
+profile behavior, reason codes, and spans match the public CLI report.
 
 ## See also
 
