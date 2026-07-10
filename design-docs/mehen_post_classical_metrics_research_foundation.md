@@ -582,17 +582,29 @@ principled 5-column set, in order:
 
 | Column | Selector | Dimension it uniquely covers | Status |
 |---|---|---|---|
-| Cognitive | `cognitive` | control-flow *understandability* (keep the better of the two flow metrics) | ✅ exists |
-| ABC | `abc` | computational volume (assignments/branches/conditions) | ✅ exists |
-| Halstead effort | `halstead.effort` | vocabulary/operator burden | ✅ exists |
-| LLOC | `loc.lloc` | size | ✅ exists |
-| MI | `mi.visual_studio` | at-a-glance rollup (kept as the one deliberate composite) | ✅ exists |
+| Cognitive | `cognitive` | control-flow *understandability* (keep the better of the two flow metrics) | ✅ selectable |
+| ABC | `abc` | computational volume (assignments/branches/conditions) | ✅ selectable |
+| Halstead effort | `halstead.effort` | vocabulary/operator burden | ⚠️ computed but **not yet selectable** — see note |
+| LLOC | `loc.lloc` | size | ✅ selectable |
+| MI | `mi.visual_studio` | at-a-glance rollup (kept as the one deliberate composite) | ✅ selectable |
 
 Rationale: **drop `cyclomatic`** (cognitive is the more defensible flow metric and the two correlate
 strongly) and **drop `nom.functions`** (LLOC already carries size; function *count* is weak signal in
 a diff). Spend the freed columns on the two orthogonal axes that were missing — ABC and Halstead
-effort. This is still a **zero-new-metric change** (all five already ship for all languages); it only
-edits the `DEFAULT_METRICS` list and reporter snapshots. Effort **S**.
+effort.
+
+**Wiring caveat (one metric is not free).** Four of these five (`cognitive`, `abc`, `loc.lloc`,
+`mi.visual_studio`) are already registered as selectors in
+`crates/mehen-engine/src/metric_selector.rs` (present in `KNOWN_METRICS` and mapped in
+`metric_set_key_for`), so for them this is a **pure-config change** to `DEFAULT_METRICS` plus
+reporter snapshots. **`halstead.effort` is the exception:** the walker *publishes* the value
+(`crates/mehen-metrics/src/state.rs` emits the `halstead.effort` key), but only `halstead.volume` is
+registered as a *selector* today, and `halstead.effort` is not a namespaced (`sql.*`/`markdown.*`)
+key, so it would fall through to "Unknown metric, skipping" rather than render. Adding it needs two
+one-line registrations first — a `("halstead.effort", "Halstead Effort", Polarity::LowerIsBetter)`
+entry in `KNOWN_METRICS` and a `"halstead.effort" => "halstead.effort"` arm in `metric_set_key_for`.
+So §9.3 is **"no new metric *formula*"**, not "no code": budget the small selector-registration
+change for the Halstead effort column. Effort **S**.
 
 ### 9.4 The strategic answer (once history lands)
 
