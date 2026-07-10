@@ -58,6 +58,9 @@ Ccomment = "Ccomment"
 "Ono" = "Ono"
 # Acronym for Wording Quality Score (§33.11, §36.7)
 "WQS" = "WQS"
+# Journal abbreviation: Information and Software Technology (Radjenović et al.
+# 2013 citation in design-docs/mehen_post_classical_metrics_research_foundation.md)
+"IST" = "IST"
 # Proper noun: Automattic (harper Rust grammar checker vendor)
 "Automattic" = "Automattic"
 # Suffix-pattern fragment cited in §33.6 nominalizations (-ment)
