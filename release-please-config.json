@@ -10,13 +10,7 @@
             "prerelease": false,
             "bump-minor-pre-major": true,
             "bump-patch-for-minor-pre-major": false,
-            "changelog-types": [
-                {
-                    "type": "chore",
-                    "scope": "deps",
-                    "section": "Dependencies",
-                    "hidden": false
-                },
+            "changelog-sections": [
                 {
                     "type": "feat",
                     "section": "Features",
@@ -33,6 +27,11 @@
                     "hidden": false
                 },
                 {
+                    "type": "deps",
+                    "section": "Parser & Grammar Updates",
+                    "hidden": false
+                },
+                {
                     "type": "revert",
                     "section": "Reverts",
                     "hidden": false
@@ -40,37 +39,37 @@
                 {
                     "type": "docs",
                     "section": "Documentation",
-                    "hidden": false
+                    "hidden": true
                 },
                 {
                     "type": "style",
                     "section": "Styles",
-                    "hidden": false
+                    "hidden": true
                 },
                 {
                     "type": "chore",
                     "section": "Miscellaneous",
-                    "hidden": false
+                    "hidden": true
                 },
                 {
                     "type": "refactor",
                     "section": "Code Refactoring",
-                    "hidden": false
+                    "hidden": true
                 },
                 {
                     "type": "test",
                     "section": "Tests",
-                    "hidden": false
+                    "hidden": true
                 },
                 {
                     "type": "build",
                     "section": "Build System",
-                    "hidden": false
+                    "hidden": true
                 },
                 {
                     "type": "ci",
                     "section": "Continuous Integration",
-                    "hidden": false
+                    "hidden": true
                 }
             ],
             "extra-files": [
