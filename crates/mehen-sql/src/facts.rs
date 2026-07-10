@@ -2049,11 +2049,11 @@ fn extract_objects(
     let (read_objects, write_objects) = collect_touched_objects(root, line_at, emit_contributions);
     obj.read_object_count = read_objects.len() as u32;
     obj.write_object_count = write_objects.len() as u32;
-    obj.touch_count = read_objects
-        .keys()
-        .chain(write_objects.keys())
-        .collect::<std::collections::BTreeSet<_>>()
-        .len() as u32;
+    obj.touch_count = (read_objects.len()
+        + write_objects
+            .keys()
+            .filter(|name| !read_objects.contains_key(*name))
+            .count()) as u32;
     if emit_contributions {
         for span in write_objects.values() {
             record_change_risk(
@@ -2131,22 +2131,19 @@ fn extract_objects(
         .filter(|w| w[0].word == "CREATE" && w[1].word == "OR" && w[2].word == "REPLACE")
         .collect::<Vec<_>>();
     obj.create_or_replace_count = create_or_replace.len() as u32;
-    for tokens in create_or_replace {
-        let span = match (tokens[0].span, tokens[2].span) {
-            (Some(start), Some(end)) => SourceSpan::new(
-                start.start_byte,
-                end.end_byte,
-                start.start_line,
-                end.end_line,
-            ),
-            _ => fallback_span,
-        };
-        record_change_risk(
-            evidence,
-            emit_contributions,
-            span,
-            ChangeRiskFactor::CreateOrReplace,
-        );
+    if emit_contributions {
+        for tokens in create_or_replace {
+            let span = match (tokens[0].span, tokens[2].span) {
+                (Some(start), Some(end)) => SourceSpan::new(
+                    start.start_byte,
+                    end.end_byte,
+                    start.start_line,
+                    end.end_line,
+                ),
+                _ => fallback_span,
+            };
+            record_change_risk(evidence, true, span, ChangeRiskFactor::CreateOrReplace);
+        }
     }
 
     // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses, counted

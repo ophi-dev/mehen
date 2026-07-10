@@ -169,16 +169,12 @@ impl ContributionCollector {
             (
                 a.span.start_byte,
                 a.span.end_byte,
-                a.span.start_line,
-                a.span.end_line,
                 &a.metric,
                 a.reason.as_str(),
             )
                 .cmp(&(
                     b.span.start_byte,
                     b.span.end_byte,
-                    b.span.start_line,
-                    b.span.end_line,
                     &b.metric,
                     b.reason.as_str(),
                 ))
