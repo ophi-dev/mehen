@@ -15,11 +15,39 @@ jobs:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
+      # Structured info about the update (crate names, group, semver bump).
+      # `dependency-names` lists every crate the PR touches — including for
+      # grouped PRs whose titles ("bump the oxc group") don't name the crates.
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v3
+
       - name: Approve and enable auto-merge
         run: |
+          set -euo pipefail
           gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body "Dependabot PR — auto-approved."
-          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
+
+          # Parser/grammar dependency bumps are relabeled from the hidden
+          # `build(deps)` type to the custom `deps:` type, which
+          # release-please surfaces under "Parser & Grammar Updates" (see
+          # release-please-config.json). Every other dependency bump keeps
+          # `build(deps)` and stays out of the changelog. release-please
+          # matches on commit TYPE only (it has no scope filter), so the
+          # discrimination must be baked into the squashed subject here.
+          #
+          # We match on crate-name prefix rather than the PR title so grouped
+          # PRs are classified correctly. release-please links a changelog
+          # entry via the trailing "(#NN)", and a custom --subject replaces
+          # GitHub's default subject entirely, so we re-add it by hand.
+          if printf '%s' "$NAMES" | grep -qiE '(^|,)[[:space:]]*(tree-sitter|oxc_|mago-|ruff_|sqruff-|pulldown-cmark|ra_ap_|antlr-rust-runtime)'; then
+            gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash \
+              --subject "deps: ${TITLE#*: } (#${PR_NUMBER})"
+          else
+            gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
+          fi
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          NAMES: ${{ steps.meta.outputs.dependency-names }}
+          TITLE: ${{ github.event.pull_request.title }}

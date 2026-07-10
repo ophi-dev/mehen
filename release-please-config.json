@@ -10,13 +10,7 @@
             "prerelease": false,
             "bump-minor-pre-major": true,
             "bump-patch-for-minor-pre-major": false,
-            "changelog-types": [
-                {
-                    "type": "chore",
-                    "scope": "deps",
-                    "section": "Dependencies",
-                    "hidden": false
-                },
+            "changelog-sections": [
                 {
                     "type": "feat",
                     "section": "Features",
@@ -33,43 +27,13 @@
                     "hidden": false
                 },
                 {
+                    "type": "deps",
+                    "section": "Parser & Grammar Updates",
+                    "hidden": false
+                },
+                {
                     "type": "revert",
                     "section": "Reverts",
-                    "hidden": false
-                },
-                {
-                    "type": "docs",
-                    "section": "Documentation",
-                    "hidden": false
-                },
-                {
-                    "type": "style",
-                    "section": "Styles",
-                    "hidden": false
-                },
-                {
-                    "type": "chore",
-                    "section": "Miscellaneous",
-                    "hidden": false
-                },
-                {
-                    "type": "refactor",
-                    "section": "Code Refactoring",
-                    "hidden": false
-                },
-                {
-                    "type": "test",
-                    "section": "Tests",
-                    "hidden": false
-                },
-                {
-                    "type": "build",
-                    "section": "Build System",
-                    "hidden": false
-                },
-                {
-                    "type": "ci",
-                    "section": "Continuous Integration",
                     "hidden": false
                 }
             ],
