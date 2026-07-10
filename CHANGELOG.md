@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/ophi-dev/mehen/compare/v1.3.0...v1.4.0) (2026-07-10)
+
+
+### Features
+
+* **metrics:** explain SQL change risk contributions ([#176](https://github.com/ophi-dev/mehen/issues/176)) ([e67f380](https://github.com/ophi-dev/mehen/commit/e67f3805f931f93dcd10fd5a5f4a11b19ef1afc3))
+
 ## [1.3.0](https://github.com/ophi-dev/mehen/compare/v1.2.0...v1.3.0) (2026-07-07)
 
 
