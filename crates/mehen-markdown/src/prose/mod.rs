@@ -165,14 +165,13 @@ pub(crate) fn analyze_prose(root: &Node<'_>, source: &[u8]) -> ProseReport {
 /// Enumerates the kinds of blocks that were excluded from prose analysis.
 /// Deterministic: always emitted in a fixed order so snapshots are stable.
 fn blocks_stripped_kinds(root: &Node<'_>) -> Vec<String> {
-    use crate::grammar::Markdown;
+    use crate::kind::NodeKind;
 
     let mut has_code = false;
     let mut has_frontmatter = false;
     let mut has_html = false;
     let mut has_math = false;
     let mut has_table = false;
-    let mut has_mdx = false;
 
     fn walk(
         node: &Node<'_>,
@@ -181,46 +180,28 @@ fn blocks_stripped_kinds(root: &Node<'_>) -> Vec<String> {
         html: &mut bool,
         math: &mut bool,
         table: &mut bool,
-        mdx: &mut bool,
     ) {
-        let kind: Markdown = node.kind_id().into();
+        let kind = node.kind();
         match kind {
-            Markdown::FencedCodeBlock | Markdown::IndentedCodeBlock | Markdown::InlineCode => {
+            NodeKind::FencedCodeBlock | NodeKind::IndentedCodeBlock | NodeKind::InlineCode => {
                 *code = true;
             }
-            Markdown::MinusMetadata | Markdown::PlusMetadata => {
+            NodeKind::MinusMetadata | NodeKind::PlusMetadata => {
                 *fm = true;
             }
-            Markdown::HtmlBlock
-            | Markdown::HtmlBlock1
-            | Markdown::HtmlBlock3
-            | Markdown::HtmlBlock4
-            | Markdown::HtmlBlock5
-            | Markdown::HtmlBlock6
-            | Markdown::HtmlBlock7
-            | Markdown::HtmlCommentBlock
-            | Markdown::HtmlInline => {
+            NodeKind::HtmlBlock | NodeKind::HtmlInline => {
                 *html = true;
             }
-            Markdown::MdxJsxBlock | Markdown::MdxJsxInline => {
-                *mdx = true;
-            }
-            Markdown::MathBlock | Markdown::MathInline => {
+            NodeKind::MathBlock | NodeKind::MathInline => {
                 *math = true;
             }
-            Markdown::PipeTable => {
+            NodeKind::PipeTable => {
                 *table = true;
             }
             _ => {}
         }
-        let mut cursor = node.cursor();
-        if cursor.goto_first_child() {
-            loop {
-                walk(&cursor.node(), code, fm, html, math, table, mdx);
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+        for child in node.children() {
+            walk(&child, code, fm, html, math, table);
         }
     }
 
@@ -231,9 +212,10 @@ fn blocks_stripped_kinds(root: &Node<'_>) -> Vec<String> {
         &mut has_html,
         &mut has_math,
         &mut has_table,
-        &mut has_mdx,
     );
 
+    // Note: pulldown-cmark never emits MDX nodes, so no "mdx" entry is
+    // produced (the tree-sitter grammar had MDX kinds; this backend does not).
     let mut out = Vec::new();
     if has_code {
         out.push("code".to_string());
@@ -243,9 +225,6 @@ fn blocks_stripped_kinds(root: &Node<'_>) -> Vec<String> {
     }
     if has_html {
         out.push("html".to_string());
-    }
-    if has_mdx {
-        out.push("mdx".to_string());
     }
     if has_math {
         out.push("math".to_string());

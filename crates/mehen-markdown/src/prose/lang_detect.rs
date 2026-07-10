@@ -27,7 +27,7 @@
 use serde::Serialize;
 use unicode_script::{Script, UnicodeScript};
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::syntax_tree::Node;
 
 /// Sentinel character inserted where an `InlineCode` span was stripped.
@@ -73,7 +73,7 @@ impl Language {
 /// One prose-eligible block extracted from the tree.
 #[derive(Debug, Clone)]
 pub(crate) struct ProseBlock<'a> {
-    pub(crate) kind: Markdown,
+    pub(crate) kind: NodeKind,
     pub start_line: u64,
     pub end_line: u64,
     /// Stripped prose text: inline code / URLs / alt-text destination already
@@ -86,7 +86,7 @@ pub(crate) struct ProseBlock<'a> {
 /// metric dispatch.
 #[derive(Debug, Clone)]
 pub(crate) struct DetectedBlock {
-    pub(crate) kind: Markdown,
+    pub(crate) kind: NodeKind,
     pub start_line: u64,
     pub end_line: u64,
     pub text: String,
@@ -102,52 +102,32 @@ pub(crate) fn collect_prose_blocks<'a>(root: &Node<'_>, source: &'a [u8]) -> Vec
 }
 
 fn walk<'a>(node: &Node<'_>, source: &'a [u8], blocks: &mut Vec<ProseBlock<'a>>) {
-    let kind: Markdown = node.kind_id().into();
+    let kind = node.kind();
 
     // Prose-carrying blocks we record. For list items we recurse so that
     // nested paragraphs / blockquotes / callouts are recorded individually
     // — matching §30.3's per-block tagging requirement.
-    let is_prose_block = matches!(
-        kind,
-        Markdown::Paragraph
-            | Markdown::AtxHeading
-            | Markdown::AtxHeading2
-            | Markdown::AtxHeading3
-            | Markdown::AtxHeading4
-            | Markdown::AtxHeading5
-            | Markdown::AtxHeading6
-            | Markdown::SetextHeading
-            | Markdown::SetextHeading2
-            | Markdown::BlockQuote
-            | Markdown::PlainBlockQuote
-            | Markdown::Callout
-            | Markdown::ListItemContent
-            | Markdown::TaskListItemContent
-    );
+    let is_prose_block = kind.is_heading()
+        || matches!(
+            kind,
+            NodeKind::Paragraph
+                | NodeKind::BlockQuote
+                | NodeKind::Callout
+                | NodeKind::ListItemContent { .. }
+        );
 
     // Stop containers: never descend, never emit.
     let is_stop = matches!(
         kind,
-        Markdown::FencedCodeBlock
-            | Markdown::IndentedCodeBlock
-            | Markdown::HtmlBlock
-            | Markdown::HtmlBlock1
-            | Markdown::HtmlBlock3
-            | Markdown::HtmlBlock4
-            | Markdown::HtmlBlock5
-            | Markdown::HtmlBlock6
-            | Markdown::HtmlBlock7
-            | Markdown::HtmlCommentBlock
-            | Markdown::MdxJsxBlock
-            | Markdown::MinusMetadata
-            | Markdown::PlusMetadata
-            | Markdown::MathBlock
-            | Markdown::PipeTable
-            | Markdown::LinkReferenceDefinition
-            | Markdown::ThematicBreak
-            | Markdown::ThematicBreak2
-            | Markdown::DirectiveBlock
-            | Markdown::ImageBlock
+        NodeKind::FencedCodeBlock
+            | NodeKind::IndentedCodeBlock
+            | NodeKind::HtmlBlock
+            | NodeKind::MinusMetadata
+            | NodeKind::PlusMetadata
+            | NodeKind::MathBlock
+            | NodeKind::PipeTable
+            | NodeKind::LinkReferenceDefinition
+            | NodeKind::ThematicBreak
     );
 
     if is_stop {
@@ -161,27 +141,16 @@ fn walk<'a>(node: &Node<'_>, source: &'a [u8], blocks: &mut Vec<ProseBlock<'a>>)
         if end_col == 0 && end_line > start_line {
             end_line -= 1;
         }
-        let is_container = matches!(
-            kind,
-            Markdown::BlockQuote | Markdown::PlainBlockQuote | Markdown::Callout
-        ) || (matches!(
-            kind,
-            Markdown::ListItemContent | Markdown::TaskListItemContent
-        ) && has_nested_prose_block(node));
+        let is_container = matches!(kind, NodeKind::BlockQuote | NodeKind::Callout)
+            || (matches!(kind, NodeKind::ListItemContent { .. }) && has_nested_prose_block(node));
 
         if is_container {
             // Containers (blockquote / callout) don't emit their own slice:
             // recurse into children so nested paragraphs are counted exactly
             // once. Emitting both the container text AND descending into
             // children would double-count every word / sentence inside.
-            let mut cursor = node.cursor();
-            if cursor.goto_first_child() {
-                loop {
-                    walk(&cursor.node(), source, blocks);
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
-                }
+            for child in node.children() {
+                walk(&child, source, blocks);
             }
             return;
         }
@@ -203,47 +172,24 @@ fn walk<'a>(node: &Node<'_>, source: &'a [u8], blocks: &mut Vec<ProseBlock<'a>>)
     }
 
     // Recurse into everything else (sections, lists, list items, documents).
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            walk(&cursor.node(), source, blocks);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        walk(&child, source, blocks);
     }
 }
 
 fn has_nested_prose_block(node: &Node<'_>) -> bool {
-    let mut cursor = node.cursor();
-    if !cursor.goto_first_child() {
-        return false;
-    }
-    loop {
-        let child = cursor.node();
-        let kind: Markdown = child.kind_id().into();
-        if matches!(
-            kind,
-            Markdown::Paragraph
-                | Markdown::AtxHeading
-                | Markdown::AtxHeading2
-                | Markdown::AtxHeading3
-                | Markdown::AtxHeading4
-                | Markdown::AtxHeading5
-                | Markdown::AtxHeading6
-                | Markdown::SetextHeading
-                | Markdown::SetextHeading2
-                | Markdown::BlockQuote
-                | Markdown::PlainBlockQuote
-                | Markdown::Callout
-        ) {
+    for child in node.children() {
+        let kind = child.kind();
+        if kind.is_heading()
+            || matches!(
+                kind,
+                NodeKind::Paragraph | NodeKind::BlockQuote | NodeKind::Callout
+            )
+        {
             return true;
         }
         if has_nested_prose_block(&child) {
             return true;
-        }
-        if !cursor.goto_next_sibling() {
-            break;
         }
     }
     false
@@ -337,95 +283,55 @@ enum SkipKind {
 /// Walks the subtree at `node` and appends (start_byte, end_byte, kind)
 /// entries for every descendant whose kind should be stripped from prose.
 fn collect_skip_ranges(node: &Node<'_>, out: &mut Vec<(usize, usize, SkipKind)>) {
-    let kind: Markdown = node.kind_id().into();
+    let kind = node.kind();
     if is_skip_kind(&kind) {
         let sk = match kind {
-            Markdown::InlineCode | Markdown::InlineCodeContent | Markdown::InlineCodeContent2 => {
-                SkipKind::InlineCode
-            }
+            NodeKind::InlineCode | NodeKind::InlineCodeContent => SkipKind::InlineCode,
             _ => SkipKind::Other,
         };
         out.push((node.start_byte(), node.end_byte(), sk));
         return;
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            collect_skip_ranges(&cursor.node(), out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        collect_skip_ranges(&child, out);
     }
 }
 
-fn is_skip_kind(kind: &Markdown) -> bool {
+fn is_skip_kind(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        Markdown::InlineCode
-            | Markdown::CodeFenceContent
-            | Markdown::InlineCodeContent
-            | Markdown::InlineCodeContent2
-            | Markdown::MathInline
-            | Markdown::MathInlineContent
-            | Markdown::MathBlock
-            | Markdown::MathBlockContent
-            | Markdown::HtmlInline
-            | Markdown::HtmlBlock
-            | Markdown::HtmlBlock1
-            | Markdown::HtmlBlock3
-            | Markdown::HtmlBlock4
-            | Markdown::HtmlBlock5
-            | Markdown::HtmlBlock6
-            | Markdown::HtmlBlock7
-            | Markdown::HtmlCommentBlock
-            | Markdown::HtmlOpenTag
-            | Markdown::HtmlCloseTag
-            | Markdown::HtmlComment
-            | Markdown::HtmlCdata
-            | Markdown::HtmlDeclaration
-            | Markdown::HtmlProcessingInstruction
-            | Markdown::MdxJsxBlock
-            | Markdown::MdxJsxInline
-            | Markdown::MdxJsxOpenTag
-            | Markdown::MdxJsxOpenTag2
-            | Markdown::MdxJsxCloseTag
-            | Markdown::MdxJsxCloseTag2
-            | Markdown::MdxJsxExpression
-            | Markdown::Autolink
-            | Markdown::Uri
-            | Markdown::Email
-            | Markdown::LinkDestination
-            | Markdown::LinkDestinationParenthesis
-            | Markdown::LinkTitle
-            | Markdown::MinusMetadata
-            | Markdown::PlusMetadata
-            | Markdown::PipeTableDelimiterRow
-            | Markdown::PipeTableDelimiterCell
-            | Markdown::AtxH1Marker
-            | Markdown::AtxH2Marker
-            | Markdown::AtxH3Marker
-            | Markdown::AtxH4Marker
-            | Markdown::AtxH5Marker
-            | Markdown::AtxH6Marker
-            | Markdown::SetextH1Underline
-            | Markdown::SetextH2Underline
-            | Markdown::BlockQuoteMarker
-            | Markdown::CalloutMarkerOpen
-            | Markdown::CalloutMarkerClose
-            | Markdown::CalloutType
-            | Markdown::ListMarkerMinus
-            | Markdown::ListMarkerPlus
-            | Markdown::ListMarkerStar
-            | Markdown::ListMarkerDot
-            | Markdown::ListMarkerParenthesis
-            | Markdown::ListMarkerMinus2
-            | Markdown::ListMarkerPlus2
-            | Markdown::ListMarkerStar2
-            | Markdown::ListMarkerParenthesis2
-            | Markdown::ListMarkerDot2
-            | Markdown::TaskListMarkerChecked
-            | Markdown::TaskListMarkerUnchecked
+        NodeKind::InlineCode
+            | NodeKind::CodeFenceContent
+            | NodeKind::InlineCodeContent
+            | NodeKind::MathInline
+            | NodeKind::MathInlineContent
+            | NodeKind::MathBlock
+            | NodeKind::MathBlockContent
+            | NodeKind::HtmlInline
+            | NodeKind::HtmlBlock
+            | NodeKind::HtmlOpenTag
+            | NodeKind::HtmlCloseTag
+            | NodeKind::HtmlComment
+            | NodeKind::HtmlCdata
+            | NodeKind::HtmlDeclaration
+            | NodeKind::HtmlProcessingInstruction
+            | NodeKind::Autolink
+            | NodeKind::Uri
+            | NodeKind::Email
+            | NodeKind::LinkDestination
+            | NodeKind::LinkTitle
+            | NodeKind::MinusMetadata
+            | NodeKind::PlusMetadata
+            | NodeKind::PipeTableDelimiterRow
+            | NodeKind::PipeTableDelimiterCell
+            | NodeKind::HeadingMarker { .. }
+            | NodeKind::BlockQuoteMarker
+            | NodeKind::CalloutMarkerOpen
+            | NodeKind::CalloutMarkerClose
+            | NodeKind::CalloutType
+            | NodeKind::ListMarker
+            | NodeKind::TaskListMarkerChecked
+            | NodeKind::TaskListMarkerUnchecked
     )
 }
 
@@ -636,18 +542,8 @@ fn inherit_short_blocks_from_headings(blocks: &mut [DetectedBlock]) {
     }
 }
 
-fn is_heading_kind(kind: &Markdown) -> bool {
-    matches!(
-        kind,
-        Markdown::AtxHeading
-            | Markdown::AtxHeading2
-            | Markdown::AtxHeading3
-            | Markdown::AtxHeading4
-            | Markdown::AtxHeading5
-            | Markdown::AtxHeading6
-            | Markdown::SetextHeading
-            | Markdown::SetextHeading2
-    )
+fn is_heading_kind(kind: &NodeKind) -> bool {
+    kind.is_heading()
 }
 
 /// Picks the document-level dominant language by simple majority over
@@ -776,16 +672,11 @@ mod tests {
         let blocks = parse_blocks(src);
         let paragraph_blocks: Vec<_> = blocks
             .iter()
-            .filter(|b| matches!(b.kind, Markdown::Paragraph))
+            .filter(|b| matches!(b.kind, NodeKind::Paragraph))
             .collect();
         let container_blocks: Vec<_> = blocks
             .iter()
-            .filter(|b| {
-                matches!(
-                    b.kind,
-                    Markdown::BlockQuote | Markdown::PlainBlockQuote | Markdown::Callout
-                )
-            })
+            .filter(|b| matches!(b.kind, NodeKind::BlockQuote | NodeKind::Callout))
             .collect();
         assert_eq!(
             paragraph_blocks.len(),

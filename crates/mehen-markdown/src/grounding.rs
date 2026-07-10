@@ -25,7 +25,7 @@
 
 use std::path::Path;
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::mathops::{clamp01, sat};
 use crate::syntax_tree::Node;
 use crate::tree_helpers::{ProseContext, is_non_prose_container, node_text, opens_prose_context};
@@ -236,9 +236,9 @@ fn visit_token_counts(
     out: &mut GroundingTokenCounts,
     inside_prose: bool,
 ) {
-    use Markdown::*;
+    use NodeKind::*;
 
-    let kind: Markdown = node.kind_id().into();
+    let kind = node.kind();
 
     // Inline code is machine-readable but still a grounding signal inside
     // prose, so count the node itself and skip its children.
@@ -279,14 +279,8 @@ fn visit_token_counts(
         }
     }
 
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            visit_token_counts(&cursor.node(), source, base, out, next_inside);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        visit_token_counts(&child, source, base, out, next_inside);
     }
 }
 
@@ -299,8 +293,8 @@ fn collect_package_api_config_tokens(root: &Node<'_>, source: &str, _file_path: 
 }
 
 fn visit_package_api_config(node: &Node<'_>, source: &str, total: &mut u64, inside_prose: bool) {
-    use Markdown::*;
-    let kind: Markdown = node.kind_id().into();
+    use NodeKind::*;
+    let kind = node.kind();
     if is_non_prose_container(kind) {
         return;
     }
@@ -314,14 +308,8 @@ fn visit_package_api_config(node: &Node<'_>, source: &str, total: &mut u64, insi
         }
     }
 
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            visit_package_api_config(&cursor.node(), source, total, next_inside);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        visit_package_api_config(&child, source, total, next_inside);
     }
 }
 
@@ -493,8 +481,8 @@ fn visit_per_section_resolved_paths(
     sections: &[Section],
     inside_prose: bool,
 ) {
-    use Markdown::*;
-    let kind: Markdown = node.kind_id().into();
+    use NodeKind::*;
+    let kind = node.kind();
     if is_non_prose_container(kind) {
         return;
     }
@@ -508,21 +496,8 @@ fn visit_per_section_resolved_paths(
             }
         }
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            visit_per_section_resolved_paths(
-                &cursor.node(),
-                source,
-                base,
-                counts,
-                sections,
-                next_inside,
-            );
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        visit_per_section_resolved_paths(&child, source, base, counts, sections, next_inside);
     }
 }
 

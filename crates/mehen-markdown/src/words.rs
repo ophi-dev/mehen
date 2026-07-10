@@ -15,7 +15,7 @@
 //! Alt-text inside an image or link *label* IS prose per §37.5 item 3, so
 //! traversal into `link_label` is allowed — only the destination is skipped.
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::syntax_tree::Node;
 use crate::tree_helpers::{ProseContext, is_non_prose_container, opens_prose_context};
 
@@ -31,7 +31,7 @@ pub(crate) fn count_words(root: &Node<'_>) -> u64 {
 /// `inside_prose` tracks whether the current walk is below a prose-shaped
 /// ancestor. Technical containers flip the flag off for their subtree.
 fn visit(node: &Node<'_>, total: &mut u64, inside_prose: bool) {
-    let kind: Markdown = node.kind_id().into();
+    let kind = node.kind();
     if is_non_prose_container(kind) {
         return;
     }
@@ -44,26 +44,17 @@ fn visit(node: &Node<'_>, total: &mut u64, inside_prose: bool) {
     }
 
     // Recurse.
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            visit(&cursor.node(), total, next_inside);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        visit(&child, total, next_inside);
     }
 }
 
-fn is_word_token(kind: Markdown) -> bool {
+fn is_word_token(kind: NodeKind) -> bool {
     matches!(
         kind,
-        Markdown::WordToken
-            | Markdown::WordToken1
-            | Markdown::WordToken2
-            | Markdown::WordToken3
-            | Markdown::NumericToken
-            | Markdown::IdentifierLikeToken
-            | Markdown::PathLikeToken
+        NodeKind::WordToken
+            | NodeKind::NumericToken
+            | NodeKind::IdentifierLikeToken
+            | NodeKind::PathLikeToken
     )
 }

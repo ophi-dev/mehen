@@ -21,7 +21,9 @@
 use std::collections::BTreeMap;
 
 use crate::document::{MarkdownDocument, is_diagram_language};
-use crate::grammar::Markdown;
+// `crate::kind::NodeKind` is aliased to `MdKind` to avoid clashing with the
+// local graph-node `NodeKind` enum defined below.
+use crate::kind::NodeKind as MdKind;
 use crate::syntax_tree::Node;
 use crate::tree_helpers::{count_table_cells, has_scheme};
 
@@ -184,12 +186,10 @@ impl<'doc> GraphBuilder<'doc> {
     }
 
     fn walk_recurse(&mut self, node: &Node<'_>, source: &str) {
-        use Markdown::*;
-
-        let kind: Markdown = node.kind_id().into();
+        let kind = node.kind();
 
         match kind {
-            Section | Section1 | Section2 | Section3 | Section4 | Section5 | Section6 => {
+            MdKind::Section { .. } => {
                 // §3.4 defines the derived section tree as "one section per
                 // heading". Tree-sitter emits headingless wrapper sections
                 // for pre-heading / blank content — those must not inflate
@@ -228,7 +228,7 @@ impl<'doc> GraphBuilder<'doc> {
                 self.section_stack.pop();
                 return;
             }
-            FencedCodeBlock | IndentedCodeBlock => {
+            MdKind::FencedCodeBlock | MdKind::IndentedCodeBlock => {
                 if let Some(block) = self.document.code_block_by_start_row(node.start_row()) {
                     let loc = block.content_line_count();
                     let is_diagram = block.language.as_deref().is_some_and(is_diagram_language);
@@ -250,7 +250,7 @@ impl<'doc> GraphBuilder<'doc> {
                 }
                 return;
             }
-            PipeTable => {
+            MdKind::PipeTable => {
                 let cells = count_table_cells(node);
                 if cells >= LARGE_TABLE_CELLS {
                     let id = self.large_tables;
@@ -262,7 +262,7 @@ impl<'doc> GraphBuilder<'doc> {
                 }
                 return;
             }
-            FootnoteDefinition => {
+            MdKind::FootnoteDefinition => {
                 let label = footnote_def_label(node, source).unwrap_or_default();
                 let next = self.footnotes.len() as u32;
                 let id = *self.footnotes.entry(label).or_insert(next);
@@ -294,7 +294,7 @@ impl<'doc> GraphBuilder<'doc> {
                 self.recurse_children(node, source);
                 return;
             }
-            LinkReferenceDefinition => {
+            MdKind::LinkReferenceDefinition => {
                 // Reference definitions never contribute a graph node of
                 // their own. Reference-style links resolve through
                 // `MarkdownDocument` facts in the `Link | Image` branch, so
@@ -302,7 +302,7 @@ impl<'doc> GraphBuilder<'doc> {
                 // as the equivalent inline `[text](...)`.
                 return;
             }
-            FootnoteReference => {
+            MdKind::FootnoteReference => {
                 // Edge from enclosing section to the footnote node.
                 let label = footnote_ref_label(node, source).unwrap_or_default();
                 let next = self.footnotes.len() as u32;
@@ -324,7 +324,7 @@ impl<'doc> GraphBuilder<'doc> {
                 // footnote reference has no relevant children.
                 return;
             }
-            Link | Image => {
+            MdKind::Link | MdKind::Image => {
                 // Pulldown resolves inline and reference-style destinations
                 // before these compact syntax nodes are walked.
                 if let Some(dest) = self
@@ -335,7 +335,7 @@ impl<'doc> GraphBuilder<'doc> {
                 }
                 return;
             }
-            Autolink => {
+            MdKind::Autolink => {
                 // Autolinks (`<https://example.com>`) are semantically
                 // equivalent to inline external links — they should emit
                 // the same navigation edge (Codex P2 on PR #83).
@@ -351,15 +351,8 @@ impl<'doc> GraphBuilder<'doc> {
     }
 
     fn recurse_children(&mut self, node: &Node<'_>, source: &str) {
-        let mut cursor = node.cursor();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                self.walk_recurse(&child, source);
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+        for child in node.children() {
+            self.walk_recurse(&child, source);
         }
     }
 
@@ -627,10 +620,8 @@ fn classify_link(dest: &str) -> LinkClass {
 }
 
 fn extract_domain(dest: &str) -> Option<String> {
-    let rest = match dest.find("://") {
-        Some(pos) => &dest[pos + 3..],
-        None => return None,
-    };
+    let pos = dest.find("://")?;
+    let rest = &dest[pos + 3..];
     let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host = &rest[..host_end];
     if host.is_empty() {
@@ -688,46 +679,16 @@ fn extract_heading_slug(section: &Node<'_>, source: &str) -> Option<String> {
 }
 
 fn find_heading_text_node<'a>(section: &Node<'a>) -> Option<Node<'a>> {
-    use Markdown::*;
-    let mut cursor = section.cursor();
-    if !cursor.goto_first_child() {
-        return None;
-    }
-    loop {
-        let child = cursor.node();
-        let kind: Markdown = child.kind_id().into();
-        if matches!(
-            kind,
-            AtxHeading
-                | AtxHeading2
-                | AtxHeading3
-                | AtxHeading4
-                | AtxHeading5
-                | AtxHeading6
-                | SetextHeading
-                | SetextHeading2
-        ) {
+    for child in section.children() {
+        if child.kind().is_heading() {
             // The visible text lives in the heading-content child; fall back
             // to the heading node itself if the grammar surface changes.
-            let mut inner = child.cursor();
-            if inner.goto_first_child() {
-                loop {
-                    let n = inner.node();
-                    if matches!(
-                        n.kind_id().into(),
-                        Markdown::AtxHeadingContent | Markdown::Inline
-                    ) {
-                        return Some(n);
-                    }
-                    if !inner.goto_next_sibling() {
-                        break;
-                    }
+            for n in child.children() {
+                if matches!(n.kind(), MdKind::HeadingContent) {
+                    return Some(n);
                 }
             }
             return Some(child);
-        }
-        if !cursor.goto_next_sibling() {
-            break;
         }
     }
     None
@@ -774,23 +735,16 @@ fn resolve_anchor_to_section(dest: &str, section_slugs: &BTreeMap<String, u32>) 
 fn autolink_destination(node: &Node<'_>, source: &str) -> Option<String> {
     // Look for the `Uri` (or fallback to the whole node text) and strip
     // the surrounding angle brackets.
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if matches!(child.kind_id().into(), Markdown::Uri) {
-                let bytes = source.as_bytes();
-                let start = child.start_byte();
-                let end = child.end_byte();
-                if end <= bytes.len() && start < end {
-                    let text = std::str::from_utf8(&bytes[start..end]).ok()?.trim();
-                    if !text.is_empty() {
-                        return Some(text.to_string());
-                    }
+    for child in node.children() {
+        if matches!(child.kind(), MdKind::Uri) {
+            let bytes = source.as_bytes();
+            let start = child.start_byte();
+            let end = child.end_byte();
+            if end <= bytes.len() && start < end {
+                let text = std::str::from_utf8(&bytes[start..end]).ok()?.trim();
+                if !text.is_empty() {
+                    return Some(text.to_string());
                 }
-            }
-            if !cursor.goto_next_sibling() {
-                break;
             }
         }
     }
@@ -809,19 +763,18 @@ fn autolink_destination(node: &Node<'_>, source: &str) -> Option<String> {
 }
 
 fn footnote_def_label(node: &Node<'_>, source: &str) -> Option<String> {
-    label_text(node, source, Markdown::FootnoteLabel)
+    label_text(node, source, MdKind::FootnoteLabel)
 }
 
 fn footnote_ref_label(node: &Node<'_>, source: &str) -> Option<String> {
-    label_text(node, source, Markdown::FootnoteReferenceLabel)
-        .or_else(|| label_text(node, source, Markdown::FootnoteLabel))
+    label_text(node, source, MdKind::FootnoteReferenceLabel)
+        .or_else(|| label_text(node, source, MdKind::FootnoteLabel))
 }
 
-fn label_text(node: &Node<'_>, source: &str, target: Markdown) -> Option<String> {
-    let target_id = target as u16;
+fn label_text(node: &Node<'_>, source: &str, target: MdKind) -> Option<String> {
     let mut stack = vec![*node];
     while let Some(n) = stack.pop() {
-        if n.kind_id() == target_id {
+        if n.kind() == target {
             let bytes = source.as_bytes();
             let start = n.start_byte();
             let end = n.end_byte();
@@ -831,15 +784,7 @@ fn label_text(node: &Node<'_>, source: &str, target: Markdown) -> Option<String>
                     .map(|s| s.trim().to_string());
             }
         }
-        let mut cursor = n.cursor();
-        if cursor.goto_first_child() {
-            loop {
-                stack.push(cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
+        stack.extend(n.children());
     }
     None
 }

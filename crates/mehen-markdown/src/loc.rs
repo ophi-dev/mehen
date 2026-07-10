@@ -10,7 +10,7 @@
 //! `CLOC + TLOC + MLOC + other_artifact`. Callers read the final counts via
 //! [`LineClasses::loc_family`].
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::syntax_tree::Node;
 use crate::types::{LocFamily, LocRatios};
 
@@ -54,15 +54,7 @@ impl LineClasses {
         let mut stack = vec![*root];
         while let Some(node) = stack.pop() {
             classify_node(&node, &mut classes);
-            let mut cursor = node.cursor();
-            if cursor.goto_first_child() {
-                loop {
-                    stack.push(cursor.node());
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
-                }
-            }
+            stack.extend(node.children());
         }
 
         Self { classes }
@@ -120,65 +112,35 @@ impl LineClass {
 }
 
 fn classify_node(node: &Node<'_>, classes: &mut [LineClass]) {
-    let class = match node.kind_id().into() {
+    let class = match node.kind() {
         // Code — both fenced and indented blocks. Fence markers are covered
         // because the `fenced_code_block` span includes them.
-        Markdown::FencedCodeBlock | Markdown::IndentedCodeBlock => LineClass::Code,
+        NodeKind::FencedCodeBlock | NodeKind::IndentedCodeBlock => LineClass::Code,
 
         // Tables.
-        Markdown::PipeTable => LineClass::Table,
+        NodeKind::PipeTable => LineClass::Table,
 
         // Math blocks (`$$…$$`).
-        Markdown::MathBlock => LineClass::Math,
+        NodeKind::MathBlock => LineClass::Math,
 
-        // Raw HTML / MDX / directive / image-block / footnote / link
-        // reference / thematic break / front-matter.
-        Markdown::HtmlBlock
-        | Markdown::HtmlBlock1
-        | Markdown::HtmlBlock3
-        | Markdown::HtmlBlock4
-        | Markdown::HtmlBlock5
-        | Markdown::HtmlBlock6
-        | Markdown::HtmlBlock7
-        | Markdown::HtmlCommentBlock
-        | Markdown::MdxJsxBlock
-        | Markdown::DirectiveBlock
-        | Markdown::ImageBlock
-        | Markdown::FootnoteDefinition
-        | Markdown::LinkReferenceDefinition
-        | Markdown::ThematicBreak
-        | Markdown::ThematicBreak2
-        | Markdown::MinusMetadata
-        | Markdown::PlusMetadata => LineClass::OtherArtifact,
+        // Raw HTML / footnote / link reference / thematic break / front-matter.
+        NodeKind::HtmlBlock
+        | NodeKind::FootnoteDefinition
+        | NodeKind::LinkReferenceDefinition
+        | NodeKind::ThematicBreak
+        | NodeKind::MinusMetadata
+        | NodeKind::PlusMetadata => LineClass::OtherArtifact,
 
         // Prose-shaped blocks. Children like inline code / math inline do
         // not relabel their line — they appear inside a paragraph whose
         // line bucket is prose, consistent with §5. List items are prose
         // too: tight lists omit paragraph wrappers, so without this the
         // list lines would fall through to Blank and inflate BLOC.
-        Markdown::Paragraph
-        | Markdown::AtxHeading
-        | Markdown::AtxHeading2
-        | Markdown::AtxHeading3
-        | Markdown::AtxHeading4
-        | Markdown::AtxHeading5
-        | Markdown::AtxHeading6
-        | Markdown::SetextHeading
-        | Markdown::SetextHeading2
-        | Markdown::BlockQuote
-        | Markdown::PlainBlockQuote
-        | Markdown::Callout
-        | Markdown::CalloutHeaderParagraph
-        | Markdown::ListItem
-        | Markdown::ListItem2
-        | Markdown::ListItem3
-        | Markdown::ListItem4
-        | Markdown::ListItem5
-        | Markdown::TaskListItem
-        | Markdown::TaskListItem2
-        | Markdown::TaskListItem3
-        | Markdown::TaskListItem4
-        | Markdown::TaskListItem5 => LineClass::Prose,
+        NodeKind::Paragraph
+        | NodeKind::Heading { .. }
+        | NodeKind::BlockQuote
+        | NodeKind::Callout
+        | NodeKind::ListItem { .. } => LineClass::Prose,
 
         _ => return,
     };

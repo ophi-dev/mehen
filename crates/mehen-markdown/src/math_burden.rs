@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::nearby::{BlockSpan, has_prose_within};
 use crate::syntax_tree::Node;
 
@@ -48,19 +48,13 @@ pub(crate) fn analyze_math_blocks(
 }
 
 fn walk(node: &Node<'_>, source: &str, blocks: &[BlockSpan], out: &mut Vec<MathBlock>) {
-    let kind: Markdown = node.kind_id().into();
-    if matches!(kind, Markdown::MathBlock) {
+    let kind = node.kind();
+    if matches!(kind, NodeKind::MathBlock) {
         out.push(build(node, source, blocks));
         return;
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            walk(&cursor.node(), source, blocks, out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        walk(&child, source, blocks, out);
     }
 }
 

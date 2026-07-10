@@ -298,20 +298,9 @@ fn collect_html_blocks(root: &Node<'_>) -> Vec<HtmlBlockRecord> {
 }
 
 fn walk_html(node: &Node<'_>, out: &mut Vec<HtmlBlockRecord>) {
-    use crate::grammar::Markdown::*;
-    let kind: crate::grammar::Markdown = node.kind_id().into();
-    if matches!(
-        kind,
-        HtmlBlock
-            | HtmlBlock1
-            | HtmlBlock3
-            | HtmlBlock4
-            | HtmlBlock5
-            | HtmlBlock6
-            | HtmlBlock7
-            | HtmlCommentBlock
-            | MdxJsxBlock
-    ) {
+    use crate::kind::NodeKind::*;
+    let kind = node.kind();
+    if matches!(kind, HtmlBlock) {
         let start_line = (node.start_row() as u64) + 1;
         let (end_row, end_col) = node.end_position();
         let mut end = end_row;
@@ -325,14 +314,8 @@ fn walk_html(node: &Node<'_>, out: &mut Vec<HtmlBlockRecord>) {
         });
         return;
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            walk_html(&cursor.node(), out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        walk_html(&child, out);
     }
 }
 

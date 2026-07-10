@@ -28,8 +28,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::grammar::Markdown;
 use crate::grounding::GroundingOutputs;
+use crate::kind::NodeKind;
 use crate::mathops::{clamp01, sat};
 use crate::section_balance::SectionBalance;
 use crate::syntax_tree::Node;
@@ -340,8 +340,8 @@ fn collect_paragraphs(root: &Node<'_>, source: &str) -> Vec<Paragraph> {
 }
 
 fn walk_paragraphs(node: &Node<'_>, source: &str, out: &mut Vec<Paragraph>) {
-    let kind: Markdown = node.kind_id().into();
-    if matches!(kind, Markdown::Paragraph) {
+    let kind = node.kind();
+    if matches!(kind, NodeKind::Paragraph) {
         let start = node.start_byte();
         let end = node.end_byte();
         let raw = source.as_bytes().get(start..end).unwrap_or(&[]);
@@ -354,14 +354,8 @@ fn walk_paragraphs(node: &Node<'_>, source: &str, out: &mut Vec<Paragraph>) {
         // paragraph text is what we want for shingle matching.
         return;
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            walk_paragraphs(&cursor.node(), source, out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        walk_paragraphs(&child, source, out);
     }
 }
 
@@ -470,31 +464,22 @@ fn count_placeholder_words(root: &Node<'_>, source: &str) -> u64 {
 }
 
 fn walk_placeholder_words(node: &Node<'_>, source: &str, total: &mut u64, inside_prose: bool) {
-    use Markdown::*;
-    let kind: Markdown = node.kind_id().into();
+    use NodeKind::*;
+    let kind = node.kind();
     if is_non_prose_container(kind) {
         return;
     }
     let next_inside = inside_prose || opens_prose_context(kind, ProseContext::PLACEHOLDER_TEXT);
 
     if next_inside
-        && matches!(
-            kind,
-            WordToken | WordToken1 | WordToken2 | WordToken3 | IdentifierLikeToken
-        )
+        && matches!(kind, WordToken | IdentifierLikeToken)
         && is_placeholder(node_text(node, source).trim())
     {
         *total += 1;
     }
 
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            walk_placeholder_words(&cursor.node(), source, total, next_inside);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        walk_placeholder_words(&child, source, total, next_inside);
     }
 }
 

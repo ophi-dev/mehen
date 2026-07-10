@@ -22,7 +22,7 @@
 
 use std::collections::HashSet;
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::loc::LineClass;
 use crate::loc::LineClasses;
 use crate::syntax_tree::Node;
@@ -71,25 +71,18 @@ fn walk(
     math_tokens: &mut u64,
     raw_html_lines: &mut HashSet<usize>,
 ) {
-    use Markdown::*;
+    use NodeKind::*;
 
-    let kind: Markdown = node.kind_id().into();
+    let kind = node.kind();
 
     match kind {
         // Count body-row cells per §6. The delimiter row is excluded because
         // it is pure structure (---, :---:); the header row is included
         // because its cells carry content.
         PipeTableHeader | PipeTableRow => {
-            let mut cursor = node.cursor();
-            if cursor.goto_first_child() {
-                loop {
-                    let child = cursor.node();
-                    if matches!(child.kind_id().into(), PipeTableCell) {
-                        *table_cells += 1;
-                    }
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
+            for child in node.children() {
+                if matches!(child.kind(), PipeTableCell) {
+                    *table_cells += 1;
                 }
             }
             // Fall through to recurse for any nested content (e.g. inline
@@ -104,8 +97,7 @@ fn walk(
             return;
         }
         // Raw HTML / MDX lines.
-        HtmlBlock | HtmlBlock1 | HtmlBlock3 | HtmlBlock4 | HtmlBlock5 | HtmlBlock6 | HtmlBlock7
-        | HtmlCommentBlock | MdxJsxBlock => {
+        HtmlBlock => {
             let start = node.start_row();
             let (end_row, end_col) = node.end_position();
             let mut end = end_row;
@@ -120,39 +112,24 @@ fn walk(
         _ => {}
     }
 
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            walk(&cursor.node(), table_cells, math_tokens, raw_html_lines);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        walk(&child, table_cells, math_tokens, raw_html_lines);
     }
 }
 
 fn count_math_tokens(node: &Node<'_>, total: &mut u64) {
-    let kind: Markdown = node.kind_id().into();
+    let kind = node.kind();
     if matches!(
         kind,
-        Markdown::WordToken
-            | Markdown::WordToken1
-            | Markdown::WordToken2
-            | Markdown::WordToken3
-            | Markdown::NumericToken
-            | Markdown::IdentifierLikeToken
-            | Markdown::PathLikeToken
+        NodeKind::WordToken
+            | NodeKind::NumericToken
+            | NodeKind::IdentifierLikeToken
+            | NodeKind::PathLikeToken
     ) {
         *total += 1;
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            count_math_tokens(&cursor.node(), total);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        count_math_tokens(&child, total);
     }
 }
 

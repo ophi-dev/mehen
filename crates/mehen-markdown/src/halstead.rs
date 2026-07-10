@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 
 use crate::document::MarkdownDocument;
-use crate::grammar::Markdown;
+use crate::kind::{HeadingStyle, NodeKind};
 use crate::syntax_tree::Node;
 use crate::types::Halstead;
 
@@ -58,14 +58,7 @@ enum OperatorKind {
     BlockquoteMarker,
     CalloutOp,
     MathDelimiter,
-    MathInlineDelimiter,
-    EmphasisDelim,
-    StrongDelim,
-    StrikethroughDelim,
-    FootnoteMarker,
     RawHtmlOp,
-    MdxJsxOp,
-    DirectiveOp,
     /// Terminator (`. ? ! 。 …`).
     Terminator,
     /// Separator (`, ; :`).
@@ -74,6 +67,25 @@ enum OperatorKind {
     Bracket,
     /// Operator-like (`= + - * / | & :: -> =>`).
     OperatorLike,
+}
+
+/// Maps a heading marker's level and style to its operator class.
+///
+/// Each ATX level (`#`..`######`) is a distinct operator, as is each setext
+/// underline level; this mirrors the pre-refactor per-marker operator table.
+/// Setext is only defined for levels 1 and 2 (see `resolve_heading`), so
+/// higher setext levels fall back to the ATX class for that level.
+fn heading_marker_op(level: u8, style: HeadingStyle) -> OperatorKind {
+    match (style, level) {
+        (HeadingStyle::Setext, 1) => OperatorKind::SetextMarkerH1,
+        (HeadingStyle::Setext, 2) => OperatorKind::SetextMarkerH2,
+        (_, 1) => OperatorKind::HeadingMarkerH1,
+        (_, 2) => OperatorKind::HeadingMarkerH2,
+        (_, 3) => OperatorKind::HeadingMarkerH3,
+        (_, 4) => OperatorKind::HeadingMarkerH4,
+        (_, 5) => OperatorKind::HeadingMarkerH5,
+        _ => OperatorKind::HeadingMarkerH6,
+    }
 }
 
 /// Core public entry point. Walks the AST and emits the §9.3 derived values.
@@ -147,48 +159,30 @@ impl Ctx<'_, '_, '_> {
     }
 
     fn walk(&mut self, node: &Node<'_>) {
-        use Markdown::*;
+        use NodeKind::*;
 
-        let kind: Markdown = node.kind_id().into();
+        let kind = node.kind();
 
         // Stop containers for operands that are URL / code text — still
         // classify them as operators at the wrapper level.
         let mut descend = true;
 
         match kind {
-            // Heading markers — operators.
-            AtxH1Marker => self.bump_op(OperatorKind::HeadingMarkerH1),
-            AtxH2Marker => self.bump_op(OperatorKind::HeadingMarkerH2),
-            AtxH3Marker => self.bump_op(OperatorKind::HeadingMarkerH3),
-            AtxH4Marker => self.bump_op(OperatorKind::HeadingMarkerH4),
-            AtxH5Marker => self.bump_op(OperatorKind::HeadingMarkerH5),
-            AtxH6Marker => self.bump_op(OperatorKind::HeadingMarkerH6),
-            SetextH1Underline => self.bump_op(OperatorKind::SetextMarkerH1),
-            SetextH2Underline => self.bump_op(OperatorKind::SetextMarkerH2),
+            // Heading markers — one operator per level/style. `#` and `##`
+            // are distinct operators; setext underlines have their own class.
+            HeadingMarker { level, style } => {
+                self.bump_op(heading_marker_op(level, style));
+            }
 
-            // List markers.
-            ListMarkerMinus
-            | ListMarkerMinus2
-            | ListMarkerMinusDontInterrupt
-            | ListMarkerPlus
-            | ListMarkerPlus2
-            | ListMarkerPlusDontInterrupt
-            | ListMarkerStar
-            | ListMarkerStar2
-            | ListMarkerStarDontInterrupt
-            | ListMarkerDot
-            | ListMarkerDot2
-            | ListMarkerDotDontInterrupt
-            | ListMarkerParenthesis
-            | ListMarkerParenthesis2
-            | ListMarkerParenthesisDontInterrupt => self.bump_op(OperatorKind::ListMarker),
+            // List markers — every bullet/number style is one operator class.
+            ListMarker => self.bump_op(OperatorKind::ListMarker),
 
             // Task list markers.
             TaskListMarkerChecked => self.bump_op(OperatorKind::TaskMarkerChecked),
             TaskListMarkerUnchecked => self.bump_op(OperatorKind::TaskMarkerUnchecked),
 
             // Table operators.
-            PipeTableDelimiterRow | PipeTableDelimiterCell | PipeTableStart => {
+            PipeTableDelimiterRow | PipeTableDelimiterCell => {
                 self.bump_op(OperatorKind::TableDelim)
             }
             PipeTableAlignLeft => self.bump_op(OperatorKind::TableAlignLeft),
@@ -253,40 +247,17 @@ impl Ctx<'_, '_, '_> {
                 self.bump_op(OperatorKind::CalloutOp)
             }
 
-            // Math delimiters.
+            // Math delimiters. Only the block delimiter is emitted by the
+            // pulldown-backed builder; inline math carries no delimiter node.
             MathBlockDelimiter => self.bump_op(OperatorKind::MathDelimiter),
-            MathInlineDelimiter | MathInlineDelimiter2 => {
-                self.bump_op(OperatorKind::MathInlineDelimiter)
-            }
 
-            // Emphasis / strong / strikethrough.
-            EmphasisDelimiter | EmphasisDelimiter2 => self.bump_op(OperatorKind::EmphasisDelim),
-            StrongDelimiter | StrongDelimiter2 => self.bump_op(OperatorKind::StrongDelim),
-            StrikethroughDelimiter => self.bump_op(OperatorKind::StrikethroughDelim),
-
-            // Footnote operators.
-            FootnoteReferenceOpen | FootnoteLabelOpen | FootnoteDefinitionStart => {
-                self.bump_op(OperatorKind::FootnoteMarker)
-            }
-
-            // Raw HTML / MDX / directive operators.
+            // Raw HTML operators.
             HtmlOpenTag
             | HtmlCloseTag
             | HtmlComment
             | HtmlCdata
             | HtmlDeclaration
-            | HtmlProcessingInstruction
-            | HtmlBlock1Start
-            | HtmlBlock1End
-            | HtmlBlock2Start
-            | HtmlBlock3Start
-            | HtmlBlock4Start
-            | HtmlBlock5Start
-            | HtmlBlock6Start
-            | HtmlBlock7Start => self.bump_op(OperatorKind::RawHtmlOp),
-            MdxJsxOpenTag | MdxJsxCloseTag | MdxJsxOpenTag2 | MdxJsxCloseTag2
-            | MdxJsxExpression => self.bump_op(OperatorKind::MdxJsxOp),
-            DirectiveBlockDelimiter | DirectiveName => self.bump_op(OperatorKind::DirectiveOp),
+            | HtmlProcessingInstruction => self.bump_op(OperatorKind::RawHtmlOp),
 
             // Punctuation classes per §3.3.
             Terminator => self.bump_op(OperatorKind::Terminator),
@@ -295,7 +266,7 @@ impl Ctx<'_, '_, '_> {
             OperatorLike => self.bump_op(OperatorKind::OperatorLike),
 
             // Operand leaves.
-            WordToken | WordToken1 | WordToken2 | WordToken3 => {
+            WordToken => {
                 self.push_text_operand(node);
             }
             NumericToken => {
@@ -317,7 +288,7 @@ impl Ctx<'_, '_, '_> {
             // Link destinations are handled at the `Link` / `Image` wrapper
             // so reference-style links can resolve semantically. Autolink
             // URIs have no wrapper destination, so keep counting those here.
-            LinkDestination | LinkDestinationParenthesis => {
+            LinkDestination => {
                 descend = false;
             }
             Uri => {
@@ -329,18 +300,11 @@ impl Ctx<'_, '_, '_> {
             // an operand in addition to any word-like tokens inside it.
             // §9.2 lists "table headers" as a distinct operand class.
             PipeTableHeader => {
-                let mut c = node.cursor();
-                if c.goto_first_child() {
-                    loop {
-                        let cell = c.node();
-                        if matches!(cell.kind_id().into(), Markdown::PipeTableCell) {
-                            let text = node_text(&cell, self.source).trim().to_string();
-                            if !text.is_empty() {
-                                self.bump_operand(format!("th:{}", text));
-                            }
-                        }
-                        if !c.goto_next_sibling() {
-                            break;
+                for cell in node.children() {
+                    if matches!(cell.kind(), NodeKind::PipeTableCell) {
+                        let text = node_text(&cell, self.source).trim().to_string();
+                        if !text.is_empty() {
+                            self.bump_operand(format!("th:{}", text));
                         }
                     }
                 }
@@ -355,14 +319,8 @@ impl Ctx<'_, '_, '_> {
             return;
         }
 
-        let mut cursor = node.cursor();
-        if cursor.goto_first_child() {
-            loop {
-                self.walk(&cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+        for child in node.children() {
+            self.walk(&child);
         }
     }
 

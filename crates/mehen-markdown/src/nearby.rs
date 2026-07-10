@@ -10,7 +10,7 @@
 //! flat list of block rows, and exposes a helper that tells you whether a
 //! given artifact line range has a prose block ±2 positions away.
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::syntax_tree::Node;
 
 /// A flattened block descriptor. One entry per top-level block in the
@@ -34,7 +34,7 @@ pub(crate) fn collect_blocks(root: &Node<'_>) -> Vec<BlockSpan> {
 }
 
 fn walk(node: &Node<'_>, out: &mut Vec<BlockSpan>) {
-    let kind: Markdown = node.kind_id().into();
+    let kind = node.kind();
 
     if is_block_like(&kind) {
         let start = (node.start_row() as u64) + 1;
@@ -52,71 +52,38 @@ fn walk(node: &Node<'_>, out: &mut Vec<BlockSpan>) {
         return;
     }
 
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            walk(&cursor.node(), out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        walk(&child, out);
     }
 }
 
-fn is_block_like(kind: &Markdown) -> bool {
+fn is_block_like(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        Markdown::Paragraph
-            | Markdown::FencedCodeBlock
-            | Markdown::IndentedCodeBlock
-            | Markdown::HtmlBlock
-            | Markdown::HtmlBlock1
-            | Markdown::HtmlBlock3
-            | Markdown::HtmlBlock4
-            | Markdown::HtmlBlock5
-            | Markdown::HtmlBlock6
-            | Markdown::HtmlBlock7
-            | Markdown::HtmlCommentBlock
-            | Markdown::MdxJsxBlock
-            | Markdown::MathBlock
-            | Markdown::DirectiveBlock
-            | Markdown::ImageBlock
-            | Markdown::PipeTable
-            | Markdown::BlockQuote
-            | Markdown::PlainBlockQuote
-            | Markdown::Callout
-            | Markdown::List
-            | Markdown::ThematicBreak
-            | Markdown::ThematicBreak2
-            | Markdown::FootnoteDefinition
-            | Markdown::LinkReferenceDefinition
-            | Markdown::AtxHeading
-            | Markdown::AtxHeading2
-            | Markdown::AtxHeading3
-            | Markdown::AtxHeading4
-            | Markdown::AtxHeading5
-            | Markdown::AtxHeading6
-            | Markdown::SetextHeading
-            | Markdown::SetextHeading2
+        NodeKind::Paragraph
+            | NodeKind::FencedCodeBlock
+            | NodeKind::IndentedCodeBlock
+            | NodeKind::HtmlBlock
+            | NodeKind::MathBlock
+            | NodeKind::PipeTable
+            | NodeKind::BlockQuote
+            | NodeKind::Callout
+            | NodeKind::List
+            | NodeKind::ThematicBreak
+            | NodeKind::FootnoteDefinition
+            | NodeKind::LinkReferenceDefinition
+            | NodeKind::Heading { .. }
     )
 }
 
-fn is_prose_block(kind: &Markdown) -> bool {
+fn is_prose_block(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        Markdown::Paragraph
-            | Markdown::BlockQuote
-            | Markdown::PlainBlockQuote
-            | Markdown::Callout
-            | Markdown::List
-            | Markdown::AtxHeading
-            | Markdown::AtxHeading2
-            | Markdown::AtxHeading3
-            | Markdown::AtxHeading4
-            | Markdown::AtxHeading5
-            | Markdown::AtxHeading6
-            | Markdown::SetextHeading
-            | Markdown::SetextHeading2
+        NodeKind::Paragraph
+            | NodeKind::BlockQuote
+            | NodeKind::Callout
+            | NodeKind::List
+            | NodeKind::Heading { .. }
     )
 }
 
