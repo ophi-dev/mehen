@@ -1,3 +1,6 @@
+[alias]
+xtask = "run --package xtask --"
+
 [net]
 # Ruff is consumed as a tagged git dependency (see workspace `Cargo.toml`).
 # Cargo's bundled libgit2 does not pick up `url.git@github.com:.insteadof`

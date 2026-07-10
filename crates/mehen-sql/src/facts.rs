@@ -17,6 +17,7 @@
 //! (`Rc<RefCell<…>>`) that would conflict with borrows held across the call
 //! (see [`extract_cte_graph`]).
 
+use mehen_core::SourceSpan;
 use sqruff_lib_core::dialects::Dialect;
 use sqruff_lib_core::dialects::syntax::{SyntaxKind, SyntaxSet};
 use sqruff_lib_core::parser::segments::ErasedSegment;
@@ -230,6 +231,62 @@ pub(crate) struct ObjectFacts {
     pub touch_count: u32,
 }
 
+/// Stable classification for one term in `sql.change_risk_score`.
+///
+/// The factor owns both its public reason code and score weight so the
+/// aggregate formula and emitted evidence cannot drift independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChangeRiskFactor {
+    Drop,
+    Truncate,
+    Alter,
+    DeleteWithoutWhere,
+    UpdateWithoutWhere,
+    GrantRevoke,
+    Merge,
+    CreateOrReplace,
+    TransactionControl,
+    WriteObject,
+    ReadObject,
+}
+
+impl ChangeRiskFactor {
+    pub(crate) fn amount(self) -> f64 {
+        match self {
+            Self::Drop | Self::Truncate => 8.0,
+            Self::Alter | Self::DeleteWithoutWhere | Self::UpdateWithoutWhere => 6.0,
+            Self::GrantRevoke => 5.0,
+            Self::Merge | Self::CreateOrReplace => 4.0,
+            Self::TransactionControl => 3.0,
+            Self::WriteObject => 2.0,
+            Self::ReadObject => 1.0,
+        }
+    }
+
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Drop => "sql.change_risk.drop",
+            Self::Truncate => "sql.change_risk.truncate",
+            Self::Alter => "sql.change_risk.alter",
+            Self::DeleteWithoutWhere => "sql.change_risk.delete_without_where",
+            Self::UpdateWithoutWhere => "sql.change_risk.update_without_where",
+            Self::GrantRevoke => "sql.change_risk.grant_revoke",
+            Self::Merge => "sql.change_risk.merge",
+            Self::CreateOrReplace => "sql.change_risk.create_or_replace",
+            Self::TransactionControl => "sql.change_risk.transaction_control",
+            Self::WriteObject => "sql.change_risk.write_object",
+            Self::ReadObject => "sql.change_risk.read_object",
+        }
+    }
+}
+
+/// One source-resolved term in `sql.change_risk_score`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ChangeRiskEvidence {
+    pub span: SourceSpan,
+    pub factor: ChangeRiskFactor,
+}
+
 /// Per-statement facts with source span (research foundation §5.2).
 #[derive(Clone, Debug)]
 pub(crate) struct StatementFacts {
@@ -271,6 +328,7 @@ pub(crate) struct SqlFileFacts {
     pub output: OutputFacts,
     pub ctes: CteFacts,
     pub objects: ObjectFacts,
+    pub change_risk_evidence: Vec<ChangeRiskEvidence>,
     pub halstead: HalsteadFacts,
     pub relation_ref_count: u32,
     /// Count of `SyntaxKind::Unparsable` segments (parser-health, §6.16).
@@ -298,6 +356,7 @@ pub(crate) fn extract(
     root: &ErasedSegment,
     dialect: &Dialect,
     line_at: impl Fn(u32) -> u32,
+    emit_contributions: bool,
 ) -> SqlFileFacts {
     let mut facts = SqlFileFacts::default();
 
@@ -378,7 +437,7 @@ pub(crate) fn extract(
     extract_cte_graph(root, dialect, &mut facts.ctes);
 
     // ── object-touch / DML-DDL risk ─────────────────────────────────
-    extract_objects(root, &line_at, &mut facts);
+    extract_objects(root, &line_at, &mut facts, emit_contributions);
 
     // ── Halstead ────────────────────────────────────────────────────
     extract_halstead(root, &mut facts.halstead);
@@ -1900,25 +1959,83 @@ fn longest_chain(edges: &std::collections::BTreeMap<String, Vec<String>>, nodes:
 
 // ── object-touch / DML-DDL risk ───────────────────────────────────────
 
-fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &mut SqlFileFacts) {
-    let _ = line_at;
+fn extract_objects(
+    root: &ErasedSegment,
+    line_at: &impl Fn(u32) -> u32,
+    facts: &mut SqlFileFacts,
+    emit_contributions: bool,
+) {
+    let fallback_span = if emit_contributions {
+        segment_span(root, line_at).unwrap_or_else(SourceSpan::empty)
+    } else {
+        SourceSpan::empty()
+    };
     let obj = &mut facts.objects;
+    let evidence = &mut facts.change_risk_evidence;
     // Per-statement-kind counters (used by the DML/DDL/TCL metric keys).
     for stmt in &facts.statements {
         match stmt.kind {
             StatementKind::Insert => obj.insert_count += 1,
             StatementKind::Update => obj.update_count += 1,
             StatementKind::Delete => obj.delete_count += 1,
-            StatementKind::Merge => obj.merge_count += 1,
+            StatementKind::Merge => {
+                obj.merge_count += 1;
+                record_change_risk(
+                    evidence,
+                    emit_contributions,
+                    statement_span(stmt),
+                    ChangeRiskFactor::Merge,
+                );
+            }
             StatementKind::CreateTable
             | StatementKind::CreateTableAsSelect
             | StatementKind::CreateView
             | StatementKind::CreateOther => obj.create_count += 1,
-            StatementKind::AlterTable => obj.alter_count += 1,
-            StatementKind::Drop => obj.drop_count += 1,
-            StatementKind::Truncate => obj.truncate_count += 1,
-            StatementKind::Grant | StatementKind::Revoke => obj.grant_revoke_count += 1,
-            StatementKind::TransactionControl => obj.transaction_control_count += 1,
+            StatementKind::AlterTable => {
+                obj.alter_count += 1;
+                record_change_risk(
+                    evidence,
+                    emit_contributions,
+                    statement_span(stmt),
+                    ChangeRiskFactor::Alter,
+                );
+            }
+            StatementKind::Drop => {
+                obj.drop_count += 1;
+                record_change_risk(
+                    evidence,
+                    emit_contributions,
+                    statement_span(stmt),
+                    ChangeRiskFactor::Drop,
+                );
+            }
+            StatementKind::Truncate => {
+                obj.truncate_count += 1;
+                record_change_risk(
+                    evidence,
+                    emit_contributions,
+                    statement_span(stmt),
+                    ChangeRiskFactor::Truncate,
+                );
+            }
+            StatementKind::Grant | StatementKind::Revoke => {
+                obj.grant_revoke_count += 1;
+                record_change_risk(
+                    evidence,
+                    emit_contributions,
+                    statement_span(stmt),
+                    ChangeRiskFactor::GrantRevoke,
+                );
+            }
+            StatementKind::TransactionControl => {
+                obj.transaction_control_count += 1;
+                record_change_risk(
+                    evidence,
+                    emit_contributions,
+                    statement_span(stmt),
+                    ChangeRiskFactor::TransactionControl,
+                );
+            }
             _ => {}
         }
     }
@@ -1929,10 +2046,32 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
     // both read and written is touched once. Read objects are table references
     // in FROM/JOIN positions; write objects are the statement-level targets of
     // write statements. Names are uppercased so case variants collapse.
-    let (read_objects, write_objects) = collect_touched_objects(root);
+    let (read_objects, write_objects) = collect_touched_objects(root, line_at, emit_contributions);
     obj.read_object_count = read_objects.len() as u32;
     obj.write_object_count = write_objects.len() as u32;
-    obj.touch_count = read_objects.union(&write_objects).count() as u32;
+    obj.touch_count = (read_objects.len()
+        + write_objects
+            .keys()
+            .filter(|name| !read_objects.contains_key(*name))
+            .count()) as u32;
+    if emit_contributions {
+        for span in write_objects.values() {
+            record_change_risk(
+                evidence,
+                true,
+                span.unwrap_or(fallback_span),
+                ChangeRiskFactor::WriteObject,
+            );
+        }
+        for span in read_objects.values() {
+            record_change_risk(
+                evidence,
+                true,
+                span.unwrap_or(fallback_span),
+                ChangeRiskFactor::ReadObject,
+            );
+        }
+    }
 
     // UPDATE/DELETE without WHERE. The WHERE crawl must stop at nested
     // SELECT nodes: `UPDATE t SET v = (SELECT v FROM u WHERE u.id = t.id)` has no
@@ -1949,6 +2088,14 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
     for u in &updates {
         if !has_own_where_clause(u) {
             obj.update_without_where_count += 1;
+            if emit_contributions {
+                record_change_risk(
+                    evidence,
+                    true,
+                    segment_span(u, line_at).unwrap_or(fallback_span),
+                    ChangeRiskFactor::UpdateWithoutWhere,
+                );
+            }
         }
     }
     let deletes = root.recursive_crawl(
@@ -1960,6 +2107,14 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
     for d in &deletes {
         if !has_own_where_clause(d) {
             obj.delete_without_where_count += 1;
+            if emit_contributions {
+                record_change_risk(
+                    evidence,
+                    true,
+                    segment_span(d, line_at).unwrap_or(fallback_span),
+                    ChangeRiskFactor::DeleteWithoutWhere,
+                );
+            }
         }
     }
 
@@ -1967,14 +2122,29 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
     // (comments/whitespace excluded) so a comment like `-- RETURNING id` or
     // `/* CREATE OR REPLACE */` never trips them, and arbitrary whitespace
     // between keywords is irrelevant (we look at adjacency in the token list).
-    let code_words = code_token_words(root);
+    let code_tokens = code_tokens(root, line_at, emit_contributions);
 
     // CREATE OR REPLACE — three consecutive code tokens, handling
     // `CREATE\nOR REPLACE` / `CREATE  OR  REPLACE` (whitespace-insensitive).
-    obj.create_or_replace_count = code_words
+    let create_or_replace = code_tokens
         .windows(3)
-        .filter(|w| w[0] == "CREATE" && w[1] == "OR" && w[2] == "REPLACE")
-        .count() as u32;
+        .filter(|w| w[0].word == "CREATE" && w[1].word == "OR" && w[2].word == "REPLACE")
+        .collect::<Vec<_>>();
+    obj.create_or_replace_count = create_or_replace.len() as u32;
+    if emit_contributions {
+        for tokens in create_or_replace {
+            let span = match (tokens[0].span, tokens[2].span) {
+                (Some(start), Some(end)) => SourceSpan::new(
+                    start.start_byte,
+                    end.end_byte,
+                    start.start_line,
+                    end.end_line,
+                ),
+                _ => fallback_span,
+            };
+            record_change_risk(evidence, true, span, ChangeRiskFactor::CreateOrReplace);
+        }
+    }
 
     // RETURNING (Postgres/Oracle) / OUTPUT (T-SQL) DML result clauses, counted
     // from `Keyword` tokens inside DML statements (INSERT/UPDATE/DELETE/MERGE).
@@ -1997,8 +2167,22 @@ fn extract_objects(root: &ErasedSegment, line_at: &impl Fn(u32) -> u32, facts: &
 /// The uppercased text of every *code* leaf token in `node` (comments,
 /// whitespace, and meta tokens excluded), in source order. Used for
 /// adjacency/word checks that must ignore comments and be whitespace-agnostic.
-fn code_token_words(node: &ErasedSegment) -> Vec<String> {
-    fn walk(node: &ErasedSegment, out: &mut Vec<String>) {
+struct CodeToken {
+    word: String,
+    span: Option<SourceSpan>,
+}
+
+fn code_tokens(
+    node: &ErasedSegment,
+    line_at: &impl Fn(u32) -> u32,
+    emit_contributions: bool,
+) -> Vec<CodeToken> {
+    fn walk(
+        node: &ErasedSegment,
+        line_at: &impl Fn(u32) -> u32,
+        emit_contributions: bool,
+        out: &mut Vec<CodeToken>,
+    ) {
         let children = node.segments();
         if children.is_empty() {
             if node.is_comment() || node.is_whitespace() || node.is_meta() {
@@ -2006,16 +2190,23 @@ fn code_token_words(node: &ErasedSegment) -> Vec<String> {
             }
             let raw = node.raw().trim();
             if !raw.is_empty() {
-                out.push(raw.to_ascii_uppercase());
+                out.push(CodeToken {
+                    word: raw.to_ascii_uppercase(),
+                    span: if emit_contributions {
+                        segment_span(node, line_at)
+                    } else {
+                        None
+                    },
+                });
             }
             return;
         }
         for child in children {
-            walk(child, out);
+            walk(child, line_at, emit_contributions, out);
         }
     }
     let mut out = Vec::new();
-    walk(node, &mut out);
+    walk(node, line_at, emit_contributions, &mut out);
     out
 }
 
@@ -2077,13 +2268,15 @@ const PROCEDURAL_DEFINITIONS: SyntaxSet = SyntaxSet::new(&[
 /// uppercased so case variants collapse to one object.
 fn collect_touched_objects(
     root: &ErasedSegment,
+    line_at: &impl Fn(u32) -> u32,
+    emit_contributions: bool,
 ) -> (
-    std::collections::BTreeSet<String>,
-    std::collections::BTreeSet<String>,
+    std::collections::BTreeMap<String, Option<SourceSpan>>,
+    std::collections::BTreeMap<String, Option<SourceSpan>>,
 ) {
-    use std::collections::BTreeSet;
-    let mut read = BTreeSet::new();
-    let mut write = BTreeSet::new();
+    use std::collections::BTreeMap;
+    let mut read = BTreeMap::new();
+    let mut write = BTreeMap::new();
 
     // CTE names are query-local aliases scoped to their *owning query block*,
     // not database objects. Scope matters at two levels:
@@ -2097,7 +2290,14 @@ fn collect_touched_objects(
     // identity (`cte_local_refs`), not by a flat name set.
     for stmt in &top_level_statements(root) {
         let cte_local = cte_local_refs(stmt);
-        collect_statement_objects(stmt, &cte_local, &mut read, &mut write);
+        collect_statement_objects(
+            stmt,
+            &cte_local,
+            &mut read,
+            &mut write,
+            line_at,
+            emit_contributions,
+        );
     }
 
     (read, write)
@@ -2164,8 +2364,10 @@ fn cte_local_refs(stmt: &ErasedSegment) -> Vec<ErasedSegment> {
 fn collect_statement_objects(
     stmt: &ErasedSegment,
     cte_local: &[ErasedSegment],
-    read: &mut std::collections::BTreeSet<String>,
-    write: &mut std::collections::BTreeSet<String>,
+    read: &mut std::collections::BTreeMap<String, Option<SourceSpan>>,
+    write: &mut std::collections::BTreeMap<String, Option<SourceSpan>>,
+    line_at: &impl Fn(u32) -> u32,
+    emit_contributions: bool,
 ) {
     let is_cte_local = |tr: &ErasedSegment| cte_local.iter().any(|c| c.is(tr));
     // The objects a write statement targets are not always `TableReference`s:
@@ -2222,11 +2424,11 @@ fn collect_statement_objects(
             }
             let name = tr.raw().to_ascii_uppercase();
             if i == 0 || all_targets {
-                write.insert(name);
+                record_object_occurrence(write, name, tr, line_at, emit_contributions);
                 write_target_nodes.push(tr.clone());
             } else {
                 // FROM/USING source tables of a DML statement are reads.
-                read.insert(name);
+                record_object_occurrence(read, name, tr, line_at, emit_contributions);
             }
         }
     }
@@ -2253,9 +2455,71 @@ fn collect_statement_objects(
         ) {
             let is_write_target = write_target_nodes.iter().any(|w| w.is(&tr));
             if !is_cte_local(&tr) && !is_write_target {
-                read.insert(tr.raw().to_ascii_uppercase());
+                record_object_occurrence(
+                    read,
+                    tr.raw().to_ascii_uppercase(),
+                    &tr,
+                    line_at,
+                    emit_contributions,
+                );
             }
         }
+    }
+}
+
+fn record_object_occurrence(
+    objects: &mut std::collections::BTreeMap<String, Option<SourceSpan>>,
+    name: String,
+    segment: &ErasedSegment,
+    line_at: &impl Fn(u32) -> u32,
+    emit_contributions: bool,
+) {
+    let candidate = if emit_contributions {
+        segment_span(segment, line_at)
+    } else {
+        None
+    };
+    objects
+        .entry(name)
+        .and_modify(|current| match (*current, candidate) {
+            (None, Some(_)) => *current = candidate,
+            (Some(existing), Some(new)) if new.start_byte < existing.start_byte => {
+                *current = candidate;
+            }
+            _ => {}
+        })
+        .or_insert(candidate);
+}
+
+fn statement_span(statement: &StatementFacts) -> SourceSpan {
+    SourceSpan::new(
+        statement.start_byte,
+        statement.end_byte,
+        statement.start_line,
+        statement.end_line,
+    )
+}
+
+fn segment_span(segment: &ErasedSegment, line_at: &impl Fn(u32) -> u32) -> Option<SourceSpan> {
+    let marker = segment.get_position_marker()?;
+    let start_byte = marker.source_slice.start as u32;
+    let end_byte = marker.source_slice.end as u32;
+    Some(SourceSpan::new(
+        start_byte,
+        end_byte,
+        line_at(start_byte),
+        line_at(end_byte.saturating_sub(1)),
+    ))
+}
+
+fn record_change_risk(
+    evidence: &mut Vec<ChangeRiskEvidence>,
+    enabled: bool,
+    span: SourceSpan,
+    factor: ChangeRiskFactor,
+) {
+    if enabled {
+        evidence.push(ChangeRiskEvidence { span, factor });
     }
 }
 

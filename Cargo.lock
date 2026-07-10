@@ -4211,6 +4211,7 @@ dependencies = [
  "clap",
  "mehen-c",
  "mehen-go",
+ "serde_json",
  "tree-sitter",
 ]
 

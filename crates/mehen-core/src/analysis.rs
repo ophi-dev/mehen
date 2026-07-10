@@ -121,6 +121,69 @@ pub struct MetricContribution {
     pub reason: ContributionReason,
 }
 
+/// Optional, deterministically ordered sink for analyzer contribution evidence.
+///
+/// Analyzers can construct this directly from
+/// [`crate::AnalysisConfig::emit_contributions`]. When disabled, [`record`](Self::record)
+/// is a cheap no-op; when enabled, [`finish`](Self::finish) returns entries in
+/// source order so JSON and snapshot output remain stable across parser walk
+/// implementations and platforms.
+#[derive(Debug)]
+pub struct ContributionCollector {
+    enabled: bool,
+    entries: Vec<MetricContribution>,
+}
+
+impl ContributionCollector {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn record(
+        &mut self,
+        metric: impl Into<MetricKey>,
+        span: SourceSpan,
+        amount: f64,
+        reason: impl Into<String>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        self.entries.push(MetricContribution {
+            metric: metric.into(),
+            span,
+            amount,
+            reason: ContributionReason::new(reason),
+        });
+    }
+
+    pub fn finish(mut self) -> Vec<MetricContribution> {
+        self.entries.sort_by(|a, b| {
+            (
+                a.span.start_byte,
+                a.span.end_byte,
+                &a.metric,
+                a.reason.as_str(),
+            )
+                .cmp(&(
+                    b.span.start_byte,
+                    b.span.end_byte,
+                    &b.metric,
+                    b.reason.as_str(),
+                ))
+                .then_with(|| a.amount.total_cmp(&b.amount))
+        });
+        self.entries
+    }
+}
+
 /// A namespaced reason code attached to a [`MetricContribution`].
 ///
 /// Stored as a string so language crates can publish their own reason codes
@@ -176,5 +239,21 @@ mod tests {
         set.insert("a", 2u64);
         let keys: Vec<&str> = set.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, vec!["a", "z"]);
+    }
+
+    #[test]
+    fn contribution_collector_is_gated_and_deterministic() {
+        let later = SourceSpan::new(20, 24, 3, 3);
+        let earlier = SourceSpan::new(2, 6, 1, 1);
+        let mut collector = ContributionCollector::new(true);
+        collector.record("risk", later, 2.0, "risk.write");
+        collector.record("risk", earlier, 8.0, "risk.drop");
+        let entries = collector.finish();
+        assert_eq!(entries[0].span, earlier);
+        assert_eq!(entries[1].span, later);
+
+        let mut disabled = ContributionCollector::new(false);
+        disabled.record("risk", earlier, 8.0, "risk.drop");
+        assert!(disabled.finish().is_empty());
     }
 }

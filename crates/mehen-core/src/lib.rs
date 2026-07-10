@@ -38,7 +38,8 @@ mod span;
 mod threshold;
 
 pub use analysis::{
-    ContributionReason, LanguageAnalysis, MetricContribution, MetricSet, MetricValue,
+    ContributionCollector, ContributionReason, LanguageAnalysis, MetricContribution, MetricSet,
+    MetricValue,
 };
 pub use analyzer::{LanguageAnalyzer, LanguageDispatcher};
 pub use backend::AnalysisBackend;

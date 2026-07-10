@@ -10,7 +10,7 @@
 //! judgments — the analyzer publishes the raw metrics first and these second.
 
 use crate::dialect::DialectResolution;
-use crate::facts::SqlFileFacts;
+use crate::facts::{ChangeRiskFactor, SqlFileFacts};
 use crate::loc::SqlLoc;
 
 /// The six composite scores published per file.
@@ -182,17 +182,17 @@ fn modularization_credit(f: &SqlFileFacts) -> f64 {
 /// `+ 5 * dynamic_sql_count` term here.
 fn change_risk(f: &SqlFileFacts) -> f64 {
     let o = &f.objects;
-    8.0 * o.drop_count as f64
-        + 8.0 * o.truncate_count as f64
-        + 6.0 * o.alter_count as f64
-        + 6.0 * o.delete_without_where_count as f64
-        + 6.0 * o.update_without_where_count as f64
-        + 5.0 * o.grant_revoke_count as f64
-        + 4.0 * o.merge_count as f64
-        + 4.0 * o.create_or_replace_count as f64
-        + 3.0 * o.transaction_control_count as f64
-        + 2.0 * o.write_object_count as f64
-        + 1.0 * o.read_object_count as f64
+    ChangeRiskFactor::Drop.amount() * o.drop_count as f64
+        + ChangeRiskFactor::Truncate.amount() * o.truncate_count as f64
+        + ChangeRiskFactor::Alter.amount() * o.alter_count as f64
+        + ChangeRiskFactor::DeleteWithoutWhere.amount() * o.delete_without_where_count as f64
+        + ChangeRiskFactor::UpdateWithoutWhere.amount() * o.update_without_where_count as f64
+        + ChangeRiskFactor::GrantRevoke.amount() * o.grant_revoke_count as f64
+        + ChangeRiskFactor::Merge.amount() * o.merge_count as f64
+        + ChangeRiskFactor::CreateOrReplace.amount() * o.create_or_replace_count as f64
+        + ChangeRiskFactor::TransactionControl.amount() * o.transaction_control_count as f64
+        + ChangeRiskFactor::WriteObject.amount() * o.write_object_count as f64
+        + ChangeRiskFactor::ReadObject.amount() * o.read_object_count as f64
 }
 
 /// SQL Review Burden Index (research foundation §8.3), 0..100.

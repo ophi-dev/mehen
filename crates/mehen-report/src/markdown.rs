@@ -4,8 +4,8 @@
 use std::fmt::Write;
 
 use mehen_core::{
-    DiagnosticSeverity, DiffReport, Language, MetricKey, MetricSet, MetricSpace, MetricsReport,
-    ParseDiagnostic, SpaceKind,
+    DiagnosticSeverity, DiffReport, Language, MetricContribution, MetricKey, MetricSet,
+    MetricSpace, MetricsReport, ParseDiagnostic, SpaceKind,
 };
 
 use crate::metrics_json::{
@@ -42,10 +42,44 @@ pub fn render_metrics_markdown(report: &MetricsReport) -> String {
     let _ = writeln!(out, "- schema: `{}`", report.schema_version);
 
     write_diagnostics(&mut out, &report.diagnostics);
+    write_contributions(&mut out, &report.contributions);
     write_unit_metrics(&mut out, &report.root.metrics, report.language);
     write_nested_spaces(&mut out, &report.root.spaces, 0, report.language);
 
     out
+}
+
+fn write_contributions(out: &mut String, contributions: &[MetricContribution]) {
+    if contributions.is_empty() {
+        return;
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Contributions");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "| metric | amount | reason | lines |");
+    let _ = writeln!(out, "|---|---:|---|---:|");
+    for contribution in contributions {
+        let sign = if contribution.amount.is_sign_negative() {
+            "-"
+        } else {
+            "+"
+        };
+        let amount = fmt_metric(contribution.amount.abs());
+        let lines = if contribution.span.start_line == contribution.span.end_line {
+            format!("L{}", contribution.span.start_line)
+        } else {
+            format!(
+                "L{}–L{}",
+                contribution.span.start_line, contribution.span.end_line
+            )
+        };
+        let _ = writeln!(
+            out,
+            "| `{}` | {sign}{amount} | `{}` | {lines} |",
+            contribution.metric,
+            contribution.reason.as_str(),
+        );
+    }
 }
 
 fn write_diagnostics(out: &mut String, diagnostics: &[ParseDiagnostic]) {
@@ -727,8 +761,8 @@ pub fn render_diff_github_markdown(report: &DiffReport) -> String {
 mod tests {
     use super::*;
     use mehen_core::{
-        AnalysisBackend, Language, MetricKey, MetricSpace, ParseDiagnostic, SourceSpan, SpaceId,
-        SpaceKind,
+        AnalysisBackend, ContributionReason, Language, MetricContribution, MetricKey, MetricSpace,
+        ParseDiagnostic, SourceSpan, SpaceId, SpaceKind,
     };
 
     fn report_with_metrics(pairs: &[(&str, f64)]) -> MetricsReport {
@@ -744,6 +778,7 @@ mod tests {
             analysis_backend: AnalysisBackend::PythonRuff,
             diagnostics: Vec::new(),
             root,
+            contributions: Vec::new(),
         }
     }
 
@@ -817,6 +852,21 @@ mod tests {
     }
 
     #[test]
+    fn renders_contribution_evidence_when_present() {
+        let mut report = report_with_metrics(&[("cyclomatic.sum", 1.0)]);
+        report.contributions.push(MetricContribution {
+            metric: MetricKey::new("sql.change_risk_score"),
+            span: SourceSpan::new(10, 30, 2, 3),
+            amount: 8.0,
+            reason: ContributionReason::new("sql.change_risk.drop"),
+        });
+        let md = render_metrics_markdown(&report);
+        assert!(md.contains("## Contributions"));
+        assert!(md.contains("| `sql.change_risk_score` | +8 |"));
+        assert!(md.contains("`sql.change_risk.drop` | L2–L3"));
+    }
+
+    #[test]
     fn renders_markdown_family_when_language_is_markdown() {
         // Regression: previously `write_unit_metrics` always pivoted
         // through `MetricsFamilies`, which only reads source-code
@@ -847,6 +897,7 @@ mod tests {
             analysis_backend: AnalysisBackend::PulldownCmark,
             diagnostics: Vec::new(),
             root,
+            contributions: Vec::new(),
         };
         let md = render_metrics_markdown(&report);
 
@@ -914,6 +965,7 @@ mod tests {
             analysis_backend: AnalysisBackend::PythonRuff,
             diagnostics: Vec::new(),
             root,
+            contributions: Vec::new(),
         };
         let md = render_metrics_markdown(&report);
         assert!(md.contains("## Spaces"));
@@ -950,6 +1002,7 @@ mod tests {
             analysis_backend: AnalysisBackend::Sqruff,
             diagnostics: Vec::new(),
             root,
+            contributions: Vec::new(),
         };
         let md = render_metrics_markdown(&report);
         let space_section = md.split("## Spaces").nth(1).expect("Spaces section");

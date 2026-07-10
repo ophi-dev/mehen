@@ -13,6 +13,7 @@
 //! - `update-ruff` — Phase 6.
 
 mod antlr;
+mod metric_contributions;
 mod tree_sitter;
 
 use clap::{Parser, Subcommand};
@@ -124,10 +125,13 @@ fn main() {
                 }
             }
         },
-        Command::AstDump { .. }
-        | Command::MetricContributions { .. }
-        | Command::AuditLicenses
-        | Command::UpdateRuff { .. } => {
+        Command::MetricContributions { path } => {
+            if let Err(err) = metric_contributions::run(&path) {
+                eprintln!("xtask metric-contributions: {err}");
+                std::process::exit(1);
+            }
+        }
+        Command::AstDump { .. } | Command::AuditLicenses | Command::UpdateRuff { .. } => {
             eprintln!("xtask command not yet implemented");
             std::process::exit(1);
         }
