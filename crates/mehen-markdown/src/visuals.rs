@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::diagrams::{DiagramSignal, parse_diagram};
 use crate::document::{CodeBlock, MarkdownDocument, is_diagram_language};
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::mathops::{clamp01, normalize_zero, sat};
 use crate::nearby::{BlockSpan, has_prose_within};
 use crate::syntax_tree::Node;
@@ -77,32 +77,15 @@ fn walk_images(
     blocks: &[BlockSpan],
     images: &mut Vec<ImageRecord>,
 ) {
-    let kind: Markdown = node.kind_id().into();
-    match kind {
-        Markdown::Image => {
-            if let Some(rec) = record_image(node, document, source, base_dir, blocks) {
-                images.push(rec);
-            }
-            return;
+    let kind = node.kind();
+    if kind == NodeKind::Image {
+        if let Some(rec) = record_image(node, document, source, base_dir, blocks) {
+            images.push(rec);
         }
-        Markdown::ImageBlock => {
-            // Image-block is a stand-alone image — its parent is the
-            // document, not a paragraph. Treat it identically.
-            if let Some(rec) = record_image(node, document, source, base_dir, blocks) {
-                images.push(rec);
-            }
-            return;
-        }
-        _ => {}
+        return;
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            walk_images(&cursor.node(), document, source, base_dir, blocks, images);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        walk_images(&child, document, source, base_dir, blocks, images);
     }
 }
 
@@ -117,7 +100,7 @@ fn record_image(
     let destination = document
         .link_destination_by_span(node.start_byte(), node.end_byte())?
         .to_string();
-    let alt_text = find_first(node, Markdown::LinkLabel)
+    let alt_text = find_first(node, NodeKind::LinkLabel)
         .map(|n| {
             let s = node_text(&n, source);
             s.trim()
@@ -126,7 +109,7 @@ fn record_image(
                 .to_string()
         })
         .unwrap_or_default();
-    let has_title = find_first(node, Markdown::LinkTitle).is_some();
+    let has_title = find_first(node, NodeKind::LinkTitle).is_some();
     let has_alt_or_caption = !alt_text.trim().is_empty() || has_title;
 
     let end_line = line;

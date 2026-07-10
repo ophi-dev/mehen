@@ -10,7 +10,7 @@
 //! artifact-debt pipeline and in per-artifact "oversized" / "unexplained"
 //! flags that Phase D consumes.
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::mathops::{clamp01, sat};
 use crate::syntax_tree::Node;
 use crate::types::{TableRecord, Tables};
@@ -27,19 +27,12 @@ pub(crate) fn analyze_tables(root: &Node<'_>, source: &str) -> Vec<TableRecord> 
 }
 
 fn collect_tables(node: &Node<'_>, source: &str, out: &mut Vec<TableRecord>) {
-    let kind: Markdown = node.kind_id().into();
-    if matches!(kind, Markdown::PipeTable) {
+    if matches!(node.kind(), NodeKind::PipeTable) {
         out.push(build_record(node, source));
         return;
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            collect_tables(&cursor.node(), source, out);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        collect_tables(&child, source, out);
     }
 }
 
@@ -59,34 +52,26 @@ fn build_record(table: &Node<'_>, source: &str) -> TableRecord {
     let mut has_header = false;
     let mut alignments: std::collections::BTreeSet<TableAlignment> = Default::default();
 
-    let mut cursor = table.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            let child_kind: Markdown = child.kind_id().into();
-            match child_kind {
-                Markdown::PipeTableHeader => {
-                    has_header = true;
-                    let (cells_in_row, empties) = count_cells(&child, source);
-                    cells += cells_in_row;
-                    empty_cells += empties;
-                    cols_by_row.push(cells_in_row);
-                }
-                Markdown::PipeTableRow => {
-                    rows += 1;
-                    let (cells_in_row, empties) = count_cells(&child, source);
-                    cells += cells_in_row;
-                    empty_cells += empties;
-                    cols_by_row.push(cells_in_row);
-                }
-                Markdown::PipeTableDelimiterRow => {
-                    collect_alignments(&child, &mut alignments);
-                }
-                _ => {}
+    for child in table.children() {
+        match child.kind() {
+            NodeKind::PipeTableHeader => {
+                has_header = true;
+                let (cells_in_row, empties) = count_cells(&child, source);
+                cells += cells_in_row;
+                empty_cells += empties;
+                cols_by_row.push(cells_in_row);
             }
-            if !cursor.goto_next_sibling() {
-                break;
+            NodeKind::PipeTableRow => {
+                rows += 1;
+                let (cells_in_row, empties) = count_cells(&child, source);
+                cells += cells_in_row;
+                empty_cells += empties;
+                cols_by_row.push(cells_in_row);
             }
+            NodeKind::PipeTableDelimiterRow => {
+                collect_alignments(&child, &mut alignments);
+            }
+            _ => {}
         }
     }
 
@@ -160,19 +145,10 @@ fn collect_alignments(
     delimiter_row: &Node<'_>,
     alignments: &mut std::collections::BTreeSet<TableAlignment>,
 ) {
-    let mut cursor = delimiter_row.cursor();
-    if !cursor.goto_first_child() {
-        return;
-    }
-    loop {
-        let child = cursor.node();
-        let kind: Markdown = child.kind_id().into();
-        if matches!(kind, Markdown::PipeTableDelimiterCell) {
+    for child in delimiter_row.children() {
+        if matches!(child.kind(), NodeKind::PipeTableDelimiterCell) {
             let align = cell_alignment(&child);
             alignments.insert(align);
-        }
-        if !cursor.goto_next_sibling() {
-            break;
         }
     }
 }
@@ -180,20 +156,11 @@ fn collect_alignments(
 fn cell_alignment(cell: &Node<'_>) -> TableAlignment {
     let mut has_left = false;
     let mut has_right = false;
-    let mut cursor = cell.cursor();
-    if !cursor.goto_first_child() {
-        return TableAlignment::Default;
-    }
-    loop {
-        let child = cursor.node();
-        let kind: Markdown = child.kind_id().into();
-        match kind {
-            Markdown::PipeTableAlignLeft => has_left = true,
-            Markdown::PipeTableAlignRight => has_right = true,
+    for child in cell.children() {
+        match child.kind() {
+            NodeKind::PipeTableAlignLeft => has_left = true,
+            NodeKind::PipeTableAlignRight => has_right = true,
             _ => {}
-        }
-        if !cursor.goto_next_sibling() {
-            break;
         }
     }
     match (has_left, has_right) {
@@ -207,14 +174,8 @@ fn cell_alignment(cell: &Node<'_>) -> TableAlignment {
 fn count_cells(row: &Node<'_>, source: &str) -> (u64, u64) {
     let mut cells: u64 = 0;
     let mut empties: u64 = 0;
-    let mut cursor = row.cursor();
-    if !cursor.goto_first_child() {
-        return (0, 0);
-    }
-    loop {
-        let child = cursor.node();
-        let child_kind: Markdown = child.kind_id().into();
-        if matches!(child_kind, Markdown::PipeTableCell) {
+    for child in row.children() {
+        if matches!(child.kind(), NodeKind::PipeTableCell) {
             cells += 1;
             let start = child.start_byte();
             let end = child.end_byte();
@@ -222,9 +183,6 @@ fn count_cells(row: &Node<'_>, source: &str) -> (u64, u64) {
             if text.trim().is_empty() {
                 empties += 1;
             }
-        }
-        if !cursor.goto_next_sibling() {
-            break;
         }
     }
     (cells, empties)

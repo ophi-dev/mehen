@@ -17,7 +17,7 @@
 //! - Diagram parse error (+3.00) → 0.00 until Phase C diagram parser lands.
 
 use crate::document::{MarkdownDocument, is_diagram_language};
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::syntax_tree::Node;
 use crate::tree_helpers::{
     count_table_cells, find_link_label, has_scheme as is_external, node_line_span,
@@ -81,7 +81,6 @@ enum BlockKind {
     Code,
     Table,
     Math,
-    Image,
     RawHtml,
     Heading,
     Other,
@@ -113,26 +112,12 @@ impl<'a, 'doc> Walker<'a, 'doc> {
     }
 
     fn scan_blocks(&mut self, node: &Node<'_>) {
-        use Markdown::*;
-        let kind: Markdown = node.kind_id().into();
-        let bk = classify_block(&kind);
+        use NodeKind::*;
+        let kind = node.kind();
+        let bk = classify_block(kind);
         let is_artifact = matches!(
             kind,
-            FencedCodeBlock
-                | IndentedCodeBlock
-                | PipeTable
-                | MathBlock
-                | HtmlBlock
-                | HtmlBlock1
-                | HtmlBlock3
-                | HtmlBlock4
-                | HtmlBlock5
-                | HtmlBlock6
-                | HtmlBlock7
-                | HtmlCommentBlock
-                | MdxJsxBlock
-                | ImageBlock
-                | DirectiveBlock
+            FencedCodeBlock | IndentedCodeBlock | PipeTable | MathBlock | HtmlBlock
         );
         if is_artifact {
             let start = node.start_row();
@@ -148,25 +133,19 @@ impl<'a, 'doc> Walker<'a, 'doc> {
         if bk != BlockKind::Other {
             self.blocks.push((bk, node.start_row() as u32));
         }
-        let mut cursor = node.cursor();
-        if cursor.goto_first_child() {
-            loop {
-                self.scan_blocks(&cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+        for child in node.children() {
+            self.scan_blocks(&child);
         }
     }
 
     fn walk(&mut self, node: &Node<'_>) {
-        use Markdown::*;
+        use NodeKind::*;
 
-        let kind: Markdown = node.kind_id().into();
+        let kind = node.kind();
 
         // Headings.
-        if is_atx_heading(&kind) || is_setext_heading(&kind) {
-            let level = heading_level(node).unwrap_or(1);
+        if kind.is_heading() {
+            let level = kind.heading_level().unwrap_or(1);
             if let Some(prev) = self.last_heading_level
                 && level > prev
             {
@@ -184,8 +163,8 @@ impl<'a, 'doc> Walker<'a, 'doc> {
         }
 
         // Section without subheading + > 800 words — checked only when the
-        // node is a `section*` container.
-        if is_section(&kind) && section_has_no_sub_heading(node) {
+        // node is a `Section` container.
+        if is_section(kind) && section_has_no_sub_heading(node) {
             let words = count_section_words(node);
             if words > 800 {
                 self.positive += 2.00 * self.current_nest_multiplier();
@@ -208,14 +187,14 @@ impl<'a, 'doc> Walker<'a, 'doc> {
 
         // Lists and list structures.
         match kind {
-            List | ListPlus | ListMinus | ListStar | ListDot | ListParenthesis => {
+            List => {
                 self.positive += 0.40 * self.current_nest_multiplier();
                 self.list_depth += 1;
                 self.recurse(node);
                 self.list_depth -= 1;
                 return;
             }
-            ListItem | ListItem2 | ListItem3 | ListItem4 | ListItem5 => {
+            ListItem { task: false } => {
                 // Nested list level: charge 0.50 * depth per §8.1. `depth`
                 // here is the current list-depth *before* the list-item
                 // increments it further; using list_depth directly approximates
@@ -223,10 +202,10 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                 self.positive +=
                     0.50 * self.list_depth.max(1) as f64 * self.current_nest_multiplier();
             }
-            TaskListItem | TaskListItem2 | TaskListItem3 | TaskListItem4 | TaskListItem5 => {
+            ListItem { task: true } => {
                 self.positive += 0.35 * self.current_nest_multiplier();
             }
-            BlockQuote | PlainBlockQuote => {
+            BlockQuote => {
                 self.positive += 0.50 * self.current_nest_multiplier();
                 self.blockquote_depth += 1;
                 self.recurse(node);
@@ -284,10 +263,6 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                 }
             }
         }
-        if matches!(kind, ImageBlock) {
-            self.positive += 0.50 * self.current_nest_multiplier();
-        }
-
         // Code fences.
         if matches!(kind, FencedCodeBlock | IndentedCodeBlock)
             && let Some(block) = self.document.code_block_by_start_row(node.start_row())
@@ -379,20 +354,8 @@ impl<'a, 'doc> Walker<'a, 'doc> {
             }
         }
 
-        // Raw HTML / MDX blocks: 0.30 * lines, cap 8.
-        if matches!(
-            kind,
-            HtmlBlock
-                | HtmlBlock1
-                | HtmlBlock3
-                | HtmlBlock4
-                | HtmlBlock5
-                | HtmlBlock6
-                | HtmlBlock7
-                | HtmlCommentBlock
-                | MdxJsxBlock
-                | DirectiveBlock
-        ) {
+        // Raw HTML blocks: 0.30 * lines, cap 8.
+        if matches!(kind, HtmlBlock) {
             let lines = node_line_span(node) as f64;
             let weight = (0.30 * lines).min(8.0);
             self.positive +=
@@ -403,14 +366,8 @@ impl<'a, 'doc> Walker<'a, 'doc> {
     }
 
     fn recurse(&mut self, node: &Node<'_>) {
-        let mut cursor = node.cursor();
-        if cursor.goto_first_child() {
-            loop {
-                self.walk(&cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
+        for child in node.children() {
+            self.walk(&child);
         }
     }
 
@@ -485,80 +442,25 @@ fn saturate(x: f64, lo: f64, hi: f64) -> f64 {
     ((x - lo) / (hi - lo)).clamp(0.0, 1.0)
 }
 
-fn classify_block(kind: &Markdown) -> BlockKind {
-    use Markdown::*;
+fn classify_block(kind: NodeKind) -> BlockKind {
+    use NodeKind::*;
     match kind {
         Paragraph => BlockKind::Paragraph,
         FencedCodeBlock | IndentedCodeBlock => BlockKind::Code,
         PipeTable => BlockKind::Table,
         MathBlock => BlockKind::Math,
-        ImageBlock => BlockKind::Image,
-        HtmlBlock | HtmlBlock1 | HtmlBlock3 | HtmlBlock4 | HtmlBlock5 | HtmlBlock6 | HtmlBlock7
-        | HtmlCommentBlock | MdxJsxBlock => BlockKind::RawHtml,
-        AtxHeading | AtxHeading2 | AtxHeading3 | AtxHeading4 | AtxHeading5 | AtxHeading6
-        | SetextHeading | SetextHeading2 => BlockKind::Heading,
+        HtmlBlock => BlockKind::RawHtml,
+        Heading { .. } => BlockKind::Heading,
         _ => BlockKind::Other,
     }
 }
 
-fn is_atx_heading(kind: &Markdown) -> bool {
-    matches!(
-        kind,
-        Markdown::AtxHeading
-            | Markdown::AtxHeading2
-            | Markdown::AtxHeading3
-            | Markdown::AtxHeading4
-            | Markdown::AtxHeading5
-            | Markdown::AtxHeading6
-    )
-}
-
-fn is_setext_heading(kind: &Markdown) -> bool {
-    matches!(kind, Markdown::SetextHeading | Markdown::SetextHeading2)
-}
-
-fn is_section(kind: &Markdown) -> bool {
-    matches!(
-        kind,
-        Markdown::Section
-            | Markdown::Section1
-            | Markdown::Section2
-            | Markdown::Section3
-            | Markdown::Section4
-            | Markdown::Section5
-            | Markdown::Section6
-    )
-}
-
-fn heading_level(heading: &Node<'_>) -> Option<u8> {
-    let level = heading.child_by_field_name("level")?;
-    Some(match level.kind_id().into() {
-        Markdown::AtxH1Marker | Markdown::SetextH1Underline => 1,
-        Markdown::AtxH2Marker | Markdown::SetextH2Underline => 2,
-        Markdown::AtxH3Marker => 3,
-        Markdown::AtxH4Marker => 4,
-        Markdown::AtxH5Marker => 5,
-        Markdown::AtxH6Marker => 6,
-        _ => return None,
-    })
+fn is_section(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Section { .. })
 }
 
 fn section_has_no_sub_heading(section: &Node<'_>) -> bool {
-    let mut cursor = section.cursor();
-    if !cursor.goto_first_child() {
-        return true;
-    }
-    loop {
-        let child = cursor.node();
-        let child_kind: Markdown = child.kind_id().into();
-        if is_section(&child_kind) {
-            return false;
-        }
-        if !cursor.goto_next_sibling() {
-            break;
-        }
-    }
-    true
+    !section.children().any(|child| is_section(child.kind()))
 }
 
 fn count_section_words(node: &Node<'_>) -> u64 {
@@ -568,65 +470,43 @@ fn count_section_words(node: &Node<'_>) -> u64 {
 }
 
 fn walk_words(node: &Node<'_>, total: &mut u64) {
-    let kind: Markdown = node.kind_id().into();
+    use NodeKind::*;
+    let kind = node.kind();
     // Don't descend into stop-containers — mirrors `words.rs` rules.
     match kind {
-        Markdown::FencedCodeBlock
-        | Markdown::IndentedCodeBlock
-        | Markdown::InlineCode
-        | Markdown::CodeFenceContent
-        | Markdown::InlineCodeContent
-        | Markdown::InlineCodeContent2
-        | Markdown::InfoString
-        | Markdown::Language
-        | Markdown::MathBlock
-        | Markdown::MathInline
-        | Markdown::MathBlockContent
-        | Markdown::MathInlineContent
-        | Markdown::HtmlBlock
-        | Markdown::HtmlBlock1
-        | Markdown::HtmlBlock3
-        | Markdown::HtmlBlock4
-        | Markdown::HtmlBlock5
-        | Markdown::HtmlBlock6
-        | Markdown::HtmlBlock7
-        | Markdown::HtmlCommentBlock
-        | Markdown::HtmlInline
-        | Markdown::MdxJsxBlock
-        | Markdown::MdxJsxInline
-        | Markdown::Autolink
-        | Markdown::Uri
-        | Markdown::Email
-        | Markdown::LinkDestination
-        | Markdown::LinkDestinationParenthesis
-        | Markdown::LinkTitle
-        | Markdown::MinusMetadata
-        | Markdown::PlusMetadata
-        | Markdown::PipeTableDelimiterRow => {
+        FencedCodeBlock
+        | IndentedCodeBlock
+        | InlineCode
+        | CodeFenceContent
+        | InlineCodeContent
+        | InfoString
+        | Language
+        | MathBlock
+        | MathInline
+        | MathBlockContent
+        | MathInlineContent
+        | HtmlBlock
+        | HtmlInline
+        | Autolink
+        | Uri
+        | Email
+        | LinkDestination
+        | LinkTitle
+        | MinusMetadata
+        | PlusMetadata
+        | PipeTableDelimiterRow => {
             return;
         }
         _ => {}
     }
     if matches!(
         kind,
-        Markdown::WordToken
-            | Markdown::WordToken1
-            | Markdown::WordToken2
-            | Markdown::WordToken3
-            | Markdown::NumericToken
-            | Markdown::IdentifierLikeToken
-            | Markdown::PathLikeToken
+        WordToken | NumericToken | IdentifierLikeToken | PathLikeToken
     ) {
         *total += 1;
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            walk_words(&cursor.node(), total);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        walk_words(&child, total);
     }
 }
 
@@ -640,36 +520,17 @@ fn count_inline_links(node: &Node<'_>) -> u64 {
     let mut total = 0u64;
     let mut stack = vec![*node];
     while let Some(n) = stack.pop() {
-        if matches!(n.kind_id().into(), Markdown::Link) {
+        if matches!(n.kind(), NodeKind::Link) {
             total += 1;
         }
-        let mut cursor = n.cursor();
-        if cursor.goto_first_child() {
-            loop {
-                stack.push(cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
+        stack.extend(n.children());
     }
     total
 }
 
 fn pipe_table_has_header(node: &Node<'_>) -> bool {
-    let mut cursor = node.cursor();
-    if !cursor.goto_first_child() {
-        return false;
-    }
-    loop {
-        if matches!(cursor.node().kind_id().into(), Markdown::PipeTableHeader) {
-            return true;
-        }
-        if !cursor.goto_next_sibling() {
-            break;
-        }
-    }
-    false
+    node.children()
+        .any(|child| matches!(child.kind(), NodeKind::PipeTableHeader))
 }
 
 #[cfg(test)]

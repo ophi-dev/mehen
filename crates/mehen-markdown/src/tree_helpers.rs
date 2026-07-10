@@ -15,7 +15,7 @@
 //! Markdown semantic facts such as resolved reference links live in
 //! `MarkdownDocument`, where pulldown-cmark already exposes them.
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::syntax_tree::Node;
 
 #[derive(Clone, Copy, Debug)]
@@ -58,8 +58,8 @@ impl ProseContext {
 
 /// Containers whose descendants are structural or machine-readable rather than
 /// narrative prose for Markdown metric walks.
-pub(crate) fn is_non_prose_container(kind: Markdown) -> bool {
-    use Markdown::*;
+pub(crate) fn is_non_prose_container(kind: NodeKind) -> bool {
+    use NodeKind::*;
     matches!(
         kind,
         FencedCodeBlock
@@ -67,7 +67,6 @@ pub(crate) fn is_non_prose_container(kind: Markdown) -> bool {
             | InlineCode
             | CodeFenceContent
             | InlineCodeContent
-            | InlineCodeContent2
             | InfoString
             | Language
             | MathBlock
@@ -75,13 +74,6 @@ pub(crate) fn is_non_prose_container(kind: Markdown) -> bool {
             | MathBlockContent
             | MathInlineContent
             | HtmlBlock
-            | HtmlBlock1
-            | HtmlBlock3
-            | HtmlBlock4
-            | HtmlBlock5
-            | HtmlBlock6
-            | HtmlBlock7
-            | HtmlCommentBlock
             | HtmlInline
             | HtmlComment
             | HtmlCdata
@@ -89,21 +81,11 @@ pub(crate) fn is_non_prose_container(kind: Markdown) -> bool {
             | HtmlProcessingInstruction
             | HtmlOpenTag
             | HtmlCloseTag
-            | MdxJsxBlock
-            | MdxJsxInline
-            | MdxJsxOpenTag
-            | MdxJsxOpenTag2
-            | MdxJsxCloseTag
-            | MdxJsxCloseTag2
-            | MdxJsxExpression
-            | DirectiveBlock
             | Autolink
             | Uri
             | Email
             | LinkDestination
-            | LinkDestinationParenthesis
             | LinkTitle
-            | TextNoAngle
             | MinusMetadata
             | PlusMetadata
             | PipeTableDelimiterRow
@@ -113,30 +95,13 @@ pub(crate) fn is_non_prose_container(kind: Markdown) -> bool {
     )
 }
 
-pub(crate) fn opens_prose_context(kind: Markdown, context: ProseContext) -> bool {
-    use Markdown::*;
+pub(crate) fn opens_prose_context(kind: NodeKind, context: ProseContext) -> bool {
+    use NodeKind::*;
     matches!(
         kind,
-        Paragraph
-            | BlockQuote
-            | PlainBlockQuote
-            | Callout
-            | CalloutHeaderParagraph
-            | ListItemContent
-            | TaskListItemContent
-    ) || (context.include_heading_content && matches!(kind, AtxHeadingContent))
-        || (context.include_heading_blocks
-            && matches!(
-                kind,
-                AtxHeading
-                    | AtxHeading2
-                    | AtxHeading3
-                    | AtxHeading4
-                    | AtxHeading5
-                    | AtxHeading6
-                    | SetextHeading
-                    | SetextHeading2
-            ))
+        Paragraph | BlockQuote | Callout | ListItemContent { .. }
+    ) || (context.include_heading_content && matches!(kind, HeadingContent))
+        || (context.include_heading_blocks && kind.is_heading())
         || (context.include_link_labels && matches!(kind, LinkLabel | FootnoteLabel))
         || (context.include_tables
             && matches!(kind, PipeTableCell | PipeTableHeader | PipeTableRow))
@@ -165,28 +130,15 @@ pub(crate) fn node_line_span(node: &Node<'_>) -> usize {
 /// `pipe_table_row` and counts each `pipe_table_cell` inside.
 pub(crate) fn count_table_cells(node: &Node<'_>) -> usize {
     let mut total = 0usize;
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if matches!(
-                child.kind_id().into(),
-                Markdown::PipeTableHeader | Markdown::PipeTableRow
-            ) {
-                let mut c2 = child.cursor();
-                if c2.goto_first_child() {
-                    loop {
-                        if matches!(c2.node().kind_id().into(), Markdown::PipeTableCell) {
-                            total += 1;
-                        }
-                        if !c2.goto_next_sibling() {
-                            break;
-                        }
-                    }
+    for child in node.children() {
+        if matches!(
+            child.kind(),
+            NodeKind::PipeTableHeader | NodeKind::PipeTableRow
+        ) {
+            for cell in child.children() {
+                if matches!(cell.kind(), NodeKind::PipeTableCell) {
+                    total += 1;
                 }
-            }
-            if !cursor.goto_next_sibling() {
-                break;
             }
         }
     }
@@ -197,7 +149,7 @@ pub(crate) fn count_table_cells(node: &Node<'_>) -> usize {
 pub(crate) fn find_link_label(node: &Node<'_>, source: &str) -> Option<String> {
     let mut stack = vec![*node];
     while let Some(n) = stack.pop() {
-        if matches!(n.kind_id().into(), Markdown::LinkLabel) {
+        if matches!(n.kind(), NodeKind::LinkLabel) {
             let bytes = source.as_bytes();
             let start = n.start_byte();
             let end = n.end_byte();
@@ -207,15 +159,7 @@ pub(crate) fn find_link_label(node: &Node<'_>, source: &str) -> Option<String> {
                     .map(|s| s.to_string());
             }
         }
-        let mut cursor = n.cursor();
-        if cursor.goto_first_child() {
-            loop {
-                stack.push(cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
+        stack.extend(n.children());
     }
     None
 }
@@ -224,22 +168,8 @@ pub(crate) fn find_link_label(node: &Node<'_>, source: &str) -> Option<String> {
 /// `None` when the node has no children or no matching child. Common
 /// shape across `code_burden`, `visuals`, etc. for plucking a single
 /// known child (e.g. the `link_destination` inside an `inline_link`).
-pub(crate) fn find_first<'a>(node: &Node<'a>, target: Markdown) -> Option<Node<'a>> {
-    let mut cursor = node.cursor();
-    if !cursor.goto_first_child() {
-        return None;
-    }
-    loop {
-        let child = cursor.node();
-        let kind: Markdown = child.kind_id().into();
-        if kind == target {
-            return Some(child);
-        }
-        if !cursor.goto_next_sibling() {
-            break;
-        }
-    }
-    None
+pub(crate) fn find_first<'a>(node: &Node<'a>, target: NodeKind) -> Option<Node<'a>> {
+    node.children().find(|child| child.kind() == target)
 }
 
 /// Slice the source bytes covered by `node` as a UTF-8 lossy `String`.

@@ -15,7 +15,7 @@
 //! which requires a `parent_section_id` pointing to the enclosing heading's
 //! section and a `child_section_ids` list of directly-nested subsections.
 
-use crate::grammar::Markdown;
+use crate::kind::NodeKind;
 use crate::syntax_tree::Node;
 use crate::types::Section;
 use crate::words::count_words;
@@ -88,21 +88,15 @@ fn renumber_sections(sections: &mut [Section]) {
 }
 
 fn walk(node: &Node<'_>, parent_id: usize, sections: &mut Vec<Section>) {
-    let mut cursor = node.cursor();
-    if !cursor.goto_first_child() {
-        return;
-    }
-    loop {
-        let child = cursor.node();
-        let kind: Markdown = child.kind_id().into();
-        if is_section_node(&kind) {
+    for child in node.children() {
+        if is_section_node(child.kind()) {
             if let Some(heading) = find_heading_in_section(&child) {
                 let (level, heading_text) = {
                     let (lvl, txt) = describe_heading(&heading);
                     (Some(lvl), txt)
                 };
                 let section_id = sections.len();
-                // The grammar already parents H1 → H2 → H3 correctly. Heading
+                // Sections nest H1 → H2 → H3 by construction. Heading
                 // skips (H1 → H3) keep the H3 under whichever section wraps
                 // it — we do not fabricate virtual sections.
                 sections[parent_id].child_section_ids.push(section_id);
@@ -119,8 +113,8 @@ fn walk(node: &Node<'_>, parent_id: usize, sections: &mut Vec<Section>) {
                 });
                 walk(&child, section_id, sections);
             } else {
-                // A `section` node without a heading is a grammar artifact
-                // (empty or pre-heading wrapper). Recurse into it but treat
+                // A `Section` node without a heading is a structural
+                // wrapper (empty or pre-heading). Recurse into it but treat
                 // its content as belonging to the enclosing section.
                 walk(&child, parent_id, sections);
             }
@@ -129,69 +123,20 @@ fn walk(node: &Node<'_>, parent_id: usize, sections: &mut Vec<Section>) {
             // block is between sections), so recurse.
             walk(&child, parent_id, sections);
         }
-        if !cursor.goto_next_sibling() {
-            break;
-        }
     }
 }
 
-fn is_section_node(kind: &Markdown) -> bool {
-    matches!(
-        kind,
-        Markdown::Section
-            | Markdown::Section1
-            | Markdown::Section2
-            | Markdown::Section3
-            | Markdown::Section4
-            | Markdown::Section5
-            | Markdown::Section6
-    )
-}
-
-fn is_atx_heading(kind: &Markdown) -> bool {
-    matches!(
-        kind,
-        Markdown::AtxHeading
-            | Markdown::AtxHeading2
-            | Markdown::AtxHeading3
-            | Markdown::AtxHeading4
-            | Markdown::AtxHeading5
-            | Markdown::AtxHeading6
-    )
-}
-
-fn is_setext_heading(kind: &Markdown) -> bool {
-    matches!(kind, Markdown::SetextHeading | Markdown::SetextHeading2)
+fn is_section_node(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Section { .. })
 }
 
 fn find_heading_in_section<'a>(section: &Node<'a>) -> Option<Node<'a>> {
-    let mut cursor = section.cursor();
-    if !cursor.goto_first_child() {
-        return None;
-    }
-    loop {
-        let child = cursor.node();
-        let kind: Markdown = child.kind_id().into();
-        if is_atx_heading(&kind) || is_setext_heading(&kind) {
-            return Some(child);
-        }
-        if !cursor.goto_next_sibling() {
-            break;
-        }
-    }
-    None
+    section.children().find(|child| child.kind().is_heading())
 }
 
 fn describe_heading(heading: &Node<'_>) -> (u8, Option<String>) {
-    let kind: Markdown = heading.kind_id().into();
-    let level = if is_atx_heading(&kind) {
-        atx_level(heading).unwrap_or(1)
-    } else if is_setext_heading(&kind) {
-        setext_level(heading).unwrap_or(1)
-    } else {
-        1
-    };
-    let text = heading.child_by_field_name("heading_content").map(|node| {
+    let level = heading.kind().heading_level().unwrap_or(1);
+    let text = heading_content_node(heading).map(|node| {
         let start = node.start_byte();
         let end = node.end_byte();
         let _ = (start, end);
@@ -205,26 +150,10 @@ fn describe_heading(heading: &Node<'_>) -> (u8, Option<String>) {
     (level, text)
 }
 
-fn atx_level(heading: &Node<'_>) -> Option<u8> {
-    let level = heading.child_by_field_name("level")?;
-    Some(match level.kind_id().into() {
-        Markdown::AtxH1Marker => 1,
-        Markdown::AtxH2Marker => 2,
-        Markdown::AtxH3Marker => 3,
-        Markdown::AtxH4Marker => 4,
-        Markdown::AtxH5Marker => 5,
-        Markdown::AtxH6Marker => 6,
-        _ => return None,
-    })
-}
-
-fn setext_level(heading: &Node<'_>) -> Option<u8> {
-    let level = heading.child_by_field_name("level")?;
-    Some(match level.kind_id().into() {
-        Markdown::SetextH1Underline => 1,
-        Markdown::SetextH2Underline => 2,
-        _ => return None,
-    })
+fn heading_content_node<'a>(heading: &Node<'a>) -> Option<Node<'a>> {
+    heading
+        .children()
+        .find(|child| matches!(child.kind(), NodeKind::HeadingContent))
 }
 
 fn section_end_line(section: &Node<'_>) -> u64 {
@@ -293,58 +222,30 @@ fn count_blocks(node: &Node<'_>) -> u64 {
 }
 
 fn visit_blocks(node: &Node<'_>, total: &mut u64) {
-    let kind: Markdown = node.kind_id().into();
-    if is_block(&kind) {
+    if is_block(node.kind()) {
         *total += 1;
     }
-    let mut cursor = node.cursor();
-    if cursor.goto_first_child() {
-        loop {
-            visit_blocks(&cursor.node(), total);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
+    for child in node.children() {
+        visit_blocks(&child, total);
     }
 }
 
-fn is_block(kind: &Markdown) -> bool {
+fn is_block(kind: NodeKind) -> bool {
     matches!(
         kind,
-        Markdown::Paragraph
-            | Markdown::FencedCodeBlock
-            | Markdown::IndentedCodeBlock
-            | Markdown::HtmlBlock
-            | Markdown::HtmlBlock1
-            | Markdown::HtmlBlock3
-            | Markdown::HtmlBlock4
-            | Markdown::HtmlBlock5
-            | Markdown::HtmlBlock6
-            | Markdown::HtmlBlock7
-            | Markdown::HtmlCommentBlock
-            | Markdown::MdxJsxBlock
-            | Markdown::MathBlock
-            | Markdown::DirectiveBlock
-            | Markdown::ImageBlock
-            | Markdown::PipeTable
-            | Markdown::ListItem
-            | Markdown::ListItem2
-            | Markdown::ListItem3
-            | Markdown::ListItem4
-            | Markdown::ListItem5
-            | Markdown::TaskListItem
-            | Markdown::TaskListItem2
-            | Markdown::TaskListItem3
-            | Markdown::TaskListItem4
-            | Markdown::TaskListItem5
-            | Markdown::BlockQuote
-            | Markdown::PlainBlockQuote
-            | Markdown::Callout
-            | Markdown::List
-            | Markdown::ThematicBreak
-            | Markdown::ThematicBreak2
-            | Markdown::FootnoteDefinition
-            | Markdown::LinkReferenceDefinition
+        NodeKind::Paragraph
+            | NodeKind::FencedCodeBlock
+            | NodeKind::IndentedCodeBlock
+            | NodeKind::HtmlBlock
+            | NodeKind::MathBlock
+            | NodeKind::PipeTable
+            | NodeKind::ListItem { .. }
+            | NodeKind::BlockQuote
+            | NodeKind::Callout
+            | NodeKind::List
+            | NodeKind::ThematicBreak
+            | NodeKind::FootnoteDefinition
+            | NodeKind::LinkReferenceDefinition
     )
 }
 
@@ -360,19 +261,10 @@ fn find_section_node<'a>(root: &Node<'a>, start_line: u64, end_line: u64) -> Opt
         if e_col == 0 && e > s {
             e -= 1;
         }
-        let kind: Markdown = node.kind_id().into();
-        if is_section_node(&kind) && s == start_line && e == end_line {
+        if is_section_node(node.kind()) && s == start_line && e == end_line {
             return Some(node);
         }
-        let mut cursor = node.cursor();
-        if cursor.goto_first_child() {
-            loop {
-                stack.push(cursor.node());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
+        stack.extend(node.children());
     }
     None
 }

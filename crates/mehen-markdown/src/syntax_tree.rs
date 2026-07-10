@@ -4,8 +4,13 @@
 //! Small Markdown syntax tree used internally by the metric passes.
 //!
 //! The analyzer consumes a compact owned tree built from `pulldown-cmark`
-//! events. It exposes only the cursor API, byte spans, row positions, field
-//! lookup, and generated `Markdown` kind ids needed by the metric modules.
+//! events. It exposes byte spans, row positions, a `children()` iterator, and
+//! the [`NodeKind`] of each node — the shape the metric modules navigate.
+//!
+//! The tree is deliberately event-shaped: `pulldown-cmark` is a single-pass,
+//! consuming event stream with no parent/child access, so the builder reifies
+//! it once into this owned structure that the many independent metric passes
+//! can each walk top-down.
 
 use std::ops::Range;
 
@@ -18,7 +23,7 @@ use crate::document::{
     DocumentBuilder, MarkdownDocument, ReferenceDefinition, line_starts, markdown_options,
     preserve_broken_reference_link, reference_definitions_from_source, row_at,
 };
-use crate::grammar::Markdown;
+use crate::kind::{HeadingStyle, NodeKind, level_number};
 
 #[derive(Debug)]
 pub(crate) struct Tree {
@@ -27,7 +32,7 @@ pub(crate) struct Tree {
 
 #[derive(Clone, Debug)]
 struct NodeData {
-    kind: Markdown,
+    kind: NodeKind,
     start_byte: usize,
     end_byte: usize,
     start_row: usize,
@@ -35,7 +40,6 @@ struct NodeData {
     end_row: usize,
     end_col: usize,
     children: Vec<usize>,
-    fields: Vec<(&'static str, usize)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -58,8 +62,8 @@ impl<'a> Node<'a> {
         &self.tree.nodes[self.index]
     }
 
-    pub(crate) fn kind_id(&self) -> u16 {
-        self.data().kind as u16
+    pub(crate) fn kind(&self) -> NodeKind {
+        self.data().kind
     }
 
     pub(crate) fn start_byte(&self) -> usize {
@@ -83,63 +87,38 @@ impl<'a> Node<'a> {
         self.data().start_row
     }
 
-    pub(crate) fn child_by_field_name(&self, name: &str) -> Option<Node<'_>> {
-        self.data()
-            .fields
-            .iter()
-            .find_map(|(field, idx)| (*field == name).then_some(*idx))
-            .map(|index| Node {
-                tree: self.tree,
-                index,
-            })
-    }
-
-    pub(crate) fn cursor(&self) -> Cursor<'a> {
-        Cursor {
+    /// Iterates the direct children of this node in document order.
+    pub(crate) fn children(&self) -> Children<'a> {
+        Children {
             tree: self.tree,
-            parent: self.index,
-            pos: None,
+            children: &self.tree.nodes[self.index].children,
+            pos: 0,
         }
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct Cursor<'a> {
+/// Iterator over a node's direct children.
+///
+/// Replaces the former tree-sitter-style mutable `Cursor`
+/// (`goto_first_child` / `goto_next_sibling`): all navigation in this crate is
+/// strictly top-down over direct children, which a plain iterator expresses
+/// directly.
+pub(crate) struct Children<'a> {
     tree: &'a Tree,
-    parent: usize,
-    pos: Option<usize>,
+    children: &'a [usize],
+    pos: usize,
 }
 
-impl<'a> Cursor<'a> {
-    pub(crate) fn goto_next_sibling(&mut self) -> bool {
-        let Some(pos) = self.pos else {
-            return false;
-        };
-        let next = pos + 1;
-        if next < self.tree.nodes[self.parent].children.len() {
-            self.pos = Some(next);
-            true
-        } else {
-            false
-        }
-    }
+impl<'a> Iterator for Children<'a> {
+    type Item = Node<'a>;
 
-    pub(crate) fn goto_first_child(&mut self) -> bool {
-        if self.tree.nodes[self.parent].children.is_empty() {
-            false
-        } else {
-            self.pos = Some(0);
-            true
-        }
-    }
-
-    pub(crate) fn node(&self) -> Node<'a> {
-        let pos = self.pos.expect("cursor has no current node");
-        let index = self.tree.nodes[self.parent].children[pos];
-        Node {
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = *self.children.get(self.pos)?;
+        self.pos += 1;
+        Some(Node {
             tree: self.tree,
             index,
-        }
+        })
     }
 }
 
@@ -168,7 +147,7 @@ impl<'a> Builder<'a> {
             nodes: Vec::new(),
             stack: Vec::new(),
         };
-        let root = builder.new_node(Markdown::Document, 0..source.len());
+        let root = builder.new_node(NodeKind::Document, 0..source.len());
         builder.stack.push(root);
         builder
     }
@@ -208,10 +187,10 @@ impl<'a> Builder<'a> {
             Event::InlineHtml(_) => self.add_html(range, true),
             Event::FootnoteReference(label) => self.add_footnote_reference(&label, range),
             Event::SoftBreak | Event::HardBreak => {
-                self.add_child(Markdown::Newline, range);
+                self.add_child(NodeKind::Newline, range);
             }
             Event::Rule => {
-                self.add_child(Markdown::ThematicBreak, range);
+                self.add_child(NodeKind::ThematicBreak, range);
             }
             Event::TaskListMarker(checked) => self.add_task_marker(checked, range),
         }
@@ -219,25 +198,25 @@ impl<'a> Builder<'a> {
 
     fn start_tag(&mut self, tag: Tag<'a>, range: Range<usize>) {
         match tag {
-            Tag::Paragraph => self.push(Markdown::Paragraph, range),
+            Tag::Paragraph => self.push(NodeKind::Paragraph, range),
             Tag::Heading { level, .. } => self.push_heading(level, range),
             Tag::BlockQuote(kind) => self.push_blockquote(kind, range),
             Tag::CodeBlock(CodeBlockKind::Fenced(info)) => self.push_fenced_code(&info, range),
             Tag::CodeBlock(CodeBlockKind::Indented) => {
-                self.push(Markdown::IndentedCodeBlock, range)
+                self.push(NodeKind::IndentedCodeBlock, range)
             }
-            Tag::HtmlBlock => self.push(Markdown::HtmlBlock, range),
+            Tag::HtmlBlock => self.push(NodeKind::HtmlBlock, range),
             Tag::List(start) => self.push_list(start, range),
             Tag::Item => self.push_list_item(range),
             Tag::FootnoteDefinition(label) => self.push_footnote_definition(&label, range),
             Tag::Table(alignments) => self.push_table(alignments, range),
-            Tag::TableHead => self.push(Markdown::PipeTableHeader, range),
-            Tag::TableRow => self.push(Markdown::PipeTableRow, range),
-            Tag::TableCell => self.push(Markdown::PipeTableCell, range),
-            Tag::Emphasis => self.push(Markdown::Emphasis, range),
-            Tag::Strong => self.push(Markdown::Strong, range),
-            Tag::Strikethrough => self.push(Markdown::Strikethrough, range),
-            Tag::Superscript | Tag::Subscript => self.push(Markdown::Emphasis, range),
+            Tag::TableHead => self.push(NodeKind::PipeTableHeader, range),
+            Tag::TableRow => self.push(NodeKind::PipeTableRow, range),
+            Tag::TableCell => self.push(NodeKind::PipeTableCell, range),
+            Tag::Emphasis => self.push(NodeKind::Emphasis, range),
+            Tag::Strong => self.push(NodeKind::Strong, range),
+            Tag::Strikethrough => self.push(NodeKind::Strikethrough, range),
+            Tag::Superscript | Tag::Subscript => self.push(NodeKind::Emphasis, range),
             Tag::Link {
                 link_type,
                 dest_url,
@@ -251,15 +230,12 @@ impl<'a> Builder<'a> {
                 id,
             } => self.push_link(link_type, &dest_url, &title, &id, range, true),
             Tag::MetadataBlock(kind) => {
-                let kind = match kind {
-                    MetadataBlockKind::YamlStyle => Markdown::MinusMetadata,
-                    MetadataBlockKind::PlusesStyle => Markdown::PlusMetadata,
-                };
+                let kind = metadata_kind(kind);
                 self.push(kind, range);
             }
-            Tag::DefinitionList => self.push(Markdown::List, range),
+            Tag::DefinitionList => self.push(NodeKind::List, range),
             Tag::DefinitionListTitle | Tag::DefinitionListDefinition => {
-                self.push(Markdown::ListItem, range)
+                self.push(NodeKind::ListItem { task: false }, range)
             }
         }
     }
@@ -267,115 +243,90 @@ impl<'a> Builder<'a> {
     fn end_tag(&mut self, tag: TagEnd) {
         match tag {
             TagEnd::Heading(_) => {
-                self.pop_if(Markdown::AtxHeadingContent);
-                self.pop_one_of(&[
-                    Markdown::AtxHeading,
-                    Markdown::AtxHeading2,
-                    Markdown::AtxHeading3,
-                    Markdown::AtxHeading4,
-                    Markdown::AtxHeading5,
-                    Markdown::AtxHeading6,
-                    Markdown::SetextHeading,
-                    Markdown::SetextHeading2,
-                ]);
+                self.pop_if(NodeKind::HeadingContent);
+                self.pop_if_matches(NodeKind::is_heading);
             }
             TagEnd::Item => {
-                self.pop_one_of(&[Markdown::ListItemContent, Markdown::TaskListItemContent]);
-                self.pop_one_of(&[
-                    Markdown::ListItem,
-                    Markdown::ListItem2,
-                    Markdown::ListItem3,
-                    Markdown::ListItem4,
-                    Markdown::ListItem5,
-                    Markdown::TaskListItem,
-                    Markdown::TaskListItem2,
-                    Markdown::TaskListItem3,
-                    Markdown::TaskListItem4,
-                    Markdown::TaskListItem5,
-                ]);
+                self.pop_if_matches(|kind| matches!(kind, NodeKind::ListItemContent { .. }));
+                self.pop_if_matches(NodeKind::is_list_item);
             }
             TagEnd::Link | TagEnd::Image => {
-                self.pop_if(Markdown::LinkLabel);
-                self.pop_one_of(&[Markdown::Link, Markdown::Image, Markdown::Autolink]);
+                self.pop_if(NodeKind::LinkLabel);
+                self.pop_one_of(&[NodeKind::Link, NodeKind::Image, NodeKind::Autolink]);
             }
-            TagEnd::Paragraph => self.pop_if(Markdown::Paragraph),
-            TagEnd::BlockQuote(_) => self.pop_one_of(&[
-                Markdown::BlockQuote,
-                Markdown::PlainBlockQuote,
-                Markdown::Callout,
-            ]),
+            TagEnd::Paragraph => self.pop_if(NodeKind::Paragraph),
+            TagEnd::BlockQuote(_) => self.pop_one_of(&[NodeKind::BlockQuote, NodeKind::Callout]),
             TagEnd::CodeBlock => {
-                self.pop_one_of(&[Markdown::FencedCodeBlock, Markdown::IndentedCodeBlock]);
+                self.pop_one_of(&[NodeKind::FencedCodeBlock, NodeKind::IndentedCodeBlock]);
             }
-            TagEnd::HtmlBlock => self.pop_if(Markdown::HtmlBlock),
-            TagEnd::List(_) => self.pop_if(Markdown::List),
-            TagEnd::FootnoteDefinition => self.pop_if(Markdown::FootnoteDefinition),
-            TagEnd::Table => self.pop_if(Markdown::PipeTable),
-            TagEnd::TableHead => self.pop_if(Markdown::PipeTableHeader),
-            TagEnd::TableRow => self.pop_if(Markdown::PipeTableRow),
-            TagEnd::TableCell => self.pop_if(Markdown::PipeTableCell),
+            TagEnd::HtmlBlock => self.pop_if(NodeKind::HtmlBlock),
+            TagEnd::List(_) => self.pop_if(NodeKind::List),
+            TagEnd::FootnoteDefinition => self.pop_if(NodeKind::FootnoteDefinition),
+            TagEnd::Table => self.pop_if(NodeKind::PipeTable),
+            TagEnd::TableHead => self.pop_if(NodeKind::PipeTableHeader),
+            TagEnd::TableRow => self.pop_if(NodeKind::PipeTableRow),
+            TagEnd::TableCell => self.pop_if(NodeKind::PipeTableCell),
             TagEnd::Emphasis | TagEnd::Superscript | TagEnd::Subscript => {
-                self.pop_if(Markdown::Emphasis)
+                self.pop_if(NodeKind::Emphasis)
             }
-            TagEnd::Strong => self.pop_if(Markdown::Strong),
-            TagEnd::Strikethrough => self.pop_if(Markdown::Strikethrough),
+            TagEnd::Strong => self.pop_if(NodeKind::Strong),
+            TagEnd::Strikethrough => self.pop_if(NodeKind::Strikethrough),
             TagEnd::MetadataBlock(kind) => {
-                let kind = match kind {
-                    MetadataBlockKind::YamlStyle => Markdown::MinusMetadata,
-                    MetadataBlockKind::PlusesStyle => Markdown::PlusMetadata,
-                };
+                let kind = metadata_kind(kind);
                 self.pop_if(kind);
             }
-            TagEnd::DefinitionList => self.pop_if(Markdown::List),
+            TagEnd::DefinitionList => self.pop_if(NodeKind::List),
             TagEnd::DefinitionListTitle | TagEnd::DefinitionListDefinition => {
-                self.pop_if(Markdown::ListItem)
+                self.pop_if_matches(NodeKind::is_list_item)
             }
         }
     }
 
     fn push_heading(&mut self, level: HeadingLevel, range: Range<usize>) {
-        let (heading_kind, marker_kind, setext) = heading_kinds(level, self.source, &range);
-        let heading = self.add_child(heading_kind, range.clone());
+        let (level, style) = resolve_heading(level, is_setext_heading(self.source, &range));
+        // The resolved style (not the raw detection) drives the marker range:
+        // a degenerate setext level (>2) is coerced to ATX, so its marker is
+        // the `#` scan, not the underline scan.
+        let setext = matches!(style, HeadingStyle::Setext);
+        let heading = self.add_child(NodeKind::Heading { level, style }, range.clone());
         if let Some(marker_range) = heading_marker_range(self.source, &range, setext) {
-            let marker = self.add_child_to(heading, marker_kind, marker_range);
-            self.nodes[heading].fields.push(("level", marker));
+            self.add_child_to(
+                heading,
+                NodeKind::HeadingMarker { level, style },
+                marker_range,
+            );
         }
-        let content =
-            self.add_child_to(heading, Markdown::AtxHeadingContent, empty_at(range.start));
-        self.nodes[heading]
-            .fields
-            .push(("heading_content", content));
+        let content = self.add_child_to(heading, NodeKind::HeadingContent, empty_at(range.start));
         self.stack.push(heading);
         self.stack.push(content);
     }
 
     fn push_blockquote(&mut self, kind: Option<BlockQuoteKind>, range: Range<usize>) {
         let node_kind = if kind.is_some() {
-            Markdown::Callout
+            NodeKind::Callout
         } else {
-            Markdown::BlockQuote
+            NodeKind::BlockQuote
         };
         let node = self.add_child(node_kind, range.clone());
-        self.add_child_to(node, Markdown::BlockQuoteMarker, first_byte(range.start));
-        if let Some(kind) = kind {
-            if let Some(marker) = callout_marker_ranges(self.source, &range) {
-                self.add_child_to(node, Markdown::CalloutMarkerOpen, marker.open);
-                self.add_child_to(node, Markdown::CalloutType, marker.callout_type);
-                self.add_child_to(node, Markdown::CalloutMarkerClose, marker.close);
-            }
-            let _ = kind;
+        self.add_child_to(node, NodeKind::BlockQuoteMarker, first_byte(range.start));
+        if kind.is_some()
+            && let Some(marker) = callout_marker_ranges(self.source, &range)
+        {
+            self.add_child_to(node, NodeKind::CalloutMarkerOpen, marker.open);
+            self.add_child_to(node, NodeKind::CalloutType, marker.callout_type);
+            self.add_child_to(node, NodeKind::CalloutMarkerClose, marker.close);
         }
         self.stack.push(node);
     }
 
     fn push_fenced_code(&mut self, info: &str, range: Range<usize>) {
-        let node = self.add_child(Markdown::FencedCodeBlock, range.clone());
+        let node = self.add_child(NodeKind::FencedCodeBlock, range.clone());
         if !info.trim().is_empty() {
             let info_range = find_in_range(self.source, &range, info).unwrap_or_else(|| {
                 let start = range.start.min(range.end);
                 start..start
             });
-            let info_node = self.add_child_to(node, Markdown::InfoString, info_range.clone());
+            let info_node = self.add_child_to(node, NodeKind::InfoString, info_range.clone());
             let lang_end = info
                 .find(|c: char| c.is_whitespace() || c == ',' || c == '{')
                 .unwrap_or(info.len());
@@ -383,63 +334,65 @@ impl<'a> Builder<'a> {
             if !lang.is_empty() {
                 let lang_range =
                     find_in_range(self.source, &info_range, lang).unwrap_or(info_range);
-                self.add_child_to(info_node, Markdown::Language, lang_range);
+                self.add_child_to(info_node, NodeKind::Language, lang_range);
             }
         }
         self.stack.push(node);
     }
 
     fn push_list(&mut self, start: Option<u64>, range: Range<usize>) {
-        let node = self.add_child(Markdown::List, range.clone());
+        let node = self.add_child(NodeKind::List, range.clone());
         let _ = start;
         self.stack.push(node);
     }
 
     fn push_list_item(&mut self, range: Range<usize>) {
-        let item = self.add_child(Markdown::ListItem, range.clone());
-        let marker_kind =
-            list_item_marker_kind(self.source, &range).unwrap_or(Markdown::ListMarkerMinus);
+        let item = self.add_child(NodeKind::ListItem { task: false }, range.clone());
         self.add_child_to(
             item,
-            marker_kind,
+            NodeKind::ListMarker,
             list_item_marker_range(self.source, &range),
         );
-        let content = self.add_child_to(item, Markdown::ListItemContent, empty_at(range.start));
+        let content = self.add_child_to(
+            item,
+            NodeKind::ListItemContent { task: false },
+            empty_at(range.start),
+        );
         self.stack.push(item);
         self.stack.push(content);
     }
 
     fn push_footnote_definition(&mut self, label: &str, range: Range<usize>) {
-        let node = self.add_child(Markdown::FootnoteDefinition, range.clone());
+        let node = self.add_child(NodeKind::FootnoteDefinition, range.clone());
         if let Some(label_range) = find_footnote_label_range(self.source, &range, label) {
-            self.add_child_to(node, Markdown::FootnoteLabel, label_range);
+            self.add_child_to(node, NodeKind::FootnoteLabel, label_range);
         }
         self.stack.push(node);
     }
 
     fn push_table(&mut self, alignments: Vec<Alignment>, range: Range<usize>) {
-        let table = self.add_child(Markdown::PipeTable, range.clone());
+        let table = self.add_child(NodeKind::PipeTable, range.clone());
         let delim = self.add_child_to(
             table,
-            Markdown::PipeTableDelimiterRow,
+            NodeKind::PipeTableDelimiterRow,
             empty_at(range.start),
         );
         for align in alignments {
             let cell = self.add_child_to(
                 delim,
-                Markdown::PipeTableDelimiterCell,
+                NodeKind::PipeTableDelimiterCell,
                 empty_at(range.start),
             );
             match align {
                 Alignment::Left => {
-                    self.add_child_to(cell, Markdown::PipeTableAlignLeft, empty_at(range.start));
+                    self.add_child_to(cell, NodeKind::PipeTableAlignLeft, empty_at(range.start));
                 }
                 Alignment::Right => {
-                    self.add_child_to(cell, Markdown::PipeTableAlignRight, empty_at(range.start));
+                    self.add_child_to(cell, NodeKind::PipeTableAlignRight, empty_at(range.start));
                 }
                 Alignment::Center => {
-                    self.add_child_to(cell, Markdown::PipeTableAlignLeft, empty_at(range.start));
-                    self.add_child_to(cell, Markdown::PipeTableAlignRight, empty_at(range.start));
+                    self.add_child_to(cell, NodeKind::PipeTableAlignLeft, empty_at(range.start));
+                    self.add_child_to(cell, NodeKind::PipeTableAlignRight, empty_at(range.start));
                 }
                 Alignment::None => {}
             }
@@ -457,11 +410,11 @@ impl<'a> Builder<'a> {
         image: bool,
     ) {
         if !image && matches!(link_type, LinkType::Autolink | LinkType::Email) {
-            let node = self.add_child(Markdown::Autolink, range.clone());
+            let node = self.add_child(NodeKind::Autolink, range.clone());
             let kind = if matches!(link_type, LinkType::Email) {
-                Markdown::Email
+                NodeKind::Email
             } else {
-                Markdown::Uri
+                NodeKind::Uri
             };
             let dest_range = visible_autolink_range(self.source, &range, dest_url)
                 .or_else(|| find_in_range(self.source, &range, dest_url))
@@ -473,24 +426,24 @@ impl<'a> Builder<'a> {
 
         let node = self.add_child(
             if image {
-                Markdown::Image
+                NodeKind::Image
             } else {
-                Markdown::Link
+                NodeKind::Link
             },
             range.clone(),
         );
         let dest_range =
             find_link_destination_range(self.source, &range, link_type, dest_url, reference_id);
         if let Some(dest_range) = dest_range.clone() {
-            self.add_child_to(node, Markdown::LinkDestination, dest_range);
+            self.add_child_to(node, NodeKind::LinkDestination, dest_range);
         }
         if !title.is_empty()
             && let Some(title_range) =
                 find_link_title_range(self.source, &range, title, dest_range.as_ref())
         {
-            self.add_child_to(node, Markdown::LinkTitle, title_range);
+            self.add_child_to(node, NodeKind::LinkTitle, title_range);
         }
-        let label = self.add_child_to(node, Markdown::LinkLabel, empty_at(range.start));
+        let label = self.add_child_to(node, NodeKind::LinkLabel, empty_at(range.start));
         self.stack.push(node);
         self.stack.push(label);
     }
@@ -501,33 +454,33 @@ impl<'a> Builder<'a> {
         }
         let parent = self.current();
         let parent_kind = self.nodes[parent].kind;
-        if matches!(parent_kind, Markdown::FencedCodeBlock) {
-            self.add_child_to(parent, Markdown::CodeFenceContent, range);
+        if matches!(parent_kind, NodeKind::FencedCodeBlock) {
+            self.add_child_to(parent, NodeKind::CodeFenceContent, range);
             return;
         }
-        if matches!(parent_kind, Markdown::IndentedCodeBlock) {
-            self.add_child_to(parent, Markdown::IndentedChunk, range);
+        if matches!(parent_kind, NodeKind::IndentedCodeBlock) {
+            self.add_child_to(parent, NodeKind::IndentedChunk, range);
             return;
         }
         self.tokenize_text(range);
     }
 
     fn add_inline_code(&mut self, range: Range<usize>, text: &str) {
-        let node = self.add_child(Markdown::InlineCode, range.clone());
+        let node = self.add_child(NodeKind::InlineCode, range.clone());
         let content = inline_code_content_range(self.source, &range, text);
-        self.add_child_to(node, Markdown::InlineCodeContent, content);
+        self.add_child_to(node, NodeKind::InlineCodeContent, content);
     }
 
     fn add_math_inline(&mut self, range: Range<usize>) {
-        let node = self.add_child(Markdown::MathInline, range.clone());
-        self.add_child_to(node, Markdown::MathInlineContent, range.clone());
+        let node = self.add_child(NodeKind::MathInline, range.clone());
+        self.add_child_to(node, NodeKind::MathInlineContent, range.clone());
         self.tokenize_text_into(node, range);
     }
 
     fn add_math_block(&mut self, range: Range<usize>) {
-        let node = self.add_child(Markdown::MathBlock, range.clone());
-        self.add_child_to(node, Markdown::MathBlockDelimiter, first_byte(range.start));
-        self.add_child_to(node, Markdown::MathBlockContent, range.clone());
+        let node = self.add_child(NodeKind::MathBlock, range.clone());
+        self.add_child_to(node, NodeKind::MathBlockDelimiter, first_byte(range.start));
+        self.add_child_to(node, NodeKind::MathBlockContent, range.clone());
         self.tokenize_text_into(node, range);
     }
 
@@ -537,12 +490,12 @@ impl<'a> Builder<'a> {
             return;
         }
         let parent = self.current();
-        let node = if inline || !matches!(self.nodes[parent].kind, Markdown::HtmlBlock) {
+        let node = if inline || !matches!(self.nodes[parent].kind, NodeKind::HtmlBlock) {
             self.add_child(
                 if inline {
-                    Markdown::HtmlInline
+                    NodeKind::HtmlInline
                 } else {
-                    Markdown::HtmlBlock
+                    NodeKind::HtmlBlock
                 },
                 range.clone(),
             )
@@ -554,27 +507,27 @@ impl<'a> Builder<'a> {
     }
 
     fn add_footnote_reference(&mut self, label: &str, range: Range<usize>) {
-        let node = self.add_child(Markdown::FootnoteReference, range.clone());
+        let node = self.add_child(NodeKind::FootnoteReference, range.clone());
         if let Some(label_range) = find_footnote_label_range(self.source, &range, label) {
-            self.add_child_to(node, Markdown::FootnoteReferenceLabel, label_range);
+            self.add_child_to(node, NodeKind::FootnoteReferenceLabel, label_range);
         }
     }
 
     fn add_task_marker(&mut self, checked: bool, range: Range<usize>) {
         let marker = if checked {
-            Markdown::TaskListMarkerChecked
+            NodeKind::TaskListMarkerChecked
         } else {
-            Markdown::TaskListMarkerUnchecked
+            NodeKind::TaskListMarkerUnchecked
         };
         self.add_child(marker, range);
         for &idx in self.stack.iter().rev() {
             match self.nodes[idx].kind {
-                Markdown::ListItem => {
-                    self.nodes[idx].kind = Markdown::TaskListItem;
+                NodeKind::ListItem { .. } => {
+                    self.nodes[idx].kind = NodeKind::ListItem { task: true };
                     break;
                 }
-                Markdown::ListItemContent => {
-                    self.nodes[idx].kind = Markdown::TaskListItemContent;
+                NodeKind::ListItemContent { .. } => {
+                    self.nodes[idx].kind = NodeKind::ListItemContent { task: true };
                 }
                 _ => {}
             }
@@ -629,11 +582,11 @@ impl<'a> Builder<'a> {
             let parent_span = def.label_span.start..def.span.end;
             let parent = self.reference_definition_parent(&parent_span);
             let node =
-                self.add_child_to(parent, Markdown::LinkReferenceDefinition, def.span.clone());
-            self.add_child_to(node, Markdown::LinkLabel, def.label_span);
-            self.add_child_to(node, Markdown::LinkDestination, def.destination_span);
+                self.add_child_to(parent, NodeKind::LinkReferenceDefinition, def.span.clone());
+            self.add_child_to(node, NodeKind::LinkLabel, def.label_span);
+            self.add_child_to(node, NodeKind::LinkDestination, def.destination_span);
             if let Some(title_span) = def.title_span {
-                self.add_child_to(node, Markdown::LinkTitle, title_span);
+                self.add_child_to(node, NodeKind::LinkTitle, title_span);
             }
         }
     }
@@ -663,7 +616,7 @@ impl<'a> Builder<'a> {
 
         let mut section_stack: Vec<(u8, usize)> = Vec::new();
         for child in top {
-            if let Some(level) = heading_level_kind(self.nodes[child].kind) {
+            if let Some(level) = self.nodes[child].kind.heading_level() {
                 while section_stack
                     .last()
                     .map(|(stack_level, _)| *stack_level >= level)
@@ -671,9 +624,8 @@ impl<'a> Builder<'a> {
                 {
                     section_stack.pop();
                 }
-                let section_kind = section_kind(level);
                 let section = self.new_node(
-                    section_kind,
+                    NodeKind::Section { level },
                     self.nodes[child].start_byte..self.nodes[child].end_byte,
                 );
                 self.nodes[section].children.push(child);
@@ -714,22 +666,7 @@ impl<'a> Builder<'a> {
             }
         }
         if !self.nodes[idx].children.is_empty()
-            && matches!(
-                self.nodes[idx].kind,
-                Markdown::Section
-                    | Markdown::Section1
-                    | Markdown::Section2
-                    | Markdown::Section3
-                    | Markdown::Section4
-                    | Markdown::Section5
-                    | Markdown::Section6
-                    | Markdown::AtxHeadingContent
-                    | Markdown::LinkLabel
-                    | Markdown::ListItemContent
-                    | Markdown::TaskListItemContent
-                    | Markdown::PipeTableDelimiterRow
-                    | Markdown::PipeTableDelimiterCell
-            )
+            && recompute_span_from_children(self.nodes[idx].kind)
         {
             self.set_range(idx, start..end);
         }
@@ -750,23 +687,23 @@ impl<'a> Builder<'a> {
         self.set_range(idx, start..end);
     }
 
-    fn push(&mut self, kind: Markdown, range: Range<usize>) {
+    fn push(&mut self, kind: NodeKind, range: Range<usize>) {
         let node = self.add_child(kind, range);
         self.stack.push(node);
     }
 
-    fn add_child(&mut self, kind: Markdown, range: Range<usize>) -> usize {
+    fn add_child(&mut self, kind: NodeKind, range: Range<usize>) -> usize {
         let parent = self.current();
         self.add_child_to(parent, kind, range)
     }
 
-    fn add_child_to(&mut self, parent: usize, kind: Markdown, range: Range<usize>) -> usize {
+    fn add_child_to(&mut self, parent: usize, kind: NodeKind, range: Range<usize>) -> usize {
         let node = self.new_node(kind, range);
         self.nodes[parent].children.push(node);
         node
     }
 
-    fn new_node(&mut self, kind: Markdown, range: Range<usize>) -> usize {
+    fn new_node(&mut self, kind: NodeKind, range: Range<usize>) -> usize {
         let range = clamp_range(range, self.source.len());
         let (start_row, start_col) = self.position(range.start);
         let (end_row, end_col) = self.position(range.end);
@@ -780,7 +717,6 @@ impl<'a> Builder<'a> {
             end_row,
             end_col,
             children: Vec::new(),
-            fields: Vec::new(),
         });
         idx
     }
@@ -802,13 +738,28 @@ impl<'a> Builder<'a> {
         *self.stack.last().expect("builder stack is empty")
     }
 
-    fn pop_if(&mut self, kind: Markdown) {
+    fn pop_if(&mut self, kind: NodeKind) {
         if self.stack.last().map(|idx| self.nodes[*idx].kind) == Some(kind) {
             self.stack.pop();
         }
     }
 
-    fn pop_one_of(&mut self, kinds: &[Markdown]) {
+    /// Pops the stack top when its kind satisfies `pred`.
+    ///
+    /// Used for the folded families (headings, list items) where the top can
+    /// be any level/flag variant of a group.
+    fn pop_if_matches(&mut self, pred: impl Fn(NodeKind) -> bool) {
+        if self
+            .stack
+            .last()
+            .map(|idx| pred(self.nodes[*idx].kind))
+            .unwrap_or(false)
+        {
+            self.stack.pop();
+        }
+    }
+
+    fn pop_one_of(&mut self, kinds: &[NodeKind]) {
         let Some(idx) = self.stack.last().copied() else {
             return;
         };
@@ -830,6 +781,30 @@ impl<'a> Builder<'a> {
     }
 }
 
+fn metadata_kind(kind: MetadataBlockKind) -> NodeKind {
+    match kind {
+        MetadataBlockKind::YamlStyle => NodeKind::MinusMetadata,
+        MetadataBlockKind::PlusesStyle => NodeKind::PlusMetadata,
+    }
+}
+
+/// Whether a container's span should be widened to cover its children.
+///
+/// These are synthesized or empty-initialized spans (sections, content
+/// wrappers, table delimiter scaffolding) whose true extent is only known
+/// once children are attached.
+fn recompute_span_from_children(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Section { .. }
+            | NodeKind::HeadingContent
+            | NodeKind::LinkLabel
+            | NodeKind::ListItemContent { .. }
+            | NodeKind::PipeTableDelimiterRow
+            | NodeKind::PipeTableDelimiterCell
+    )
+}
+
 fn clamp_range(range: Range<usize>, len: usize) -> Range<usize> {
     let start = range.start.min(len);
     let end = range.end.min(len).max(start);
@@ -844,22 +819,18 @@ fn first_byte(byte: usize) -> Range<usize> {
     byte..byte.saturating_add(1)
 }
 
-fn heading_kinds(
-    level: HeadingLevel,
-    source: &str,
-    range: &Range<usize>,
-) -> (Markdown, Markdown, bool) {
-    let setext = is_setext_heading(source, range);
+/// Resolves the `(level, style)` of a heading from its pulldown level and
+/// whether the source span looks like a setext underline.
+///
+/// pulldown-cmark only surfaces setext headings at H1/H2. A detected setext
+/// underline at any other level is a degenerate case; it is coerced to ATX
+/// H1, preserving the pre-refactor `heading_kinds` fallback behavior.
+fn resolve_heading(level: HeadingLevel, setext: bool) -> (u8, HeadingStyle) {
     match (level, setext) {
-        (HeadingLevel::H1, false) => (Markdown::AtxHeading, Markdown::AtxH1Marker, false),
-        (HeadingLevel::H2, false) => (Markdown::AtxHeading2, Markdown::AtxH2Marker, false),
-        (HeadingLevel::H3, false) => (Markdown::AtxHeading3, Markdown::AtxH3Marker, false),
-        (HeadingLevel::H4, false) => (Markdown::AtxHeading4, Markdown::AtxH4Marker, false),
-        (HeadingLevel::H5, false) => (Markdown::AtxHeading5, Markdown::AtxH5Marker, false),
-        (HeadingLevel::H6, false) => (Markdown::AtxHeading6, Markdown::AtxH6Marker, false),
-        (HeadingLevel::H1, true) => (Markdown::SetextHeading, Markdown::SetextH1Underline, true),
-        (HeadingLevel::H2, true) => (Markdown::SetextHeading2, Markdown::SetextH2Underline, true),
-        (_, true) => (Markdown::AtxHeading, Markdown::AtxH1Marker, false),
+        (HeadingLevel::H1, true) => (1, HeadingStyle::Setext),
+        (HeadingLevel::H2, true) => (2, HeadingStyle::Setext),
+        (_, true) => (1, HeadingStyle::Atx),
+        (level, false) => (level_number(level), HeadingStyle::Atx),
     }
 }
 
@@ -897,49 +868,6 @@ fn heading_marker_range(source: &str, range: &Range<usize>, setext: bool) -> Opt
     let leading = line.len() - line.trim_start().len();
     let hashes = line[leading..].bytes().take_while(|b| *b == b'#').count();
     (hashes > 0).then_some(range.start + leading..range.start + leading + hashes)
-}
-
-fn heading_level_kind(kind: Markdown) -> Option<u8> {
-    Some(match kind {
-        Markdown::AtxHeading | Markdown::SetextHeading => 1,
-        Markdown::AtxHeading2 | Markdown::SetextHeading2 => 2,
-        Markdown::AtxHeading3 => 3,
-        Markdown::AtxHeading4 => 4,
-        Markdown::AtxHeading5 => 5,
-        Markdown::AtxHeading6 => 6,
-        _ => return None,
-    })
-}
-
-fn section_kind(level: u8) -> Markdown {
-    match level {
-        1 => Markdown::Section1,
-        2 => Markdown::Section2,
-        3 => Markdown::Section3,
-        4 => Markdown::Section4,
-        5 => Markdown::Section5,
-        6 => Markdown::Section6,
-        _ => Markdown::Section,
-    }
-}
-
-fn list_item_marker_kind(source: &str, range: &Range<usize>) -> Option<Markdown> {
-    let line = source.get(range.clone())?.lines().next().unwrap_or("");
-    let trimmed = line.trim_start();
-    let marker = trimmed.chars().next()?;
-    if marker.is_ascii_digit() {
-        return Some(if trimmed.contains(')') {
-            Markdown::ListMarkerParenthesis
-        } else {
-            Markdown::ListMarkerDot
-        });
-    }
-    Some(match marker {
-        '+' => Markdown::ListMarkerPlus,
-        '*' => Markdown::ListMarkerStar,
-        '-' => Markdown::ListMarkerMinus,
-        _ => return None,
-    })
 }
 
 fn list_item_marker_range(source: &str, range: &Range<usize>) -> Range<usize> {
@@ -1084,20 +1012,20 @@ fn find_in_range(source: &str, range: &Range<usize>, needle: &str) -> Option<Ran
     Some(range.start + local..range.start + local + needle.len())
 }
 
-fn classify_html(text: &str) -> Markdown {
+fn classify_html(text: &str) -> NodeKind {
     let trimmed = text.trim_start();
     if trimmed.starts_with("<!--") {
-        Markdown::HtmlComment
+        NodeKind::HtmlComment
     } else if trimmed.starts_with("<![CDATA[") {
-        Markdown::HtmlCdata
+        NodeKind::HtmlCdata
     } else if trimmed.starts_with("<?") {
-        Markdown::HtmlProcessingInstruction
+        NodeKind::HtmlProcessingInstruction
     } else if trimmed.starts_with("<!") {
-        Markdown::HtmlDeclaration
+        NodeKind::HtmlDeclaration
     } else if trimmed.starts_with("</") {
-        Markdown::HtmlCloseTag
+        NodeKind::HtmlCloseTag
     } else {
-        Markdown::HtmlOpenTag
+        NodeKind::HtmlOpenTag
     }
 }
 
@@ -1124,19 +1052,19 @@ fn is_token_char(ch: char, prev: Option<char>, next: Option<char>) -> bool {
     }
 }
 
-fn classify_wordish(text: &str) -> Markdown {
+fn classify_wordish(text: &str) -> NodeKind {
     let trimmed = text.trim_matches(|c: char| c == '-' || c == '_' || c == '.');
     if trimmed.is_empty() {
-        return Markdown::WordToken;
+        return NodeKind::WordToken;
     }
     if is_numeric_like(trimmed) {
-        Markdown::NumericToken
+        NodeKind::NumericToken
     } else if is_path_like(trimmed) {
-        Markdown::PathLikeToken
+        NodeKind::PathLikeToken
     } else if is_identifier_like(trimmed) {
-        Markdown::IdentifierLikeToken
+        NodeKind::IdentifierLikeToken
     } else {
-        Markdown::WordToken
+        NodeKind::WordToken
     }
 }
 
@@ -1186,36 +1114,25 @@ fn has_camel_hump(text: &str) -> bool {
     false
 }
 
-fn punctuation_kind(ch: char) -> Option<Markdown> {
+fn punctuation_kind(ch: char) -> Option<NodeKind> {
     Some(match ch {
-        '.' | '?' | '!' | '。' | '…' => Markdown::Terminator,
-        ',' | ';' | ':' => Markdown::Separator,
-        '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' => Markdown::Bracket,
-        '=' | '+' | '-' | '*' | '/' | '|' | '&' | '^' | '%' | '~' => Markdown::OperatorLike,
+        '.' | '?' | '!' | '。' | '…' => NodeKind::Terminator,
+        ',' | ';' | ':' => NodeKind::Separator,
+        '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' => NodeKind::Bracket,
+        '=' | '+' | '-' | '*' | '/' | '|' | '&' | '^' | '%' | '~' => NodeKind::OperatorLike,
         _ => return None,
     })
 }
 
-fn is_reference_definition_container(kind: Markdown) -> bool {
+fn is_reference_definition_container(kind: NodeKind) -> bool {
     matches!(
         kind,
-        Markdown::BlockQuote
-            | Markdown::PlainBlockQuote
-            | Markdown::Callout
-            | Markdown::List
-            | Markdown::ListItem
-            | Markdown::ListItem2
-            | Markdown::ListItem3
-            | Markdown::ListItem4
-            | Markdown::ListItem5
-            | Markdown::TaskListItem
-            | Markdown::TaskListItem2
-            | Markdown::TaskListItem3
-            | Markdown::TaskListItem4
-            | Markdown::TaskListItem5
-            | Markdown::ListItemContent
-            | Markdown::TaskListItemContent
-            | Markdown::FootnoteDefinition
+        NodeKind::BlockQuote
+            | NodeKind::Callout
+            | NodeKind::List
+            | NodeKind::ListItem { .. }
+            | NodeKind::ListItemContent { .. }
+            | NodeKind::FootnoteDefinition
     )
 }
 
@@ -1228,7 +1145,7 @@ mod tests {
         &source[node.start_byte..node.end_byte]
     }
 
-    fn first_node(tree: &Tree, kind: Markdown) -> usize {
+    fn first_node(tree: &Tree, kind: NodeKind) -> usize {
         tree.nodes
             .iter()
             .position(|node| node.kind == kind)
@@ -1251,12 +1168,12 @@ mod tests {
     fn unknown_reference_link_is_preserved_as_link_node() {
         let source = "See [missing][nope].";
         let tree = parse(source);
-        let link = first_node(&tree, Markdown::Link);
+        let link = first_node(&tree, NodeKind::Link);
         let label = tree.nodes[link]
             .children
             .iter()
             .copied()
-            .find(|idx| tree.nodes[*idx].kind == Markdown::LinkLabel)
+            .find(|idx| tree.nodes[*idx].kind == NodeKind::LinkLabel)
             .expect("link label");
 
         assert_eq!(node_text(&tree, source, label), "missing");
@@ -1266,8 +1183,8 @@ mod tests {
     fn inline_link_destination_uses_payload_match_not_label_match() {
         let source = "[foo](foo \"foo\")";
         let tree = parse(source);
-        let destination = first_node(&tree, Markdown::LinkDestination);
-        let title = first_node(&tree, Markdown::LinkTitle);
+        let destination = first_node(&tree, NodeKind::LinkDestination);
+        let title = first_node(&tree, NodeKind::LinkTitle);
 
         assert_eq!(tree.nodes[destination].start_byte, 6);
         assert_eq!(node_text(&tree, source, destination), "foo");
@@ -1279,7 +1196,7 @@ mod tests {
     fn reference_link_destination_uses_reference_key_not_label() {
         let source = "[visible][ref]\n\n[ref]: docs.md\n";
         let tree = parse(source);
-        let destination = first_node(&tree, Markdown::LinkDestination);
+        let destination = first_node(&tree, NodeKind::LinkDestination);
 
         assert_eq!(node_text(&tree, source, destination), "ref");
     }
@@ -1288,8 +1205,8 @@ mod tests {
     fn reference_definition_destination_uses_payload_match_not_label_match() {
         let source = "[foo]: foo \"foo\"\n";
         let tree = parse(source);
-        let destination = first_node(&tree, Markdown::LinkDestination);
-        let title = first_node(&tree, Markdown::LinkTitle);
+        let destination = first_node(&tree, NodeKind::LinkDestination);
+        let title = first_node(&tree, NodeKind::LinkTitle);
 
         assert_eq!(tree.nodes[destination].start_byte, 7);
         assert_eq!(node_text(&tree, source, destination), "foo");
@@ -1304,7 +1221,7 @@ mod tests {
         let destinations = tree
             .nodes
             .iter()
-            .filter(|node| node.kind == Markdown::LinkDestination)
+            .filter(|node| node.kind == NodeKind::LinkDestination)
             .map(|node| &source[node.start_byte..node.end_byte])
             .collect::<Vec<_>>();
 
@@ -1315,8 +1232,8 @@ mod tests {
     fn reference_definition_inside_blockquote_keeps_container_parent() {
         let source = "> [ref]: /url\n";
         let tree = parse(source);
-        let blockquote = first_node(&tree, Markdown::BlockQuote);
-        let refdef = first_node(&tree, Markdown::LinkReferenceDefinition);
+        let blockquote = first_node(&tree, NodeKind::BlockQuote);
+        let refdef = first_node(&tree, NodeKind::LinkReferenceDefinition);
 
         assert!(has_child(&tree, blockquote, refdef));
     }
@@ -1325,8 +1242,8 @@ mod tests {
     fn reference_definition_inside_list_item_keeps_container_parent() {
         let source = "- [ref]: /url\n";
         let tree = parse(source);
-        let item = first_node(&tree, Markdown::ListItem);
-        let refdef = first_node(&tree, Markdown::LinkReferenceDefinition);
+        let item = first_node(&tree, NodeKind::ListItem { task: false });
+        let refdef = first_node(&tree, NodeKind::LinkReferenceDefinition);
 
         assert!(has_descendant(&tree, item, refdef));
     }
@@ -1335,8 +1252,8 @@ mod tests {
     fn reference_definition_label_allows_escaped_closing_bracket() {
         let source = "[foo\\]]: /url\n";
         let tree = parse(source);
-        let label = first_node(&tree, Markdown::LinkLabel);
-        let destination = first_node(&tree, Markdown::LinkDestination);
+        let label = first_node(&tree, NodeKind::LinkLabel);
+        let destination = first_node(&tree, NodeKind::LinkDestination);
 
         assert_eq!(node_text(&tree, source, label), "[foo\\]]");
         assert_eq!(node_text(&tree, source, destination), "/url");
@@ -1350,12 +1267,12 @@ mod tests {
         assert!(
             tree.nodes
                 .iter()
-                .all(|node| node.kind != Markdown::LinkReferenceDefinition)
+                .all(|node| node.kind != NodeKind::LinkReferenceDefinition)
         );
         assert!(
             tree.nodes
                 .iter()
-                .any(|node| node.kind == Markdown::FootnoteDefinition)
+                .any(|node| node.kind == NodeKind::FootnoteDefinition)
         );
     }
 
@@ -1363,7 +1280,7 @@ mod tests {
     fn inline_code_content_excludes_backtick_delimiters() {
         let source = "Use `foo` now.";
         let tree = parse(source);
-        let content = first_node(&tree, Markdown::InlineCodeContent);
+        let content = first_node(&tree, NodeKind::InlineCodeContent);
 
         assert_eq!(node_text(&tree, source, content), "foo");
     }
@@ -1372,9 +1289,9 @@ mod tests {
     fn callout_marker_ranges_match_legacy_tokens() {
         let source = "> [!NOTE]\n> text\n";
         let tree = parse(source);
-        let open = first_node(&tree, Markdown::CalloutMarkerOpen);
-        let callout_type = first_node(&tree, Markdown::CalloutType);
-        let close = first_node(&tree, Markdown::CalloutMarkerClose);
+        let open = first_node(&tree, NodeKind::CalloutMarkerOpen);
+        let callout_type = first_node(&tree, NodeKind::CalloutType);
+        let close = first_node(&tree, NodeKind::CalloutMarkerClose);
 
         assert_eq!(node_text(&tree, source, open), "[!");
         assert_eq!(node_text(&tree, source, callout_type), "NOTE");
@@ -1386,10 +1303,12 @@ mod tests {
         let source = "Foo\nbar\n---\n";
         let tree = parse(source);
 
-        assert!(
-            tree.nodes
-                .iter()
-                .any(|node| node.kind == Markdown::SetextHeading2)
-        );
+        assert!(tree.nodes.iter().any(|node| matches!(
+            node.kind,
+            NodeKind::Heading {
+                level: 2,
+                style: HeadingStyle::Setext
+            }
+        )));
     }
 }
