@@ -868,3 +868,58 @@ jobs:
         run: |
           VERSION=$(cat version.txt)
           node scripts/publish-npm.js "${VERSION}" ./npm-dist
+
+  # Attach the CLI archives (built by the `build` matrix above) to the GitHub
+  # Release that release-please already created for this tag. This lives here —
+  # not in release-please.yml — because the archives and the tag context are
+  # both in-run, so no cross-workflow polling (and its timeout race) is needed.
+  # cargo-binstall, mise, and ubi install from these release assets.
+  upload-cli-binaries:
+    name: Upload CLI binaries to release
+    needs: build
+    # Only tag pushes have a release-please-created GitHub Release to attach to;
+    # workflow_dispatch (manual/test/preview) runs produce no such release.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Download CLI archives
+        uses: actions/download-artifact@v5
+        with:
+          pattern: cli-archive-*-${{ github.run_id }}
+          path: cli-archives/
+          merge-multiple: true
+
+      - name: Upload CLI archives to GitHub Release
+        shell: bash
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+
+          # release-please creates the Release before the tag push triggers this
+          # workflow; create it defensively for manually pushed tags so the
+          # upload always has a target.
+          if ! gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME not found; creating it."
+            gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
+          fi
+
+          shopt -s nullglob
+          uploaded=0
+          for file in cli-archives/*; do
+            if [[ -f "$file" ]]; then
+              echo "Uploading: $(basename "$file")"
+              gh release upload "$TAG_NAME" "$file" --clobber
+              uploaded=$((uploaded + 1))
+            fi
+          done
+
+          if [[ "$uploaded" -eq 0 ]]; then
+            echo "::error::No CLI archives found to upload"
+            exit 1
+          fi
+          echo "Uploaded ${uploaded} CLI archives to release: $TAG_NAME"
