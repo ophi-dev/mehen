@@ -20,7 +20,7 @@ mehen-metrics = { workspace = true }
 # `mago-allocator` provides `LocalArena`, the bump arena mago's parser
 # writes into (mago 1.42 replaced the external `bumpalo` dependency
 # with its own allocator).
-mago-syntax = "=1.42.0"
+mago-syntax = "=1.43.0"
 mago-syntax-core = "=1.43.0"
 mago-database = "=1.43.0"
 mago-span = "=1.43.0"
