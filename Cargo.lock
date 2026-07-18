@@ -1990,7 +1990,7 @@ dependencies = [
 
 [[package]]
 name = "mehen"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "camino",
  "clap",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-antlr"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "antlr-rust-runtime",
  "mehen-core",
@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-c"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-core"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "camino",
  "serde",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-engine"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "camino",
  "clap",
@@ -2075,14 +2075,14 @@ dependencies = [
 
 [[package]]
 name = "mehen-git"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "gix",
 ]
 
 [[package]]
 name = "mehen-go"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-java"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "antlr-rust-runtime",
  "insta",
@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-kotlin"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "antlr-rust-runtime",
  "insta",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-markdown"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "camino",
  "insta",
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-metrics"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "mehen-core",
  "serde",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-php"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "insta",
  "mago-allocator",
@@ -2172,7 +2172,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-powershell"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-python"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2201,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-report"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "mehen-core",
  "mehen-markdown",
@@ -2211,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-ruby"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2224,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-rust"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2237,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-sql"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2250,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-tree-sitter"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "mehen-core",
  "mehen-metrics",
@@ -2260,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-typescript"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "insta",
  "mehen-core",
@@ -4207,7 +4207,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "askama",
  "clap",
