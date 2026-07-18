@@ -89,7 +89,7 @@ gix = { version = "^0.85", default-features = false, features = ["attributes", "
 # `cargo xtask antlr generate --all`.
 antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.6.3" }
 
-tree-sitter = "=0.26.10"
+tree-sitter = "=0.26.11"
 # Per-language grammars (`tree-sitter-c`, `tree-sitter-go`,
 # `tree-sitter-pwsh`)
 # are pinned inline in their consuming analyzer crate. xtask reaches
