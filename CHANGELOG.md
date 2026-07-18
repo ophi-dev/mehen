@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.1](https://github.com/ophi-dev/mehen/compare/v1.4.0...v1.4.1) (2026-07-18)
+
+
+### Parser & Grammar Updates
+
+* bump mago-syntax from 1.42.0 to 1.43.0 in the mago group ([#179](https://github.com/ophi-dev/mehen/issues/179)) ([575f1a1](https://github.com/ophi-dev/mehen/commit/575f1a17c20a0a6c5c16ca386097c61ef7485af6))
+* bump ra_ap_syntax from 0.0.341 to 0.0.342 ([#188](https://github.com/ophi-dev/mehen/issues/188)) ([6c5d952](https://github.com/ophi-dev/mehen/commit/6c5d9529bde876c85c0c9c1d52dd9ac1790a6dd8))
+* bump the oxc group with 6 updates ([#184](https://github.com/ophi-dev/mehen/issues/184)) ([5a23f0c](https://github.com/ophi-dev/mehen/commit/5a23f0c1e078b353da4ae1ecbd75ec326e86191e))
+* bump the ruff group with 3 updates ([#180](https://github.com/ophi-dev/mehen/issues/180)) ([7b6748a](https://github.com/ophi-dev/mehen/commit/7b6748a4b3326315ccea56a9a5408f2dd9e24dea))
+* bump tree-sitter from 0.26.10 to 0.26.11 in the tree-sitter group ([#183](https://github.com/ophi-dev/mehen/issues/183)) ([07a8968](https://github.com/ophi-dev/mehen/commit/07a89686aba86ef439037538d4c3e2bf55ff3d44))
+
 ## [1.4.0](https://github.com/ophi-dev/mehen/compare/v1.3.0...v1.4.0) (2026-07-10)
 
 
