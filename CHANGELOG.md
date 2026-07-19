@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/ophi-dev/mehen/compare/v1.5.0...v1.5.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* import Parser trait in -parser crate doctests + guard doctests in CI ([1e0fb40](https://github.com/ophi-dev/mehen/commit/1e0fb40d30ae6ff0af719280f11705ca16cafb9e))
+
 ## [1.5.0](https://github.com/ophi-dev/mehen/compare/v1.4.1...v1.5.0) (2026-07-19)
 
 
