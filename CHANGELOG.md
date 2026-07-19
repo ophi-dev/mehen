@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/ophi-dev/mehen/compare/v1.4.1...v1.5.0) (2026-07-19)
+
+
+### Features
+
+* publishable mehen-&lt;lang&gt;-parser crates + antlr-rust-runtime 0.13.0 upgrade ([#189](https://github.com/ophi-dev/mehen/issues/189)) ([af45797](https://github.com/ophi-dev/mehen/commit/af45797779c7ed6100e734516b88d18796939346))
+
 ## [1.4.1](https://github.com/ophi-dev/mehen/compare/v1.4.0...v1.4.1) (2026-07-18)
 
 
