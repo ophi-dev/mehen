@@ -61,6 +61,14 @@ jobs:
         # report, git, and markdown crates' tests.
         run: cargo insta test --workspace --all-features --check --unreferenced reject --test-runner nextest --no-test-runner-fallback --disable-nextest-doctest
 
+      # nextest cannot run doctests, so the step above passes `--disable-nextest-doctest`.
+      # Doctests are compiled by the release job's `cargo test --workspace`, so guard
+      # them here too — otherwise a doctest that fails to compile only surfaces at the
+      # release tag, after PR CI is already green.
+      - name: Run doctests
+        shell: bash
+        run: cargo test --workspace --all-features --doc
+
       - name: Smoke test CLI
         shell: bash
         run: |

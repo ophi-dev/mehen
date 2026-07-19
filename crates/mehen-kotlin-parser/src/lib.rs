@@ -27,6 +27,9 @@
 //! ```no_run
 //! use mehen_kotlin_parser::kotlin_parser::{self, KotlinParser};
 //! use mehen_kotlin_parser::kotlin_lexer::KotlinLexer;
+//! // `number_of_syntax_errors` is a `Parser`-trait method, so the trait
+//! // must be in scope to call it.
+//! use antlr4_runtime::Parser;
 //!
 //! # fn main() -> Result<(), antlr4_runtime::AntlrError> {
 //! // One-call setup: build lexer + token stream + parser and run an entry
