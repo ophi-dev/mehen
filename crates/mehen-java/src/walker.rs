@@ -67,7 +67,7 @@
 //!   NPA/NPM; interface/annotation members are implicitly public.
 
 use mehen_antlr::runtime::token::Token;
-use mehen_antlr::runtime::{ParseTree, ParserRuleContext, TerminalNode};
+use mehen_antlr::runtime::{Node, RuleNodeView, TerminalNodeView};
 use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
 use mehen_metrics::{
@@ -76,21 +76,21 @@ use mehen_metrics::{
 };
 use smol_str::SmolStr;
 
-use crate::generated::java_lexer as jl;
-use crate::generated::java_parser as jp;
+use mehen_java_parser::java_lexer as jl;
+use mehen_java_parser::java_parser as jp;
 
 /// Drive the walk over the parsed `compilationUnit` tree and return the unit
 /// `MetricSpace`. LOC is computed from `loc_tokens` in a single ordered pass
 /// *after* the tree walk has opened and closed every space.
 pub(crate) fn walk(
-    tree: &ParseTree,
+    tree: Node<'_>,
     line_index: &LineIndex,
     source_len: usize,
     loc_tokens: &[LocToken],
 ) -> MetricSpace {
-    let unit_span = match tree {
-        ParseTree::Rule(rule) => ctx_span(rule.context(), line_index, source_len),
-        _ => mehen_core::SourceSpan::empty(),
+    let unit_span = match tree.as_rule() {
+        Some(rule) => ctx_span(rule, line_index, source_len),
+        None => mehen_core::SourceSpan::empty(),
     };
 
     let mut unit_state = State::new();
@@ -109,8 +109,8 @@ pub(crate) fn walk(
         loc_routing: SpaceRangeTracker::new(),
     };
 
-    if let ParseTree::Rule(rule) = tree {
-        for child in rule.context().children() {
+    if let Some(rule) = tree.as_rule() {
+        for child in rule.children() {
             walker.visit(child, ChildHint::default());
         }
     }
@@ -279,15 +279,17 @@ impl Walker<'_> {
         self.stack.last_mut().expect("walker stack empty")
     }
 
-    fn visit(&mut self, node: &ParseTree, hint: ChildHint) {
-        match node {
-            ParseTree::Rule(rule) => self.visit_rule(rule.context(), hint),
-            ParseTree::Terminal(term) => self.visit_terminal(term, hint),
-            ParseTree::Error(_) => {}
+    fn visit(&mut self, node: Node<'_>, hint: ChildHint) {
+        if let Some(rule) = node.as_rule() {
+            self.visit_rule(rule, hint);
+        } else if let Some(term) = node.as_terminal() {
+            self.visit_terminal(term, hint);
         }
+        // Error leaves carry no metric contribution; they are surfaced as
+        // diagnostics by `mehen_antlr::collect_errors` in the analyzer.
     }
 
-    fn visit_terminal(&mut self, term: &TerminalNode, hint: ChildHint) {
+    fn visit_terminal(&mut self, term: TerminalNodeView<'_>, hint: ChildHint) {
         let tt = term.symbol().token_type();
 
         // Halstead operator/operand token classification. A terminal reached
@@ -308,7 +310,7 @@ impl Walker<'_> {
                 });
             }
             HalsteadClass::Operand => {
-                let text = term.symbol().text().unwrap_or("");
+                let text = term.symbol().text();
                 self.current().halstead.observe_operand(HalsteadOperand {
                     kind: SmolStr::new("Operand"),
                     text: Some(SmolStr::new(text)),
@@ -328,18 +330,14 @@ impl Walker<'_> {
         // as phantom blank lines (`blank = sloc - ploc - only_comment`).
         if tt >= 0 {
             let start_row = (term.symbol().line() as u32).saturating_sub(1);
-            let extra_rows = term
-                .symbol()
-                .text()
-                .map(|t| t.bytes().filter(|&b| b == b'\n').count() as u32)
-                .unwrap_or(0);
+            let extra_rows = term.symbol().text().bytes().filter(|&b| b == b'\n').count() as u32;
             for row in start_row..=start_row.saturating_add(extra_rows) {
                 self.current().loc.observe_code_line(row);
             }
         }
     }
 
-    fn visit_rule(&mut self, ctx: &ParserRuleContext, hint: ChildHint) {
+    fn visit_rule(&mut self, ctx: RuleNodeView<'_>, hint: ChildHint) {
         let ri = ctx.rule_index();
         let saved_cognitive = self.cognitive;
 
@@ -381,19 +379,21 @@ impl Walker<'_> {
 
     fn visit_children(
         &mut self,
-        ctx: &ParserRuleContext,
+        ctx: RuleNodeView<'_>,
         ri: usize,
         hint: ChildHint,
         container_before_open: Option<ContainerKind>,
     ) {
-        let children = ctx.children();
+        // `NodeChildren` is a cheap `Clone` slice-iterator, so it is re-walked
+        // (below, and for the `else`/anon-body scans here) without allocating —
+        // the hot path avoids collecting children into a `Vec` for every node.
 
         // For an `if` statement, the `else`-branch body is the `statement`
         // that appears after the `ELSE` token. Tag it so an `if` reached
         // through it (without an intervening `block`) is recognized as
         // `else if` and does not add nesting.
         let else_body_idx = if is_if_statement(ctx, ri) {
-            else_branch_index(children)
+            else_branch_index(ctx.children())
         } else {
             None
         };
@@ -518,7 +518,7 @@ impl Walker<'_> {
         // from its inbound hint before its children are visited.
         let anon_body_child = if matches!(ri, jp::RULE_ENUM_CONSTANT | jp::RULE_CLASS_CREATOR_REST)
         {
-            child_index_of_rule(children, jp::RULE_CLASS_BODY)
+            child_index_of_rule(ctx.children(), jp::RULE_CLASS_BODY)
         } else {
             None
         };
@@ -588,7 +588,7 @@ impl Walker<'_> {
             opened_at_wrapper || hint.space_opened_by_wrapper
         };
 
-        for (idx, child) in children.iter().enumerate() {
+        for (idx, child) in ctx.children().enumerate() {
             let mut child_hint = ChildHint::default();
             if Some(idx) == else_body_idx || propagate_else {
                 child_hint.is_else_branch = true;
@@ -635,7 +635,7 @@ impl Walker<'_> {
     /// (siblings of the member declaration).
     fn member_propagation(
         &self,
-        ctx: &ParserRuleContext,
+        ctx: RuleNodeView<'_>,
         ri: usize,
         hint: ChildHint,
         container_before_open: Option<ContainerKind>,
@@ -756,12 +756,14 @@ impl Walker<'_> {
     /// needed.
     fn open_method_space(
         &mut self,
-        span_ctx: &ParserRuleContext,
-        method_ctx: &ParserRuleContext,
+        span_ctx: RuleNodeView<'_>,
+        method_ctx: RuleNodeView<'_>,
         hint: ChildHint,
     ) {
         let name = method_name(method_ctx);
-        let opened_at_wrapper = !std::ptr::eq(span_ctx, method_ctx);
+        // Node identity: the arena addresses every node by a `NodeId`, so
+        // "different node" is an id comparison, not pointer equality.
+        let opened_at_wrapper = span_ctx.node().id() != method_ctx.node().id();
         // When opening at the wrapper, NPM must be recorded into the enclosing
         // class BEFORE the method space is pushed (member classification
         // normally runs at the inner declaration, but that node now sits inside
@@ -833,10 +835,11 @@ impl Walker<'_> {
     /// Mirrors `open_method_space` but for class-like scopes: nested types are
     /// not member-classified into NPA/NPM, so there is no member-routing to
     /// relocate.
-    fn open_type_space(&mut self, span_ctx: &ParserRuleContext, type_ctx: &ParserRuleContext) {
+    fn open_type_space(&mut self, span_ctx: RuleNodeView<'_>, type_ctx: RuleNodeView<'_>) {
         let name = type_name(type_ctx);
         let ri = type_ctx.rule_index();
-        let opened_at_wrapper = !std::ptr::eq(span_ctx, type_ctx);
+        // Node identity is a `NodeId` comparison in the arena model.
+        let opened_at_wrapper = span_ctx.node().id() != type_ctx.node().id();
         let widened = if opened_at_wrapper {
             None
         } else {
@@ -870,7 +873,7 @@ impl Walker<'_> {
 
     /// Open a metric space for space-introducing rules. Returns whether a
     /// space was pushed.
-    fn maybe_open_space(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) -> bool {
+    fn maybe_open_space(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) -> bool {
         match ri {
             // One function space per method shape. Interface methods reach
             // their name/params/body via `interfaceCommonBodyDeclaration`
@@ -970,7 +973,7 @@ impl Walker<'_> {
         }
     }
 
-    fn new_space_state(&self, ctx: &ParserRuleContext) -> State {
+    fn new_space_state(&self, ctx: RuleNodeView<'_>) -> State {
         self.new_space_state_widened(ctx, None)
     }
 
@@ -981,7 +984,7 @@ impl Walker<'_> {
     /// the declaration's own `ctx_span` start).
     fn new_space_state_widened(
         &self,
-        ctx: &ParserRuleContext,
+        ctx: RuleNodeView<'_>,
         widened_start: Option<(u32, u32)>,
     ) -> State {
         let mut state = State::new();
@@ -1002,7 +1005,7 @@ impl Walker<'_> {
         &mut self,
         kind: SpaceKind,
         name: Option<String>,
-        ctx: &ParserRuleContext,
+        ctx: RuleNodeView<'_>,
         state: State,
         suppress_parent_wmc: bool,
     ) {
@@ -1017,7 +1020,7 @@ impl Walker<'_> {
         &mut self,
         kind: SpaceKind,
         name: Option<String>,
-        ctx: &ParserRuleContext,
+        ctx: RuleNodeView<'_>,
         state: State,
         suppress_parent_wmc: bool,
         widened_start: Option<(u32, u32)>,
@@ -1126,7 +1129,7 @@ impl Walker<'_> {
     }
 
     /// Per-rule cyclomatic / cognitive / ABC / exit / LOC classification.
-    fn classify_rule(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
+    fn classify_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) {
         if ri == jp::RULE_STATEMENT {
             self.classify_statement(ctx, hint);
         }
@@ -1193,7 +1196,7 @@ impl Walker<'_> {
     }
 
     /// Classify a `statement` context by its leading keyword token.
-    fn classify_statement(&mut self, ctx: &ParserRuleContext, hint: ChildHint) {
+    fn classify_statement(&mut self, ctx: RuleNodeView<'_>, hint: ChildHint) {
         let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
 
         if ctx.has_token(jl::IF) {
@@ -1233,7 +1236,7 @@ impl Walker<'_> {
     /// short-circuit `&&`/`||` (cyclomatic + cognitive + ABC), the ternary `?`
     /// (cyclomatic + cognitive + ABC), comparison/equality (ABC condition),
     /// and `instanceof` (ABC condition).
-    fn classify_expression(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
+    fn classify_expression(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) {
         if ri == jp::RULE_CATCH_CLAUSE {
             // `catch` is cognitive-only (matches SonarJava): nesting increment
             // + an ABC condition, but no cyclomatic decision.
@@ -1323,7 +1326,7 @@ impl Walker<'_> {
         }
     }
 
-    fn classify_abc_rule(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
+    fn classify_abc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) {
         match ri {
             // A method/constructor call, or object creation, is a branch.
             jp::RULE_METHOD_CALL => self.current().abc.record_branch(),
@@ -1402,7 +1405,7 @@ impl Walker<'_> {
         }
     }
 
-    fn classify_loc_rule(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
+    fn classify_loc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) {
         // A `for` header's initializer declaration is part of the `for`
         // statement's single logical line — not its own LLOC.
         if ri == jp::RULE_LOCAL_VARIABLE_DECLARATION && hint.in_for_init {
@@ -1475,7 +1478,7 @@ impl Walker<'_> {
     /// enclosing record's visibility for the compact-constructor fallback.
     fn classify_class_member(
         &mut self,
-        ctx: &ParserRuleContext,
+        ctx: RuleNodeView<'_>,
         ri: usize,
         container: ContainerKind,
         public: bool,
@@ -1550,11 +1553,17 @@ impl Walker<'_> {
 
 /// Index of the first direct child that is a rule with `rule_index`, if any.
 /// Used to tag only the `classBody` child of `classCreatorRest`/`enumConstant`
-/// as the anonymous body (its sibling `arguments` is a plain call).
-fn child_index_of_rule(children: &[ParseTree], rule_index: usize) -> Option<usize> {
-    children.iter().position(
-        |c| matches!(c, ParseTree::Rule(rule) if rule.context().rule_index() == rule_index),
-    )
+/// as the anonymous body (its sibling `arguments` is a plain call). Takes the
+/// child iterator directly so no `Vec` is allocated.
+fn child_index_of_rule<'a>(
+    children: impl Iterator<Item = Node<'a>>,
+    rule_index: usize,
+) -> Option<usize> {
+    children.enumerate().find_map(|(idx, c)| {
+        c.as_rule()
+            .filter(|rule| rule.rule_index() == rule_index)
+            .map(|_| idx)
+    })
 }
 
 /// Rules that open a class-like metric space (see `maybe_open_space`). Used to
@@ -1612,11 +1621,11 @@ fn is_member_body_wrapper(ri: usize) -> bool {
 /// are plain operands) — matching SonarSource, where negation never breaks a
 /// boolean run. The caller counts +1 whenever the operator kind changes across
 /// the resulting sequence. A depth bound guards against pathological nesting.
-fn flatten_logical_operators(ctx: &ParserRuleContext, out: &mut Vec<BoolOp>) {
+fn flatten_logical_operators(ctx: RuleNodeView<'_>, out: &mut Vec<BoolOp>) {
     flatten_logical_operators_inner(ctx, out, 0);
 }
 
-fn flatten_logical_operators_inner(ctx: &ParserRuleContext, out: &mut Vec<BoolOp>, depth: usize) {
+fn flatten_logical_operators_inner(ctx: RuleNodeView<'_>, out: &mut Vec<BoolOp>, depth: usize) {
     if depth > 64 {
         return;
     }
@@ -1634,19 +1643,12 @@ fn flatten_logical_operators_inner(ctx: &ParserRuleContext, out: &mut Vec<BoolOp
         return;
     };
     // `expression op expression` — left operand, this operator, right operand.
-    let operands: Vec<&ParserRuleContext> = logical
-        .children()
-        .iter()
-        .filter_map(|c| match c {
-            ParseTree::Rule(rule) => Some(rule.context()),
-            _ => None,
-        })
-        .collect();
-    if let Some(left) = operands.first() {
+    let operands: Vec<RuleNodeView<'_>> = logical.children().filter_map(|c| c.as_rule()).collect();
+    if let Some(&left) = operands.first() {
         flatten_logical_operators_inner(left, out, depth + 1);
     }
     out.push(op);
-    if let Some(right) = operands.get(1) {
+    if let Some(&right) = operands.get(1) {
         flatten_logical_operators_inner(right, out, depth + 1);
     }
 }
@@ -1656,7 +1658,7 @@ fn flatten_logical_operators_inner(ctx: &ParserRuleContext, out: &mut Vec<BoolOp
 /// `expression` wrappers. Returns `None` when `ctx` is not (and does not
 /// transparently wrap) a logical-binary expression — i.e. it is a plain
 /// operand (identifier, comparison, negation, call, …) where flattening stops.
-fn unwrap_to_logical(ctx: &ParserRuleContext, depth: usize) -> Option<&ParserRuleContext> {
+fn unwrap_to_logical(ctx: RuleNodeView<'_>, depth: usize) -> Option<RuleNodeView<'_>> {
     if depth > 64 {
         return None;
     }
@@ -1668,18 +1670,18 @@ fn unwrap_to_logical(ctx: &ParserRuleContext, depth: usize) -> Option<&ParserRul
             // A transparent expression (a bare operand or single wrapped
             // sub-expression, no operator token of its own) — unwrap and retry.
             if !expression_has_operator_token(ctx) {
-                return ctx.children().iter().find_map(|c| match c {
-                    ParseTree::Rule(rule) => unwrap_to_logical(rule.context(), depth + 1),
-                    _ => None,
-                });
+                return ctx
+                    .children()
+                    .filter_map(|c| c.as_rule())
+                    .find_map(|rule| unwrap_to_logical(rule, depth + 1));
             }
             None
         }
         // `primary: '(' expression ')'` — unwrap the parenthesized expression.
-        jp::RULE_PRIMARY => ctx.children().iter().find_map(|c| match c {
-            ParseTree::Rule(rule) => unwrap_to_logical(rule.context(), depth + 1),
-            _ => None,
-        }),
+        jp::RULE_PRIMARY => ctx
+            .children()
+            .filter_map(|c| c.as_rule())
+            .find_map(|rule| unwrap_to_logical(rule, depth + 1)),
         _ => None,
     }
 }
@@ -1692,16 +1694,14 @@ fn unwrap_to_logical(ctx: &ParserRuleContext, depth: usize) -> Option<&ParserRul
 /// Used by the cognitive boolean-run collapse: only a token-less (transparent)
 /// expression forwards the enclosing `&&`/`||`; anything with its own operator
 /// starts a fresh boolean context.
-fn expression_has_operator_token(ctx: &ParserRuleContext) -> bool {
-    ctx.children()
-        .iter()
-        .any(|c| matches!(c, ParseTree::Terminal(_)))
+fn expression_has_operator_token(ctx: RuleNodeView<'_>) -> bool {
+    ctx.children().any(|c| c.as_terminal().is_some())
 }
 
 /// Whether a `lambdaExpression`'s body is an expression (`lambdaBody:
 /// expression`) rather than a block. An expression body is a single logical
 /// line for LLOC; a block body's statements are counted individually.
-fn lambda_body_is_expression(ctx: &ParserRuleContext) -> bool {
+fn lambda_body_is_expression(ctx: RuleNodeView<'_>) -> bool {
     ctx.child_rule(jp::RULE_LAMBDA_BODY)
         .map(|body| {
             body.child_rule(jp::RULE_EXPRESSION).is_some()
@@ -1712,7 +1712,7 @@ fn lambda_body_is_expression(ctx: &ParserRuleContext) -> bool {
 
 /// Whether this `statement` context is an `if` statement (has an `IF` token as
 /// a direct child).
-fn is_if_statement(ctx: &ParserRuleContext, ri: usize) -> bool {
+fn is_if_statement(ctx: RuleNodeView<'_>, ri: usize) -> bool {
     ri == jp::RULE_STATEMENT && ctx.has_token(jl::IF)
 }
 
@@ -1731,7 +1731,7 @@ fn is_if_statement(ctx: &ParserRuleContext, ri: usize) -> bool {
 ///     `break`/`continue`/`yield`/`assert`) — its body is a real nested scope,
 ///     not an else-if, so e.g. an `if` in `else while (c) if (b) {}` keeps its
 ///     nesting increment.
-fn statement_is_else_transparent(ctx: &ParserRuleContext, ri: usize) -> bool {
+fn statement_is_else_transparent(ctx: RuleNodeView<'_>, ri: usize) -> bool {
     ri == jp::RULE_STATEMENT
         && !ctx_is_block(ctx)
         && !ctx.has_token(jl::IF)
@@ -1751,11 +1751,8 @@ fn statement_is_else_transparent(ctx: &ParserRuleContext, ri: usize) -> bool {
 
 /// Whether this context is a bare block statement (`{ … }`) — a `statement`
 /// whose only rule child is a `block`.
-fn ctx_is_block(ctx: &ParserRuleContext) -> bool {
-    let mut rules = ctx.children().iter().filter_map(|c| match c {
-        ParseTree::Rule(rule) => Some(rule.context()),
-        _ => None,
-    });
+fn ctx_is_block(ctx: RuleNodeView<'_>) -> bool {
+    let mut rules = ctx.children().filter_map(|c| c.as_rule());
     matches!((rules.next(), rules.next()), (Some(only), None)
         if only.rule_index() == jp::RULE_BLOCK)
 }
@@ -1763,10 +1760,13 @@ fn ctx_is_block(ctx: &ParserRuleContext) -> bool {
 /// Whether this `statement` is an empty statement (a bare `;`) — its only
 /// child is the `SEMI` terminal. Distinguished from `return;`/`break;` (which
 /// carry a keyword terminal too) by requiring exactly one child.
-fn ctx_is_empty_statement(ctx: &ParserRuleContext) -> bool {
-    let children = ctx.children();
-    children.len() == 1
-        && matches!(&children[0], ParseTree::Terminal(t) if t.symbol().token_type() == jl::SEMI)
+fn ctx_is_empty_statement(ctx: RuleNodeView<'_>) -> bool {
+    let mut children = ctx.children();
+    matches!(
+        (children.next(), children.next()),
+        (Some(only), None)
+            if only.as_terminal().is_some_and(|t| t.symbol().token_type() == jl::SEMI)
+    )
 }
 
 /// Whether this `statement` is a labeled-statement wrapper
@@ -1774,11 +1774,10 @@ fn ctx_is_empty_statement(ctx: &ParserRuleContext) -> bool {
 /// exactly one `identifier` followed by one nested `statement`. The label is
 /// an attribute of the inner statement (counted when visited), not its own
 /// logical line.
-fn ctx_is_label_wrapper(ctx: &ParserRuleContext) -> bool {
-    let mut rules = ctx.children().iter().filter_map(|c| match c {
-        ParseTree::Rule(rule) => Some(rule.context().rule_index()),
-        _ => None,
-    });
+fn ctx_is_label_wrapper(ctx: RuleNodeView<'_>) -> bool {
+    let mut rules = ctx
+        .children()
+        .filter_map(|c| c.as_rule().map(|r| r.rule_index()));
     matches!(
         (rules.next(), rules.next(), rules.next()),
         (Some(jp::RULE_IDENTIFIER), Some(jp::RULE_STATEMENT), None)
@@ -1790,11 +1789,11 @@ fn ctx_is_label_wrapper(ctx: &ParserRuleContext) -> bool {
 /// exactly one; a bit-shift decomposes into two (`<<`, `>>`) or three (`>>>`)
 /// — the grammar has no dedicated shift token — so counting distinguishes the
 /// two so shifts are not miscounted as ABC conditions.
-fn count_angle_tokens(ctx: &ParserRuleContext) -> (usize, usize) {
+fn count_angle_tokens(ctx: RuleNodeView<'_>) -> (usize, usize) {
     let mut lt = 0;
     let mut gt = 0;
     for child in ctx.children() {
-        if let ParseTree::Terminal(t) = child {
+        if let Some(t) = child.as_terminal() {
             match t.symbol().token_type() {
                 jl::LT => lt += 1,
                 jl::GT => gt += 1,
@@ -1808,17 +1807,18 @@ fn count_angle_tokens(ctx: &ParserRuleContext) -> (usize, usize) {
 /// Index of the `else`-branch `statement` child of an `if` statement, if
 /// present. The else body is the `statement` that appears *after* the `ELSE`
 /// terminal among the children.
-fn else_branch_index(children: &[ParseTree]) -> Option<usize> {
+fn else_branch_index<'a>(children: impl Iterator<Item = Node<'a>>) -> Option<usize> {
     let mut seen_else = false;
-    for (idx, child) in children.iter().enumerate() {
-        match child {
-            ParseTree::Terminal(t) if t.symbol().token_type() == jl::ELSE => seen_else = true,
-            ParseTree::Rule(rule)
-                if seen_else && rule.context().rule_index() == jp::RULE_STATEMENT =>
-            {
-                return Some(idx);
+    for (idx, child) in children.enumerate() {
+        if let Some(t) = child.as_terminal() {
+            if t.symbol().token_type() == jl::ELSE {
+                seen_else = true;
             }
-            _ => {}
+        } else if let Some(rule) = child.as_rule()
+            && seen_else
+            && rule.rule_index() == jp::RULE_STATEMENT
+        {
+            return Some(idx);
         }
     }
     None
@@ -1826,13 +1826,13 @@ fn else_branch_index(children: &[ParseTree]) -> Option<usize> {
 
 /// The declared name of a type: its first `identifier`/`typeIdentifier`
 /// child's covered text.
-fn type_name(ctx: &ParserRuleContext) -> Option<String> {
+fn type_name(ctx: RuleNodeView<'_>) -> Option<String> {
     name_from_identifier(ctx)
 }
 
 /// The declared name of a method/constructor: its first `identifier` child's
 /// covered text.
-fn method_name(ctx: &ParserRuleContext) -> Option<String> {
+fn method_name(ctx: RuleNodeView<'_>) -> Option<String> {
     name_from_identifier(ctx)
 }
 
@@ -1853,13 +1853,12 @@ fn method_name(ctx: &ParserRuleContext) -> Option<String> {
 /// declaration-arm opens), or `None` when the member is not a method-shaped
 /// declaration (a field, nested type, const, compact ctor — those keep their
 /// existing open sites).
-fn wrapper_inner_method(ctx: &ParserRuleContext) -> Option<&ParserRuleContext> {
+fn wrapper_inner_method(ctx: RuleNodeView<'_>) -> Option<RuleNodeView<'_>> {
     match ctx.rule_index() {
         jp::RULE_CLASS_BODY_DECLARATION => {
             let member = ctx.child_rule(jp::RULE_MEMBER_DECLARATION)?;
             for child in member.children() {
-                if let ParseTree::Rule(rule) = child {
-                    let c = rule.context();
+                if let Some(c) = child.as_rule() {
                     match c.rule_index() {
                         jp::RULE_METHOD_DECLARATION | jp::RULE_CONSTRUCTOR_DECLARATION => {
                             return Some(c);
@@ -1932,7 +1931,7 @@ fn is_type_wrapper(ri: usize) -> bool {
 /// member alternatives include *other* declarations whose own nested types must
 /// not be captured here). Returns `None` when the member is not a class-like
 /// type (a field, method, const, etc. keep their existing sites).
-fn wrapper_inner_type(ctx: &ParserRuleContext) -> Option<&ParserRuleContext> {
+fn wrapper_inner_type(ctx: RuleNodeView<'_>) -> Option<RuleNodeView<'_>> {
     let holder = match ctx.rule_index() {
         // typeDeclaration / localTypeDeclaration hold the type declaration as a
         // direct child (after `classOrInterfaceModifier*`).
@@ -1949,28 +1948,26 @@ fn wrapper_inner_type(ctx: &ParserRuleContext) -> Option<&ParserRuleContext> {
         _ => return None,
     };
     for child in holder.children() {
-        if let ParseTree::Rule(rule) = child {
-            let c = rule.context();
-            if opens_class_like(c.rule_index()) {
-                return Some(c);
-            }
+        if let Some(c) = child.as_rule()
+            && opens_class_like(c.rule_index())
+        {
+            return Some(c);
         }
     }
     None
 }
 
-fn name_from_identifier(ctx: &ParserRuleContext) -> Option<String> {
+fn name_from_identifier(ctx: RuleNodeView<'_>) -> Option<String> {
     for child in ctx.children() {
-        if let ParseTree::Rule(rule) = child {
-            let c = rule.context();
-            if matches!(
+        if let Some(c) = child.as_rule()
+            && matches!(
                 c.rule_index(),
                 jp::RULE_IDENTIFIER | jp::RULE_TYPE_IDENTIFIER
-            ) {
-                let t = c.text();
-                if !t.is_empty() {
-                    return Some(t);
-                }
+            )
+        {
+            let t = c.text();
+            if !t.is_empty() {
+                return Some(t);
             }
         }
     }
@@ -1987,7 +1984,7 @@ fn name_from_identifier(ctx: &ParserRuleContext) -> Option<String> {
 /// children plus the `formalParameterList`'s `formalParameter`s. A leading
 /// `receiverParameter` (`Foo this`) is not a value parameter and is excluded.
 /// A trailing varargs (`int... rest`) is a plain `formalParameter` here.
-fn count_formal_params(ctx: &ParserRuleContext) -> u32 {
+fn count_formal_params(ctx: RuleNodeView<'_>) -> u32 {
     let Some(params) = find_descendant(ctx, jp::RULE_FORMAL_PARAMETERS) else {
         return 0;
     };
@@ -2002,7 +1999,7 @@ fn count_formal_params(ctx: &ParserRuleContext) -> u32 {
 /// Count lambda parameters. A lambda's parameters are either a single bare
 /// `identifier`, a parenthesized `formalParameterList`, or a
 /// `lambdaLVTIList`/identifier list.
-fn count_lambda_args(ctx: &ParserRuleContext) -> u32 {
+fn count_lambda_args(ctx: RuleNodeView<'_>) -> u32 {
     let Some(params) = ctx.child_rule(jp::RULE_LAMBDA_PARAMETERS) else {
         return 0;
     };
@@ -2021,7 +2018,7 @@ fn count_lambda_args(ctx: &ParserRuleContext) -> u32 {
 
 /// Count the variables declared by a `fieldDeclaration`
 /// (`int a, b, c;` → 3), via `variableDeclarators → variableDeclarator`.
-fn field_variable_count(ctx: &ParserRuleContext) -> u32 {
+fn field_variable_count(ctx: RuleNodeView<'_>) -> u32 {
     ctx.child_rule(jp::RULE_VARIABLE_DECLARATORS)
         .map(|vds| vds.child_rules(jp::RULE_VARIABLE_DECLARATOR).count() as u32)
         .unwrap_or(0)
@@ -2029,7 +2026,7 @@ fn field_variable_count(ctx: &ParserRuleContext) -> u32 {
 
 /// Record a record's component parameters as class attributes (NPA). Walks
 /// `recordDeclaration → recordHeader → recordComponentList → recordComponent`.
-fn record_record_components(ctx: &ParserRuleContext, state: &mut State) {
+fn record_record_components(ctx: RuleNodeView<'_>, state: &mut State) {
     let count = count_record_components(ctx);
     for _ in 0..count {
         state.npa.record_attribute(ContainerKind::Class, true);
@@ -2040,7 +2037,7 @@ fn record_record_components(ctx: &ParserRuleContext, state: &mut State) {
 /// `recordDeclaration → recordHeader → recordComponentList → recordComponent`.
 /// These are both the record's public attributes (NPA) and the parameter list
 /// of its (canonical/compact) constructor (NArgs).
-fn count_record_components(ctx: &ParserRuleContext) -> u32 {
+fn count_record_components(ctx: RuleNodeView<'_>) -> u32 {
     ctx.child_rule(jp::RULE_RECORD_HEADER)
         .and_then(|header| header.child_rule(jp::RULE_RECORD_COMPONENT_LIST))
         .map(|list| list.child_rules(jp::RULE_RECORD_COMPONENT).count() as u32)
@@ -2057,7 +2054,7 @@ fn count_record_components(ctx: &ParserRuleContext) -> u32 {
 /// member declaration, which is where Java places visibility keywords. The
 /// `modifier` rule wraps a `classOrInterfaceModifier`, so we scan two levels
 /// for the visibility token.
-fn visibility_from_modifiers(ctx: &ParserRuleContext) -> Option<bool> {
+fn visibility_from_modifiers(ctx: RuleNodeView<'_>) -> Option<bool> {
     for modifier in ctx.child_rules(jp::RULE_MODIFIER) {
         if let Some(vis) = visibility_token(modifier) {
             return Some(vis);
@@ -2076,7 +2073,7 @@ fn visibility_from_modifiers(ctx: &ParserRuleContext) -> Option<bool> {
 
 /// Read a visibility token from a `modifier` context, descending into its
 /// `classOrInterfaceModifier` child if present.
-fn visibility_token(modifier: &ParserRuleContext) -> Option<bool> {
+fn visibility_token(modifier: RuleNodeView<'_>) -> Option<bool> {
     if let Some(v) = visibility_from_token_holder(modifier) {
         return Some(v);
     }
@@ -2090,7 +2087,7 @@ fn visibility_token(modifier: &ParserRuleContext) -> Option<bool> {
 
 /// Read `public`/`private`/`protected` directly from a context's token
 /// children.
-fn visibility_from_token_holder(ctx: &ParserRuleContext) -> Option<bool> {
+fn visibility_from_token_holder(ctx: RuleNodeView<'_>) -> Option<bool> {
     if ctx.has_token(jl::PUBLIC) {
         return Some(true);
     }
@@ -2104,7 +2101,7 @@ fn visibility_from_token_holder(ctx: &ParserRuleContext) -> Option<bool> {
 /// a direct child token: `=`, a compound assign (`+=`, `-=`, …), or an
 /// increment/decrement (`++`, `--`). Fitzpatrick's ABC lists `++`/`--` under
 /// the assignment (A) component alongside `=`.
-fn has_assignment_op(ctx: &ParserRuleContext) -> bool {
+fn has_assignment_op(ctx: RuleNodeView<'_>) -> bool {
     ctx.has_token(jl::ASSIGN)
         || ctx.has_token(jl::ADD_ASSIGN)
         || ctx.has_token(jl::SUB_ASSIGN)
@@ -2124,18 +2121,15 @@ fn has_assignment_op(ctx: &ParserRuleContext) -> bool {
 /// Find the first descendant rule with `rule_index`, searching direct children
 /// then recursing. Used for parameter lists that may sit under an intermediate
 /// wrapper (e.g. `genericMethodDeclaration → methodDeclaration`).
-fn find_descendant(ctx: &ParserRuleContext, rule_index: usize) -> Option<&ParserRuleContext> {
-    if let Some(direct) = ctx.child_rule(rule_index) {
-        return Some(direct);
-    }
-    for child in ctx.children() {
-        if let ParseTree::Rule(rule) = child
-            && let Some(found) = find_descendant(rule.context(), rule_index)
-        {
-            return Some(found);
-        }
-    }
-    None
+///
+/// Searches *descendants* (children-first), never `ctx` itself. The runtime's
+/// [`Node::first_rule`](mehen_antlr::runtime::Node::first_rule) includes the
+/// receiver in its pre-order search, so it is applied per child here to keep
+/// the original "descendants only" semantics.
+fn find_descendant(ctx: RuleNodeView<'_>, rule_index: usize) -> Option<RuleNodeView<'_>> {
+    ctx.children()
+        .find_map(|child| child.first_rule(rule_index))
+        .and_then(|node| node.as_rule())
 }
 
 fn container_kind(parent_kind: SpaceKind) -> ContainerKind {

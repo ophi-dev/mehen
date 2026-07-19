@@ -50,7 +50,7 @@ jobs:
           # Strip generated grammar enums, generated ANTLR modules, tests,
           # snapshots, fixtures, templates.
           # `src/generated/` holds the machine-generated ANTLR lexer/parser
-          # modules (e.g. `mehen-kotlin`); they are intentionally repetitive
+          # modules (e.g. `mehen-kotlin-parser`); they are intentionally repetitive
           # (one templated method per grammar rule) and must not be CPD-policed.
           # `tests/` matches both the top-level tests directory and per-crate
           # `crates/<name>/tests/` integration suites. Test boilerplate

@@ -54,7 +54,7 @@ use mehen_core::{MetricSpace, SourceSpan, SpaceId, SpaceKind};
 /// pinned in exactly one place ([`mehen-antlr`'s `Cargo.toml`]).
 pub use antlr4_runtime as runtime;
 
-pub use comments::{LocToken, LocTokenKind, loc_tokens};
+pub use comments::{LocToken, LocTokenKind, loc_tokens, token_views};
 pub use diagnostics::collect_errors;
 pub use span::{ctx_span, span_from_tokens};
 

@@ -15,46 +15,28 @@
 //! separate, `fatal` path handled by the analyzer crate; this module only
 //! covers recovered `Error` nodes within a returned tree.
 
-use antlr4_runtime::ParseTree;
+use antlr4_runtime::Node;
 use antlr4_runtime::token::Token;
 use mehen_core::ParseDiagnostic;
 
-/// Walk `tree` and emit one `error`-severity [`ParseDiagnostic`] per
-/// recovered `ParseTree::Error` leaf, capped at `max_diagnostics` to bound
-/// noise on heavily corrupted input.
+/// Walk `tree` and emit one `error`-severity [`ParseDiagnostic`] per recovered
+/// error leaf ([`NodeKind::Error`](antlr4_runtime::NodeKind::Error)), capped at
+/// `max_diagnostics` to bound noise on heavily corrupted input.
 ///
 /// `code` is the language-namespaced diagnostic code, e.g.
 /// `"kotlin.syntax_error"`. Returns an empty `Vec` for a clean parse.
-pub fn collect_errors(
-    tree: &ParseTree,
-    code: &str,
-    max_diagnostics: usize,
-) -> Vec<ParseDiagnostic> {
-    let mut out = Vec::new();
-    collect_into(tree, code, max_diagnostics, &mut out);
-    out
-}
-
-fn collect_into(tree: &ParseTree, code: &str, max: usize, out: &mut Vec<ParseDiagnostic>) {
-    if out.len() >= max {
-        return;
-    }
-    match tree {
-        ParseTree::Error(err) => {
+///
+/// Since the 0.11 runtime rewrite the tree is a flat arena traversed through
+/// borrowing [`Node`] views. [`Node::descendants`] yields a pre-order iterator
+/// over the whole subtree, so error leaves are collected by filtering it with
+/// [`Node::as_error`] — no hand-rolled recursion.
+pub fn collect_errors(tree: Node<'_>, code: &str, max_diagnostics: usize) -> Vec<ParseDiagnostic> {
+    tree.descendants()
+        .filter_map(Node::as_error)
+        .take(max_diagnostics)
+        .map(|err| {
             let line = err.symbol().line();
-            out.push(ParseDiagnostic::error(
-                code.to_string(),
-                format!("ANTLR error node at line {line}"),
-            ));
-        }
-        ParseTree::Rule(rule) => {
-            for child in rule.context().children() {
-                collect_into(child, code, max, out);
-                if out.len() >= max {
-                    return;
-                }
-            }
-        }
-        ParseTree::Terminal(_) => {}
-    }
+            ParseDiagnostic::error(code.to_string(), format!("ANTLR error node at line {line}"))
+        })
+        .collect()
 }

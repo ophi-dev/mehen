@@ -24,28 +24,23 @@
 
 mod walker;
 
-/// ANTLR-generated Java lexer and parser.
-///
-/// Regenerate with `cargo run -p xtask -- antlr generate java` — never
-/// hand-edit.
-mod generated {
-    pub(crate) mod java_lexer;
-    pub(crate) mod java_parser;
-}
-
-use mehen_antlr::runtime::{CommonToken, CommonTokenStream, InputStream, ParseTree};
+use mehen_antlr::runtime::ParsedFile;
 use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
     ParseDiagnostic, Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
 
-use generated::java_lexer::JavaLexer;
-use generated::java_parser::JavaParser;
+use mehen_java_parser::java_lexer::JavaLexer;
+use mehen_java_parser::java_parser::{self, JavaParser};
 
 pub struct JavaAnalyzer;
 
+/// A recovered parse: the flat-arena [`ParsedFile`] owns the token store and
+/// CST storage, and the walker borrows [`Node`](mehen_antlr::runtime::Node)
+/// views from it. `loc_tokens` is precomputed from the (eagerly buffered,
+/// hidden-channel-inclusive) token store.
 struct ParsedJava {
-    tree: ParseTree,
+    parsed: ParsedFile,
     loc_tokens: Vec<mehen_antlr::LocToken>,
 }
 
@@ -55,18 +50,23 @@ impl JavaAnalyzer {
     }
 
     /// Parse `source` via the single `compilationUnit` entry rule and return
-    /// the recovered tree plus the source-ordered LOC token list. Returns
-    /// `None` only if the rule call hard-fails (returns `Err` rather than a
-    /// recovered tree).
+    /// the recovered [`ParsedFile`] plus the source-ordered LOC token list.
+    /// Returns `None` only if the rule call hard-fails (returns `Err` rather
+    /// than a recovered tree).
+    ///
+    /// Uses the generated one-call [`parse_with_parser`](java_parser::parse_with_parser)
+    /// helper (lexer + token stream + parser + entry rule in one step).
     fn parse(&self, source: &str) -> Option<ParsedJava> {
-        let lexer = JavaLexer::new(InputStream::new(source));
-        let tokens = CommonTokenStream::new(lexer);
-        let mut parser = JavaParser::new(tokens);
-        let tree = parser.compilation_unit().ok()?;
-        let mut tokens = parser.into_token_stream();
-        tokens.fill();
-        let loc_tokens = collect_loc_tokens(tokens.tokens());
-        Some(ParsedJava { tree, loc_tokens })
+        let out =
+            java_parser::parse_with_parser(source, JavaLexer::new, JavaParser::compilation_unit)
+                .ok()?;
+        // `into_parsed_file` consumes the parser and moves the eagerly-buffered
+        // token store into the `ParsedFile`; the LOC token list is then read
+        // straight from that store (all channels, so hidden-channel comments
+        // are present — no `fill()` step needed).
+        let parsed = out.parser.into_parsed_file(out.result);
+        let loc_tokens = collect_loc_tokens(&parsed);
+        Some(ParsedJava { parsed, loc_tokens })
     }
 }
 
@@ -110,16 +110,14 @@ impl LanguageAnalyzer for JavaAnalyzer {
             }
         };
 
-        let root = walker::walk(
-            &parsed.tree,
-            &line_index,
-            source.text.len(),
-            &parsed.loc_tokens,
-        );
+        // The `ParsedFile` owns the token store and CST; `tree()` is the root
+        // `Node` borrowing view the walker traverses.
+        let tree = parsed.parsed.tree();
+        let root = walker::walk(tree, &line_index, source.text.len(), &parsed.loc_tokens);
 
         // Recovered ANTLR error nodes are surfaced as `error` so the
         // diagnostic contract treats the analysis as incomplete.
-        let diagnostics = mehen_antlr::collect_errors(&parsed.tree, "java.syntax_error", 16);
+        let diagnostics = mehen_antlr::collect_errors(tree, "java.syntax_error", 16);
 
         Ok(LanguageAnalysis {
             language: Language::Java,
@@ -131,16 +129,22 @@ impl LanguageAnalyzer for JavaAnalyzer {
     }
 }
 
-/// Classify the parser-owned token stream into the source-ordered LOC token
+/// Classify the parsed file's token store into the source-ordered LOC token
 /// list that drives the LOC family. Java comments are `COMMENT` (block, may
 /// span lines) and `LINE_COMMENT`; whitespace is `WS`. Unlike Kotlin, Java
 /// has no string-mode comment tokens and no trivia-folding operator tokens
 /// (annotations are a plain `AT` token followed by a name), so no
-/// trivia-bearing token scan is needed.
-fn collect_loc_tokens(tokens: &[CommonToken]) -> Vec<mehen_antlr::LocToken> {
-    use generated::java_lexer::{COMMENT, LINE_COMMENT, WS};
+/// trivia-bearing token scan is needed. The token store is eagerly buffered
+/// through EOF, so every token (all channels) is present.
+fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
+    use mehen_java_parser::java_lexer::{COMMENT, LINE_COMMENT, WS};
 
-    mehen_antlr::loc_tokens(tokens, &[COMMENT, LINE_COMMENT], &[WS], &[])
+    mehen_antlr::loc_tokens(
+        mehen_antlr::token_views(parsed.tokens()),
+        &[COMMENT, LINE_COMMENT],
+        &[WS],
+        &[],
+    )
 }
 
 #[cfg(test)]

@@ -6,14 +6,24 @@
 //! `antlr-rust-runtime` exposes token positions in both its native Unicode
 //! scalar index space (`Token::start`/`Token::stop`) and UTF-8 byte space
 //! (`Token::start_byte`/`Token::stop_byte`). mehen uses UTF-8 byte offsets
-//! throughout, so this module lifts ANTLR context token ranges into byte/line
+//! throughout, so this module lifts ANTLR rule token ranges into byte/line
 //! [`SourceSpan`](mehen_core::SourceSpan)s.
+//!
+//! Since the 0.11 runtime rewrite the concrete syntax tree is a flat arena
+//! addressed by [`NodeId`](antlr4_runtime::NodeId) and traversed through
+//! borrowing views. A rule's covered token range is read from a
+//! [`RuleNodeView`], whose `start`/`stop` accessors return [`TokenView`]s
+//! directly — the view already carries the shared [`TokenStore`], so no token
+//! store has to be threaded through here.
 
-use antlr4_runtime::ParserRuleContext;
+use antlr4_runtime::RuleNodeView;
 use antlr4_runtime::token::{TOKEN_EOF, Token};
 use mehen_core::{LineIndex, SourceSpan, byte_offset_clamped};
 
 /// Lift an ANTLR token span into a byte- and line-resolved [`SourceSpan`].
+///
+/// Generic over [`Token`] so it works with both the parser-owned
+/// [`TokenView`](antlr4_runtime::TokenView) and any test double.
 pub fn span_from_tokens(
     start_token: &impl Token,
     stop_token: &impl Token,
@@ -35,16 +45,16 @@ pub fn span_from_tokens(
     }
 }
 
-/// Lift a rule context's covered token range into a [`SourceSpan`].
+/// Lift a rule node's covered token range into a [`SourceSpan`].
 ///
-/// Reads the context's `start`/`stop` tokens and maps their runtime-provided
-/// byte span to mehen's byte/line coordinates. A context covering no tokens
-/// (an empty optional rule) yields [`SourceSpan::empty`].
-pub fn ctx_span(ctx: &ParserRuleContext, line_index: &LineIndex, source_len: usize) -> SourceSpan {
-    match ctx.start() {
+/// Reads the rule's `start`/`stop` tokens and maps their runtime-provided byte
+/// span to mehen's byte/line coordinates. A rule covering no tokens (an empty
+/// optional rule) yields [`SourceSpan::empty`].
+pub fn ctx_span(rule: RuleNodeView<'_>, line_index: &LineIndex, source_len: usize) -> SourceSpan {
+    match rule.start() {
         Some(start_tok) => {
-            let stop_tok = ctx.stop().unwrap_or(start_tok);
-            span_from_tokens(start_tok, stop_tok, line_index, source_len)
+            let stop_tok = rule.stop().unwrap_or(start_tok);
+            span_from_tokens(&start_tok, &stop_tok, line_index, source_len)
         }
         None => SourceSpan::empty(),
     }
@@ -53,22 +63,70 @@ pub fn ctx_span(ctx: &ParserRuleContext, line_index: &LineIndex, source_len: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use antlr4_runtime::token::CommonToken;
-    use std::rc::Rc;
+    use antlr4_runtime::token::{TOKEN_EOF, TokenId};
+
+    /// Minimal [`Token`] test double. The 0.11 runtime rewrite made real
+    /// tokens live only inside the parser-owned `TokenStore` (no public
+    /// builder), but `span_from_tokens` is generic over [`Token`], so its
+    /// byte-math contract is exercised through a local impl instead.
+    #[derive(Debug)]
+    struct FakeToken {
+        token_type: i32,
+        start_byte: usize,
+        stop_byte: usize,
+    }
+
+    impl Token for FakeToken {
+        fn token_id(&self) -> TokenId {
+            TokenId::try_from(0usize).expect("0 is a valid token id")
+        }
+        fn token_type(&self) -> i32 {
+            self.token_type
+        }
+        fn channel(&self) -> i32 {
+            0
+        }
+        fn start(&self) -> usize {
+            self.start_byte
+        }
+        fn stop(&self) -> usize {
+            self.stop_byte
+        }
+        fn line(&self) -> usize {
+            1
+        }
+        fn column(&self) -> usize {
+            0
+        }
+        fn text(&self) -> Option<&str> {
+            None
+        }
+        fn source_name(&self) -> &str {
+            "<test>"
+        }
+        fn start_byte(&self) -> usize {
+            self.start_byte
+        }
+        fn stop_byte(&self) -> usize {
+            self.stop_byte
+        }
+    }
 
     #[test]
     fn span_uses_runtime_byte_bounds() {
         let src = "fun f() {}\nclass C\n";
         let li = LineIndex::new(src);
-        let source = Rc::from(src);
-        let start =
-            CommonToken::new(1)
-                .with_span(11, 15)
-                .with_source_text(Rc::clone(&source), 11, 16);
-        let stop =
-            CommonToken::new(1)
-                .with_span(17, 17)
-                .with_source_text(Rc::clone(&source), 17, 18);
+        // A token covering `class C` on line 2 (bytes 11..=17, exclusive 18).
+        let start = FakeToken {
+            token_type: 1,
+            start_byte: 11,
+            stop_byte: 16,
+        };
+        let stop = FakeToken {
+            token_type: 1,
+            start_byte: 17,
+            stop_byte: 18,
+        };
         let span = span_from_tokens(&start, &stop, &li, src.len());
         assert_eq!(span.start_byte, 11);
         assert_eq!(span.end_byte, 18);
@@ -79,11 +137,18 @@ mod tests {
     fn eof_stop_uses_source_byte_len() {
         let src = "é\nx";
         let li = LineIndex::new(src);
-        let source: Rc<str> = Rc::from(src);
-        let start = CommonToken::new(1)
-            .with_span(0, 0)
-            .with_source_text(Rc::clone(&source), 0, 2);
-        let eof = CommonToken::eof("", src.chars().count(), 2, 1);
+        // `é` is 2 bytes; the EOF stop token forces the span end to the full
+        // source byte length rather than the EOF token's own byte offset.
+        let start = FakeToken {
+            token_type: 1,
+            start_byte: 0,
+            stop_byte: 2,
+        };
+        let eof = FakeToken {
+            token_type: TOKEN_EOF,
+            start_byte: 0,
+            stop_byte: 0,
+        };
 
         let span = span_from_tokens(&start, &eof, &li, src.len());
 

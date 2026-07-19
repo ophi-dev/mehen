@@ -15,8 +15,34 @@
 //!
 //! This mirrors how the token-driven analyzers (`mehen-rust`, `mehen-python`,
 //! `mehen-typescript`) drive LOC: a flat, source-ordered token sweep.
+//!
+//! Since the 0.11 runtime rewrite there is no owned `CommonToken`: tokens live
+//! once in the parser-owned [`TokenStore`](antlr4_runtime::TokenStore) and are
+//! read through borrowing [`TokenView`]s. The LOC sweep therefore takes an
+//! iterator of `TokenView` — e.g. `CommonTokenStream::tokens()` — instead of a
+//! `&[CommonToken]` slice.
 
-use antlr4_runtime::token::{CommonToken, Token};
+use antlr4_runtime::token::{Token, TokenId, TokenStore, TokenView};
+
+/// Iterate every token in a [`TokenStore`] in source order as [`TokenView`]s.
+///
+/// A [`ParsedFile`](antlr4_runtime::ParsedFile) owns its token store but the
+/// store itself exposes no iterator, so this bridges the gap for the LOC
+/// sweep. The store is eagerly buffered through EOF at parse time (all
+/// channels, including hidden-channel comments), so this yields the complete
+/// source token stream — no `fill()` step is required.
+pub fn token_views(store: &TokenStore) -> impl Iterator<Item = TokenView<'_>> {
+    // `0..len()` are exactly the valid indices, so both conversions are
+    // infallible. Assert rather than `filter_map`-skip: if a future
+    // `TokenStore` change ever broke that invariant, a silently-dropped token
+    // would skew LOC/CLOC with no diagnostic — so fail loudly instead.
+    (0..store.len()).map(|i| {
+        let id = TokenId::try_from(i).expect("token store index fits TokenId");
+        store
+            .view(id)
+            .expect("every index in 0..len() addresses a token")
+    })
+}
 
 /// How a token contributes to LOC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,59 +85,91 @@ pub struct LocToken {
 ///
 /// Byte ranges come from the runtime's UTF-8 token spans, so routing stays
 /// correct for non-ASCII source.
-pub fn loc_tokens(
-    tokens: &[CommonToken],
+///
+/// `tokens` is any source-ordered iterator of [`TokenView`]s over the full
+/// (hidden-channel-inclusive) token stream, typically
+/// [`CommonTokenStream::tokens`](antlr4_runtime::CommonTokenStream::tokens).
+pub fn loc_tokens<'a>(
+    tokens: impl IntoIterator<Item = TokenView<'a>>,
     comment_token_types: &[i32],
     skip_token_types: &[i32],
     trivia_bearing_token_types: &[i32],
 ) -> Vec<LocToken> {
-    let mut out = Vec::with_capacity(tokens.len());
+    let tokens = tokens.into_iter();
+    let mut out = Vec::with_capacity(tokens.size_hint().0);
     for tok in tokens {
-        let tt = tok.token_type();
-        if tt < 0 || skip_token_types.contains(&tt) {
-            continue;
-        }
-        let start_byte = mehen_core::byte_offset_clamped(tok.start_byte());
-        let end_byte = mehen_core::byte_offset_clamped(tok.stop_byte()).max(start_byte);
-        let start_row = (tok.line() as u32).saturating_sub(1);
-        if comment_token_types.contains(&tt) {
-            // A delimited comment's text may span multiple lines; count the
-            // newlines to find the end row. Line comments have none.
-            let extra_lines = tok
-                .text()
-                .map(|t| t.bytes().filter(|&b| b == b'\n').count() as u32)
-                .unwrap_or(0);
-            out.push(LocToken {
-                kind: LocTokenKind::Comment,
-                start_byte,
-                end_byte,
-                start_row,
-                end_row: start_row.saturating_add(extra_lines),
-            });
-        } else {
-            out.push(LocToken {
-                kind: LocTokenKind::Code,
-                start_byte,
-                end_byte,
-                start_row,
-                end_row: start_row,
-            });
-            // Some lexers fold optional trivia into operator tokens — e.g.
-            // Kotlin's `EXCL_WS: '!' Hidden`, `NOT_IS: '!is' (Hidden|NL)` —
-            // so a comment glued to the operator (`!is/* c */`) is part of
-            // the token text rather than a standalone comment token. Recover
-            // those as comments so CLOC isn't undercounted, using the same
-            // byte span and row offsets the embedded comment occupies. Only
-            // the declared trivia-bearing operator tokens are scanned, so a
-            // `//` or `/*` inside string-literal text is never misread.
-            if trivia_bearing_token_types.contains(&tt)
-                && let Some(text) = tok.text()
-            {
-                emit_embedded_comments(text, start_byte, start_row, &mut out);
-            }
-        }
+        // `TokenView::text` returns `&str` (empty when the token has no
+        // recorded text). Everything past this point works on plain fields,
+        // so the classification is unit-testable without a `TokenStore`.
+        push_loc_token(
+            tok.token_type(),
+            tok.start_byte(),
+            tok.stop_byte(),
+            tok.line(),
+            tok.text(),
+            comment_token_types,
+            skip_token_types,
+            trivia_bearing_token_types,
+            &mut out,
+        );
     }
     out
+}
+
+/// Classify a single token's plain fields into zero or more [`LocToken`]s,
+/// pushing them onto `out`. Split out of [`loc_tokens`] so the classification
+/// is exercised by unit tests without constructing runtime
+/// [`TokenView`]s (which the 0.11 rewrite made un-buildable outside a real
+/// `TokenStore`). `text` is the token's UTF-8 text (empty when absent).
+#[allow(clippy::too_many_arguments)]
+fn push_loc_token(
+    tt: i32,
+    start_byte: usize,
+    stop_byte: usize,
+    line: usize,
+    text: &str,
+    comment_token_types: &[i32],
+    skip_token_types: &[i32],
+    trivia_bearing_token_types: &[i32],
+    out: &mut Vec<LocToken>,
+) {
+    if tt < 0 || skip_token_types.contains(&tt) {
+        return;
+    }
+    let start_byte = mehen_core::byte_offset_clamped(start_byte);
+    let end_byte = mehen_core::byte_offset_clamped(stop_byte).max(start_byte);
+    let start_row = (line as u32).saturating_sub(1);
+    if comment_token_types.contains(&tt) {
+        // A delimited comment's text may span multiple lines; count the
+        // newlines to find the end row. Line comments have none.
+        let extra_lines = text.bytes().filter(|&b| b == b'\n').count() as u32;
+        out.push(LocToken {
+            kind: LocTokenKind::Comment,
+            start_byte,
+            end_byte,
+            start_row,
+            end_row: start_row.saturating_add(extra_lines),
+        });
+    } else {
+        out.push(LocToken {
+            kind: LocTokenKind::Code,
+            start_byte,
+            end_byte,
+            start_row,
+            end_row: start_row,
+        });
+        // Some lexers fold optional trivia into operator tokens — e.g.
+        // Kotlin's `EXCL_WS: '!' Hidden`, `NOT_IS: '!is' (Hidden|NL)` —
+        // so a comment glued to the operator (`!is/* c */`) is part of
+        // the token text rather than a standalone comment token. Recover
+        // those as comments so CLOC isn't undercounted, using the same
+        // byte span and row offsets the embedded comment occupies. Only
+        // the declared trivia-bearing operator tokens are scanned, so a
+        // `//` or `/*` inside string-literal text is never misread.
+        if trivia_bearing_token_types.contains(&tt) {
+            emit_embedded_comments(text, start_byte, start_row, out);
+        }
+    }
 }
 
 /// Scan an operator-token's `text` for embedded `/* … */` or `// …` comment
@@ -181,22 +239,49 @@ fn emit_embedded_comments(
 mod tests {
     use super::*;
 
-    fn tok(token_type: i32, line: usize, start: usize, stop: usize, text: &str) -> CommonToken {
-        CommonToken::new(token_type)
-            .with_text(text)
-            .with_position(line, 0)
-            .with_span(start, stop)
+    /// One fake token's fields, mirroring what a [`TokenView`] would expose.
+    /// The 0.11 runtime rewrite made real tokens un-buildable outside a
+    /// parser-owned `TokenStore`, so the classification is exercised through
+    /// [`push_loc_token`] on plain fields instead.
+    struct Tok {
+        tt: i32,
+        line: usize,
+        start: usize,
+        stop: usize,
+        text: &'static str,
+    }
+
+    const fn tok(tt: i32, line: usize, start: usize, stop: usize, text: &'static str) -> Tok {
+        Tok {
+            tt,
+            line,
+            start,
+            stop,
+            text,
+        }
+    }
+
+    /// Run the LOC classification over a fake token list, mirroring what
+    /// [`loc_tokens`] does per [`TokenView`].
+    fn classify(tokens: &[Tok], comment: &[i32], skip: &[i32], trivia: &[i32]) -> Vec<LocToken> {
+        let mut out = Vec::new();
+        for t in tokens {
+            push_loc_token(
+                t.tt, t.start, t.stop, t.line, t.text, comment, skip, trivia, &mut out,
+            );
+        }
+        out
     }
 
     #[test]
     fn classifies_code_and_comment_in_source_order() {
         // `code // a` then a code token on the next line.
-        let tokens = vec![
+        let tokens = [
             tok(2, 1, 0, 3, "code"), // code
             tok(1, 1, 5, 8, "// a"), // comment (type 1)
             tok(2, 2, 10, 10, "x"),  // code
         ];
-        let locs = loc_tokens(&tokens, &[1], &[], &[]);
+        let locs = classify(&tokens, &[1], &[], &[]);
         assert_eq!(locs.len(), 3);
         assert_eq!(locs[0].kind, LocTokenKind::Code);
         assert_eq!(locs[1].kind, LocTokenKind::Comment);
@@ -207,11 +292,11 @@ mod tests {
 
     #[test]
     fn multiline_comment_spans_rows_and_skips_whitespace() {
-        let tokens = vec![
+        let tokens = [
             tok(1, 1, 0, 10, "/* a\nb\nc */"), // 3-line comment
             tok(99, 3, 11, 11, " "),           // whitespace (skipped)
         ];
-        let locs = loc_tokens(&tokens, &[1], &[99], &[]);
+        let locs = classify(&tokens, &[1], &[99], &[]);
         assert_eq!(locs.len(), 1);
         assert_eq!(locs[0].kind, LocTokenKind::Comment);
         assert_eq!(locs[0].start_row, 0);
@@ -220,21 +305,21 @@ mod tests {
 
     #[test]
     fn eof_token_is_skipped() {
-        let tokens = vec![tok(-1, 1, 0, 0, "<EOF>")];
-        assert!(loc_tokens(&tokens, &[], &[], &[]).is_empty());
+        let tokens = [tok(-1, 1, 0, 0, "<EOF>")];
+        assert!(classify(&tokens, &[], &[], &[]).is_empty());
     }
 
     #[test]
     fn recovers_comment_embedded_in_trivia_bearing_operator() {
         // Operator token type 105 (`!is`) with a glued comment: `!is/* c */`.
         // Source: `a !is/* c */ B` — operator token spans chars 2..=10.
-        let tokens = vec![
+        let tokens = [
             tok(7, 1, 0, 0, "a"),             // identifier (code)
             tok(105, 1, 2, 10, "!is/* c */"), // NOT_IS with embedded comment
             tok(7, 1, 13, 13, "B"),           // identifier (code)
         ];
         // 105 is declared trivia-bearing → its embedded `/* c */` is recovered.
-        let locs = loc_tokens(&tokens, &[2], &[], &[105]);
+        let locs = classify(&tokens, &[2], &[], &[105]);
         let comments: Vec<_> = locs
             .iter()
             .filter(|t| t.kind == LocTokenKind::Comment)
@@ -248,8 +333,8 @@ mod tests {
         // A string-literal text token containing `//` (e.g. a URL) must NOT
         // be misread as a comment — only declared trivia-bearing tokens are
         // scanned. Token type 7 is not in the trivia-bearing set.
-        let tokens = vec![tok(7, 1, 0, 9, "\"http://x\"")];
-        let locs = loc_tokens(&tokens, &[2], &[], &[105]);
+        let tokens = [tok(7, 1, 0, 9, "\"http://x\"")];
+        let locs = classify(&tokens, &[2], &[], &[105]);
         assert!(
             locs.iter().all(|t| t.kind == LocTokenKind::Code),
             "the // inside a string literal must not become a comment"
