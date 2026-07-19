@@ -12,21 +12,15 @@ publish = false
 [dependencies]
 mehen-core = { workspace = true }
 mehen-metrics = { workspace = true }
-# Java is parsed by a parser generated from the grammars-v4 Java ANTLR
-# grammar (vendored in `grammar/`) running on the ANTLR Rust runtime.
-# The runtime is reached through `mehen-antlr`, which owns the version pin
-# and the shared span/comment/diagnostic helpers, so this crate never
-# depends on `antlr4_runtime` directly for the helpers. The generated
-# parser/lexer modules live in `src/generated/` and are produced by
-# `cargo run -p xtask -- antlr generate java`.
+# The generated Java lexer/parser now live in the standalone, publishable
+# `mehen-java-parser` crate (produced by `cargo xtask antlr generate java`).
+# This analyzer depends on it for the grammar and reaches the ANTLR runtime
+# through its `antlr4_runtime` re-export.
+mehen-java-parser = { workspace = true }
+# `mehen-antlr` owns the runtime version pin and the shared span/comment/
+# diagnostic helpers; the walker reaches the runtime types (`Node`,
+# `RuleNodeView`, `TokenView`, …) through its `runtime` re-export.
 mehen-antlr = { workspace = true }
-# The generated lexer/parser modules in `src/generated/` reference the
-# runtime by its real crate name (`use antlr4_runtime::…`), so the runtime
-# must be a direct dependency here in addition to being re-exported by
-# `mehen-antlr`. The version is still pinned in exactly one place — the
-# workspace `[workspace.dependencies]` `antlr4_runtime` entry — so there is
-# no risk of `mehen-java` and `mehen-antlr` linking different revisions.
-antlr4_runtime = { workspace = true }
 smol_str = { workspace = true }
 
 [dev-dependencies]

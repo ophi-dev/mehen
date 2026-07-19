@@ -29,27 +29,23 @@
 
 mod walker;
 
-/// ANTLR-generated Kotlin lexer and parser.
-///
-/// Regenerate with `cargo xtask antlr generate kotlin` — never hand-edit.
-mod generated {
-    pub(crate) mod kotlin_lexer;
-    pub(crate) mod kotlin_parser;
-}
-
-use mehen_antlr::runtime::{CommonToken, CommonTokenStream, InputStream, ParseTree, Parser};
+use mehen_antlr::runtime::{ParsedFile, Parser};
 use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
     ParseDiagnostic, Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
 
-use generated::kotlin_lexer::KotlinLexer;
-use generated::kotlin_parser::KotlinParser;
+use mehen_kotlin_parser::kotlin_lexer::KotlinLexer;
+use mehen_kotlin_parser::kotlin_parser::{self, KotlinParser};
 
 pub struct KotlinAnalyzer;
 
+/// A recovered parse: the flat-arena [`ParsedFile`] owns the token store and
+/// CST storage, and the walker borrows [`Node`](mehen_antlr::runtime::Node)
+/// views from it. `loc_tokens` is precomputed from the (eagerly buffered,
+/// hidden-channel-inclusive) token store.
 struct ParsedKotlin {
-    tree: ParseTree,
+    parsed: ParsedFile,
     syntax_errors: usize,
     loc_tokens: Vec<mehen_antlr::LocToken>,
 }
@@ -91,24 +87,29 @@ impl KotlinAnalyzer {
     }
 
     /// Parse with one entry rule (`script` when `script_rule` is true, else
-    /// `kotlinFile`) and return the recovered tree, syntax-error count, and
-    /// parser-owned token stream data, or `None` if the rule call hard-failed.
+    /// `kotlinFile`) and return the recovered [`ParsedFile`], syntax-error
+    /// count, and LOC token list, or `None` if the rule call hard-failed.
+    ///
+    /// Uses the generated one-call [`parse_with_parser`](kotlin_parser::parse_with_parser)
+    /// helper (lexer + token stream + parser + entry rule in one step), then
+    /// reads the parser's diagnostics and folds it into a [`ParsedFile`] that
+    /// owns the token store and CST.
     fn parse_entry(&self, source: &str, script_rule: bool) -> Option<ParsedKotlin> {
-        let lexer = KotlinLexer::new(InputStream::new(source));
-        let tokens = CommonTokenStream::new(lexer);
-        let mut parser = KotlinParser::new(tokens);
-        let tree = if script_rule {
-            parser.script()
+        let entry = if script_rule {
+            KotlinParser::script
         } else {
-            parser.kotlin_file()
-        }
-        .ok()?;
-        let syntax_errors = parser.number_of_syntax_errors();
-        let mut tokens = parser.into_token_stream();
-        tokens.fill();
-        let loc_tokens = collect_loc_tokens(tokens.tokens());
+            KotlinParser::kotlin_file
+        };
+        let out = kotlin_parser::parse_with_parser(source, KotlinLexer::new, entry).ok()?;
+        let syntax_errors = out.parser.number_of_syntax_errors();
+        // `into_parsed_file` consumes the parser and moves the eagerly-buffered
+        // token store into the `ParsedFile`; the LOC token list is then read
+        // straight from that store (all channels, so hidden-channel comments
+        // are present — no `fill()` step needed).
+        let parsed = out.parser.into_parsed_file(out.result);
+        let loc_tokens = collect_loc_tokens(&parsed);
         Some(ParsedKotlin {
-            tree,
+            parsed,
             syntax_errors,
             loc_tokens,
         })
@@ -172,18 +173,16 @@ impl LanguageAnalyzer for KotlinAnalyzer {
             }
         };
 
-        let root = walker::walk(
-            &parsed.tree,
-            &line_index,
-            source.text.len(),
-            &parsed.loc_tokens,
-        );
+        // The `ParsedFile` owns the token store and CST; `tree()` is the root
+        // `Node` borrowing view the walker traverses.
+        let tree = parsed.parsed.tree();
+        let root = walker::walk(tree, &line_index, source.text.len(), &parsed.loc_tokens);
 
         // Recovered ANTLR error nodes are surfaced as `error` (not
         // `warning`) so the diagnostic contract (plan §9.3) treats the
         // analysis as incomplete: `mehen metrics` exits 1 and `mehen diff`
         // records the file under `analysis_errors`.
-        let diagnostics = mehen_antlr::collect_errors(&parsed.tree, "kotlin.syntax_error", 16);
+        let diagnostics = mehen_antlr::collect_errors(tree, "kotlin.syntax_error", 16);
 
         Ok(LanguageAnalysis {
             language: Language::Kotlin,
@@ -195,21 +194,21 @@ impl LanguageAnalyzer for KotlinAnalyzer {
     }
 }
 
-/// Classify the parser-owned token stream into the source-ordered LOC token
+/// Classify the parsed file's token store into the source-ordered LOC token
 /// list that drives the LOC family. Comments (`LineComment` /
 /// `DelimitedComment`, plus the string-mode `Inside_Comment`) are comments;
 /// whitespace and newlines (default- and string-mode) are skipped; every
 /// other token is code. Comments are absent from the parse tree (hidden
-/// channel), so LOC must come from this full token pass rather than the tree
-/// walk.
-fn collect_loc_tokens(tokens: &[CommonToken]) -> Vec<mehen_antlr::LocToken> {
-    use generated::kotlin_lexer::{
+/// channel), so LOC comes from this full token pass — the token store is
+/// eagerly buffered through EOF, so every token (all channels) is present.
+fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
+    use mehen_kotlin_parser::kotlin_lexer::{
         AS_SAFE, AT_BOTH_WS, AT_POST_WS, AT_PRE_WS, DELIMITED_COMMENT, EXCL_WS, INSIDE_COMMENT,
         INSIDE_NL, INSIDE_WS, LINE_COMMENT, NL, NOT_IN, NOT_IS, QUEST_WS, WS,
     };
 
     mehen_antlr::loc_tokens(
-        tokens,
+        mehen_antlr::token_views(parsed.tokens()),
         &[LINE_COMMENT, DELIMITED_COMMENT, INSIDE_COMMENT],
         &[WS, NL, INSIDE_WS, INSIDE_NL],
         // Operator tokens whose lexer rules embed the `Hidden` fragment, so a

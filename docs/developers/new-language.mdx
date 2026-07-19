@@ -63,44 +63,59 @@ extraction. The Rust lexer/parser modules are generated **offline**
 from a vendored `.g4` grammar and checked in — a normal `cargo build` never needs Java or the
 ANTLR jar.
 
+The generated modules and their vendored `.g4` grammar do **not** live in the analyzer crate.
+They live in a standalone, publishable `crates/mehen-<lang>-parser/` crate that carries only the
+generated lexer/parser (no mehen-specific logic and no dependency on `mehen-core`), so external
+tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then depends on
+`mehen-<lang>-parser` and walks the resulting `ParsedFile` through its arena-backed
+`Node`/`RuleNodeView`/`TerminalNodeView` borrowing views.
+
 <Steps>
   <Step title="Vendor the grammar">
     Copy the ANTLR `.g4` files (lexer, parser, and any `import`ed grammars like `UnicodeClasses`)
-    into `crates/mehen-<lang>/grammar/`. Record the upstream source, commit, and toolchain versions
-    in a `PROVENANCE.md` so regeneration is reproducible (see `crates/mehen-kotlin/grammar/`).
+    into `crates/mehen-<lang>-parser/grammar/`. Record the upstream source, commit, and toolchain
+    versions in a `PROVENANCE.md` so regeneration is reproducible (see
+    `crates/mehen-kotlin-parser/grammar/`).
   </Step>
   <Step title="Register the codegen target">
     Add an `AntlrTarget` to `xtask/src/antlr.rs::TARGETS` (slug, crate dir, grammar dir, lexer/parser
-    filenames).
+    filenames). The crate dir is the parser crate, e.g. `crates/mehen-<lang>-parser`.
   </Step>
   <Step title="Generate the parser modules">
     ```bash
     export MEHEN_ANTLR_JAR=/path/to/antlr-4.13.2-complete.jar
-    cargo install antlr-rust-runtime   # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN)
+    # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN)
+    cargo install antlr-rust-runtime --version 0.13.0 --bin antlr4-rust-gen
     cargo xtask antlr generate <lang>
     ```
 
-    The result lands in `crates/mehen-<lang>/src/generated/`. The generated files carry their own
-    lint and `rustfmt::skip` attributes, so the owning analyzer can include them with plain
-    `pub(crate) mod ...;` declarations unless another crate needs direct access.
+    The result lands in `crates/mehen-<lang>-parser/src/generated/`: the `<lang>_lexer.rs` and
+    `<lang>_parser.rs` modules plus a `semantics.json` sidecar (emitted by the 0.13.0 generator).
+    All three are checked in and drift-checked. The generated files carry their own lint and
+    `rustfmt::skip` attributes, so the parser crate includes them with plain `pub mod ...;`
+    declarations.
 
     <Warning>
     Never edit the generated modules. `cargo xtask antlr check-generated` guards drift in CI when the
     toolchain is available (it skips, exit 0, where the tools are absent).
     </Warning>
   </Step>
-  <Step title="Add the runtime dependency">
-    Depend on `mehen-antlr` (the shared helpers) **and** `antlr4_runtime` (the generated modules
-    reference the runtime by its real crate name). Both reach the same workspace-pinned version, so
-    the pin stays in one place.
+  <Step title="Add the dependencies">
+    The analyzer crate `mehen-<lang>` depends on `mehen-<lang>-parser` (the generated grammar) and
+    `mehen-antlr` (the shared helpers). The parser crate re-exports `antlr4_runtime`, so the analyzer
+    reaches the runtime through it; the runtime is pinned once in the workspace
+    `[workspace.dependencies]`, so the pin stays in one place.
   </Step>
   <Step title="Implement the analyzer + walker">
-    Parse via the generated `<Lang>Lexer`/`<Lang>Parser`, then walk the `ParseTree` with your own
-    recursive `Visitor` (like `mehen-rust`/`mehen-ruby`). ANTLR rule contexts have **no parent
-    pointer**, so thread any parent-dependent context (e.g. else-if detection) top-down. Match
-    `rule_index()` against the generated `RULE_*` constants and terminal `token_type()` against the
-    token constants. Comments are on a hidden channel (absent from the tree) — recover CLOC from the
-    token stream via `mehen_antlr::comment_rows`.
+    Parse via the parser crate's one-call `<lang>_parser::parse_with_parser` + `into_parsed_file`,
+    then walk the resulting `ParsedFile`'s root `Node` with your own recursive visitor (like
+    `mehen-java`/`mehen-kotlin`). The `Node`/`RuleNodeView`/`TerminalNodeView` views have **no
+    parent pointer**, so thread any parent-dependent context (e.g. else-if detection) top-down.
+    Match `RuleNodeView::rule_index()` against the generated `RULE_*` constants and terminal
+    `token_type()` against the token constants, using the runtime's `child_rule`/`child_token`/
+    `has_token`/`first_rule` navigation helpers. Comments are on a hidden channel (absent from the
+    tree) — recover CLOC from the eagerly-buffered token store via `mehen_antlr::loc_tokens`
+    (feeding it `mehen_antlr::token_views(parsed.tokens())`).
   </Step>
   <Step title="Register the analyzer">
     Same as the other backends: register in `crates/mehen-engine/src/registry.rs`.

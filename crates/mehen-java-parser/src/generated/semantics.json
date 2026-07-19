@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "policy": "assume-true",
+  "note": "unknown coordinates currently default to assume-true; a future minor release changes the default to error",
+  "options": [],
+  "grammars": [
+    {
+      "kind": "lexer",
+      "name": "JavaLexer",
+      "coordinates": []
+    },
+    {
+      "kind": "parser",
+      "name": "JavaParser",
+      "coordinates": [
+        {"kind": "parser-predicate", "rule": "annotationFieldValue", "rule_index": 59, "index": 0, "atn_state": null, "line": null, "column": null, "body": null, "disposition": "assume-true", "template": null},
+        {"kind": "parser-predicate", "rule": "recordComponentList", "rule_index": 76, "index": 1, "atn_state": null, "line": null, "column": null, "body": null, "disposition": "assume-true", "template": null},
+        {"kind": "parser-action", "rule": "expression", "rule_index": 99, "index": null, "atn_state": 1423, "line": null, "column": null, "body": null, "disposition": "ignored", "template": null}
+      ]
+    }
+  ]
+}

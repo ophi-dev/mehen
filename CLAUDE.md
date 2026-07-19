@@ -2,14 +2,15 @@
 
 ## Project Scope
 - `mehen` is a **CLI-only** Rust project focused on code analysis and metrics.
-- It is **not** a library or API for external use; all code is internal to the CLI tool.
+- The analyzer/engine/CLI code is **not** a library or API for external use; it is internal to the CLI tool. The sole exception is the generated-only `crates/mehen-<lang>-parser/` crates, which are intentionally **publishable** so external tools can consume the vendored ANTLR parsers standalone (they carry no mehen-specific logic — just the generated lexer/parser + grammar on `antlr4_runtime`).
 
 ## Repository Structure (current)
 - `crates/mehen-cli/`: CLI binary (entry point, command routing, exit codes).
 - `crates/mehen-engine/`: pipeline orchestration (`run_diff`, `run_top_offenders`, registry, language detection).
 - `crates/mehen-core/`: parser-neutral domain types and the `LanguageAnalyzer` trait.
 - `crates/mehen-metrics/`: shared metric formulas, accumulators, and finalization helpers.
-- `crates/mehen-<lang>/`: per-language analyzers — each owns parsing, metric interpretation, and its own `grammar.rs` for tree-sitter-backed languages, or `src/generated/` modules for ANTLR-backed ones (e.g. `mehen-kotlin`).
+- `crates/mehen-<lang>/`: per-language analyzers — each owns parsing (walker) and metric interpretation. Tree-sitter-backed languages keep their own `grammar.rs`; ANTLR-backed ones (e.g. `mehen-kotlin`, `mehen-java`) depend on a separate generated-only crate `crates/mehen-<lang>-parser/` that holds the vendored grammar + generated lexer/parser.
+- `crates/mehen-<lang>-parser/`: generated-only, **publishable** crates holding the ANTLR-generated lexer/parser + vendored `.g4` grammar for an ANTLR-backed language (`mehen-kotlin-parser`, `mehen-java-parser`). Split out so external tools can depend on just the parser via a git tag (the way this repo consumes ruff/oxc/sqruff). They depend only on `antlr4_runtime`.
 - `crates/mehen-tree-sitter/`: shared tree-sitter wrapper and CST traversal helpers.
 - `crates/mehen-antlr/`: shared support for ANTLR-backed analyzers — re-exports the `antlr4_runtime` runtime and provides span conversion (char→byte), recovered-error diagnostics, and hidden-channel comment (CLOC) extraction.
 - `crates/mehen-markdown/`: Markdown analyzer with embedded-code dispatch via `LanguageDispatcher`. Backed by `pulldown-cmark` (not tree-sitter): its `src/syntax_tree.rs` reifies the event stream into a small owned tree whose node kinds are a hand-authored enum in `src/kind.rs` — there is no generated `grammar.rs` here.
@@ -76,7 +77,7 @@ When adding or updating a tree-sitter-backed language:
 4. Register the analyzer in `mehen-engine`'s registry (`crates/mehen-engine/src/registry.rs`).
 5. Add per-language metric tests under `crates/mehen-<lang>/tests/`.
 
-ANTLR-backed languages (e.g. Kotlin) follow the same hard rule for generated code: never edit `crates/mehen-<lang>/src/generated/*.rs` — they are produced by `cargo xtask antlr generate <lang>` from the vendored `.g4` grammar in `crates/mehen-<lang>/grammar/` and wrapped in a `#[rustfmt::skip] mod generated`. Regenerating needs the external toolchain (`MEHEN_ANTLR_JAR` + `antlr4-rust-gen` + Java); `cargo xtask antlr check-generated` guards drift in CI when the toolchain is present (it skips otherwise). See `docs/developers/new-language.mdx` ("Adding an ANTLR-backed language") and `crates/mehen-kotlin/grammar/PROVENANCE.md`.
+ANTLR-backed languages (e.g. Kotlin, Java) follow the same hard rule for generated code, but the generated modules now live in the dedicated `crates/mehen-<lang>-parser/` crate: never edit `crates/mehen-<lang>-parser/src/generated/*.rs` (or the `semantics.json` sidecar beside them) — they are produced by `cargo xtask antlr generate <lang>` from the vendored `.g4` grammar in `crates/mehen-<lang>-parser/grammar/`. Each generated `.rs` self-wraps in a `#[rustfmt::skip] mod __antlr4_rust_generated` and is loaded via `#[path] pub mod` from the parser crate's `lib.rs`. Regenerating needs the external toolchain (`MEHEN_ANTLR_JAR` + a matching `antlr4-rust-gen` + Java); `cargo xtask antlr check-generated` guards drift (`.rs` and `semantics.json`) in CI when the toolchain is present (it skips otherwise). See `docs/developers/new-language.mdx` ("Adding an ANTLR-backed language") and `crates/mehen-kotlin-parser/grammar/PROVENANCE.md`.
 
 ## Coding Expectations
 - Keep internals internal (`pub(crate)`/private) unless a real external API is needed.

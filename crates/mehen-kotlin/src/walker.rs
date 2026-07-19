@@ -50,7 +50,7 @@
 //!   modifier says otherwise.
 
 use mehen_antlr::runtime::token::Token;
-use mehen_antlr::runtime::{ParseTree, ParserRuleContext, TerminalNode};
+use mehen_antlr::runtime::{Node, RuleNodeView, TerminalNodeView};
 use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
 use mehen_metrics::{
@@ -59,7 +59,7 @@ use mehen_metrics::{
 };
 use smol_str::SmolStr;
 
-use crate::generated::kotlin_parser as kp;
+use mehen_kotlin_parser::kotlin_parser as kp;
 
 /// Drive the walk over the parsed `kotlinFile` tree and return the unit
 /// `MetricSpace`. `loc_tokens` is the source-ordered code/comment token list
@@ -68,14 +68,14 @@ use crate::generated::kotlin_parser as kp;
 /// opened and closed every space, so comments and code interleave correctly
 /// and per-space `loc.ploc`/`loc.cloc` reflect each scope's body.
 pub(crate) fn walk(
-    tree: &ParseTree,
+    tree: Node<'_>,
     line_index: &LineIndex,
     source_len: usize,
     loc_tokens: &[LocToken],
 ) -> MetricSpace {
-    let unit_span = match tree {
-        ParseTree::Rule(rule) => ctx_span(rule.context(), line_index, source_len),
-        _ => mehen_core::SourceSpan::empty(),
+    let unit_span = match tree.as_rule() {
+        Some(rule) => ctx_span(rule, line_index, source_len),
+        None => mehen_core::SourceSpan::empty(),
     };
 
     let mut unit_state = State::new();
@@ -94,8 +94,8 @@ pub(crate) fn walk(
         loc_routing: SpaceRangeTracker::new(),
     };
 
-    if let ParseTree::Rule(rule) = tree {
-        for child in rule.context().children() {
+    if let Some(rule) = tree.as_rule() {
+        for child in rule.children() {
             walker.visit(child, ChildHint::default());
         }
     }
@@ -220,15 +220,17 @@ impl Walker<'_> {
         self.stack.last_mut().expect("walker stack empty")
     }
 
-    fn visit(&mut self, node: &ParseTree, hint: ChildHint) {
-        match node {
-            ParseTree::Rule(rule) => self.visit_rule(rule.context(), hint),
-            ParseTree::Terminal(term) => self.visit_terminal(term, hint),
-            ParseTree::Error(_) => {}
+    fn visit(&mut self, node: Node<'_>, hint: ChildHint) {
+        if let Some(rule) = node.as_rule() {
+            self.visit_rule(rule, hint);
+        } else if let Some(term) = node.as_terminal() {
+            self.visit_terminal(term, hint);
         }
+        // Error leaves carry no metric contribution; they are surfaced as
+        // diagnostics by `mehen_antlr::collect_errors` in the analyzer.
     }
 
-    fn visit_terminal(&mut self, term: &TerminalNode, hint: ChildHint) {
+    fn visit_terminal(&mut self, term: TerminalNodeView<'_>, hint: ChildHint) {
         let tt = term.symbol().token_type();
 
         // Cyclomatic: each short-circuit boolean operator token.
@@ -271,7 +273,7 @@ impl Walker<'_> {
                 });
             }
             HalsteadClass::Operand => {
-                let text = term.symbol().text().unwrap_or("");
+                let text = term.symbol().text();
                 self.current().halstead.observe_operand(HalsteadOperand {
                     kind: SmolStr::new("Operand"),
                     text: Some(SmolStr::new(text)),
@@ -310,7 +312,7 @@ impl Walker<'_> {
             // content, not folded trivia, and must keep its real start row.
             let base = (term.symbol().line() as u32).saturating_sub(1);
             let row = if folds_leading_trivia(tt) {
-                base.saturating_add(leading_newlines(term.symbol().text().unwrap_or("")))
+                base.saturating_add(leading_newlines(term.symbol().text()))
             } else {
                 base
             };
@@ -318,7 +320,7 @@ impl Walker<'_> {
         }
     }
 
-    fn visit_rule(&mut self, ctx: &ParserRuleContext, hint: ChildHint) {
+    fn visit_rule(&mut self, ctx: RuleNodeView<'_>, hint: ChildHint) {
         let ri = ctx.rule_index();
 
         // Snapshot the cognitive context of the *enclosing* construct
@@ -374,15 +376,17 @@ impl Walker<'_> {
 
     /// Walk the children of `ctx`, deriving each child's [`ChildHint`] from
     /// this rule's identity, the inbound hint, and the child's position.
-    fn visit_children(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
-        let children = ctx.children();
+    fn visit_children(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) {
+        // `NodeChildren` is a cheap `Clone` slice-iterator, so it is re-walked
+        // (below, and once here for the `else` scan) without allocating — the
+        // hot path avoids collecting children into a `Vec` for every node.
 
         // For `ifExpression`, the `else`-branch body is the
         // `controlStructureBody` that appears after the `ELSE` token. Tag
         // it so an `ifExpression` reached through it (without an
         // intervening `block`) is recognized as `else if`.
         let else_body_idx = if ri == kp::RULE_IF_EXPRESSION {
-            else_branch_index(children)
+            else_branch_index(ctx.children())
         } else {
             None
         };
@@ -463,7 +467,7 @@ impl Walker<'_> {
         // soft keywords used as names) → Halstead operands.
         let in_simple_identifier = ri == kp::RULE_SIMPLE_IDENTIFIER;
 
-        for (idx, child) in children.iter().enumerate() {
+        for (idx, child) in ctx.children().enumerate() {
             let mut child_hint = ChildHint::default();
             if Some(idx) == else_body_idx || propagate_else {
                 child_hint.is_else_branch = true;
@@ -478,7 +482,7 @@ impl Walker<'_> {
 
     /// Open a metric space for space-introducing rules. Returns whether a
     /// space was pushed.
-    fn maybe_open_space(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) -> bool {
+    fn maybe_open_space(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) -> bool {
         match ri {
             kp::RULE_GETTER | kp::RULE_SETTER => {
                 // A property accessor is a method of the enclosing class
@@ -571,12 +575,12 @@ impl Walker<'_> {
     /// byte range, a leading block comment would be attributed to this space's
     /// CLOC. Advance both `start_byte` and `start_line` past the folded
     /// trivia so the span begins at the real declaration character.
-    fn space_span(&self, ctx: &ParserRuleContext) -> mehen_core::SourceSpan {
+    fn space_span(&self, ctx: RuleNodeView<'_>) -> mehen_core::SourceSpan {
         let mut span = ctx_span(ctx, self.line_index, self.source_len);
         if let Some(start) = ctx.start()
             && folds_leading_trivia(start.token_type())
         {
-            let (_, trivia_bytes) = leading_trivia(start.text().unwrap_or(""));
+            let (_, trivia_bytes) = leading_trivia(start.text());
             if trivia_bytes > 0 {
                 let trimmed = span
                     .start_byte
@@ -592,7 +596,7 @@ impl Walker<'_> {
         span
     }
 
-    fn new_space_state(&self, ctx: &ParserRuleContext) -> State {
+    fn new_space_state(&self, ctx: RuleNodeView<'_>) -> State {
         let mut state = State::new();
         let span = self.space_span(ctx);
         state.loc.set_span(
@@ -607,7 +611,7 @@ impl Walker<'_> {
         &mut self,
         kind: SpaceKind,
         name: Option<String>,
-        ctx: &ParserRuleContext,
+        ctx: RuleNodeView<'_>,
         state: State,
         suppress_parent_wmc: bool,
     ) {
@@ -670,7 +674,7 @@ impl Walker<'_> {
     }
 
     /// Per-rule cyclomatic / cognitive / ABC / exit / LOC classification.
-    fn classify_rule(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
+    fn classify_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) {
         // Cyclomatic decisions: if / loops / when-entry.
         if matches!(
             ri,
@@ -699,17 +703,14 @@ impl Walker<'_> {
     /// children (the delimiters); a non-empty one has at least one content /
     /// template-expression *rule* child, so "no rule children" detects empty
     /// without firing on `"$x"` / `"${…}"` (which carry rule children).
-    fn classify_empty_string_operand(&mut self, ctx: &ParserRuleContext, ri: usize) {
+    fn classify_empty_string_operand(&mut self, ctx: RuleNodeView<'_>, ri: usize) {
         if !matches!(
             ri,
             kp::RULE_LINE_STRING_LITERAL | kp::RULE_MULTI_LINE_STRING_LITERAL
         ) {
             return;
         }
-        let has_content = ctx
-            .children()
-            .iter()
-            .any(|c| matches!(c, ParseTree::Rule(_)));
+        let has_content = ctx.children().any(|c| c.as_rule().is_some());
         if !has_content {
             self.current().halstead.observe_operand(HalsteadOperand {
                 kind: SmolStr::new("Operand"),
@@ -718,7 +719,7 @@ impl Walker<'_> {
         }
     }
 
-    fn classify_cognitive(&mut self, ctx: &ParserRuleContext, ri: usize, hint: ChildHint) {
+    fn classify_cognitive(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) {
         match ri {
             // `else if` (an ifExpression reached as an else-branch body)
             // does not add nesting — only the flat `else` +1 (emitted when
@@ -765,7 +766,7 @@ impl Walker<'_> {
         }
     }
 
-    fn classify_abc_rule(&mut self, ctx: &ParserRuleContext, ri: usize) {
+    fn classify_abc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize) {
         match ri {
             kp::RULE_ASSIGNMENT => self.current().abc.record_assignment(),
             // A `propertyDeclaration` with an initializer (`= expr`) is an
@@ -792,7 +793,7 @@ impl Walker<'_> {
         }
     }
 
-    fn classify_exit(&mut self, ctx: &ParserRuleContext, ri: usize) {
+    fn classify_exit(&mut self, ctx: RuleNodeView<'_>, ri: usize) {
         if ri == kp::RULE_JUMP_EXPRESSION {
             // NExit counts a bare `return` or `throw` — these exit the
             // enclosing function. A labeled `return@label` (`RETURN_AT`)
@@ -804,7 +805,7 @@ impl Walker<'_> {
         }
     }
 
-    fn classify_loc_rule(&mut self, ctx: &ParserRuleContext, ri: usize) {
+    fn classify_loc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize) {
         // LLOC: statement / declaration-shaped rules.
         if matches!(
             ri,
@@ -848,7 +849,7 @@ impl Walker<'_> {
     /// body. `ctx` is the member declaration rule itself (the
     /// `in_class_member` hint already flowed through the transparent
     /// wrapper rules), and `ri` is its rule index.
-    fn classify_class_member(&mut self, ctx: &ParserRuleContext, ri: usize) {
+    fn classify_class_member(&mut self, ctx: RuleNodeView<'_>, ri: usize) {
         let container = match self.kinds.last().cloned().unwrap_or(SpaceKind::Unit) {
             SpaceKind::Class | SpaceKind::Impl => ContainerKind::Class,
             SpaceKind::Interface | SpaceKind::Trait => ContainerKind::Interface,
@@ -873,20 +874,20 @@ impl Walker<'_> {
 
 /// Index of the `else`-branch `controlStructureBody` child of an
 /// `ifExpression`, if present. The else body is the `controlStructureBody`
-/// that appears *after* the `ELSE` terminal among the children.
-fn else_branch_index(children: &[ParseTree]) -> Option<usize> {
+/// that appears *after* the `ELSE` terminal among the children. Takes the
+/// child iterator directly so no `Vec` is allocated.
+fn else_branch_index<'a>(children: impl Iterator<Item = Node<'a>>) -> Option<usize> {
     let mut seen_else = false;
-    for (idx, child) in children.iter().enumerate() {
-        match child {
-            ParseTree::Terminal(t) if t.symbol().token_type() == kp::ELSE => {
+    for (idx, child) in children.enumerate() {
+        if let Some(t) = child.as_terminal() {
+            if t.symbol().token_type() == kp::ELSE {
                 seen_else = true;
             }
-            ParseTree::Rule(rule)
-                if seen_else && rule.context().rule_index() == kp::RULE_CONTROL_STRUCTURE_BODY =>
-            {
-                return Some(idx);
-            }
-            _ => {}
+        } else if let Some(rule) = child.as_rule()
+            && seen_else
+            && rule.rule_index() == kp::RULE_CONTROL_STRUCTURE_BODY
+        {
+            return Some(idx);
         }
     }
     None
@@ -894,18 +895,17 @@ fn else_branch_index(children: &[ParseTree]) -> Option<usize> {
 
 /// The declared name of a class/function/object: its first
 /// `simpleIdentifier` child's covered text.
-fn rule_name(ctx: &ParserRuleContext) -> Option<String> {
+fn rule_name(ctx: RuleNodeView<'_>) -> Option<String> {
     for child in ctx.children() {
-        if let ParseTree::Rule(rule) = child {
-            let c = rule.context();
-            if matches!(
-                c.rule_index(),
+        if let Some(rule) = child.as_rule()
+            && matches!(
+                rule.rule_index(),
                 kp::RULE_SIMPLE_IDENTIFIER | kp::RULE_IDENTIFIER
-            ) {
-                let t = c.text();
-                if !t.is_empty() {
-                    return Some(t);
-                }
+            )
+        {
+            let t = rule.text();
+            if !t.is_empty() {
+                return Some(t);
             }
         }
     }
@@ -921,11 +921,10 @@ fn rule_name(ctx: &ParserRuleContext) -> Option<String> {
 ///   `functionValueParameterWithOptionalType`s.
 /// - `setter`: a single `functionValueParameterWithOptionalType` as a direct
 ///   child (e.g. `set(value)`), with no enclosing parameter-list rule.
-fn count_function_args(ctx: &ParserRuleContext) -> u32 {
+fn count_function_args(ctx: RuleNodeView<'_>) -> u32 {
     let mut total = 0;
     for child in ctx.children() {
-        if let ParseTree::Rule(rule) = child {
-            let c = rule.context();
+        if let Some(c) = child.as_rule() {
             match c.rule_index() {
                 kp::RULE_FUNCTION_VALUE_PARAMETERS => {
                     total += c.child_rules(kp::RULE_FUNCTION_VALUE_PARAMETER).count() as u32;
@@ -945,14 +944,13 @@ fn count_function_args(ctx: &ParserRuleContext) -> u32 {
 }
 
 /// Count `lambdaParameter`s under a lambda literal's `lambdaParameters`.
-fn count_lambda_args(ctx: &ParserRuleContext) -> u32 {
+fn count_lambda_args(ctx: RuleNodeView<'_>) -> u32 {
     let mut total = 0;
     for child in ctx.children() {
-        if let ParseTree::Rule(rule) = child {
-            let c = rule.context();
-            if c.rule_index() == kp::RULE_LAMBDA_PARAMETERS {
-                total += c.child_rules(kp::RULE_LAMBDA_PARAMETER).count() as u32;
-            }
+        if let Some(c) = child.as_rule()
+            && c.rule_index() == kp::RULE_LAMBDA_PARAMETERS
+        {
+            total += c.child_rules(kp::RULE_LAMBDA_PARAMETER).count() as u32;
         }
     }
     total
@@ -960,20 +958,19 @@ fn count_lambda_args(ctx: &ParserRuleContext) -> u32 {
 
 /// Whether a member declaration is public — default unless a
 /// `visibilityModifier` (`private`/`protected`/`internal`) overrides.
-fn member_is_public(ctx: &ParserRuleContext) -> bool {
+fn member_is_public(ctx: RuleNodeView<'_>) -> bool {
     visibility_from_modifiers_of(ctx).unwrap_or(true)
 }
 
 /// Explicit visibility declared *on this node itself* (via its own
 /// `modifiers` child), or `None` if it has no visibility modifier. Used for
 /// property accessors, whose own modifier overrides the property's.
-fn visibility_from_modifiers_of(ctx: &ParserRuleContext) -> Option<bool> {
+fn visibility_from_modifiers_of(ctx: RuleNodeView<'_>) -> Option<bool> {
     for child in ctx.children() {
-        if let ParseTree::Rule(rule) = child {
-            let c = rule.context();
-            if c.rule_index() == kp::RULE_MODIFIERS {
-                return visibility_from_modifiers(c);
-            }
+        if let Some(c) = child.as_rule()
+            && c.rule_index() == kp::RULE_MODIFIERS
+        {
+            return visibility_from_modifiers(c);
         }
     }
     None
@@ -982,28 +979,26 @@ fn visibility_from_modifiers_of(ctx: &ParserRuleContext) -> Option<bool> {
 /// Resolve an explicit visibility from a `modifiers` rule: `Some(false)`
 /// for private/protected/internal, `Some(true)` for public, `None` if no
 /// visibility modifier is present.
-fn visibility_from_modifiers(modifiers: &ParserRuleContext) -> Option<bool> {
+fn visibility_from_modifiers(modifiers: RuleNodeView<'_>) -> Option<bool> {
     for child in modifiers.children() {
-        if let ParseTree::Rule(rule) = child {
-            let modifier = rule.context();
+        if let Some(modifier) = child.as_rule() {
             if modifier.rule_index() != kp::RULE_MODIFIER {
                 continue;
             }
             // A `modifier` wraps a `visibilityModifier` rule whose token is
             // the visibility keyword.
             for inner in modifier.children() {
-                if let ParseTree::Rule(vis_rule) = inner {
-                    let vis = vis_rule.context();
-                    if vis.rule_index() == kp::RULE_VISIBILITY_MODIFIER {
-                        if vis.has_token(kp::PUBLIC) {
-                            return Some(true);
-                        }
-                        if vis.has_token(kp::PRIVATE)
-                            || vis.has_token(kp::PROTECTED)
-                            || vis.has_token(kp::INTERNAL)
-                        {
-                            return Some(false);
-                        }
+                if let Some(vis) = inner.as_rule()
+                    && vis.rule_index() == kp::RULE_VISIBILITY_MODIFIER
+                {
+                    if vis.has_token(kp::PUBLIC) {
+                        return Some(true);
+                    }
+                    if vis.has_token(kp::PRIVATE)
+                        || vis.has_token(kp::PROTECTED)
+                        || vis.has_token(kp::INTERNAL)
+                    {
+                        return Some(false);
                     }
                 }
             }
@@ -1020,7 +1015,7 @@ fn visibility_from_modifiers(modifiers: &ParserRuleContext) -> Option<bool> {
 /// counted parameter's visibility comes from its own modifiers (default
 /// public).
 fn record_constructor_properties(
-    class_ctx: &ParserRuleContext,
+    class_ctx: RuleNodeView<'_>,
     container: ContainerKind,
     state: &mut State,
 ) {
@@ -1031,8 +1026,7 @@ fn record_constructor_properties(
         return;
     };
     for child in params.children() {
-        if let ParseTree::Rule(rule) = child {
-            let param = rule.context();
+        if let Some(param) = child.as_rule() {
             if param.rule_index() != kp::RULE_CLASS_PARAMETER {
                 continue;
             }
@@ -1055,7 +1049,7 @@ fn record_constructor_properties(
 /// `else if` detection walks); an operator splits the ladder into multiple
 /// children, which means the expression is a compound (binary/call) form —
 /// a plain statement that should be counted, so we stop and return false.
-fn expression_is_already_lloc(expr: &ParserRuleContext) -> bool {
+fn expression_is_already_lloc(expr: RuleNodeView<'_>) -> bool {
     let mut current = expr;
     loop {
         match current.rule_index() {
@@ -1067,10 +1061,7 @@ fn expression_is_already_lloc(expr: &ParserRuleContext) -> bool {
         }
         // Follow the chain only while this rule is a transparent
         // single-child wrapper leading toward a primary expression.
-        let mut rules = current.children().iter().filter_map(|c| match c {
-            ParseTree::Rule(rule) => Some(rule.context()),
-            _ => None,
-        });
+        let mut rules = current.children().filter_map(|c| c.as_rule());
         match (rules.next(), rules.next()) {
             (Some(only), None) if is_expression_ladder(current.rule_index()) => current = only,
             _ => return false,

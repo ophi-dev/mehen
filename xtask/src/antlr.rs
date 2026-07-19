@@ -10,9 +10,9 @@
 //!    `*.interp` metadata into Rust lexer/parser modules.
 //!
 //! The generated modules are checked in verbatim under
-//! `crates/mehen-<lang>/src/generated/` (see that dir's README). The
+//! `crates/mehen-<lang>-parser/src/generated/` (see that dir's README). The
 //! generator emits lint and `rustfmt::skip` attributes inside each file, so
-//! owning analyzer crates include them as plain modules.
+//! the owning parser crate includes them as plain modules.
 //!
 //! Because this path needs Java + the ANTLR jar + the generator binary —
 //! none of which a normal `cargo build` requires — the tools are discovered
@@ -52,15 +52,15 @@ impl AntlrTarget {
 pub(crate) const TARGETS: &[AntlrTarget] = &[
     AntlrTarget {
         slug: "kotlin",
-        crate_dir: "crates/mehen-kotlin",
-        grammar_dir: "crates/mehen-kotlin/grammar",
+        crate_dir: "crates/mehen-kotlin-parser",
+        grammar_dir: "crates/mehen-kotlin-parser/grammar",
         lexer_g4: "KotlinLexer.g4",
         parser_g4: "KotlinParser.g4",
     },
     AntlrTarget {
         slug: "java",
-        crate_dir: "crates/mehen-java",
-        grammar_dir: "crates/mehen-java/grammar",
+        crate_dir: "crates/mehen-java-parser",
+        grammar_dir: "crates/mehen-java-parser/grammar",
         lexer_g4: "JavaLexer.g4",
         parser_g4: "JavaParser.g4",
     },
@@ -227,15 +227,16 @@ fn generate_with(
             gen_status.code()
         ));
     }
-    normalize_generated_rs(&generated_dir)?;
+    normalize_generated(&generated_dir)?;
 
     let _ = fs::remove_dir_all(&interp_dir);
 
-    // The generator writes one module per grammar, named after the grammar.
+    // The generator writes one module per grammar (named after the grammar)
+    // plus a `semantics.json` sidecar; report every checked-in artifact.
     let mut written: Vec<PathBuf> = fs::read_dir(&generated_dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .filter(|p| is_generated_artifact(p))
         .collect();
     written.sort();
     Ok(written)
@@ -336,14 +337,30 @@ fn run_pipeline_into(
     if !gen_status.success() {
         return Err(format!("antlr4-rust-gen failed for `{}`", target.slug));
     }
-    normalize_generated_rs(out_dir)?;
+    normalize_generated(out_dir)?;
     Ok(())
 }
 
-fn normalize_generated_rs(dir: &Path) -> Result<(), String> {
+/// Whether `path` is a generated artifact that participates in the checked-in
+/// snapshot and the drift comparison: the Rust lexer/parser modules (`.rs`)
+/// and the generator's `semantics.json` sidecar (emitted alongside them since
+/// the 0.13.0 runtime). Everything else in the dir (e.g. `README.md`) is
+/// hand-authored and excluded.
+fn is_generated_artifact(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|x| x == "rs" || x == "json")
+}
+
+/// Normalize each generated artifact's trailing newline to a single `\n`.
+///
+/// The `.rs` modules and the `semantics.json` sidecar are treated alike so a
+/// freshly rendered tree compares byte-for-byte against the checked-in one
+/// regardless of whether a given tool appends a trailing newline.
+fn normalize_generated(dir: &Path) -> Result<(), String> {
     for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
-        if !path.is_file() || path.extension().is_none_or(|x| x != "rs") {
+        if !path.is_file() || !is_generated_artifact(&path) {
             continue;
         }
         let body = fs::read_to_string(&path)
@@ -357,13 +374,13 @@ fn normalize_generated_rs(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Read every `*.rs` in `dir` into a sorted `(name, contents)` list for
-/// comparison.
+/// Read every generated artifact (`*.rs` modules + `semantics.json`) in `dir`
+/// into a sorted `(name, contents)` list for comparison.
 fn read_generated(dir: &Path) -> Result<Vec<(String, String)>, String> {
     let mut entries: Vec<(String, String)> = fs::read_dir(dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .filter(|p| is_generated_artifact(p))
         .map(|p| -> Result<(String, String), String> {
             let name = p
                 .file_name()

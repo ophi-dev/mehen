@@ -1,0 +1,28 @@
+[package]
+name = "mehen-kotlin-parser"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "ANTLR-generated Kotlin lexer and parser (Kotlin spec grammar) on the antlr-rust-runtime."
+# Unlike the internal `mehen-*` analyzer crates (`publish = false`), this
+# crate ships ONLY the generated lexer/parser so external tools can depend
+# on the Kotlin parser alone via a git tag on this repo — the same way
+# `mehen` itself consumes ruff/oxc/sqruff parser crates. It carries no
+# mehen-specific logic and no dependency on `mehen-core`.
+publish = true
+
+[dependencies]
+# The generated modules reference the runtime by its real crate name
+# (`use antlr4_runtime::…`). Pinned in exactly one place — the workspace
+# `[workspace.dependencies]` `antlr4_runtime` entry — so every consumer
+# links the same revision the modules were generated against. Regenerate
+# with `cargo xtask antlr generate kotlin` after any bump.
+antlr4_runtime = { workspace = true }
+
+# The generated modules are checked in verbatim and intentionally expose
+# their whole surface, so this crate deliberately does NOT opt into the
+# workspace `unreachable_pub` lint (`[lints] workspace = true`) that the
+# hand-written crates use.
