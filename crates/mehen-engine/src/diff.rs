@@ -28,6 +28,7 @@ use mehen_report::github_markdown_docs::{DocDiffFile, DocRenderCtx, render_doc_s
 use crate::ci;
 use crate::concurrent_files::mk_globset;
 use crate::detection::detect_language;
+use crate::git_attributes::GitAttributeFilter;
 use crate::metric_selector::{
     MetricSelector, Polarity as SelectorPolarity, default_selectors_for_language,
     parse_metric_selectors, read_metric as read_selector_metric,
@@ -45,10 +46,18 @@ use mehen_core::{
 /// `threshold_violations`); only IO/git-fatal failures bubble up as
 /// `Err` so callers can short-circuit the rendering step.
 pub fn analyze_diff(input: DiffInput) -> Result<DiffReport, DiffError> {
-    let registry = Arc::new(AnalyzerRegistry::default_set());
     let repo = mehen_git::open_repo().map_err(DiffError::Git)?;
-    let changed =
-        mehen_git::changed_files(&repo, &input.from, &input.to).map_err(DiffError::Git)?;
+    analyze_diff_in_repo(input, &repo)
+}
+
+fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
+    let registry = Arc::new(AnalyzerRegistry::default_set());
+    let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
+    let mut git_attribute_filter = GitAttributeFilter::new(repo).map_err(|error| {
+        DiffError::Git(GitError::Internal(format!(
+            "failed to configure Git attribute filtering: {error}"
+        )))
+    })?;
 
     let mut report = DiffReport {
         schema_version: "1.0".to_string(),
@@ -70,6 +79,17 @@ pub fn analyze_diff(input: DiffInput) -> Result<DiffReport, DiffError> {
         if !path_is_selected(&utf8_path, &input.paths) {
             continue;
         }
+        if git_attribute_filter
+            .excludes_relative_path(&cf.path)
+            .map_err(|error| {
+                DiffError::Git(GitError::Internal(format!(
+                    "failed to read Git attributes for {}: {error}",
+                    cf.path.display()
+                )))
+            })?
+        {
+            continue;
+        }
 
         let Some(language) = detect_language(&utf8_path) else {
             // Skip files we don't recognize.
@@ -79,14 +99,14 @@ pub fn analyze_diff(input: DiffInput) -> Result<DiffReport, DiffError> {
         let base_text = if cf.status == ChangeStatus::Added {
             None
         } else {
-            mehen_git::read_blob(&repo, &input.from, &cf.path)
+            mehen_git::read_blob(repo, &input.from, &cf.path)
                 .map_err(DiffError::Git)?
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         };
         let head_text = if cf.status == ChangeStatus::Deleted {
             None
         } else {
-            mehen_git::read_blob(&repo, &input.to, &cf.path)
+            mehen_git::read_blob(repo, &input.to, &cf.path)
                 .map_err(DiffError::Git)?
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         };
@@ -282,8 +302,6 @@ impl core::error::Error for DiffError {}
 // hoisted out of `legacy/diff.rs` into this module so the CLI and the
 // post-1.0 `analyze_diff` entry point share `has_blocking_diagnostic`.
 
-const LINGUIST_GENERATED_ATTR: &str = "linguist-generated";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum DiffFormat {
     Markdown,
@@ -355,16 +373,17 @@ pub struct DiffOpts {
     /// Show files where all metrics are unchanged.
     #[clap(long)]
     show_unchanged: bool,
-    /// Skip files marked as generated via `linguist-generated` git attributes.
+    /// Skip generated, vendored, and binary files marked via Git attributes.
     #[clap(
-        long,
+        long = "ignore-git-attributes",
+        visible_alias = "ignore-generated",
         default_value_t = true,
         action = clap::ArgAction::Set,
         num_args = 0..=1,
         require_equals = true,
         default_missing_value = "true"
     )]
-    ignore_generated: bool,
+    ignore_git_attributes: bool,
     /// Exit non-zero when the named thresholds are crossed
     /// (comma-separated: `dmi-drop`, `new-broken-link`, `filler-high`, `all`).
     #[clap(
@@ -442,9 +461,9 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // unchanged (Codex P2). `explicit_metrics` selects between the two modes.
     let explicit_metrics = !opts.metrics.is_empty();
     let selectors = parse_metric_selectors(&opts.metrics);
-    let mut generated_filter = opts
-        .ignore_generated
-        .then(|| GeneratedFilter::new(&repo))
+    let mut git_attribute_filter = opts
+        .ignore_git_attributes
+        .then(|| GitAttributeFilter::new(&repo))
         .transpose()?;
 
     let registry = Arc::new(AnalyzerRegistry::default_set());
@@ -461,8 +480,8 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if let Some(filter) = generated_filter.as_mut()
-            && filter.is_generated(p)?
+        if let Some(filter) = git_attribute_filter.as_mut()
+            && filter.excludes_relative_path(p)?
         {
             continue;
         }
@@ -834,46 +853,6 @@ fn evaluate_fail_on(flags: &[FailOn], docs: &[DocDiffFile]) -> Vec<String> {
     failures
 }
 
-// ── Generated-file filtering ───────────────────────────────────────────
-
-struct GeneratedFilter<'repo> {
-    attrs: gix::AttributeStack<'repo>,
-    outcome: gix::attrs::search::Outcome,
-}
-
-impl<'repo> GeneratedFilter<'repo> {
-    fn new(repo: &'repo gix::Repository) -> Result<Self, Box<dyn std::error::Error>> {
-        let index = repo.index_or_empty()?;
-        let source = gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping
-            .adjust_for_bare(repo.is_bare());
-        let attrs = repo.attributes_only(&index, source)?;
-        let outcome = attrs.selected_attribute_matches([LINGUIST_GENERATED_ATTR]);
-        Ok(Self { attrs, outcome })
-    }
-
-    fn is_generated(&mut self, path: &Path) -> std::io::Result<bool> {
-        self.attrs
-            .at_path(path, None)?
-            .matching_attributes(&mut self.outcome);
-        Ok(self
-            .outcome
-            .iter_selected()
-            .next()
-            .is_some_and(|matched| is_linguist_generated_state(matched.assignment.state)))
-    }
-}
-
-fn is_linguist_generated_state(state: gix::attrs::StateRef<'_>) -> bool {
-    match state {
-        gix::attrs::StateRef::Set => true,
-        gix::attrs::StateRef::Value(value) => {
-            let value: &[u8] = value.as_bstr().as_ref();
-            value.eq_ignore_ascii_case(b"true")
-        }
-        gix::attrs::StateRef::Unset | gix::attrs::StateRef::Unspecified => false,
-    }
-}
-
 // ── Ref resolution ─────────────────────────────────────────────────────
 
 fn resolve_refs(opts: &DiffOpts, ci_ctx: &Option<ci::CiContext>) -> (String, String) {
@@ -1163,6 +1142,71 @@ mod tests {
             analysis_errors: Vec::new(),
             threshold_violations: Vec::new(),
         }
+    }
+
+    fn git_ok(repo: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Mehen Test")
+            .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+            .env("GIT_COMMITTER_NAME", "Mehen Test")
+            .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn analyze_diff_skips_all_default_git_attribute_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "\
+* -linguist-generated -linguist-vendored -binary
+generated.md linguist-generated
+vendored.md linguist-vendored
+binary.md binary
+",
+        )
+        .unwrap();
+        for name in ["kept.md", "generated.md", "vendored.md", "binary.md"] {
+            std::fs::write(dir.path().join(name), "# Base\n").unwrap();
+        }
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+
+        for name in ["kept.md", "generated.md", "vendored.md", "binary.md"] {
+            std::fs::write(dir.path().join(name), "# Head\n\nChanged.\n").unwrap();
+        }
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "HEAD~1".to_string(),
+                to: "HEAD".to_string(),
+                paths: Vec::new(),
+                thresholds: Vec::new(),
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+        let paths: Vec<&str> = report
+            .markdown_files
+            .iter()
+            .filter_map(|file| file.path.file_name())
+            .collect();
+
+        assert_eq!(paths, vec!["kept.md"]);
     }
 
     fn analysis_with_diagnostics(diagnostics: Vec<ParseDiagnostic>) -> LanguageAnalysis {
@@ -1462,21 +1506,27 @@ mod tests {
     }
 
     #[test]
-    fn test_ignore_generated_defaults_to_true() {
+    fn test_ignore_git_attributes_defaults_to_true() {
         let cli = TestDiffCli::try_parse_from(["mehen"]).unwrap();
-        assert!(cli.opts.ignore_generated);
+        assert!(cli.opts.ignore_git_attributes);
     }
 
     #[test]
-    fn test_ignore_generated_accepts_bare_flag() {
-        let cli = TestDiffCli::try_parse_from(["mehen", "--ignore-generated"]).unwrap();
-        assert!(cli.opts.ignore_generated);
+    fn test_ignore_git_attributes_accepts_bare_flag() {
+        let cli = TestDiffCli::try_parse_from(["mehen", "--ignore-git-attributes"]).unwrap();
+        assert!(cli.opts.ignore_git_attributes);
     }
 
     #[test]
-    fn test_ignore_generated_can_be_disabled() {
+    fn test_ignore_git_attributes_can_be_disabled() {
+        let cli = TestDiffCli::try_parse_from(["mehen", "--ignore-git-attributes=false"]).unwrap();
+        assert!(!cli.opts.ignore_git_attributes);
+    }
+
+    #[test]
+    fn test_ignore_generated_remains_a_compatibility_alias() {
         let cli = TestDiffCli::try_parse_from(["mehen", "--ignore-generated=false"]).unwrap();
-        assert!(!cli.opts.ignore_generated);
+        assert!(!cli.opts.ignore_git_attributes);
     }
 
     #[test]
@@ -1614,7 +1664,7 @@ mod tests {
             exclude: vec![],
             output_format: None,
             show_unchanged: false,
-            ignore_generated: true,
+            ignore_git_attributes: true,
             fail_on: vec![],
         };
         let (from, to) = resolve_refs(&opts, &None);
@@ -1633,7 +1683,7 @@ mod tests {
             exclude: vec![],
             output_format: None,
             show_unchanged: false,
-            ignore_generated: true,
+            ignore_git_attributes: true,
             fail_on: vec![],
         };
         let (from, to) = resolve_refs(&opts, &None);
@@ -1661,7 +1711,7 @@ mod tests {
             exclude: vec![],
             output_format: None,
             show_unchanged: false,
-            ignore_generated: true,
+            ignore_git_attributes: true,
             fail_on: vec![],
         };
         let (from, to) = resolve_refs(&opts, &Some(ctx));
@@ -1689,7 +1739,7 @@ mod tests {
             exclude: vec![],
             output_format: None,
             show_unchanged: false,
-            ignore_generated: true,
+            ignore_git_attributes: true,
             fail_on: vec![],
         };
         let (from, to) = resolve_refs(&opts, &Some(ctx));
@@ -1741,33 +1791,50 @@ mod tests {
     }
 
     #[test]
-    fn test_generated_filter_reads_linguist_generated_attributes() {
+    fn test_diff_filter_reads_all_default_exclusion_attributes() {
         let dir = tempfile::tempdir().unwrap();
         let repo = gix::init(dir.path()).unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(
             dir.path().join(".gitattributes"),
             "\
+* -linguist-generated -linguist-vendored -binary
 *.rs linguist-generated
 src/manual.rs -linguist-generated
 src/false.rs linguist-generated=false
 src/unspecified.rs !linguist-generated
 src/value.txt linguist-generated=true
+src/vendor.txt linguist-vendored
+src/archive.txt binary
 ",
         )
         .unwrap();
 
-        let mut filter = GeneratedFilter::new(&repo).unwrap();
+        let mut filter = GitAttributeFilter::new(&repo).unwrap();
 
-        assert!(filter.is_generated(Path::new("src/generated.rs")).unwrap());
-        assert!(!filter.is_generated(Path::new("src/manual.rs")).unwrap());
-        assert!(!filter.is_generated(Path::new("src/false.rs")).unwrap());
         assert!(
-            !filter
-                .is_generated(Path::new("src/unspecified.rs"))
+            filter
+                .excludes_relative_path(Path::new("src/generated.rs"))
                 .unwrap()
         );
-        assert!(filter.is_generated(Path::new("src/value.txt")).unwrap());
+        assert!(
+            !filter
+                .excludes_relative_path(Path::new("src/manual.rs"))
+                .unwrap()
+        );
+        assert!(
+            !filter
+                .excludes_relative_path(Path::new("src/false.rs"))
+                .unwrap()
+        );
+        assert!(
+            !filter
+                .excludes_relative_path(Path::new("src/unspecified.rs"))
+                .unwrap()
+        );
+        for path in ["src/value.txt", "src/vendor.txt", "src/archive.txt"] {
+            assert!(filter.excludes_relative_path(Path::new(path)).unwrap());
+        }
     }
 
     // ── `--fail-on new-broken-link` gating tests ───────────────────────

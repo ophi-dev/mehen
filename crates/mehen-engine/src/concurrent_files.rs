@@ -1,175 +1,132 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Konstantin Vyatkin <tino@vtkn.io>
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::thread;
+use std::sync::{Arc, Mutex};
 
-use crossbeam::channel::{Receiver, Sender, unbounded};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use walkdir::{DirEntry, WalkDir};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 
-/// Build a `GlobSet` from a list of glob strings, ignoring empty entries.
+use crate::git_attributes::GitAttributeFilterSet;
+
+/// Build a `GlobSet` from a list of glob strings, ignoring empty and invalid
+/// entries.
 ///
 /// Used by both the `diff` and `top-offenders` orchestrators to turn the
 /// user's `--include` / `--exclude` flags into a usable matcher.
-pub(crate) fn mk_globset(elems: Vec<String>) -> GlobSet {
-    if elems.is_empty() {
-        return GlobSet::empty();
-    }
+pub(crate) fn mk_globset<I, S>(elems: I) -> GlobSet
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut globset = GlobSetBuilder::new();
-    elems.iter().filter(|e| !e.is_empty()).for_each(|e| {
-        if let Ok(glob) = Glob::new(e) {
+    for elem in elems {
+        let elem = elem.as_ref();
+        if !elem.is_empty()
+            && let Ok(glob) = Glob::new(elem)
+        {
             globset.add(glob);
         }
-    });
-    globset.build().map_or(GlobSet::empty(), |globset| globset)
+    }
+    globset.build().unwrap_or_else(|_| GlobSet::empty())
+}
+
+fn is_file(entry: &DirEntry) -> bool {
+    entry
+        .file_type()
+        .is_some_and(|file_type| file_type.is_file())
+        || (entry.path_is_symlink() && entry.path().is_file())
+}
+
+fn path_matches(path: &Path, include: &GlobSet, exclude: &GlobSet) -> bool {
+    (include.is_empty() || include.is_match(path))
+        && (exclude.is_empty() || !exclude.is_match(path))
+}
+
+fn walk_builder(files_data: &FilesData) -> WalkBuilder {
+    let mut builder = WalkBuilder::empty();
+    for path in &files_data.paths {
+        if path.exists() {
+            builder.add(path);
+        } else {
+            log::warn!("File doesn't exist: {path:?}");
+        }
+    }
+
+    // Keep the policy explicit: hidden entries, .ignore, .gitignore, the
+    // repository-local exclude file, parent rules, and the global Git ignore
+    // are all honored. `ignore` prunes ignored directories before they can
+    // enqueue files for analysis.
+    builder.standard_filters(true);
+    if !files_data.respect_ignores {
+        // `--no-ignore` disables ignore files without changing the established
+        // behavior of omitting hidden children.
+        builder
+            .parents(false)
+            .ignore(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false);
+    }
+    builder
+}
+
+fn log_ignore_error(entry: &DirEntry) {
+    if let Some(error) = entry.error() {
+        log::warn!(
+            "Failed to apply an ignore rule while walking {}: {error}",
+            entry.path().display()
+        );
+    }
+}
+
+/// Walk all configured roots serially and return matching files.
+///
+/// The public `rank_top_offenders` API uses this path. Analysis remains
+/// serial there, but traversal follows exactly the same ignore policy as the
+/// parallel CLI runner.
+pub(crate) fn walk_files(files_data: &FilesData) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut attribute_filters = if files_data.respect_ignores {
+        GitAttributeFilterSet::for_walk_paths(&files_data.paths)
+    } else {
+        GitAttributeFilterSet::default()
+    };
+    for result in walk_builder(files_data).build() {
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(error) => {
+                log::warn!("Failed to walk an input path: {error}");
+                continue;
+            }
+        };
+        log_ignore_error(&entry);
+        if is_file(&entry)
+            && path_matches(entry.path(), &files_data.include, &files_data.exclude)
+            && !is_excluded_by_attributes(&mut attribute_filters, entry.path())
+        {
+            paths.push(entry.into_path());
+        }
+    }
+    paths
 }
 
 type ProcFilesFunction<Config> = dyn Fn(PathBuf, &Config) -> std::io::Result<()> + Send + Sync;
 
-type ProcDirPathsFunction<Config> =
-    dyn Fn(&mut HashMap<String, Vec<PathBuf>>, &Path, &Config) + Send + Sync;
-
-type ProcPathFunction<Config> = dyn Fn(&Path, &Config) + Send + Sync;
-
-// Null functions removed at compile time
-fn null_proc_dir_paths<Config>(_: &mut HashMap<String, Vec<PathBuf>>, _: &Path, _: &Config) {}
-fn null_proc_path<Config>(_: &Path, _: &Config) {}
-
-#[derive(Debug)]
-struct JobItem<Config> {
-    path: PathBuf,
-    cfg: Arc<Config>,
-}
-
-type JobReceiver<Config> = Receiver<Option<JobItem<Config>>>;
-type JobSender<Config> = Sender<Option<JobItem<Config>>>;
-
-// Both args are moved into this thread entry point from a `move ||` closure;
-// pass-by-value is required because `Receiver` is consumed and `Arc` is moved.
-#[allow(clippy::needless_pass_by_value)]
-fn consumer<Config, ProcFiles>(receiver: JobReceiver<Config>, func: Arc<ProcFiles>)
-where
-    ProcFiles: Fn(PathBuf, &Config) -> std::io::Result<()> + Send + Sync,
-{
-    while let Ok(job) = receiver.recv() {
-        if job.is_none() {
-            break;
-        }
-        // Cannot panic because of the check immediately above.
-        let job = job.unwrap();
-        let path = job.path.clone();
-
-        if let Err(err) = func(job.path, &job.cfg) {
-            log::error!("{err:?} for file {path:?}");
-        }
-    }
-}
-
-fn send_file<T>(
-    path: PathBuf,
-    cfg: &Arc<T>,
-    sender: &JobSender<T>,
-) -> Result<(), ConcurrentErrors> {
-    sender
-        .send(Some(JobItem {
-            path,
-            cfg: Arc::clone(cfg),
-        }))
-        .map_err(|e| ConcurrentErrors::Sender(e.to_string()))
-}
-
-fn is_hidden(entry: &DirEntry) -> bool {
-    entry
-        .file_name()
-        .to_str()
-        .is_some_and(|s| s.starts_with('.'))
-}
-
-fn explore<Config, ProcDirPaths, ProcPath>(
-    files_data: FilesData,
-    cfg: &Arc<Config>,
-    proc_dir_paths: ProcDirPaths,
-    proc_path: ProcPath,
-    sender: &JobSender<Config>,
-) -> Result<HashMap<String, Vec<PathBuf>>, ConcurrentErrors>
-where
-    ProcDirPaths: Fn(&mut HashMap<String, Vec<PathBuf>>, &Path, &Config) + Send + Sync,
-    ProcPath: Fn(&Path, &Config) + Send + Sync,
-{
-    let FilesData {
-        paths,
-        ref include,
-        ref exclude,
-    } = files_data;
-
-    let mut all_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
-
-    for path in paths {
-        if !path.exists() {
-            log::warn!("File doesn't exist: {path:?}");
-            continue;
-        }
-        if path.is_dir() {
-            for entry in WalkDir::new(path)
-                .into_iter()
-                .filter_entry(|e| !is_hidden(e))
-            {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(e) => return Err(ConcurrentErrors::Sender(e.to_string())),
-                };
-                let path = entry.path().to_path_buf();
-                if (include.is_empty() || include.is_match(&path))
-                    && (exclude.is_empty() || !exclude.is_match(&path))
-                    && path.is_file()
-                {
-                    proc_dir_paths(&mut all_files, &path, cfg);
-                    send_file(path, cfg, sender)?;
-                }
-            }
-        } else if (include.is_empty() || include.is_match(&path))
-            && (exclude.is_empty() || !exclude.is_match(&path))
-            && path.is_file()
-        {
-            proc_path(&path, cfg);
-            send_file(path, cfg, sender)?;
-        }
-    }
-
-    Ok(all_files)
-}
-
-/// Series of errors that might happen when processing files concurrently.
+/// An error encountered while walking files concurrently.
 #[derive(Debug)]
 pub(crate) enum ConcurrentErrors {
-    /// Producer side error.
-    ///
-    /// An error occurred inside the producer thread.
-    Producer(String),
-    /// Sender side error.
-    ///
-    /// An error occurred when sending an item.
-    Sender(String),
-    /// Receiver side error.
-    ///
-    /// An error occurred inside one of the receiver threads.
-    Receiver(String),
-    /// Thread side error.
-    ///
-    /// A general error occurred when a thread is being spawned or run.
-    Thread(String),
+    /// Filesystem traversal failed.
+    Walk(String),
+    /// A worker panicked while traversing or processing a file.
+    Worker(String),
 }
 
 impl std::fmt::Display for ConcurrentErrors {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Producer(msg) => write!(f, "producer error: {msg}"),
-            Self::Sender(msg) => write!(f, "sender error: {msg}"),
-            Self::Receiver(msg) => write!(f, "receiver error: {msg}"),
-            Self::Thread(msg) => write!(f, "thread error: {msg}"),
+            Self::Walk(msg) => write!(f, "walk error: {msg}"),
+            Self::Worker(msg) => write!(f, "worker error: {msg}"),
         }
     }
 }
@@ -185,13 +142,13 @@ pub(crate) struct FilesData {
     pub exclude: GlobSet,
     /// List of file paths.
     pub paths: Vec<PathBuf>,
+    /// Whether standard ignore files and Git attributes should be respected.
+    pub respect_ignores: bool,
 }
 
-/// A runner to process files concurrently.
+/// A runner that traverses and processes files concurrently.
 pub(crate) struct ConcurrentRunner<Config> {
     proc_files: Box<ProcFilesFunction<Config>>,
-    proc_dir_paths: Box<ProcDirPathsFunction<Config>>,
-    proc_path: Box<ProcPathFunction<Config>>,
     num_jobs: usize,
 }
 
@@ -213,88 +170,311 @@ impl<Config: 'static + Send + Sync> ConcurrentRunner<Config> {
     where
         ProcFiles: 'static + Fn(PathBuf, &Config) -> std::io::Result<()> + Send + Sync,
     {
-        let num_jobs = std::cmp::max(2, num_jobs) - 1;
         Self {
             proc_files: Box::new(proc_files),
-            proc_dir_paths: Box::new(null_proc_dir_paths),
-            proc_path: Box::new(null_proc_path),
-            num_jobs,
+            num_jobs: num_jobs.max(1),
         }
     }
 
-    /// Runs the producer-consumer approach to process the files
-    /// contained in a directory and in its own subdirectories.
+    /// Walk the configured roots and process each matching file in a traversal
+    /// worker.
     ///
-    /// * `config` - Information used to process a file.
-    /// * `files_data` - Information about the files to be included or excluded
-    ///   from a search more the number of paths considered in the search.
-    pub(crate) fn run(
-        self,
-        config: Config,
-        files_data: FilesData,
-    ) -> Result<HashMap<String, Vec<PathBuf>>, ConcurrentErrors> {
-        let cfg = Arc::new(config);
-
-        let (sender, receiver) = unbounded();
-
-        let producer = {
-            let sender = sender.clone();
-
-            match thread::Builder::new()
-                .name(String::from("Producer"))
-                .spawn(move || {
-                    explore(
-                        files_data,
-                        &cfg,
-                        self.proc_dir_paths,
-                        self.proc_path,
-                        &sender,
-                    )
-                }) {
-                Ok(producer) => producer,
-                Err(e) => return Err(ConcurrentErrors::Thread(e.to_string())),
-            }
+    /// `ignore::WalkParallel` schedules directories with work stealing and
+    /// invokes `proc_files` directly. There is no producer channel that can
+    /// accumulate one job per file while parsers are busy.
+    pub(crate) fn run(self, config: Config, files_data: FilesData) -> Result<(), ConcurrentErrors> {
+        let config = Arc::new(config);
+        let proc_files: Arc<ProcFilesFunction<Config>> = Arc::from(self.proc_files);
+        let include = Arc::new(files_data.include.clone());
+        let exclude = Arc::new(files_data.exclude.clone());
+        let walk_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let attribute_filters = if files_data.respect_ignores {
+            GitAttributeFilterSet::for_walk_paths(&files_data.paths)
+        } else {
+            GitAttributeFilterSet::default()
         };
 
-        let mut receivers = Vec::with_capacity(self.num_jobs);
-        let proc_files = Arc::new(self.proc_files);
-        for i in 0..self.num_jobs {
-            let receiver = receiver.clone();
-            let proc_files = proc_files.clone();
+        let mut builder = walk_builder(&files_data);
+        builder.threads(self.num_jobs);
+        let walker = builder.build_parallel();
 
-            let t = match thread::Builder::new()
-                .name(format!("Consumer {i}"))
-                .spawn(move || {
-                    consumer(receiver, proc_files);
-                }) {
-                Ok(receiver) => receiver,
-                Err(e) => return Err(ConcurrentErrors::Thread(e.to_string())),
-            };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            walker.run(|| {
+                let config = Arc::clone(&config);
+                let proc_files = Arc::clone(&proc_files);
+                let include = Arc::clone(&include);
+                let exclude = Arc::clone(&exclude);
+                let walk_error = Arc::clone(&walk_error);
+                let mut attribute_filters = attribute_filters.clone();
 
-            receivers.push(t);
-        }
+                Box::new(move |result| {
+                    let entry = match result {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            if let Ok(mut slot) = walk_error.lock()
+                                && slot.is_none()
+                            {
+                                *slot = Some(error.to_string());
+                            }
+                            return WalkState::Quit;
+                        }
+                    };
+                    log_ignore_error(&entry);
+                    if !is_file(&entry)
+                        || !path_matches(entry.path(), include.as_ref(), exclude.as_ref())
+                        || is_excluded_by_attributes(&mut attribute_filters, entry.path())
+                    {
+                        return WalkState::Continue;
+                    }
 
-        let Ok(all_files) = producer.join() else {
-            return Err(ConcurrentErrors::Producer(
-                "Child thread panicked".to_owned(),
+                    let path = entry.into_path();
+                    if let Err(error) = proc_files(path.clone(), config.as_ref()) {
+                        log::error!("{error:?} for file {path:?}");
+                    }
+                    WalkState::Continue
+                })
+            });
+        }));
+
+        if result.is_err() {
+            return Err(ConcurrentErrors::Worker(
+                "a traversal worker panicked".to_owned(),
             ));
-        };
+        }
+        if let Some(error) = walk_error
+            .lock()
+            .map_err(|error| ConcurrentErrors::Worker(error.to_string()))?
+            .take()
+        {
+            return Err(ConcurrentErrors::Walk(error));
+        }
+        Ok(())
+    }
+}
 
-        // Poison the receiver, now that the producer is finished.
-        for _ in 0..self.num_jobs {
-            if let Err(e) = sender.send(None) {
-                return Err(ConcurrentErrors::Sender(e.to_string()));
-            }
+fn is_excluded_by_attributes(filters: &mut GitAttributeFilterSet, path: &Path) -> bool {
+    match filters.excludes_path(path) {
+        Ok(excluded) => excluded,
+        Err(error) => {
+            log::warn!(
+                "Failed to apply Git attributes to {}: {error}",
+                path.display()
+            );
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_names(paths: &[PathBuf]) -> Vec<&str> {
+        let mut names: Vec<&str> = paths
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    fn files_data(root: PathBuf) -> FilesData {
+        FilesData {
+            include: GlobSet::empty(),
+            exclude: GlobSet::empty(),
+            paths: vec![root],
+            respect_ignores: true,
+        }
+    }
+
+    #[test]
+    fn walk_files_respects_gitignore_and_nested_ignore_files() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init(dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("build")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/generated")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "build/\n").unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "* -linguist-generated -linguist-vendored -binary\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/.ignore"), "generated/\n").unwrap();
+        std::fs::write(dir.path().join("src/main.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("build/output.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("src/generated/output.py"), "x = 1\n").unwrap();
+
+        let paths = walk_files(&files_data(dir.path().to_path_buf()));
+
+        assert_eq!(file_names(&paths), vec!["main.py"]);
+    }
+
+    #[test]
+    fn walk_files_respects_parent_gitignore_when_root_is_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init(dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/generated")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "src/generated/\n").unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "* -linguist-generated -linguist-vendored -binary\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/main.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("src/generated/output.py"), "x = 1\n").unwrap();
+
+        let paths = walk_files(&files_data(dir.path().join("src")));
+
+        assert_eq!(file_names(&paths), vec!["main.py"]);
+    }
+
+    #[test]
+    fn walk_files_respects_git_info_exclude() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init(dir.path()).unwrap();
+        std::fs::write(dir.path().join(".git/info/exclude"), "local.py\n").unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "* -linguist-generated -linguist-vendored -binary\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("kept.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("local.py"), "x = 1\n").unwrap();
+
+        let paths = walk_files(&files_data(dir.path().to_path_buf()));
+
+        assert_eq!(file_names(&paths), vec!["kept.py"]);
+    }
+
+    #[test]
+    fn explicit_ignored_file_is_still_processed() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init(dir.path()).unwrap();
+        let ignored = dir.path().join("ignored.py");
+        std::fs::write(dir.path().join(".gitignore"), "ignored.py\n").unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "ignored.py linguist-generated\n",
+        )
+        .unwrap();
+        std::fs::write(&ignored, "x = 1\n").unwrap();
+
+        let paths = walk_files(&files_data(ignored.clone()));
+
+        assert_eq!(paths, vec![ignored]);
+    }
+
+    #[test]
+    fn no_ignore_disables_ignore_files_but_keeps_hidden_children_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join(".cache")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.py\n").unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "generated.py linguist-generated\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("ignored.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("generated.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join(".cache/hidden.py"), "x = 1\n").unwrap();
+
+        let mut data = files_data(dir.path().to_path_buf());
+        data.respect_ignores = false;
+        let paths = walk_files(&data);
+
+        assert_eq!(file_names(&paths), vec!["generated.py", "ignored.py"]);
+    }
+
+    #[test]
+    fn walk_files_respects_generated_vendored_and_binary_attributes() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "\
+* -linguist-generated -linguist-vendored -binary
+generated.py linguist-generated
+vendored.py linguist-vendored
+binary.py binary
+",
+        )
+        .unwrap();
+        for name in ["kept.py", "generated.py", "vendored.py", "binary.py"] {
+            std::fs::write(dir.path().join(name), "x = 1\n").unwrap();
         }
 
-        for receiver in receivers {
-            if receiver.join().is_err() {
-                return Err(ConcurrentErrors::Receiver(
-                    "A thread used to process a file panicked".to_owned(),
-                ));
-            }
-        }
+        let paths = walk_files(&files_data(dir.path().to_path_buf()));
 
-        all_files
+        assert_eq!(file_names(&paths), vec!["kept.py"]);
+    }
+
+    #[test]
+    fn walk_files_applies_attributes_for_each_repository_root() {
+        let first = tempfile::tempdir().unwrap();
+        gix::init(first.path()).unwrap();
+        std::fs::write(
+            first.path().join(".gitattributes"),
+            "\
+* -linguist-generated -linguist-vendored -binary
+generated.py linguist-generated
+",
+        )
+        .unwrap();
+        std::fs::write(first.path().join("generated.py"), "x = 1\n").unwrap();
+        std::fs::write(first.path().join("first.py"), "x = 1\n").unwrap();
+
+        let second = tempfile::tempdir().unwrap();
+        gix::init(second.path()).unwrap();
+        std::fs::write(
+            second.path().join(".gitattributes"),
+            "\
+* -linguist-generated -linguist-vendored -binary
+vendored.py linguist-vendored
+",
+        )
+        .unwrap();
+        std::fs::write(second.path().join("vendored.py"), "x = 1\n").unwrap();
+        std::fs::write(second.path().join("second.py"), "x = 1\n").unwrap();
+
+        let paths = walk_files(&FilesData {
+            include: GlobSet::empty(),
+            exclude: GlobSet::empty(),
+            paths: vec![first.path().to_path_buf(), second.path().to_path_buf()],
+            respect_ignores: true,
+        });
+
+        assert_eq!(file_names(&paths), vec!["first.py", "second.py"]);
+    }
+
+    #[test]
+    fn parallel_runner_uses_the_same_ignore_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        gix::init(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "\
+* -linguist-generated -linguist-vendored -binary
+vendored.py linguist-vendored
+",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("main.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("vendored.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("node_modules/generated.py"), "x = 1\n").unwrap();
+
+        let visited = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&visited);
+        ConcurrentRunner::new(2, move |path, _: &()| {
+            output.lock().unwrap().push(path);
+            Ok(())
+        })
+        .run((), files_data(dir.path().to_path_buf()))
+        .unwrap();
+
+        let paths = visited.lock().unwrap();
+        assert_eq!(file_names(&paths), vec!["main.py"]);
     }
 }

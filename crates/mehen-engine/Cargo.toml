@@ -32,13 +32,12 @@ mehen-sql = { workspace = true, optional = true }
 
 camino = { workspace = true }
 clap = { workspace = true }
-# `crossbeam`, `globset`, and `walkdir` are pinned here (not in
+# `globset` and `ignore` are pinned here (not in
 # `[workspace.dependencies]`) because `mehen-engine` is the only consumer
-# — concurrency, ignore-pattern matching, and recursive directory walks
-# are engine-only concerns.
-crossbeam = { version = "^0.8", features = ["crossbeam-channel"] }
+# — CLI filtering and ignore-aware recursive directory walks are
+# engine-only concerns.
 globset = "^0.4"
-walkdir = "^2.3"
+ignore = "^0.4"
 gix = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }

@@ -22,7 +22,7 @@ mehen diff [OPTIONS]
 | `-X, --exclude <EXCLUDE>...` | Glob to exclude files. |
 | `-O, --output-format <OUTPUT_FORMAT>` | `markdown` or `json`. |
 | `--show-unchanged` | Show files where every metric is unchanged. |
-| `--ignore-generated[=<BOOL>]` | Skip files marked `linguist-generated` (default `true`). |
+| `--ignore-git-attributes[=<BOOL>]` | Skip files marked `linguist-generated`, `linguist-vendored`, or `binary` (default `true`; `--ignore-generated` remains an alias). |
 | `--fail-on <FAIL_ON>` | Exit non-zero when named thresholds are crossed. Comma-separated: `dmi-drop`, `new-broken-link`, `filler-high`, `all`. |
 
 ## Examples
@@ -68,9 +68,12 @@ mehen diff [OPTIONS]
 
 ## What gets compared
 
-mehen runs the equivalent of `mehen metrics` against each side, joins by repository-relative path, and
-computes per-metric deltas. Files that exist on only one side are reported as new or deleted. Files
-matched by `linguist-generated` are skipped by default.
+mehen asks Git for the changed-file set, runs the equivalent of `mehen metrics` against each side,
+joins by repository-relative path, and computes per-metric deltas. It does not recursively walk
+untracked working-tree content, so ignored build and dependency directories are never candidates.
+Files that exist on only one side are reported as new or deleted. Tracked files matched by
+`linguist-generated`, `linguist-vendored`, or `binary` Git attributes are skipped by default.
+Use `--ignore-git-attributes=false` to include them.
 
 When no `--metrics` are given, a mixed pull request (e.g. both `.ts` and `.sql`
 files) produces a single table whose columns are the union of each language's

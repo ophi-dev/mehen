@@ -27,6 +27,7 @@ mod concurrent_files;
 mod detection;
 mod diff;
 mod dispatcher;
+mod git_attributes;
 mod metric_selector;
 mod registry;
 mod top_offenders;

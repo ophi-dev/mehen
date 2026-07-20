@@ -12,8 +12,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
-use globset::{Glob, GlobSet, GlobSetBuilder};
-
 use mehen_core::{
     AnalysisErrorRecord, DiffSide, Language, MetricKey, ParseDiagnostic, Polarity, SourceFile,
 };
@@ -141,59 +139,15 @@ fn canonical_key(path: &Utf8PathBuf) -> Utf8PathBuf {
 }
 
 fn walk_paths(root: &Utf8PathBuf, include: &[String], exclude: &[String]) -> Vec<Utf8PathBuf> {
-    if !root.exists() {
-        return Vec::new();
-    }
-    let include = build_globset(include);
-    let exclude = build_globset(exclude);
-    let mut out = Vec::new();
-    if root.is_file() {
-        if path_matches(root.as_path(), &include, &exclude) {
-            out.push(root.clone());
-        }
-        return out;
-    }
-    for entry in walkdir::WalkDir::new(root.as_std_path())
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file()
-            && let Ok(utf8) = Utf8PathBuf::try_from(entry.path().to_path_buf())
-            && path_matches(utf8.as_path(), &include, &exclude)
-        {
-            out.push(utf8);
-        }
-    }
-    out
-}
-
-/// Build a `GlobSet` from CLI-style patterns. Empty entries are
-/// dropped; invalid globs are silently skipped (matches
-/// `mehen-engine::concurrent_files::mk_globset`).
-fn build_globset(patterns: &[String]) -> GlobSet {
-    if patterns.is_empty() {
-        return GlobSet::empty();
-    }
-    let mut builder = GlobSetBuilder::new();
-    for p in patterns.iter().filter(|p| !p.is_empty()) {
-        if let Ok(glob) = Glob::new(p) {
-            builder.add(glob);
-        }
-    }
-    builder.build().unwrap_or_else(|_| GlobSet::empty())
-}
-
-/// Apply the standard include/exclude semantics: when `include` is
-/// non-empty, the path must match it; when `exclude` is non-empty, the
-/// path must not match it. Empty sets are treated as no-op.
-fn path_matches(path: &camino::Utf8Path, include: &GlobSet, exclude: &GlobSet) -> bool {
-    if !include.is_empty() && !include.is_match(path) {
-        return false;
-    }
-    if !exclude.is_empty() && exclude.is_match(path) {
-        return false;
-    }
-    true
+    walk_files(&FilesData {
+        include: mk_globset(include),
+        exclude: mk_globset(exclude),
+        paths: vec![root.as_std_path().to_path_buf()],
+        respect_ignores: true,
+    })
+    .into_iter()
+    .filter_map(|path| Utf8PathBuf::try_from(path).ok())
+    .collect()
 }
 
 /// Order entries from most concerning to least.
@@ -315,7 +269,7 @@ use std::process;
 use std::sync::Mutex;
 use std::thread::available_parallelism;
 
-use crate::concurrent_files::{ConcurrentRunner, FilesData, mk_globset};
+use crate::concurrent_files::{ConcurrentRunner, FilesData, mk_globset, walk_files};
 use crate::metric_selector::{
     MetricSelector as CliMetricSelector, Polarity as SelectorPolarity, parse_metric_selectors,
     read_metric as read_selector_metric,
@@ -361,6 +315,11 @@ pub struct TopOffendersOpts {
     /// Glob to exclude files. Repeat the flag for multiple patterns.
     #[clap(long, short = 'X', num_args = 1)]
     exclude: Vec<String>,
+
+    /// Do not respect ignore files or generated/vendored/binary Git
+    /// attributes while walking directories.
+    #[clap(long)]
+    no_ignore: bool,
 
     /// Number of parser jobs.
     #[clap(long, short = 'j')]
@@ -565,6 +524,7 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
         include,
         exclude,
         paths: opts.paths,
+        respect_ignores: !opts.no_ignore,
     };
 
     if let Err(e) = ConcurrentRunner::new(num_jobs, act_on_file).run(cfg, files_data) {
@@ -914,6 +874,56 @@ mod tests {
     }
 
     #[test]
+    fn rank_top_offenders_skips_gitignored_and_attributed_files() {
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        gix::init(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "\
+* -linguist-generated -linguist-vendored -binary
+generated.py linguist-generated
+vendored.py linguist-vendored
+binary.py binary
+",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("kept.py"), "x = 1\n").unwrap();
+        std::fs::write(
+            dir.path().join("node_modules/generated.py"),
+            "def generated():\n    if True:\n        return 1\n",
+        )
+        .unwrap();
+        for name in ["generated.py", "vendored.py", "binary.py"] {
+            std::fs::write(
+                dir.path().join(name),
+                "def excluded():\n    if True:\n        return 1\n",
+            )
+            .unwrap();
+        }
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("loc.lloc")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        let names: Vec<&str> = report
+            .entries
+            .iter()
+            .filter_map(|entry| entry.path.file_name())
+            .collect();
+
+        assert_eq!(names, vec!["kept.py"]);
+    }
+
+    #[test]
     fn rank_top_offenders_dedupes_overlapping_roots() {
         // Regression: when callers pass overlapping roots (a directory
         // plus a child directory, or a directory plus an explicit file
@@ -1152,6 +1162,30 @@ mod tests {
     #[test]
     fn cli_num_jobs_falls_back_to_conservative_thread_count() {
         assert_eq!(resolve_num_jobs(None, None), 2);
+    }
+
+    #[test]
+    fn cli_no_ignore_is_opt_in() {
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            opts: TopOffendersOpts,
+        }
+
+        let default =
+            <TestCli as clap::Parser>::try_parse_from(["mehen", "--metric", "loc.lloc", "."])
+                .unwrap();
+        assert!(!default.opts.no_ignore);
+
+        let disabled = <TestCli as clap::Parser>::try_parse_from([
+            "mehen",
+            "--metric",
+            "loc.lloc",
+            "--no-ignore",
+            ".",
+        ])
+        .unwrap();
+        assert!(disabled.opts.no_ignore);
     }
 
     #[test]
