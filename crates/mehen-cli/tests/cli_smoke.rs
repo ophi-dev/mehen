@@ -269,20 +269,29 @@ binary.py binary
         write_python(dir.path(), name, "x = 1\n");
     }
     commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "attribute-base"]);
 
     for name in ["kept.py", "generated.py", "vendored.py", "binary.py"] {
         write_python(dir.path(), name, "x = 2\n");
     }
     commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "attribute-head"]);
+
+    std::fs::write(
+        dir.path().join(".gitattributes"),
+        "* -linguist-generated -linguist-vendored -binary\n",
+    )
+    .expect("replace checkout gitattributes");
+    commit_all(dir.path(), "checkout");
 
     let run = |override_flag: Option<&str>| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mehen"));
         command.current_dir(dir.path()).args([
             "diff",
             "--from",
-            "HEAD~1",
+            "attribute-base",
             "--to",
-            "HEAD",
+            "attribute-head",
             "--metrics",
             "loc.lloc",
             "--show-unchanged",

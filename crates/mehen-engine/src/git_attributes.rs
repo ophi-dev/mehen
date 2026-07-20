@@ -2,7 +2,9 @@
 // Copyright (C) 2026 Konstantin Vyatkin <tino@vtkn.io>
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 const EXCLUDED_ATTRIBUTES: [&str; 3] = ["linguist-generated", "linguist-vendored", "binary"];
 
@@ -36,6 +38,30 @@ impl GitAttributeFilter {
         })
     }
 
+    pub(crate) fn from_revision(
+        repo: &gix::Repository,
+        revision: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let tree_id = repo
+            .rev_parse_single(revision)?
+            .object()?
+            .peel_to_commit()?
+            .tree_id()?;
+        let index = repo.index_from_tree(&tree_id)?;
+        let attrs = repo.attributes_only(
+            &index,
+            gix::worktree::stack::state::attributes::Source::IdMapping,
+        )?;
+        let outcome = attrs.selected_attribute_matches(EXCLUDED_ATTRIBUTES);
+
+        Ok(Self {
+            worktree: None,
+            attrs: attrs.detach(),
+            objects: repo.objects.clone(),
+            outcome,
+        })
+    }
+
     pub(crate) fn excludes_relative_path(&mut self, path: &Path) -> std::io::Result<bool> {
         self.attrs
             .at_path(path, None, &self.objects)?
@@ -47,11 +73,86 @@ impl GitAttributeFilter {
     }
 }
 
+/// Repository roots found before or during a walk.
+///
+/// The registry contains only normalized paths, so it is cheap to share
+/// between traversal workers. Each worker still owns its mutable gix
+/// attribute stacks.
+#[derive(Default)]
+struct GitRepositoryRegistryInner {
+    worktrees: RwLock<Vec<PathBuf>>,
+    generation: AtomicUsize,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct GitRepositoryRegistry {
+    inner: Arc<GitRepositoryRegistryInner>,
+}
+
+impl GitRepositoryRegistry {
+    fn for_walk_paths(paths: &[PathBuf]) -> Self {
+        let registry = Self::default();
+        for path in paths.iter().filter(|path| path.is_dir()) {
+            registry.register_repository(path, false);
+        }
+        registry
+    }
+
+    pub(crate) fn discover_nested_repository(&self, directory: &Path) {
+        if std::fs::symlink_metadata(directory.join(".git")).is_ok() {
+            self.register_repository(directory, true);
+        }
+    }
+
+    fn register_repository(&self, path: &Path, require_exact_root: bool) {
+        let Ok(repo) = gix::discover(path) else {
+            return;
+        };
+        let Some(worktree) = repo.workdir() else {
+            return;
+        };
+        let Ok(worktree) =
+            std::fs::canonicalize(worktree).or_else(|_| std::path::absolute(worktree))
+        else {
+            return;
+        };
+        if require_exact_root && worktree != path {
+            return;
+        }
+
+        let mut worktrees = self
+            .inner
+            .worktrees
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if !worktrees.contains(&worktree) {
+            worktrees.push(worktree);
+            self.inner.generation.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    fn snapshot_if_changed(&self, previous_generation: usize) -> Option<(usize, Vec<PathBuf>)> {
+        if self.inner.generation.load(Ordering::Acquire) == previous_generation {
+            return None;
+        }
+        let worktrees = self
+            .inner
+            .worktrees
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let generation = self.inner.generation.load(Ordering::Relaxed);
+        Some((generation, worktrees.clone()))
+    }
+}
+
 /// Per-walker attribute filters. Each parallel traversal worker clones this
 /// value so its mutable gix attribute stacks remain thread-local.
 #[derive(Clone, Default)]
 pub(crate) struct GitAttributeFilterSet {
+    repositories: GitRepositoryRegistry,
     filters: Vec<GitAttributeFilter>,
+    repository_generation: usize,
+    loaded_worktrees: HashSet<PathBuf>,
     explicit_files: HashSet<PathBuf>,
 }
 
@@ -60,93 +161,84 @@ impl GitAttributeFilterSet {
         let explicit_files = paths
             .iter()
             .filter(|path| path.is_file())
-            .flat_map(|path| {
-                [
-                    std::path::absolute(path).ok(),
-                    std::fs::canonicalize(path).ok(),
-                ]
-                .into_iter()
-                .flatten()
-            })
+            .cloned()
             .collect();
-
-        let mut seen_worktrees = HashSet::new();
-        let mut filters = Vec::new();
-        for path in paths.iter().filter(|path| path.is_dir()) {
-            let Ok(repo) = gix::discover(path) else {
-                continue;
-            };
-            let Some(worktree) = repo.workdir() else {
-                continue;
-            };
-            let Ok(worktree) =
-                std::fs::canonicalize(worktree).or_else(|_| std::path::absolute(worktree))
-            else {
-                continue;
-            };
-            if !seen_worktrees.insert(worktree) {
-                continue;
-            }
-            match GitAttributeFilter::new(&repo) {
-                Ok(filter) => filters.push(filter),
-                Err(error) => log::warn!(
-                    "Failed to configure Git attribute filtering for {}: {error}",
-                    path.display()
-                ),
-            }
-        }
-
-        // Prefer the innermost repository if callers provide roots from
-        // nested worktrees.
-        filters.sort_by(|a, b| {
-            b.worktree
-                .as_ref()
-                .map_or(0, |path| path.components().count())
-                .cmp(
-                    &a.worktree
-                        .as_ref()
-                        .map_or(0, |path| path.components().count()),
-                )
-        });
-
-        Self {
-            filters,
+        let mut filters = Self {
+            repositories: GitRepositoryRegistry::for_walk_paths(paths),
+            filters: Vec::new(),
+            repository_generation: 0,
+            loaded_worktrees: HashSet::new(),
             explicit_files,
-        }
+        };
+        filters.sync_filters();
+        filters
+    }
+
+    pub(crate) fn repository_registry(&self) -> GitRepositoryRegistry {
+        self.repositories.clone()
     }
 
     pub(crate) fn excludes_path(&mut self, path: &Path) -> std::io::Result<bool> {
-        let absolute = std::path::absolute(path)?;
-        if let Some(excluded) = self.excludes_absolute_path(&absolute)? {
-            return Ok(excluded);
-        }
-
-        if let Ok(canonical) = std::fs::canonicalize(path)
-            && canonical != absolute
-            && let Some(excluded) = self.excludes_absolute_path(&canonical)?
-        {
-            return Ok(excluded);
-        }
-        Ok(false)
-    }
-
-    fn excludes_absolute_path(&mut self, path: &Path) -> std::io::Result<Option<bool>> {
         if self.explicit_files.contains(path) {
-            return Ok(Some(false));
+            return Ok(false);
         }
+
+        self.sync_filters();
         for filter in &mut self.filters {
             let Some(worktree) = &filter.worktree else {
                 continue;
             };
-            if let Ok(relative) = path.strip_prefix(worktree)
-                && !relative
-                    .components()
-                    .any(|component| matches!(component, Component::ParentDir))
-            {
-                return filter.excludes_relative_path(relative).map(Some);
+            if let Ok(relative) = path.strip_prefix(worktree) {
+                return filter.excludes_relative_path(relative);
             }
         }
-        Ok(None)
+        Ok(false)
+    }
+
+    fn sync_filters(&mut self) {
+        let Some((generation, worktrees)) = self
+            .repositories
+            .snapshot_if_changed(self.repository_generation)
+        else {
+            return;
+        };
+        self.repository_generation = generation;
+        let mut added = false;
+        for worktree in worktrees {
+            if !self.loaded_worktrees.insert(worktree.clone()) {
+                continue;
+            }
+            let Ok(repo) = gix::discover(&worktree) else {
+                log::warn!(
+                    "Failed to discover Git repository at {}",
+                    worktree.display()
+                );
+                continue;
+            };
+            match GitAttributeFilter::new(&repo) {
+                Ok(filter) => {
+                    self.filters.push(filter);
+                    added = true;
+                }
+                Err(error) => log::warn!(
+                    "Failed to configure Git attribute filtering for {}: {error}",
+                    worktree.display()
+                ),
+            }
+        }
+        if added {
+            // Prefer the innermost repository when worktrees are nested.
+            self.filters.sort_by(|a, b| {
+                b.worktree
+                    .as_ref()
+                    .map_or(0, |path| path.components().count())
+                    .cmp(
+                        &a.worktree
+                            .as_ref()
+                            .map_or(0, |path| path.components().count()),
+                    )
+            });
+        }
     }
 }
 
@@ -275,37 +367,65 @@ mod tests {
         let second_vendored = second.path().join("vendored.py");
         std::fs::write(&second_vendored, "x = 1\n").unwrap();
 
-        let mut filters = GitAttributeFilterSet::for_walk_paths(&[
-            first.path().to_path_buf(),
-            second.path().to_path_buf(),
-        ]);
+        let first_root = std::fs::canonicalize(first.path()).unwrap();
+        let first_generated = std::fs::canonicalize(first_generated).unwrap();
+        let second_root = std::fs::canonicalize(second.path()).unwrap();
+        let second_vendored = std::fs::canonicalize(second_vendored).unwrap();
+        let mut filters = GitAttributeFilterSet::for_walk_paths(&[first_root.clone(), second_root]);
         assert!(filters.excludes_path(&first_generated).unwrap());
         assert!(filters.excludes_path(&second_vendored).unwrap());
 
-        let mut explicit = GitAttributeFilterSet::for_walk_paths(&[
-            first.path().to_path_buf(),
-            first_generated.clone(),
-        ]);
+        let mut explicit =
+            GitAttributeFilterSet::for_walk_paths(&[first_root, first_generated.clone()]);
         assert!(!explicit.excludes_path(&first_generated).unwrap());
     }
 
     #[test]
-    fn walk_filter_set_normalizes_parent_components() {
+    fn revision_filter_uses_attributes_from_the_requested_commit() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("repo");
-        std::fs::create_dir(&root).unwrap();
-        gix::init(&root).unwrap();
+        gix::init(dir.path()).unwrap();
         std::fs::write(
-            root.join(".gitattributes"),
+            dir.path().join(".gitattributes"),
             "generated.py linguist-generated\n",
         )
         .unwrap();
-        std::fs::write(root.join("generated.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("generated.py"), "x = 1\n").unwrap();
+        let status = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(["add", "-A"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args([
+                "-c",
+                "user.name=Mehen Test",
+                "-c",
+                "user.email=test@mehen.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "attributes",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
 
-        let non_normalized_root = root.join("..").join("repo");
-        let non_normalized_file = non_normalized_root.join("generated.py");
-        let mut filters = GitAttributeFilterSet::for_walk_paths(&[non_normalized_root]);
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "generated.py -linguist-generated\n",
+        )
+        .unwrap();
+        let repo = gix::discover(dir.path()).unwrap();
+        let mut filter = GitAttributeFilter::from_revision(&repo, "HEAD").unwrap();
 
-        assert!(filters.excludes_path(&non_normalized_file).unwrap());
+        assert!(
+            filter
+                .excludes_relative_path(Path::new("generated.py"))
+                .unwrap()
+        );
     }
 }

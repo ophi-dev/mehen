@@ -35,8 +35,9 @@ scheduled for analysis. This keeps generated and vendored trees such as `node_mo
 `dist`, and `cdk.out` out of the parser workload when the repository ignores them.
 
 Within Git repositories, mehen also reads the normal Git attribute hierarchy, including nested
-`.gitattributes`, `.git/info/attributes`, and configured global attributes. Files with any of these
-attributes set, or assigned the value `true`, are excluded before parser dispatch:
+`.gitattributes`, `.git/info/attributes`, and configured global attributes. Nested repositories use
+their own hierarchy. Files with any of these attributes set, or assigned the value `true`, are
+excluded before parser dispatch:
 
 - `linguist-generated`
 - `linguist-vendored`

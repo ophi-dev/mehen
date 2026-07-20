@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
-use crate::git_attributes::GitAttributeFilterSet;
+use crate::git_attributes::{GitAttributeFilterSet, GitRepositoryRegistry};
 
 /// Build a `GlobSet` from a list of glob strings, ignoring empty and invalid
 /// entries.
@@ -43,14 +43,85 @@ fn path_matches(path: &Path, include: &GlobSet, exclude: &GlobSet) -> bool {
         && (exclude.is_empty() || !exclude.is_match(path))
 }
 
-fn walk_builder(files_data: &FilesData) -> WalkBuilder {
-    let mut builder = WalkBuilder::empty();
-    for path in &files_data.paths {
-        if path.exists() {
-            builder.add(path);
-        } else {
-            log::warn!("File doesn't exist: {path:?}");
+#[derive(Clone, Debug)]
+struct WalkRoot {
+    original: PathBuf,
+    normalized: PathBuf,
+    is_file: bool,
+}
+
+#[derive(Clone, Debug)]
+struct WalkPaths {
+    roots: Vec<WalkRoot>,
+}
+
+impl WalkPaths {
+    fn new(paths: &[PathBuf]) -> Self {
+        let roots = paths
+            .iter()
+            .filter_map(|path| {
+                if !path.exists() {
+                    log::warn!("File doesn't exist: {path:?}");
+                    return None;
+                }
+                match std::fs::canonicalize(path).or_else(|_| std::path::absolute(path)) {
+                    Ok(normalized) => Some(WalkRoot {
+                        original: path.clone(),
+                        is_file: normalized.is_file(),
+                        normalized,
+                    }),
+                    Err(error) => {
+                        log::warn!("Failed to resolve path {}: {error}", path.display());
+                        None
+                    }
+                }
+            })
+            .collect();
+        Self { roots }
+    }
+
+    fn normalized(&self) -> Vec<PathBuf> {
+        self.roots
+            .iter()
+            .map(|root| root.normalized.clone())
+            .collect()
+    }
+
+    fn restore(&self, normalized: &Path) -> PathBuf {
+        for root in &self.roots {
+            if root.is_file {
+                if normalized == root.normalized {
+                    return root.original.clone();
+                }
+                continue;
+            }
+            if let Ok(relative) = normalized.strip_prefix(&root.normalized) {
+                return root.original.join(relative);
+            }
         }
+        normalized.to_path_buf()
+    }
+}
+
+fn walk_builder(
+    files_data: &FilesData,
+    paths: &WalkPaths,
+    repositories: Option<GitRepositoryRegistry>,
+) -> WalkBuilder {
+    let mut builder = WalkBuilder::empty();
+    for root in &paths.roots {
+        builder.add(&root.normalized);
+    }
+    if let Some(repositories) = repositories {
+        builder.filter_entry(move |entry| {
+            if entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_dir())
+            {
+                repositories.discover_nested_repository(entry.path());
+            }
+            true
+        });
     }
 
     // Keep the policy explicit: hidden entries, .ignore, .gitignore, the
@@ -87,12 +158,17 @@ fn log_ignore_error(entry: &DirEntry) {
 /// parallel CLI runner.
 pub(crate) fn walk_files(files_data: &FilesData) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let walk_paths = WalkPaths::new(&files_data.paths);
+    let normalized_paths = walk_paths.normalized();
     let mut attribute_filters = if files_data.respect_ignores {
-        GitAttributeFilterSet::for_walk_paths(&files_data.paths)
+        GitAttributeFilterSet::for_walk_paths(&normalized_paths)
     } else {
         GitAttributeFilterSet::default()
     };
-    for result in walk_builder(files_data).build() {
+    let repositories = files_data
+        .respect_ignores
+        .then(|| attribute_filters.repository_registry());
+    for result in walk_builder(files_data, &walk_paths, repositories).build() {
         let entry = match result {
             Ok(entry) => entry,
             Err(error) => {
@@ -101,11 +177,12 @@ pub(crate) fn walk_files(files_data: &FilesData) -> Vec<PathBuf> {
             }
         };
         log_ignore_error(&entry);
+        let output_path = walk_paths.restore(entry.path());
         if is_file(&entry)
-            && path_matches(entry.path(), &files_data.include, &files_data.exclude)
+            && path_matches(&output_path, &files_data.include, &files_data.exclude)
             && !is_excluded_by_attributes(&mut attribute_filters, entry.path())
         {
-            paths.push(entry.into_path());
+            paths.push(output_path);
         }
     }
     paths
@@ -188,13 +265,18 @@ impl<Config: 'static + Send + Sync> ConcurrentRunner<Config> {
         let include = Arc::new(files_data.include.clone());
         let exclude = Arc::new(files_data.exclude.clone());
         let walk_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let walk_paths = Arc::new(WalkPaths::new(&files_data.paths));
+        let normalized_paths = walk_paths.normalized();
         let attribute_filters = if files_data.respect_ignores {
-            GitAttributeFilterSet::for_walk_paths(&files_data.paths)
+            GitAttributeFilterSet::for_walk_paths(&normalized_paths)
         } else {
             GitAttributeFilterSet::default()
         };
+        let repositories = files_data
+            .respect_ignores
+            .then(|| attribute_filters.repository_registry());
 
-        let mut builder = walk_builder(&files_data);
+        let mut builder = walk_builder(&files_data, walk_paths.as_ref(), repositories);
         builder.threads(self.num_jobs);
         let walker = builder.build_parallel();
 
@@ -205,6 +287,7 @@ impl<Config: 'static + Send + Sync> ConcurrentRunner<Config> {
                 let include = Arc::clone(&include);
                 let exclude = Arc::clone(&exclude);
                 let walk_error = Arc::clone(&walk_error);
+                let walk_paths = Arc::clone(&walk_paths);
                 let mut attribute_filters = attribute_filters.clone();
 
                 Box::new(move |result| {
@@ -220,14 +303,15 @@ impl<Config: 'static + Send + Sync> ConcurrentRunner<Config> {
                         }
                     };
                     log_ignore_error(&entry);
+                    let output_path = walk_paths.restore(entry.path());
                     if !is_file(&entry)
-                        || !path_matches(entry.path(), include.as_ref(), exclude.as_ref())
+                        || !path_matches(&output_path, include.as_ref(), exclude.as_ref())
                         || is_excluded_by_attributes(&mut attribute_filters, entry.path())
                     {
                         return WalkState::Continue;
                     }
 
-                    let path = entry.into_path();
+                    let path = output_path;
                     if let Err(error) = proc_files(path.clone(), config.as_ref()) {
                         log::error!("{error:?} for file {path:?}");
                     }
@@ -445,6 +529,62 @@ vendored.py linguist-vendored
         });
 
         assert_eq!(file_names(&paths), vec!["first.py", "second.py"]);
+    }
+
+    #[test]
+    fn walk_files_normalizes_roots_before_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        gix::init(&root).unwrap();
+        std::fs::write(
+            root.join(".gitattributes"),
+            "generated.py linguist-generated\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("generated.py"), "x = 1\n").unwrap();
+        let kept = root.join("kept.py");
+        std::fs::write(&kept, "x = 1\n").unwrap();
+
+        let input_root = root.join("..").join("repo");
+        let paths = walk_files(&files_data(input_root.clone()));
+
+        assert_eq!(paths, vec![input_root.join("kept.py")]);
+    }
+
+    #[test]
+    fn serial_and_parallel_walks_use_nested_repository_attributes() {
+        let outer = tempfile::tempdir().unwrap();
+        gix::init(outer.path()).unwrap();
+        let nested = outer.path().join("vendor/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        gix::init(&nested).unwrap();
+        std::fs::write(
+            nested.join(".git/info/attributes"),
+            "generated.py linguist-vendored\n",
+        )
+        .unwrap();
+        let outer_file = outer.path().join("outer.py");
+        let nested_file = nested.join("kept.py");
+        std::fs::write(&outer_file, "x = 1\n").unwrap();
+        std::fs::write(&nested_file, "x = 1\n").unwrap();
+        std::fs::write(nested.join("generated.py"), "x = 1\n").unwrap();
+
+        let data = files_data(outer.path().to_path_buf());
+        let paths = walk_files(&data);
+        assert_eq!(file_names(&paths), vec!["kept.py", "outer.py"]);
+
+        let visited = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&visited);
+        ConcurrentRunner::new(2, move |path, _: &()| {
+            output.lock().unwrap().push(path);
+            Ok(())
+        })
+        .run((), data)
+        .unwrap();
+
+        let paths = visited.lock().unwrap();
+        assert_eq!(file_names(&paths), vec!["kept.py", "outer.py"]);
     }
 
     #[test]

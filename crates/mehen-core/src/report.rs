@@ -94,7 +94,8 @@ mod tests {
 /// Inputs to `analyze_diff`.
 ///
 /// Changed files marked `linguist-generated`, `linguist-vendored`, or
-/// `binary` by Git attributes are excluded from analysis.
+/// `binary` by Git attributes in the requested head revision are excluded
+/// from analysis.
 #[derive(Clone, Debug)]
 pub struct DiffInput {
     pub from: String,

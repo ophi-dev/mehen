@@ -32,61 +32,55 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     // inside it) would rank the same file multiple times, crowding
     // out other files once `max_results` is applied.
     //
-    // The dedup key is the canonicalized absolute path so different
-    // string spellings of the same file (`./src/foo.py` from root
-    // `.` vs. `src/foo.py` from root `src`) collapse to one entry.
-    // When canonicalize fails (file removed mid-walk, broken
-    // symlink, …) we fall back to the as-walked path: still better
-    // than analyzing it twice.
+    // All roots share one normalized walk, then each result is mapped back
+    // through the first matching input root. Overlapping roots therefore use
+    // the same stable key without a filesystem round trip per file.
     let mut seen: HashSet<Utf8PathBuf> = HashSet::new();
 
-    for root in &input.paths {
-        for entry in walk_paths(root, &input.include, &input.exclude) {
-            let dedup_key = canonical_key(&entry);
-            if !seen.insert(dedup_key) {
-                continue;
-            }
-            let Some(language) = detect_language(entry.as_path()) else {
-                continue;
-            };
-            let Ok(text) = std::fs::read_to_string(entry.as_std_path()) else {
-                continue;
-            };
-            let Some(analyzer) = registry.analyzer_for(language) else {
-                // Language detected but no analyzer registered (the
-                // owning crate is feature-gated off in this build).
-                // Surface as a non-fatal `analysis_error` so callers
-                // can distinguish "no offenders" from "offenders
-                // silently skipped" — matching the diff path's
-                // `record_unavailable` (rewrite plan §3.5).
-                record_unavailable(&mut analysis_errors, &entry, language);
-                continue;
-            };
-            let source = SourceFile::new(entry.clone(), language, text);
-            let Ok(analysis) = analyzer.analyze(&source, &input.config) else {
-                continue;
-            };
-            // Migrated analyzers can return `Ok(...)` with a partial
-            // tree alongside an `Error`/`Fatal` diagnostic when the
-            // file doesn't parse cleanly. Per §9.3 those analyses are
-            // incomplete; surfacing them in the offender list as if
-            // they were measured would mislead CI/policy callers.
-            if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
-                continue;
-            }
-
-            let scores: Vec<f64> = input
-                .selectors
-                .iter()
-                .map(|s| read_metric(s, &analysis.root))
-                .collect();
-
-            entries.push(TopOffenderEntry {
-                path: entry,
-                language,
-                scores,
-            });
+    for entry in walk_paths(&input.paths, &input.include, &input.exclude) {
+        if !seen.insert(entry.clone()) {
+            continue;
         }
+        let Some(language) = detect_language(entry.as_path()) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(entry.as_std_path()) else {
+            continue;
+        };
+        let Some(analyzer) = registry.analyzer_for(language) else {
+            // Language detected but no analyzer registered (the
+            // owning crate is feature-gated off in this build).
+            // Surface as a non-fatal `analysis_error` so callers
+            // can distinguish "no offenders" from "offenders
+            // silently skipped" — matching the diff path's
+            // `record_unavailable` (rewrite plan §3.5).
+            record_unavailable(&mut analysis_errors, &entry, language);
+            continue;
+        };
+        let source = SourceFile::new(entry.clone(), language, text);
+        let Ok(analysis) = analyzer.analyze(&source, &input.config) else {
+            continue;
+        };
+        // Migrated analyzers can return `Ok(...)` with a partial
+        // tree alongside an `Error`/`Fatal` diagnostic when the
+        // file doesn't parse cleanly. Per §9.3 those analyses are
+        // incomplete; surfacing them in the offender list as if
+        // they were measured would mislead CI/policy callers.
+        if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
+            continue;
+        }
+
+        let scores: Vec<f64> = input
+            .selectors
+            .iter()
+            .map(|s| read_metric(s, &analysis.root))
+            .collect();
+
+        entries.push(TopOffenderEntry {
+            path: entry,
+            language,
+            scores,
+        });
     }
 
     let polarities: Vec<Polarity> = input.selectors.iter().map(default_polarity_for).collect();
@@ -126,23 +120,14 @@ fn record_unavailable(
     });
 }
 
-/// Compute a stable dedup key for `path`. Resolves to the
-/// canonical absolute path (following symlinks) so different string
-/// spellings of the same file collapse. Falls back to the original
-/// path when canonicalize fails — better than silently treating two
-/// "different" un-canonicalize-able paths as the same file.
-fn canonical_key(path: &Utf8PathBuf) -> Utf8PathBuf {
-    match std::fs::canonicalize(path.as_std_path()) {
-        Ok(canon) => Utf8PathBuf::try_from(canon).unwrap_or_else(|_| path.clone()),
-        Err(_) => path.clone(),
-    }
-}
-
-fn walk_paths(root: &Utf8PathBuf, include: &[String], exclude: &[String]) -> Vec<Utf8PathBuf> {
+fn walk_paths(roots: &[Utf8PathBuf], include: &[String], exclude: &[String]) -> Vec<Utf8PathBuf> {
     walk_files(&FilesData {
         include: mk_globset(include),
         exclude: mk_globset(exclude),
-        paths: vec![root.as_std_path().to_path_buf()],
+        paths: roots
+            .iter()
+            .map(|root| root.as_std_path().to_path_buf())
+            .collect(),
         respect_ignores: true,
     })
     .into_iter()
@@ -988,7 +973,11 @@ binary.py binary
         std::fs::write(&skipped, "x = 1\n").unwrap();
 
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let result = walk_paths(&root, &[], &["**/skipped.py".to_string()]);
+        let result = walk_paths(
+            std::slice::from_ref(&root),
+            &[],
+            &["**/skipped.py".to_string()],
+        );
         let names: Vec<&str> = result.iter().filter_map(|p| p.file_name()).collect();
         assert!(names.contains(&"kept.py"), "expected kept.py in {names:?}");
         assert!(
@@ -1006,7 +995,7 @@ binary.py binary
         std::fs::write(&rs, "fn main() {}\n").unwrap();
 
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let result = walk_paths(&root, &["**/*.py".to_string()], &[]);
+        let result = walk_paths(std::slice::from_ref(&root), &["**/*.py".to_string()], &[]);
         let names: Vec<&str> = result.iter().filter_map(|p| p.file_name()).collect();
         assert!(names.contains(&"a.py"), "expected a.py in {names:?}");
         assert!(
@@ -1022,7 +1011,7 @@ binary.py binary
         std::fs::write(dir.path().join("b.rs"), "fn main() {}\n").unwrap();
 
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let result = walk_paths(&root, &[], &[]);
+        let result = walk_paths(std::slice::from_ref(&root), &[], &[]);
         let names: Vec<&str> = result.iter().filter_map(|p| p.file_name()).collect();
         assert!(names.contains(&"a.py"));
         assert!(names.contains(&"b.rs"));
@@ -1036,7 +1025,11 @@ binary.py binary
         let path = dir.path().join("vendored.py");
         std::fs::write(&path, "x = 1\n").unwrap();
         let root = Utf8PathBuf::from_path_buf(path).unwrap();
-        let result = walk_paths(&root, &[], &["**/vendored.py".to_string()]);
+        let result = walk_paths(
+            std::slice::from_ref(&root),
+            &[],
+            &["**/vendored.py".to_string()],
+        );
         assert!(
             result.is_empty(),
             "single-file root must respect exclude, got {result:?}"

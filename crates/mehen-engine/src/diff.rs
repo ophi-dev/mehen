@@ -53,11 +53,13 @@ pub fn analyze_diff(input: DiffInput) -> Result<DiffReport, DiffError> {
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
-    let mut git_attribute_filter = GitAttributeFilter::new(repo).map_err(|error| {
-        DiffError::Git(GitError::Internal(format!(
-            "failed to configure Git attribute filtering: {error}"
-        )))
-    })?;
+    let mut git_attribute_filter =
+        GitAttributeFilter::from_revision(repo, &input.to).map_err(|error| {
+            DiffError::Git(GitError::Internal(format!(
+                "failed to configure Git attribute filtering for {}: {error}",
+                input.to
+            )))
+        })?;
 
     let mut report = DiffReport {
         schema_version: "1.0".to_string(),
@@ -463,7 +465,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     let selectors = parse_metric_selectors(&opts.metrics);
     let mut git_attribute_filter = opts
         .ignore_git_attributes
-        .then(|| GitAttributeFilter::new(&repo))
+        .then(|| GitAttributeFilter::from_revision(&repo, &to_ref))
         .transpose()?;
 
     let registry = Arc::new(AnalyzerRegistry::default_set());
@@ -1181,18 +1183,28 @@ binary.md binary
         }
         git_ok(dir.path(), &["add", "-A"]);
         git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "attribute-base"]);
 
         for name in ["kept.md", "generated.md", "vendored.md", "binary.md"] {
             std::fs::write(dir.path().join(name), "# Head\n\nChanged.\n").unwrap();
         }
         git_ok(dir.path(), &["add", "-A"]);
         git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
+        git_ok(dir.path(), &["tag", "attribute-head"]);
+
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "* -linguist-generated -linguist-vendored -binary\n",
+        )
+        .unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "checkout"]);
 
         let repo = gix::discover(dir.path()).unwrap();
         let report = analyze_diff_in_repo(
             DiffInput {
-                from: "HEAD~1".to_string(),
-                to: "HEAD".to_string(),
+                from: "attribute-base".to_string(),
+                to: "attribute-head".to_string(),
                 paths: Vec::new(),
                 thresholds: Vec::new(),
                 config: AnalysisConfig::default(),
