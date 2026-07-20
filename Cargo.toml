@@ -74,9 +74,9 @@ mehen-git = { path = "crates/mehen-git" }
 mehen-report = { path = "crates/mehen-report" }
 
 # Shared third-party deps with pinned versions. Single-consumer deps
-# (e.g. `oxc_*`, `ra_ap_syntax`, `ruby-prism`, `crossbeam`, `env_logger`,
-# `globset`, `regex`, `walkdir`, `tree-sitter-pwsh`, `unicode-*`) are
-# pinned inline in their consuming crate's `Cargo.toml` instead of here.
+# (e.g. `oxc_*`, `ra_ap_syntax`, `ruby-prism`, `env_logger`, `globset`,
+# `ignore`, `regex`, `tree-sitter-pwsh`, `unicode-*`) are pinned inline in
+# their consuming crate's `Cargo.toml` instead of here.
 camino = { version = "^1.1", features = ["serde1"] }
 clap = { version = "^4.6", features = ["derive"] }
 log = "^0.4"

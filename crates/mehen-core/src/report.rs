@@ -93,8 +93,10 @@ mod tests {
 
 /// Inputs to `analyze_diff`.
 ///
-/// Phase 1 ships the type so that later phases can fill in the orchestration
-/// without reshaping the public surface.
+/// Changed files marked `linguist-generated`, `linguist-vendored`, or
+/// `binary` by Git attributes are excluded from analysis. Added and modified
+/// files use attributes from the requested head revision; deleted files use
+/// attributes from the base revision where they still exist.
 #[derive(Clone, Debug)]
 pub struct DiffInput {
     pub from: String,
@@ -138,6 +140,13 @@ pub enum DiffSide {
 }
 
 /// Inputs to `rank_top_offenders`.
+///
+/// Directory paths are traversed with standard ignore rules: hidden entries,
+/// `.ignore`, `.gitignore`, `.git/info/exclude`, parent rules, and the user's
+/// global Git excludes are respected. Files marked `linguist-generated`,
+/// `linguist-vendored`, or `binary` by Git attributes are also excluded. An
+/// explicitly supplied file path is still analyzed even when a default ignore
+/// rule matches it.
 #[derive(Clone, Debug)]
 pub struct TopOffendersInput {
     pub paths: Vec<Utf8PathBuf>,

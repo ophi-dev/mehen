@@ -23,8 +23,31 @@ mehen top-offenders [OPTIONS] --metric <METRICS> <PATHS>...
 | `-O, --output-format <FMT>` | `markdown` | `markdown` or `json`. |
 | `-I, --include <GLOB>` | — | Glob to include files. Repeatable. |
 | `-X, --exclude <GLOB>` | — | Glob to exclude files. Repeatable. |
+| `--no-ignore` | off | Disable ignore-file and Git-attribute filtering. Hidden children remain excluded. |
 | `-j, --num-jobs <N>` | platform default | Number of parser jobs. |
 | `-l, --language-type <LANG>` | auto | Language type override (skip auto-detection). |
+
+## File discovery
+
+Directory walks respect `.gitignore`, `.ignore`, `.git/info/exclude`, parent ignore files, and the
+user's global Git excludes by default. Ignored directories are pruned before their files are
+scheduled for analysis. This keeps generated and vendored trees such as `node_modules`, `target`,
+`dist`, and `cdk.out` out of the parser workload when the repository ignores them.
+
+Within Git repositories, mehen also reads the normal Git attribute hierarchy, including nested
+`.gitattributes`, `.git/info/attributes`, and configured global attributes. Nested repositories use
+their own hierarchy. Files with any of these attributes set, or assigned the value `true`, are
+excluded before parser dispatch:
+
+- `linguist-generated`
+- `linguist-vendored`
+- `binary`
+
+An attribute explicitly unset or assigned `false` does not exclude the file.
+
+Pass `--no-ignore` to disable both ignore-file and Git-attribute filtering. Hidden children are
+still skipped. An explicit file path is always considered, even when an ignore rule or attribute
+matches it, so a deliberately targeted file can still be measured.
 
 ## Known metric names
 
@@ -73,9 +96,9 @@ maintainability index is better, etc. Override with the prefix:
 
 ## Determinism
 
-The output ordering is fully deterministic: same paths, same metrics, same head ref → byte-identical
-report. Tie-breaking falls back to the next `--metric`, then to the repository-relative path. There is
-no sampling and no file-system-order dependence.
+The output ordering is fully deterministic: same visible paths, ignore configuration, metrics, and
+head ref → byte-identical report. Tie-breaking falls back to the next `--metric`, then to the
+repository-relative path. There is no sampling and no file-system-order dependence.
 
 ## Exit codes
 

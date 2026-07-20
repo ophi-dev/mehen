@@ -65,8 +65,11 @@ reporter (mehen-report)             ← JSON / Markdown / YAML / TOML
 ```
 
 The key constraint: `LanguageAnalysis` is parser-neutral and `Send + 'static`. That lets the engine
-analyze files in parallel via `rayon` without arena-backed parsers (Oxc, Mago) leaking lifetimes
-across thread boundaries.
+analyze files in an ignore-aware worker pool without arena-backed parsers (Oxc, Mago) leaking
+lifetimes across thread boundaries. Directory discovery uses the same `.gitignore` semantics as
+ripgrep, normalizes roots once, and excludes generated, vendored, and binary paths using each
+repository's Git attributes. It processes each file directly in a traversal worker, so a producer
+cannot accumulate an unbounded queue while parsers are busy.
 
 ## Markdown is special
 

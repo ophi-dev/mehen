@@ -12,8 +12,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
-use globset::{Glob, GlobSet, GlobSetBuilder};
-
 use mehen_core::{
     AnalysisErrorRecord, DiffSide, Language, MetricKey, ParseDiagnostic, Polarity, SourceFile,
 };
@@ -34,61 +32,55 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     // inside it) would rank the same file multiple times, crowding
     // out other files once `max_results` is applied.
     //
-    // The dedup key is the canonicalized absolute path so different
-    // string spellings of the same file (`./src/foo.py` from root
-    // `.` vs. `src/foo.py` from root `src`) collapse to one entry.
-    // When canonicalize fails (file removed mid-walk, broken
-    // symlink, …) we fall back to the as-walked path: still better
-    // than analyzing it twice.
+    // All roots share one normalized walk, then each result is mapped back
+    // through the first matching input root. Canonical keys also collapse
+    // symlink aliases that have different walked paths but the same target.
     let mut seen: HashSet<Utf8PathBuf> = HashSet::new();
 
-    for root in &input.paths {
-        for entry in walk_paths(root, &input.include, &input.exclude) {
-            let dedup_key = canonical_key(&entry);
-            if !seen.insert(dedup_key) {
-                continue;
-            }
-            let Some(language) = detect_language(entry.as_path()) else {
-                continue;
-            };
-            let Ok(text) = std::fs::read_to_string(entry.as_std_path()) else {
-                continue;
-            };
-            let Some(analyzer) = registry.analyzer_for(language) else {
-                // Language detected but no analyzer registered (the
-                // owning crate is feature-gated off in this build).
-                // Surface as a non-fatal `analysis_error` so callers
-                // can distinguish "no offenders" from "offenders
-                // silently skipped" — matching the diff path's
-                // `record_unavailable` (rewrite plan §3.5).
-                record_unavailable(&mut analysis_errors, &entry, language);
-                continue;
-            };
-            let source = SourceFile::new(entry.clone(), language, text);
-            let Ok(analysis) = analyzer.analyze(&source, &input.config) else {
-                continue;
-            };
-            // Migrated analyzers can return `Ok(...)` with a partial
-            // tree alongside an `Error`/`Fatal` diagnostic when the
-            // file doesn't parse cleanly. Per §9.3 those analyses are
-            // incomplete; surfacing them in the offender list as if
-            // they were measured would mislead CI/policy callers.
-            if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
-                continue;
-            }
-
-            let scores: Vec<f64> = input
-                .selectors
-                .iter()
-                .map(|s| read_metric(s, &analysis.root))
-                .collect();
-
-            entries.push(TopOffenderEntry {
-                path: entry,
-                language,
-                scores,
-            });
+    for entry in walk_paths(&input.paths, &input.include, &input.exclude) {
+        if !seen.insert(canonical_key(&entry)) {
+            continue;
         }
+        let Some(language) = detect_language(entry.as_path()) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(entry.as_std_path()) else {
+            continue;
+        };
+        let Some(analyzer) = registry.analyzer_for(language) else {
+            // Language detected but no analyzer registered (the
+            // owning crate is feature-gated off in this build).
+            // Surface as a non-fatal `analysis_error` so callers
+            // can distinguish "no offenders" from "offenders
+            // silently skipped" — matching the diff path's
+            // `record_unavailable` (rewrite plan §3.5).
+            record_unavailable(&mut analysis_errors, &entry, language);
+            continue;
+        };
+        let source = SourceFile::new(entry.clone(), language, text);
+        let Ok(analysis) = analyzer.analyze(&source, &input.config) else {
+            continue;
+        };
+        // Migrated analyzers can return `Ok(...)` with a partial
+        // tree alongside an `Error`/`Fatal` diagnostic when the
+        // file doesn't parse cleanly. Per §9.3 those analyses are
+        // incomplete; surfacing them in the offender list as if
+        // they were measured would mislead CI/policy callers.
+        if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
+            continue;
+        }
+
+        let scores: Vec<f64> = input
+            .selectors
+            .iter()
+            .map(|s| read_metric(s, &analysis.root))
+            .collect();
+
+        entries.push(TopOffenderEntry {
+            path: entry,
+            language,
+            scores,
+        });
     }
 
     let polarities: Vec<Polarity> = input.selectors.iter().map(default_polarity_for).collect();
@@ -103,6 +95,13 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         entries,
         analysis_errors,
     }
+}
+
+fn canonical_key(path: &Utf8PathBuf) -> Utf8PathBuf {
+    std::fs::canonicalize(path.as_std_path())
+        .ok()
+        .and_then(|path| Utf8PathBuf::try_from(path).ok())
+        .unwrap_or_else(|| path.clone())
 }
 
 /// Push an `engine.analyzer_unavailable` record for `path` so callers
@@ -128,72 +127,19 @@ fn record_unavailable(
     });
 }
 
-/// Compute a stable dedup key for `path`. Resolves to the
-/// canonical absolute path (following symlinks) so different string
-/// spellings of the same file collapse. Falls back to the original
-/// path when canonicalize fails — better than silently treating two
-/// "different" un-canonicalize-able paths as the same file.
-fn canonical_key(path: &Utf8PathBuf) -> Utf8PathBuf {
-    match std::fs::canonicalize(path.as_std_path()) {
-        Ok(canon) => Utf8PathBuf::try_from(canon).unwrap_or_else(|_| path.clone()),
-        Err(_) => path.clone(),
-    }
-}
-
-fn walk_paths(root: &Utf8PathBuf, include: &[String], exclude: &[String]) -> Vec<Utf8PathBuf> {
-    if !root.exists() {
-        return Vec::new();
-    }
-    let include = build_globset(include);
-    let exclude = build_globset(exclude);
-    let mut out = Vec::new();
-    if root.is_file() {
-        if path_matches(root.as_path(), &include, &exclude) {
-            out.push(root.clone());
-        }
-        return out;
-    }
-    for entry in walkdir::WalkDir::new(root.as_std_path())
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file()
-            && let Ok(utf8) = Utf8PathBuf::try_from(entry.path().to_path_buf())
-            && path_matches(utf8.as_path(), &include, &exclude)
-        {
-            out.push(utf8);
-        }
-    }
-    out
-}
-
-/// Build a `GlobSet` from CLI-style patterns. Empty entries are
-/// dropped; invalid globs are silently skipped (matches
-/// `mehen-engine::concurrent_files::mk_globset`).
-fn build_globset(patterns: &[String]) -> GlobSet {
-    if patterns.is_empty() {
-        return GlobSet::empty();
-    }
-    let mut builder = GlobSetBuilder::new();
-    for p in patterns.iter().filter(|p| !p.is_empty()) {
-        if let Ok(glob) = Glob::new(p) {
-            builder.add(glob);
-        }
-    }
-    builder.build().unwrap_or_else(|_| GlobSet::empty())
-}
-
-/// Apply the standard include/exclude semantics: when `include` is
-/// non-empty, the path must match it; when `exclude` is non-empty, the
-/// path must not match it. Empty sets are treated as no-op.
-fn path_matches(path: &camino::Utf8Path, include: &GlobSet, exclude: &GlobSet) -> bool {
-    if !include.is_empty() && !include.is_match(path) {
-        return false;
-    }
-    if !exclude.is_empty() && exclude.is_match(path) {
-        return false;
-    }
-    true
+fn walk_paths(roots: &[Utf8PathBuf], include: &[String], exclude: &[String]) -> Vec<Utf8PathBuf> {
+    walk_files(&FilesData {
+        include: mk_globset(include),
+        exclude: mk_globset(exclude),
+        paths: roots
+            .iter()
+            .map(|root| root.as_std_path().to_path_buf())
+            .collect(),
+        respect_ignores: true,
+    })
+    .into_iter()
+    .filter_map(|path| Utf8PathBuf::try_from(path).ok())
+    .collect()
 }
 
 /// Order entries from most concerning to least.
@@ -315,7 +261,7 @@ use std::process;
 use std::sync::Mutex;
 use std::thread::available_parallelism;
 
-use crate::concurrent_files::{ConcurrentRunner, FilesData, mk_globset};
+use crate::concurrent_files::{ConcurrentRunner, FilesData, mk_globset, walk_files};
 use crate::metric_selector::{
     MetricSelector as CliMetricSelector, Polarity as SelectorPolarity, parse_metric_selectors,
     read_metric as read_selector_metric,
@@ -361,6 +307,11 @@ pub struct TopOffendersOpts {
     /// Glob to exclude files. Repeat the flag for multiple patterns.
     #[clap(long, short = 'X', num_args = 1)]
     exclude: Vec<String>,
+
+    /// Do not respect ignore files or generated/vendored/binary Git
+    /// attributes while walking directories.
+    #[clap(long)]
+    no_ignore: bool,
 
     /// Number of parser jobs.
     #[clap(long, short = 'j')]
@@ -565,6 +516,7 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
         include,
         exclude,
         paths: opts.paths,
+        respect_ignores: !opts.no_ignore,
     };
 
     if let Err(e) = ConcurrentRunner::new(num_jobs, act_on_file).run(cfg, files_data) {
@@ -914,6 +866,56 @@ mod tests {
     }
 
     #[test]
+    fn rank_top_offenders_skips_gitignored_and_attributed_files() {
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        gix::init(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "\
+* -linguist-generated -linguist-vendored -binary
+generated.py linguist-generated
+vendored.py linguist-vendored
+binary.py binary
+",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("kept.py"), "x = 1\n").unwrap();
+        std::fs::write(
+            dir.path().join("node_modules/generated.py"),
+            "def generated():\n    if True:\n        return 1\n",
+        )
+        .unwrap();
+        for name in ["generated.py", "vendored.py", "binary.py"] {
+            std::fs::write(
+                dir.path().join(name),
+                "def excluded():\n    if True:\n        return 1\n",
+            )
+            .unwrap();
+        }
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("loc.lloc")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        let names: Vec<&str> = report
+            .entries
+            .iter()
+            .filter_map(|entry| entry.path.file_name())
+            .collect();
+
+        assert_eq!(names, vec!["kept.py"]);
+    }
+
+    #[test]
     fn rank_top_offenders_dedupes_overlapping_roots() {
         // Regression: when callers pass overlapping roots (a directory
         // plus a child directory, or a directory plus an explicit file
@@ -969,6 +971,34 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rank_top_offenders_dedupes_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("source.py"), "x = 1\n").unwrap();
+        symlink("source.py", dir.path().join("alias.py")).unwrap();
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("loc.lloc")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+
+        assert_eq!(
+            report.entries.len(),
+            1,
+            "a file and its symlink alias must be ranked once"
+        );
+    }
+
     #[test]
     fn walk_paths_applies_exclude_patterns() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -978,7 +1008,11 @@ mod tests {
         std::fs::write(&skipped, "x = 1\n").unwrap();
 
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let result = walk_paths(&root, &[], &["**/skipped.py".to_string()]);
+        let result = walk_paths(
+            std::slice::from_ref(&root),
+            &[],
+            &["**/skipped.py".to_string()],
+        );
         let names: Vec<&str> = result.iter().filter_map(|p| p.file_name()).collect();
         assert!(names.contains(&"kept.py"), "expected kept.py in {names:?}");
         assert!(
@@ -996,7 +1030,7 @@ mod tests {
         std::fs::write(&rs, "fn main() {}\n").unwrap();
 
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let result = walk_paths(&root, &["**/*.py".to_string()], &[]);
+        let result = walk_paths(std::slice::from_ref(&root), &["**/*.py".to_string()], &[]);
         let names: Vec<&str> = result.iter().filter_map(|p| p.file_name()).collect();
         assert!(names.contains(&"a.py"), "expected a.py in {names:?}");
         assert!(
@@ -1012,7 +1046,7 @@ mod tests {
         std::fs::write(dir.path().join("b.rs"), "fn main() {}\n").unwrap();
 
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
-        let result = walk_paths(&root, &[], &[]);
+        let result = walk_paths(std::slice::from_ref(&root), &[], &[]);
         let names: Vec<&str> = result.iter().filter_map(|p| p.file_name()).collect();
         assert!(names.contains(&"a.py"));
         assert!(names.contains(&"b.rs"));
@@ -1026,7 +1060,11 @@ mod tests {
         let path = dir.path().join("vendored.py");
         std::fs::write(&path, "x = 1\n").unwrap();
         let root = Utf8PathBuf::from_path_buf(path).unwrap();
-        let result = walk_paths(&root, &[], &["**/vendored.py".to_string()]);
+        let result = walk_paths(
+            std::slice::from_ref(&root),
+            &[],
+            &["**/vendored.py".to_string()],
+        );
         assert!(
             result.is_empty(),
             "single-file root must respect exclude, got {result:?}"
@@ -1152,6 +1190,30 @@ mod tests {
     #[test]
     fn cli_num_jobs_falls_back_to_conservative_thread_count() {
         assert_eq!(resolve_num_jobs(None, None), 2);
+    }
+
+    #[test]
+    fn cli_no_ignore_is_opt_in() {
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            opts: TopOffendersOpts,
+        }
+
+        let default =
+            <TestCli as clap::Parser>::try_parse_from(["mehen", "--metric", "loc.lloc", "."])
+                .unwrap();
+        assert!(!default.opts.no_ignore);
+
+        let disabled = <TestCli as clap::Parser>::try_parse_from([
+            "mehen",
+            "--metric",
+            "loc.lloc",
+            "--no-ignore",
+            ".",
+        ])
+        .unwrap();
+        assert!(disabled.opts.no_ignore);
     }
 
     #[test]
