@@ -29,14 +29,14 @@
 
 mod walker;
 
-use mehen_antlr::runtime::{ParsedFile, Parser};
+use mehen_antlr::runtime::{CommonTokenStream, InputStream, ParsedFile, Parser};
 use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
     ParseDiagnostic, Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
 
 use mehen_kotlin_parser::kotlin_lexer::KotlinLexer;
-use mehen_kotlin_parser::kotlin_parser::{self, KotlinParser};
+use mehen_kotlin_parser::kotlin_parser::KotlinParser;
 
 pub struct KotlinAnalyzer;
 
@@ -90,23 +90,28 @@ impl KotlinAnalyzer {
     /// `kotlinFile`) and return the recovered [`ParsedFile`], syntax-error
     /// count, and LOC token list, or `None` if the rule call hard-failed.
     ///
-    /// Uses the generated one-call [`parse_with_parser`](kotlin_parser::parse_with_parser)
-    /// helper (lexer + token stream + parser + entry rule in one step), then
-    /// reads the parser's diagnostics and folds it into a [`ParsedFile`] that
-    /// owns the token store and CST.
+    /// Removes the runtime's default console listeners before tokenization and
+    /// parsing, then folds the recovered tree into a [`ParsedFile`] that owns
+    /// the token store and CST.
     fn parse_entry(&self, source: &str, script_rule: bool) -> Option<ParsedKotlin> {
         let entry = if script_rule {
             KotlinParser::script
         } else {
             KotlinParser::kotlin_file
         };
-        let out = kotlin_parser::parse_with_parser(source, KotlinLexer::new, entry).ok()?;
-        let syntax_errors = out.parser.number_of_syntax_errors();
+        let mut lexer = KotlinLexer::new(InputStream::new(source));
+        lexer.remove_error_listeners();
+        let tokens = CommonTokenStream::new(lexer);
+        let mut parser = KotlinParser::new(tokens);
+        parser.remove_error_listeners();
+        let result = entry(&mut parser).ok()?;
+        let syntax_errors = parser.number_of_syntax_errors();
+
         // `into_parsed_file` consumes the parser and moves the eagerly-buffered
         // token store into the `ParsedFile`; the LOC token list is then read
         // straight from that store (all channels, so hidden-channel comments
         // are present — no `fill()` step needed).
-        let parsed = out.parser.into_parsed_file(out.result);
+        let parsed = parser.into_parsed_file(result);
         let loc_tokens = collect_loc_tokens(&parsed);
         Some(ParsedKotlin {
             parsed,

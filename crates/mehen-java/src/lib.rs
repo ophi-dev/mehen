@@ -24,14 +24,14 @@
 
 mod walker;
 
-use mehen_antlr::runtime::ParsedFile;
+use mehen_antlr::runtime::{CommonTokenStream, InputStream, ParsedFile};
 use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
     ParseDiagnostic, Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
 
 use mehen_java_parser::java_lexer::JavaLexer;
-use mehen_java_parser::java_parser::{self, JavaParser};
+use mehen_java_parser::java_parser::JavaParser;
 
 pub struct JavaAnalyzer;
 
@@ -54,17 +54,21 @@ impl JavaAnalyzer {
     /// Returns `None` only if the rule call hard-fails (returns `Err` rather
     /// than a recovered tree).
     ///
-    /// Uses the generated one-call [`parse_with_parser`](java_parser::parse_with_parser)
-    /// helper (lexer + token stream + parser + entry rule in one step).
+    /// Removes the runtime's default console listeners before tokenization and
+    /// parsing; recovered errors are reported through mehen diagnostics.
     fn parse(&self, source: &str) -> Option<ParsedJava> {
-        let out =
-            java_parser::parse_with_parser(source, JavaLexer::new, JavaParser::compilation_unit)
-                .ok()?;
+        let mut lexer = JavaLexer::new(InputStream::new(source));
+        lexer.remove_error_listeners();
+        let tokens = CommonTokenStream::new(lexer);
+        let mut parser = JavaParser::new(tokens);
+        parser.remove_error_listeners();
+        let result = parser.compilation_unit().ok()?;
+
         // `into_parsed_file` consumes the parser and moves the eagerly-buffered
         // token store into the `ParsedFile`; the LOC token list is then read
         // straight from that store (all channels, so hidden-channel comments
         // are present — no `fill()` step needed).
-        let parsed = out.parser.into_parsed_file(out.result);
+        let parsed = parser.into_parsed_file(result);
         let loc_tokens = collect_loc_tokens(&parsed);
         Some(ParsedJava { parsed, loc_tokens })
     }
