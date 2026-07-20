@@ -33,12 +33,12 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     // out other files once `max_results` is applied.
     //
     // All roots share one normalized walk, then each result is mapped back
-    // through the first matching input root. Overlapping roots therefore use
-    // the same stable key without a filesystem round trip per file.
+    // through the first matching input root. Canonical keys also collapse
+    // symlink aliases that have different walked paths but the same target.
     let mut seen: HashSet<Utf8PathBuf> = HashSet::new();
 
     for entry in walk_paths(&input.paths, &input.include, &input.exclude) {
-        if !seen.insert(entry.clone()) {
+        if !seen.insert(canonical_key(&entry)) {
             continue;
         }
         let Some(language) = detect_language(entry.as_path()) else {
@@ -95,6 +95,13 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         entries,
         analysis_errors,
     }
+}
+
+fn canonical_key(path: &Utf8PathBuf) -> Utf8PathBuf {
+    std::fs::canonicalize(path.as_std_path())
+        .ok()
+        .and_then(|path| Utf8PathBuf::try_from(path).ok())
+        .unwrap_or_else(|| path.clone())
 }
 
 /// Push an `engine.analyzer_unavailable` record for `path` so callers
@@ -961,6 +968,34 @@ binary.py binary
             report.entries.len(),
             2,
             "expected 2 unique offenders across overlapping roots, got {names:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rank_top_offenders_dedupes_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("source.py"), "x = 1\n").unwrap();
+        symlink("source.py", dir.path().join("alias.py")).unwrap();
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("loc.lloc")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+
+        assert_eq!(
+            report.entries.len(),
+            1,
+            "a file and its symlink alias must be ranked once"
         );
     }
 

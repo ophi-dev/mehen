@@ -262,18 +262,45 @@ fn diff_respects_git_attribute_defaults_and_override() {
 generated.py linguist-generated
 vendored.py linguist-vendored
 binary.py binary
+deleted.py linguist-generated
 ",
     )
     .expect("write gitattributes");
-    for name in ["kept.py", "generated.py", "vendored.py", "binary.py"] {
+    for name in [
+        "kept.py",
+        "generated.py",
+        "vendored.py",
+        "binary.py",
+        "deleted.py",
+        "info-only.py",
+        "global-only.py",
+    ] {
         write_python(dir.path(), name, "x = 1\n");
     }
     commit_all(dir.path(), "base");
     git_ok(dir.path(), &["tag", "attribute-base"]);
 
-    for name in ["kept.py", "generated.py", "vendored.py", "binary.py"] {
+    for name in [
+        "kept.py",
+        "generated.py",
+        "vendored.py",
+        "binary.py",
+        "info-only.py",
+        "global-only.py",
+    ] {
         write_python(dir.path(), name, "x = 2\n");
     }
+    std::fs::remove_file(dir.path().join("deleted.py")).expect("remove generated file");
+    std::fs::write(
+        dir.path().join(".gitattributes"),
+        "\
+* -linguist-generated -linguist-vendored -binary
+generated.py linguist-generated
+vendored.py linguist-vendored
+binary.py binary
+",
+    )
+    .expect("remove deleted file attribute");
     commit_all(dir.path(), "head");
     git_ok(dir.path(), &["tag", "attribute-head"]);
 
@@ -283,6 +310,31 @@ binary.py binary
     )
     .expect("replace checkout gitattributes");
     commit_all(dir.path(), "checkout");
+    std::fs::write(
+        dir.path().join(".git/info/attributes"),
+        "\
+generated.py -linguist-generated
+info-only.py linguist-generated
+",
+    )
+    .expect("write local attributes");
+    let global_attributes = dir.path().join(".global-attributes");
+    std::fs::write(
+        &global_attributes,
+        "\
+generated.py -linguist-generated
+global-only.py linguist-vendored
+",
+    )
+    .expect("write configured attributes");
+    git_ok(
+        dir.path(),
+        &[
+            "config",
+            "core.attributesFile",
+            global_attributes.to_str().expect("UTF-8 temp path"),
+        ],
+    );
 
     let run = |override_flag: Option<&str>| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mehen"));
@@ -329,9 +381,20 @@ binary.py binary
         paths
     };
 
-    assert_eq!(paths(&run(None)), vec!["kept.py"]);
+    assert_eq!(
+        paths(&run(None)),
+        vec!["global-only.py", "info-only.py", "kept.py"]
+    );
     assert_eq!(
         paths(&run(Some("--ignore-git-attributes=false"))),
-        vec!["binary.py", "generated.py", "kept.py", "vendored.py"]
+        vec![
+            "binary.py",
+            "deleted.py",
+            "generated.py",
+            "global-only.py",
+            "info-only.py",
+            "kept.py",
+            "vendored.py"
+        ]
     );
 }

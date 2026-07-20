@@ -48,15 +48,36 @@ impl GitAttributeFilter {
             .peel_to_commit()?
             .tree_id()?;
         let index = repo.index_from_tree(&tree_id)?;
-        let attrs = repo.attributes_only(
-            &index,
-            gix::worktree::stack::state::attributes::Source::IdMapping,
+        // `Repository::attributes_only` also injects info and configured
+        // global attributes. Build the virtual stack directly so historical
+        // reports depend only on committed files and Git's built-in macros.
+        let mut buffer = Vec::with_capacity(512);
+        let mut collection = gix::attrs::search::MetadataCollection::default();
+        let globals = gix::attrs::Search::new_globals(
+            std::iter::empty::<PathBuf>(),
+            &mut buffer,
+            &mut collection,
         )?;
+        let attributes = gix::worktree::stack::state::Attributes::new(
+            globals,
+            None,
+            gix::worktree::stack::state::attributes::Source::IdMapping,
+            collection,
+        );
+        let attrs = gix::worktree::Stack::from_state_and_ignore_case(
+            repo.workdir().unwrap_or(repo.git_dir()),
+            repo.config_snapshot()
+                .boolean("core.ignoreCase")
+                .unwrap_or(false),
+            gix::worktree::stack::State::AttributesStack(attributes),
+            &index,
+            index.path_backing(),
+        );
         let outcome = attrs.selected_attribute_matches(EXCLUDED_ATTRIBUTES);
 
         Ok(Self {
             worktree: None,
-            attrs: attrs.detach(),
+            attrs,
             objects: repo.objects.clone(),
             outcome,
         })
@@ -381,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_filter_uses_attributes_from_the_requested_commit() {
+    fn revision_filter_uses_only_attributes_from_the_requested_commit() {
         let dir = tempfile::tempdir().unwrap();
         gix::init(dir.path()).unwrap();
         std::fs::write(
@@ -389,7 +410,9 @@ mod tests {
             "generated.py linguist-generated\n",
         )
         .unwrap();
-        std::fs::write(dir.path().join("generated.py"), "x = 1\n").unwrap();
+        for name in ["generated.py", "info-only.py", "global-only.py"] {
+            std::fs::write(dir.path().join(name), "x = 1\n").unwrap();
+        }
         let status = std::process::Command::new("git")
             .current_dir(dir.path())
             .args(["add", "-A"])
@@ -419,6 +442,32 @@ mod tests {
             "generated.py -linguist-generated\n",
         )
         .unwrap();
+        std::fs::write(
+            dir.path().join(".git/info/attributes"),
+            "\
+generated.py -linguist-generated
+info-only.py linguist-vendored
+",
+        )
+        .unwrap();
+        let global_dir = tempfile::tempdir().unwrap();
+        let global_attributes = global_dir.path().join("attributes");
+        std::fs::write(
+            &global_attributes,
+            "\
+generated.py -linguist-generated
+global-only.py binary
+",
+        )
+        .unwrap();
+        let status = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(["config", "core.attributesFile"])
+            .arg(&global_attributes)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
         let repo = gix::discover(dir.path()).unwrap();
         let mut filter = GitAttributeFilter::from_revision(&repo, "HEAD").unwrap();
 
@@ -427,5 +476,11 @@ mod tests {
                 .excludes_relative_path(Path::new("generated.py"))
                 .unwrap()
         );
+        for path in ["info-only.py", "global-only.py"] {
+            assert!(
+                !filter.excludes_relative_path(Path::new(path)).unwrap(),
+                "{path} must not inherit checkout-local attributes"
+            );
+        }
     }
 }

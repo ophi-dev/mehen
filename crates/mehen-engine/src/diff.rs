@@ -50,14 +50,41 @@ pub fn analyze_diff(input: DiffInput) -> Result<DiffReport, DiffError> {
     analyze_diff_in_repo(input, &repo)
 }
 
+struct RevisionGitAttributeFilters {
+    base: GitAttributeFilter,
+    head: GitAttributeFilter,
+}
+
+impl RevisionGitAttributeFilters {
+    fn new(
+        repo: &gix::Repository,
+        from: &str,
+        to: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            base: GitAttributeFilter::from_revision(repo, from)?,
+            head: GitAttributeFilter::from_revision(repo, to)?,
+        })
+    }
+
+    fn excludes(&mut self, file: &mehen_git::ChangedFile) -> std::io::Result<bool> {
+        let filter = if file.status == ChangeStatus::Deleted {
+            &mut self.base
+        } else {
+            &mut self.head
+        };
+        filter.excludes_relative_path(&file.path)
+    }
+}
+
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
-    let mut git_attribute_filter =
-        GitAttributeFilter::from_revision(repo, &input.to).map_err(|error| {
+    let mut git_attribute_filters = RevisionGitAttributeFilters::new(repo, &input.from, &input.to)
+        .map_err(|error| {
             DiffError::Git(GitError::Internal(format!(
-                "failed to configure Git attribute filtering for {}: {error}",
-                input.to
+                "failed to configure Git attribute filtering for {}..{}: {error}",
+                input.from, input.to
             )))
         })?;
 
@@ -81,15 +108,12 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         if !path_is_selected(&utf8_path, &input.paths) {
             continue;
         }
-        if git_attribute_filter
-            .excludes_relative_path(&cf.path)
-            .map_err(|error| {
-                DiffError::Git(GitError::Internal(format!(
-                    "failed to read Git attributes for {}: {error}",
-                    cf.path.display()
-                )))
-            })?
-        {
+        if git_attribute_filters.excludes(&cf).map_err(|error| {
+            DiffError::Git(GitError::Internal(format!(
+                "failed to read Git attributes for {}: {error}",
+                cf.path.display()
+            )))
+        })? {
             continue;
         }
 
@@ -463,9 +487,9 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // unchanged (Codex P2). `explicit_metrics` selects between the two modes.
     let explicit_metrics = !opts.metrics.is_empty();
     let selectors = parse_metric_selectors(&opts.metrics);
-    let mut git_attribute_filter = opts
+    let mut git_attribute_filters = opts
         .ignore_git_attributes
-        .then(|| GitAttributeFilter::from_revision(&repo, &to_ref))
+        .then(|| RevisionGitAttributeFilters::new(&repo, &from_ref, &to_ref))
         .transpose()?;
 
     let registry = Arc::new(AnalyzerRegistry::default_set());
@@ -482,8 +506,8 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if let Some(filter) = git_attribute_filter.as_mut()
-            && filter.excludes_relative_path(p)?
+        if let Some(filters) = git_attribute_filters.as_mut()
+            && filters.excludes(&cf)?
         {
             continue;
         }
@@ -1175,10 +1199,17 @@ mod tests {
 generated.md linguist-generated
 vendored.md linguist-vendored
 binary.md binary
+deleted.md linguist-generated
 ",
         )
         .unwrap();
-        for name in ["kept.md", "generated.md", "vendored.md", "binary.md"] {
+        for name in [
+            "kept.md",
+            "generated.md",
+            "vendored.md",
+            "binary.md",
+            "deleted.md",
+        ] {
             std::fs::write(dir.path().join(name), "# Base\n").unwrap();
         }
         git_ok(dir.path(), &["add", "-A"]);
@@ -1188,6 +1219,17 @@ binary.md binary
         for name in ["kept.md", "generated.md", "vendored.md", "binary.md"] {
             std::fs::write(dir.path().join(name), "# Head\n\nChanged.\n").unwrap();
         }
+        std::fs::remove_file(dir.path().join("deleted.md")).unwrap();
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "\
+* -linguist-generated -linguist-vendored -binary
+generated.md linguist-generated
+vendored.md linguist-vendored
+binary.md binary
+",
+        )
+        .unwrap();
         git_ok(dir.path(), &["add", "-A"]);
         git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
         git_ok(dir.path(), &["tag", "attribute-head"]);

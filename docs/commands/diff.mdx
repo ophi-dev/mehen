@@ -72,8 +72,11 @@ mehen asks Git for the changed-file set, runs the equivalent of `mehen metrics` 
 joins by repository-relative path, and computes per-metric deltas. It does not recursively walk
 untracked working-tree content, so ignored build and dependency directories are never candidates.
 Files that exist on only one side are reported as new or deleted. Tracked files matched by
-`linguist-generated`, `linguist-vendored`, or `binary` Git attributes in the requested head
-revision are skipped by default. Use `--ignore-git-attributes=false` to include them.
+`linguist-generated`, `linguist-vendored`, or `binary` Git attributes are skipped by default.
+Added and modified files use attributes from the requested head revision; deleted files use the
+base revision where they still exist. Revision filtering reads committed `.gitattributes` files
+only, so checkout-local `.git/info/attributes` and configured global attributes cannot change a
+historical report. Use `--ignore-git-attributes=false` to include attributed files.
 
 When no `--metrics` are given, a mixed pull request (e.g. both `.ts` and `.sql`
 files) produces a single table whose columns are the union of each language's
