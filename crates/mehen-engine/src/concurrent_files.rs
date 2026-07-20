@@ -151,6 +151,19 @@ fn log_ignore_error(entry: &DirEntry) {
     }
 }
 
+fn attribute_filters_for_walk(
+    paths: &WalkPaths,
+    respect_ignores: bool,
+) -> (GitAttributeFilterSet, Option<GitRepositoryRegistry>) {
+    let filters = if respect_ignores {
+        GitAttributeFilterSet::for_walk_paths(&paths.normalized())
+    } else {
+        GitAttributeFilterSet::default()
+    };
+    let repositories = respect_ignores.then(|| filters.repository_registry());
+    (filters, repositories)
+}
+
 /// Walk all configured roots serially and return matching files.
 ///
 /// The public `rank_top_offenders` API uses this path. Analysis remains
@@ -159,15 +172,8 @@ fn log_ignore_error(entry: &DirEntry) {
 pub(crate) fn walk_files(files_data: &FilesData) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let walk_paths = WalkPaths::new(&files_data.paths);
-    let normalized_paths = walk_paths.normalized();
-    let mut attribute_filters = if files_data.respect_ignores {
-        GitAttributeFilterSet::for_walk_paths(&normalized_paths)
-    } else {
-        GitAttributeFilterSet::default()
-    };
-    let repositories = files_data
-        .respect_ignores
-        .then(|| attribute_filters.repository_registry());
+    let (mut attribute_filters, repositories) =
+        attribute_filters_for_walk(&walk_paths, files_data.respect_ignores);
     for result in walk_builder(files_data, &walk_paths, repositories).build() {
         let entry = match result {
             Ok(entry) => entry,
@@ -266,15 +272,8 @@ impl<Config: 'static + Send + Sync> ConcurrentRunner<Config> {
         let exclude = Arc::new(files_data.exclude.clone());
         let walk_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let walk_paths = Arc::new(WalkPaths::new(&files_data.paths));
-        let normalized_paths = walk_paths.normalized();
-        let attribute_filters = if files_data.respect_ignores {
-            GitAttributeFilterSet::for_walk_paths(&normalized_paths)
-        } else {
-            GitAttributeFilterSet::default()
-        };
-        let repositories = files_data
-            .respect_ignores
-            .then(|| attribute_filters.repository_registry());
+        let (attribute_filters, repositories) =
+            attribute_filters_for_walk(walk_paths.as_ref(), files_data.respect_ignores);
 
         let mut builder = walk_builder(&files_data, walk_paths.as_ref(), repositories);
         builder.threads(self.num_jobs);
