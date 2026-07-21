@@ -121,9 +121,21 @@ fn antlr_syntax_errors_are_structured_without_stderr_output() {
             "java.syntax_error",
         ),
         (
+            "lexer-error.java",
+            "java",
+            "public class A # {}\n",
+            "java.syntax_error",
+        ),
+        (
             "invalid.kt",
             "kotlin",
             "fun broken( {\n",
+            "kotlin.syntax_error",
+        ),
+        (
+            "lexer-error.kt",
+            "kotlin",
+            "class A # {}\n",
             "kotlin.syntax_error",
         ),
     ] {

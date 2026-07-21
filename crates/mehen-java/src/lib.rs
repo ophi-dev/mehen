@@ -24,6 +24,7 @@
 
 mod walker;
 
+use mehen_antlr::DiagnosticCollector;
 use mehen_antlr::runtime::{CommonTokenStream, InputStream, ParsedFile};
 use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
@@ -41,6 +42,7 @@ pub struct JavaAnalyzer;
 /// hidden-channel-inclusive) token store.
 struct ParsedJava {
     parsed: ParsedFile,
+    lexer_diagnostics: Vec<ParseDiagnostic>,
     loc_tokens: Vec<mehen_antlr::LocToken>,
 }
 
@@ -54,15 +56,18 @@ impl JavaAnalyzer {
     /// Returns `None` only if the rule call hard-fails (returns `Err` rather
     /// than a recovered tree).
     ///
-    /// Removes the runtime's default console listeners before tokenization and
-    /// parsing; recovered errors are reported through mehen diagnostics.
+    /// Replaces the runtime's default lexer console listener with a structured
+    /// diagnostic collector and removes the parser console listener.
     fn parse(&self, source: &str) -> Option<ParsedJava> {
         let mut lexer = JavaLexer::new(InputStream::new(source));
         lexer.remove_error_listeners();
+        let lexer_diagnostics = DiagnosticCollector::default();
+        lexer.add_error_listener(lexer_diagnostics.clone());
         let tokens = CommonTokenStream::new(lexer);
         let mut parser = JavaParser::new(tokens);
         parser.remove_error_listeners();
         let result = parser.compilation_unit().ok()?;
+        let lexer_diagnostics = lexer_diagnostics.diagnostics("java.syntax_error", 16);
 
         // `into_parsed_file` consumes the parser and moves the eagerly-buffered
         // token store into the `ParsedFile`; the LOC token list is then read
@@ -70,7 +75,11 @@ impl JavaAnalyzer {
         // are present — no `fill()` step needed).
         let parsed = parser.into_parsed_file(result);
         let loc_tokens = collect_loc_tokens(&parsed);
-        Some(ParsedJava { parsed, loc_tokens })
+        Some(ParsedJava {
+            parsed,
+            lexer_diagnostics,
+            loc_tokens,
+        })
     }
 }
 
@@ -121,7 +130,13 @@ impl LanguageAnalyzer for JavaAnalyzer {
 
         // Recovered ANTLR error nodes are surfaced as `error` so the
         // diagnostic contract treats the analysis as incomplete.
-        let diagnostics = mehen_antlr::collect_errors(tree, "java.syntax_error", 16);
+        let mut diagnostics = parsed.lexer_diagnostics;
+        let remaining = 16usize.saturating_sub(diagnostics.len());
+        diagnostics.extend(mehen_antlr::collect_errors(
+            tree,
+            "java.syntax_error",
+            remaining,
+        ));
 
         Ok(LanguageAnalysis {
             language: Language::Java,

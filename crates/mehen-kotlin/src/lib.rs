@@ -29,6 +29,7 @@
 
 mod walker;
 
+use mehen_antlr::DiagnosticCollector;
 use mehen_antlr::runtime::{CommonTokenStream, InputStream, ParsedFile, Parser};
 use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
@@ -47,6 +48,7 @@ pub struct KotlinAnalyzer;
 struct ParsedKotlin {
     parsed: ParsedFile,
     syntax_errors: usize,
+    lexer_diagnostics: Vec<ParseDiagnostic>,
     loc_tokens: Vec<mehen_antlr::LocToken>,
 }
 
@@ -90,9 +92,9 @@ impl KotlinAnalyzer {
     /// `kotlinFile`) and return the recovered [`ParsedFile`], syntax-error
     /// count, and LOC token list, or `None` if the rule call hard-failed.
     ///
-    /// Removes the runtime's default console listeners before tokenization and
-    /// parsing, then folds the recovered tree into a [`ParsedFile`] that owns
-    /// the token store and CST.
+    /// Replaces the runtime's default lexer console listener with a structured
+    /// diagnostic collector, removes the parser console listener, and folds the
+    /// recovered tree into a [`ParsedFile`] that owns the token store and CST.
     fn parse_entry(&self, source: &str, script_rule: bool) -> Option<ParsedKotlin> {
         let entry = if script_rule {
             KotlinParser::script
@@ -101,11 +103,14 @@ impl KotlinAnalyzer {
         };
         let mut lexer = KotlinLexer::new(InputStream::new(source));
         lexer.remove_error_listeners();
+        let lexer_diagnostics = DiagnosticCollector::default();
+        lexer.add_error_listener(lexer_diagnostics.clone());
         let tokens = CommonTokenStream::new(lexer);
         let mut parser = KotlinParser::new(tokens);
         parser.remove_error_listeners();
         let result = entry(&mut parser).ok()?;
         let syntax_errors = parser.number_of_syntax_errors();
+        let lexer_diagnostics = lexer_diagnostics.diagnostics("kotlin.syntax_error", 16);
 
         // `into_parsed_file` consumes the parser and moves the eagerly-buffered
         // token store into the `ParsedFile`; the LOC token list is then read
@@ -116,6 +121,7 @@ impl KotlinAnalyzer {
         Some(ParsedKotlin {
             parsed,
             syntax_errors,
+            lexer_diagnostics,
             loc_tokens,
         })
     }
@@ -187,7 +193,13 @@ impl LanguageAnalyzer for KotlinAnalyzer {
         // `warning`) so the diagnostic contract (plan §9.3) treats the
         // analysis as incomplete: `mehen metrics` exits 1 and `mehen diff`
         // records the file under `analysis_errors`.
-        let diagnostics = mehen_antlr::collect_errors(tree, "kotlin.syntax_error", 16);
+        let mut diagnostics = parsed.lexer_diagnostics;
+        let remaining = 16usize.saturating_sub(diagnostics.len());
+        diagnostics.extend(mehen_antlr::collect_errors(
+            tree,
+            "kotlin.syntax_error",
+            remaining,
+        ));
 
         Ok(LanguageAnalysis {
             language: Language::Kotlin,
