@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/ophi-dev/mehen/compare/v1.5.1...v1.6.0) (2026-07-21)
+
+
+### chore
+
+* release 1.6.0 ([67952a9](https://github.com/ophi-dev/mehen/commit/67952a92211a446692e218a253b327ddb05a9383))
+
 ## [1.5.1](https://github.com/ophi-dev/mehen/compare/v1.5.0...v1.5.1) (2026-07-19)
 
 
