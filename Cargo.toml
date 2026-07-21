@@ -37,7 +37,7 @@ default-members = ["crates/mehen-cli"]
 unreachable_pub = "warn"
 
 [workspace.package]
-version = "1.5.1"
+version = "1.6.0"
 authors = ["Konstantin Vyatkin <tino@vtkn.io>"]
 edition = "2024"
 rust-version = "1.95.0"
