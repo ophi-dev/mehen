@@ -1,23 +1,83 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Konstantin Vyatkin <tino@vtkn.io>
 
-//! Recovered-error collection for ANTLR parse trees.
+//! Structured diagnostic collection for ANTLR lexers and parse trees.
 //!
-//! Like tree-sitter, the ANTLR runtime recovers from syntax errors rather
-//! than aborting: bad input surfaces as `ParseTree::Error` leaves embedded
-//! in an otherwise-complete tree. Per mehen's diagnostic contract (rewrite
-//! plan §9.3) these must be reported as `error`-severity diagnostics so
-//! that `mehen metrics` exits 1 and `mehen diff` records the file under
-//! `analysis_errors` — metric output from a partially-recovered tree must
-//! never masquerade as a clean parse.
+//! Lexer errors are reported through runtime listeners because an unrecognized
+//! character can be skipped before the parser sees the token stream. Parser
+//! recovery instead surfaces as `ParseTree::Error` leaves embedded in an
+//! otherwise-complete tree. Per mehen's diagnostic contract (rewrite plan
+//! §9.3), both must become `error`-severity diagnostics so that `mehen metrics`
+//! exits 1 and `mehen diff` records the file under `analysis_errors`.
 //!
 //! Hard parser failures (the entry-rule call itself returning `Err`) are a
 //! separate, `fatal` path handled by the analyzer crate; this module only
-//! covers recovered `Error` nodes within a returned tree.
+//! covers listener diagnostics and recovered `Error` nodes.
 
-use antlr4_runtime::Node;
+use std::sync::{Arc, Mutex};
+
 use antlr4_runtime::token::Token;
+use antlr4_runtime::{ErrorListener, Node, Recognizer};
 use mehen_core::ParseDiagnostic;
+
+#[derive(Clone, Debug)]
+struct CollectedDiagnostic {
+    line: usize,
+    column: usize,
+    message: String,
+}
+
+/// Cloneable runtime listener that records diagnostics without writing to
+/// stderr.
+#[derive(Clone, Debug, Default)]
+pub struct DiagnosticCollector {
+    diagnostics: Arc<Mutex<Vec<CollectedDiagnostic>>>,
+}
+
+impl<R> ErrorListener<R> for DiagnosticCollector
+where
+    R: Recognizer + ?Sized,
+{
+    fn syntax_error(
+        &mut self,
+        _recognizer: &R,
+        line: usize,
+        column: usize,
+        message: &str,
+        _error: Option<&antlr4_runtime::AntlrError>,
+    ) {
+        self.diagnostics
+            .lock()
+            .expect("ANTLR diagnostic collector lock poisoned")
+            .push(CollectedDiagnostic {
+                line,
+                column,
+                message: message.to_owned(),
+            });
+    }
+}
+
+impl DiagnosticCollector {
+    /// Convert at most `max_diagnostics` collected runtime diagnostics to
+    /// mehen's structured form.
+    pub fn diagnostics(&self, code: &str, max_diagnostics: usize) -> Vec<ParseDiagnostic> {
+        self.diagnostics
+            .lock()
+            .expect("ANTLR diagnostic collector lock poisoned")
+            .iter()
+            .take(max_diagnostics)
+            .map(|diagnostic| {
+                ParseDiagnostic::error(
+                    code,
+                    format!(
+                        "ANTLR error at line {}:{}: {}",
+                        diagnostic.line, diagnostic.column, diagnostic.message
+                    ),
+                )
+            })
+            .collect()
+    }
+}
 
 /// Walk `tree` and emit one `error`-severity [`ParseDiagnostic`] per recovered
 /// error leaf ([`NodeKind::Error`](antlr4_runtime::NodeKind::Error)), capped at

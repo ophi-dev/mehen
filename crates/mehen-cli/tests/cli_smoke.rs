@@ -110,6 +110,72 @@ fn metrics_emits_json_for_python_file() {
 }
 
 #[test]
+fn antlr_syntax_errors_are_structured_without_stderr_output() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    for (name, language, source, diagnostic_code) in [
+        (
+            "invalid.java",
+            "java",
+            "package %name.namespace%;\npublic class Broken {\n",
+            "java.syntax_error",
+        ),
+        (
+            "lexer-error.java",
+            "java",
+            "public class A # {}\n",
+            "java.syntax_error",
+        ),
+        (
+            "invalid.kt",
+            "kotlin",
+            "fun broken( {\n",
+            "kotlin.syntax_error",
+        ),
+        (
+            "lexer-error.kt",
+            "kotlin",
+            "class A # {}\n",
+            "kotlin.syntax_error",
+        ),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, source).expect("write invalid source file");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+            .args([
+                "metrics",
+                path.to_str().expect("UTF-8 test path"),
+                "--language",
+                language,
+            ])
+            .output()
+            .expect("failed to run mehen metrics");
+
+        assert!(
+            !output.status.success(),
+            "{language} syntax errors must produce a non-zero exit"
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{language} syntax errors leaked raw ANTLR diagnostics: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("metrics output must be valid JSON");
+        assert!(
+            report["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic["code"] == diagnostic_code)),
+            "{language} structured diagnostics must contain {diagnostic_code}"
+        );
+    }
+}
+
+#[test]
 fn metrics_rejects_unknown_language() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = write_python(dir.path(), "sample.unknown", "def f(): pass\n");

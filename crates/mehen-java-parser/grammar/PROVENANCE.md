@@ -50,7 +50,7 @@ predicates are handled by the generator, not by editing the grammar:
 | Tool | Version |
 |---|---|
 | ANTLR tool jar | `antlr-4.13.2-complete.jar` (from <https://www.antlr.org/download/>) |
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.13.0` |
+| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.14.2` |
 
 ## Regenerating
 
@@ -59,7 +59,7 @@ the grammar or the runtime:
 
 ```bash
 export MEHEN_ANTLR_JAR=/path/to/antlr-4.13.2-complete.jar
-cargo install antlr-rust-runtime --version 0.13.0 --bin antlr4-rust-gen --force
+cargo install antlr-rust-runtime --version 0.14.2 --bin antlr4-rust-gen --force
 cargo run -p xtask -- antlr generate java
 ```
 

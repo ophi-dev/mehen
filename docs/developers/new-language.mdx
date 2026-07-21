@@ -85,12 +85,12 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
     ```bash
     export MEHEN_ANTLR_JAR=/path/to/antlr-4.13.2-complete.jar
     # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN)
-    cargo install antlr-rust-runtime --version 0.13.0 --bin antlr4-rust-gen
+    cargo install antlr-rust-runtime --version 0.14.2 --bin antlr4-rust-gen --force
     cargo xtask antlr generate <lang>
     ```
 
     The result lands in `crates/mehen-<lang>-parser/src/generated/`: the `<lang>_lexer.rs` and
-    `<lang>_parser.rs` modules plus a `semantics.json` sidecar (emitted by the 0.13.0 generator).
+    `<lang>_parser.rs` modules plus a `semantics.json` sidecar emitted by the generator.
     All three are checked in and drift-checked. The generated files carry their own lint and
     `rustfmt::skip` attributes, so the parser crate includes them with plain `pub mod ...;`
     declarations.

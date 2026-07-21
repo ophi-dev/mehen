@@ -12,8 +12,9 @@
 //!   ANTLR runtime through this crate and never pin its version themselves,
 //! - **span conversion** ([`span`]) lifting ANTLR token byte spans into
 //!   mehen's byte-offset [`SourceSpan`](mehen_core::SourceSpan)s,
-//! - **diagnostics** ([`diagnostics`]) turning recovered `ParseTree::Error`
-//!   leaves into mehen [`ParseDiagnostic`](mehen_core::ParseDiagnostic)s,
+//! - **diagnostics** ([`diagnostics`]) collecting runtime listener errors and
+//!   recovered `ParseTree::Error` leaves as mehen
+//!   [`ParseDiagnostic`](mehen_core::ParseDiagnostic)s,
 //! - **LOC tokens** ([`comments`]) a source-ordered code/comment token list
 //!   for LOC, recovered from the hidden-channel-inclusive
 //!   token stream (comments are absent from the parse tree).
@@ -55,7 +56,7 @@ use mehen_core::{MetricSpace, SourceSpan, SpaceId, SpaceKind};
 pub use antlr4_runtime as runtime;
 
 pub use comments::{LocToken, LocTokenKind, loc_tokens, token_views};
-pub use diagnostics::collect_errors;
+pub use diagnostics::{DiagnosticCollector, collect_errors};
 pub use span::{ctx_span, span_from_tokens};
 
 /// Build an "empty" unit space — used by analyzers when the parser fails
