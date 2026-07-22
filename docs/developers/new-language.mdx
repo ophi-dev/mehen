@@ -60,8 +60,7 @@ ANTLR is a first-class backend (`AnalysisBackend::Antlr`), used when a high-qual
 grammar exists but no Rust-native parser does. The shared crate `mehen-antlr` provides the runtime
 re-export, token-span conversion, recovered-error diagnostics, and hidden-channel comment (CLOC)
 extraction. The Rust lexer/parser modules are generated **offline**
-from a vendored `.g4` grammar and checked in — a normal `cargo build` never needs Java or the
-ANTLR jar.
+from a vendored `.g4` grammar and checked in; a normal `cargo build` does not run the generator.
 
 The generated modules and their vendored `.g4` grammar do **not** live in the analyzer crate.
 They live in a standalone, publishable `crates/mehen-<lang>-parser/` crate that carries only the
@@ -83,9 +82,8 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
   </Step>
   <Step title="Generate the parser modules">
     ```bash
-    export MEHEN_ANTLR_JAR=/path/to/antlr-4.13.2-complete.jar
     # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN)
-    cargo install antlr-rust-runtime --version 0.14.2 --bin antlr4-rust-gen --force
+    cargo install antlr-rust-runtime --features codegen --bin antlr4-rust-gen --force
     cargo xtask antlr generate <lang>
     ```
 

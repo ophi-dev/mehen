@@ -70,8 +70,7 @@ dependencies = [
 [[package]]
 name = "antlr-rust-runtime"
 version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aae72dab439842f2f9d064eadc11cf6ce15e83929eb515e0318b09b4de97418"
+source = "git+https://github.com/ophi-dev/antlr-rust-runtime?rev=745cf7ff69fc9edca42cd4e121f2d69d5e490a43#745cf7ff69fc9edca42cd4e121f2d69d5e490a43"
 dependencies = [
  "memchr",
  "stacker",

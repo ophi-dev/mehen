@@ -96,9 +96,8 @@ gix = { version = "^0.85", default-features = false, features = ["attributes", "
 # checked-in generated parser/lexer modules (`crates/mehen-<lang>-parser/
 # src/generated/`) always link the runtime they were generated against.
 # Bump deliberately and regenerate via `cargo xtask antlr generate --all`
-# with a matching `antlr4-rust-gen` (`cargo install antlr-rust-runtime
-# --version <this> --bin antlr4-rust-gen --force`).
-antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.14.2" }
+# with `antlr4-rust-gen` built from the same revision.
+antlr4_runtime = { package = "antlr-rust-runtime", git = "https://github.com/ophi-dev/antlr-rust-runtime", rev = "745cf7ff69fc9edca42cd4e121f2d69d5e490a43" }
 
 tree-sitter = "=0.26.11"
 # Per-language grammars (`tree-sitter-c`, `tree-sitter-go`,

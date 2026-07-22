@@ -49,8 +49,7 @@ predicates are handled by the generator, not by editing the grammar:
 
 | Tool | Version |
 |---|---|
-| ANTLR tool jar | `antlr-4.13.2-complete.jar` (from <https://www.antlr.org/download/>) |
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.14.2` |
+| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `745cf7ff69fc9edca42cd4e121f2d69d5e490a43` |
 
 ## Regenerating
 
@@ -58,16 +57,15 @@ Never hand-edit the files in `../src/generated/`. To regenerate after bumping
 the grammar or the runtime:
 
 ```bash
-export MEHEN_ANTLR_JAR=/path/to/antlr-4.13.2-complete.jar
-cargo install antlr-rust-runtime --version 0.14.2 --bin antlr4-rust-gen --force
+cargo install antlr-rust-runtime --features codegen --bin antlr4-rust-gen --force
 cargo run -p xtask -- antlr generate java
 ```
 
-That command drives the same pipeline this directory was produced with:
+That command runs:
 
-1. `java -jar antlr-4.13.2-complete.jar -o <interp-dir> -Xexact-output-dir JavaLexer.g4 JavaParser.g4`
-   → `<interp-dir>/JavaLexer.interp` + `<interp-dir>/JavaParser.interp`
-2. `antlr4-rust-gen --lexer <interp-dir>/JavaLexer.interp --parser <interp-dir>/JavaParser.interp --out-dir ../src/generated`
+```bash
+antlr4-rust-gen JavaLexer.g4 JavaParser.g4 --out-dir ../src/generated
+```
 
 The analyzer parses via the generated `compilationUnit`
 (`JavaParser::compilation_unit()`) entry rule.

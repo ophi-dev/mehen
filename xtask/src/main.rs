@@ -78,8 +78,8 @@ enum AntlrCommand {
     /// Regenerate the Rust lexer/parser modules for one ANTLR-backed
     /// language into its `src/generated/` dir, or `--all` for every one.
     ///
-    /// Requires the external toolchain (set `MEHEN_ANTLR_JAR`, install
-    /// `antlr4-rust-gen`, have Java on PATH). See `xtask/src/antlr.rs`.
+    /// Requires `antlr4-rust-gen` on PATH or in `MEHEN_ANTLR_RUST_GEN`.
+    /// See `xtask/src/antlr.rs`.
     Generate {
         /// Language slug (e.g. `kotlin`). Required unless `--all` is set.
         language: Option<String>,
@@ -222,8 +222,8 @@ fn run_antlr_check_generated() -> Result<(), String> {
     match antlr::check_generated(&workspace)? {
         None => {
             println!(
-                "skipped: ANTLR toolchain unavailable (set MEHEN_ANTLR_JAR and install \
-                 antlr4-rust-gen to enable the drift check)"
+                "skipped: antlr4-rust-gen unavailable (install it or set \
+                 MEHEN_ANTLR_RUST_GEN to enable the drift check)"
             );
             Ok(())
         }

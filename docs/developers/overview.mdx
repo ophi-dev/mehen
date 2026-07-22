@@ -11,9 +11,9 @@ This section documents how to build mehen, run its tests, and contribute changes
 - A recent stable Rust toolchain. See [rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
 - For tree-sitter grammar regeneration (Go / C / PowerShell): a Linux or macOS shell, or
   Windows via WSL.
-- For ANTLR grammar regeneration (Kotlin, Java): a Java runtime, an `antlr-4.13.2-complete.jar`, and
-  the `antlr4-rust-gen` generator (`cargo install antlr-rust-runtime`). Only needed to *regenerate*
-  parsers — a normal build uses the checked-in modules and needs none of these.
+- For ANTLR grammar regeneration (Kotlin, Java): the `antlr4-rust-gen` generator
+  (`cargo install antlr-rust-runtime --features codegen --bin antlr4-rust-gen`). Only needed to
+  *regenerate* parsers; a normal build uses the checked-in modules.
 
 ## Clone
 

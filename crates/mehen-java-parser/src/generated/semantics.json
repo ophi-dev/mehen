@@ -2,7 +2,10 @@
   "version": 2,
   "policy": "assume-true",
   "note": "unknown coordinates currently default to assume-true; a future minor release changes the default to error",
-  "options": [],
+  "options": [
+    {"name": "superClass", "value": "JavaParserBase", "line": 39, "column": 4, "disposition": "unsupported"},
+    {"name": "tokenVocab", "value": "JavaLexer", "line": 38, "column": 4, "disposition": "metadata"}
+  ],
   "grammars": [
     {
       "kind": "lexer",
@@ -13,9 +16,9 @@
       "kind": "parser",
       "name": "JavaParser",
       "coordinates": [
-        {"kind": "parser-predicate", "rule": "annotationFieldValue", "rule_index": 59, "index": 0, "atn_state": null, "line": null, "column": null, "body": null, "disposition": "assume-true", "template": null},
-        {"kind": "parser-predicate", "rule": "recordComponentList", "rule_index": 76, "index": 1, "atn_state": null, "line": null, "column": null, "body": null, "disposition": "assume-true", "template": null},
-        {"kind": "parser-action", "rule": "expression", "rule_index": 99, "index": null, "atn_state": 1423, "line": null, "column": null, "body": null, "disposition": "ignored", "template": null}
+        {"kind": "parser-predicate", "rule": "annotationFieldValue", "rule_index": 59, "index": 0, "atn_state": null, "line": 360, "column": 1, "body": "this.IsNotIdentifierAssign()", "disposition": "assume-true", "template": null},
+        {"kind": "parser-predicate", "rule": "recordComponentList", "rule_index": 76, "index": 1, "atn_state": null, "line": 453, "column": 45, "body": "this.DoLastRecordComponent()", "disposition": "assume-true", "template": null},
+        {"kind": "parser-action", "rule": "expression", "rule_index": 99, "index": null, "atn_state": 1423, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null}
       ]
     }
   ]

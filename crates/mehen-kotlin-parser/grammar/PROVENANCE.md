@@ -35,8 +35,7 @@ comment in the `.g4` file.
 
 | Tool | Version |
 |---|---|
-| ANTLR tool jar | `antlr-4.13.2-complete.jar` (from <https://www.antlr.org/download/>) |
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.14.2` |
+| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `745cf7ff69fc9edca42cd4e121f2d69d5e490a43` |
 
 ## Regenerating
 
@@ -47,12 +46,12 @@ grammar or the runtime:
 cargo xtask antlr generate kotlin
 ```
 
-That command drives the same pipeline this directory was produced with:
+That command runs:
 
-1. `java -jar antlr-4.13.2-complete.jar -o <interp-dir> -Xexact-output-dir KotlinLexer.g4 KotlinParser.g4`
-   → `<interp-dir>/KotlinLexer.interp` + `<interp-dir>/KotlinParser.interp`
-2. `antlr4-rust-gen --lexer <interp-dir>/KotlinLexer.interp --parser <interp-dir>/KotlinParser.interp --out-dir ../src/generated`
+```bash
+antlr4-rust-gen KotlinLexer.g4 KotlinParser.g4 --out-dir ../src/generated
+```
 
 The analyzer selects between the generated `kotlinFile`
 (`KotlinParser::kotlin_file()`) and `script` (`KotlinParser::script()`) entry
-rules, matching the generated parser's v0.14.2 entry-rule documentation.
+rules, matching the generated parser's entry-rule documentation.
