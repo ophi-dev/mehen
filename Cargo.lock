@@ -70,7 +70,7 @@ dependencies = [
 [[package]]
 name = "antlr-rust-runtime"
 version = "0.14.2"
-source = "git+https://github.com/ophi-dev/antlr-rust-runtime?rev=745cf7ff69fc9edca42cd4e121f2d69d5e490a43#745cf7ff69fc9edca42cd4e121f2d69d5e490a43"
+source = "git+https://github.com/ophi-dev/antlr-rust-runtime?rev=c31ce00172d7a38b14dc991878caab810c40148f#c31ce00172d7a38b14dc991878caab810c40148f"
 dependencies = [
  "memchr",
  "stacker",

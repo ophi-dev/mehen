@@ -49,7 +49,7 @@ predicates are handled by the generator, not by editing the grammar:
 
 | Tool | Version |
 |---|---|
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `745cf7ff69fc9edca42cd4e121f2d69d5e490a43` |
+| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `c31ce00172d7a38b14dc991878caab810c40148f` |
 
 ## Regenerating
 
