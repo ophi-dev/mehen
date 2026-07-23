@@ -225,7 +225,10 @@ fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
     };
 
     mehen_antlr::loc_tokens(
-        mehen_antlr::token_views(parsed.tokens()),
+        // Since the 0.15 runtime `&TokenStore` is `IntoIterator` (issue #123),
+        // so the eagerly-buffered store feeds the LOC sweep directly — no
+        // hand-rolled index loop.
+        parsed.tokens(),
         &[LINE_COMMENT, DELIMITED_COMMENT, INSIDE_COMMENT],
         &[WS, NL, INSIDE_WS, INSIDE_NL],
         // Operator tokens whose lexer rules embed the `Hidden` fragment, so a

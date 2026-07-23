@@ -273,7 +273,7 @@ impl Walker<'_> {
                 });
             }
             HalsteadClass::Operand => {
-                let text = term.symbol().text();
+                let text = term.symbol().text_or_empty();
                 self.current().halstead.observe_operand(HalsteadOperand {
                     kind: SmolStr::new("Operand"),
                     text: Some(SmolStr::new(text)),
@@ -312,7 +312,7 @@ impl Walker<'_> {
             // content, not folded trivia, and must keep its real start row.
             let base = (term.symbol().line() as u32).saturating_sub(1);
             let row = if folds_leading_trivia(tt) {
-                base.saturating_add(leading_newlines(term.symbol().text()))
+                base.saturating_add(leading_newlines(term.symbol().text_or_empty()))
             } else {
                 base
             };
@@ -580,7 +580,7 @@ impl Walker<'_> {
         if let Some(start) = ctx.start()
             && folds_leading_trivia(start.token_type())
         {
-            let (_, trivia_bytes) = leading_trivia(start.text());
+            let (_, trivia_bytes) = leading_trivia(start.text_or_empty());
             if trivia_bytes > 0 {
                 let trimmed = span
                     .start_byte

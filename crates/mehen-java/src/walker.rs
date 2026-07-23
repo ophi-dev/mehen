@@ -310,7 +310,7 @@ impl Walker<'_> {
                 });
             }
             HalsteadClass::Operand => {
-                let text = term.symbol().text();
+                let text = term.symbol().text_or_empty();
                 self.current().halstead.observe_operand(HalsteadOperand {
                     kind: SmolStr::new("Operand"),
                     text: Some(SmolStr::new(text)),
@@ -330,7 +330,12 @@ impl Walker<'_> {
         // as phantom blank lines (`blank = sloc - ploc - only_comment`).
         if tt >= 0 {
             let start_row = (term.symbol().line() as u32).saturating_sub(1);
-            let extra_rows = term.symbol().text().bytes().filter(|&b| b == b'\n').count() as u32;
+            let extra_rows = term
+                .symbol()
+                .text_or_empty()
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count() as u32;
             for row in start_row..=start_row.saturating_add(extra_rows) {
                 self.current().loc.observe_code_line(row);
             }

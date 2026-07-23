@@ -35,7 +35,7 @@ comment in the `.g4` file.
 
 | Tool | Version |
 |---|---|
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `2f46383a84ba7efbe10ed25bd1ff1d46d8bfccb7` |
+| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.15.1` |
 
 ## Regenerating
 

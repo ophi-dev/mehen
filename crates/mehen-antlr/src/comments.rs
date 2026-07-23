@@ -22,27 +22,7 @@
 //! iterator of `TokenView` — e.g. `CommonTokenStream::tokens()` — instead of a
 //! `&[CommonToken]` slice.
 
-use antlr4_runtime::token::{Token, TokenId, TokenStore, TokenView};
-
-/// Iterate every token in a [`TokenStore`] in source order as [`TokenView`]s.
-///
-/// A [`ParsedFile`](antlr4_runtime::ParsedFile) owns its token store but the
-/// store itself exposes no iterator, so this bridges the gap for the LOC
-/// sweep. The store is eagerly buffered through EOF at parse time (all
-/// channels, including hidden-channel comments), so this yields the complete
-/// source token stream — no `fill()` step is required.
-pub fn token_views(store: &TokenStore) -> impl Iterator<Item = TokenView<'_>> {
-    // `0..len()` are exactly the valid indices, so both conversions are
-    // infallible. Assert rather than `filter_map`-skip: if a future
-    // `TokenStore` change ever broke that invariant, a silently-dropped token
-    // would skew LOC/CLOC with no diagnostic — so fail loudly instead.
-    (0..store.len()).map(|i| {
-        let id = TokenId::try_from(i).expect("token store index fits TokenId");
-        store
-            .view(id)
-            .expect("every index in 0..len() addresses a token")
-    })
-}
+use antlr4_runtime::token::{Token, TokenView};
 
 /// How a token contributes to LOC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,8 +67,12 @@ pub struct LocToken {
 /// correct for non-ASCII source.
 ///
 /// `tokens` is any source-ordered iterator of [`TokenView`]s over the full
-/// (hidden-channel-inclusive) token stream, typically
-/// [`CommonTokenStream::tokens`](antlr4_runtime::CommonTokenStream::tokens).
+/// (hidden-channel-inclusive) token stream. The owned
+/// [`ParsedFile`](antlr4_runtime::ParsedFile)'s token store satisfies this
+/// directly — `&TokenStore` is `IntoIterator` since the 0.15 runtime (issue
+/// #123) — so callers pass `parsed.tokens()`; a live
+/// [`CommonTokenStream::tokens`](antlr4_runtime::CommonTokenStream::tokens)
+/// works too.
 pub fn loc_tokens<'a>(
     tokens: impl IntoIterator<Item = TokenView<'a>>,
     comment_token_types: &[i32],
@@ -98,15 +82,19 @@ pub fn loc_tokens<'a>(
     let tokens = tokens.into_iter();
     let mut out = Vec::with_capacity(tokens.size_hint().0);
     for tok in tokens {
-        // `TokenView::text` returns `&str` (empty when the token has no
-        // recorded text). Everything past this point works on plain fields,
-        // so the classification is unit-testable without a `TokenStore`.
+        // Since the 0.15 runtime `TokenView::text()` returns `Option<&str>`
+        // (aligned with the `Token` trait); `text_or_empty()` is the runtime's
+        // own convenience for the "empty when absent" behavior the LOC
+        // classifier wants (a token with no recorded text contributes no
+        // embedded newlines). Everything past this point works on plain
+        // fields, so the classification is unit-testable without a
+        // `TokenStore`.
         push_loc_token(
             tok.token_type(),
             tok.start_byte(),
             tok.stop_byte(),
             tok.line(),
-            tok.text(),
+            tok.text_or_empty(),
             comment_token_types,
             skip_token_types,
             trivia_bearing_token_types,
