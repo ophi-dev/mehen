@@ -67,7 +67,7 @@
 //!   NPA/NPM; interface/annotation members are implicitly public.
 
 use mehen_antlr::runtime::token::Token;
-use mehen_antlr::runtime::{Node, RuleNodeView, TerminalNodeView};
+use mehen_antlr::runtime::{FromRuleNode, Node, RuleNodeView, TerminalNodeView};
 use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
 use mehen_metrics::{
@@ -1990,14 +1990,23 @@ fn name_from_identifier(ctx: RuleNodeView<'_>) -> Option<String> {
 /// `receiverParameter` (`Foo this`) is not a value parameter and is excluded.
 /// A trailing varargs (`int... rest`) is a plain `formalParameter` here.
 fn count_formal_params(ctx: RuleNodeView<'_>) -> u32 {
-    let Some(params) = find_descendant(ctx, jp::RULE_FORMAL_PARAMETERS) else {
+    // `find_descendant` has no typed equivalent (the typed contexts expose
+    // named direct children, not arbitrary-depth search), so it stays; the
+    // `formalParameters` subtree is then read through its typed context.
+    let Some(params) = find_descendant(ctx, jp::RULE_FORMAL_PARAMETERS)
+        .and_then(jp::FormalParametersContext::from_rule_node)
+    else {
         return 0;
     };
-    let direct = params.child_rules(jp::RULE_FORMAL_PARAMETER).count() as u32;
-    let in_list = params
-        .child_rule(jp::RULE_FORMAL_PARAMETER_LIST)
-        .map(|list| list.child_rules(jp::RULE_FORMAL_PARAMETER).count() as u32)
-        .unwrap_or(0);
+    // Grammar: `'(' ((receiverParameter | formalParameter) (',' formalParameterList)*)? ')'`
+    // — the first value parameter is a direct `formalParameter`, the rest live
+    // in a nested `formalParameterList`. A leading `receiverParameter`
+    // (`Foo this`) is excluded (it is a separate optional child).
+    let direct = u32::from(params.formal_parameter().is_some());
+    let in_list: u32 = params
+        .formal_parameter_list_children()
+        .map(|list| list.formal_parameter_children().count() as u32)
+        .sum();
     direct + in_list
 }
 
@@ -2005,27 +2014,34 @@ fn count_formal_params(ctx: RuleNodeView<'_>) -> u32 {
 /// `identifier`, a parenthesized `formalParameterList`, or a
 /// `lambdaLVTIList`/identifier list.
 fn count_lambda_args(ctx: RuleNodeView<'_>) -> u32 {
-    let Some(params) = ctx.child_rule(jp::RULE_LAMBDA_PARAMETERS) else {
+    let Some(params) = jp::LambdaExpressionContext::from_rule_node(ctx)
+        .and_then(|lambda| lambda.lambda_parameters().ok())
+    else {
         return 0;
     };
     // `(a, b) -> …` → formalParameterList; `(var a, var b) -> …` →
     // lambdaLVTIList; `x -> …` → a single bare identifier; `(x, y) -> …` →
     // a comma-separated identifier list.
-    if let Some(list) = params.child_rule(jp::RULE_FORMAL_PARAMETER_LIST) {
-        return list.child_rules(jp::RULE_FORMAL_PARAMETER).count() as u32;
+    if let Some(list) = params.formal_parameter_list() {
+        return list.formal_parameter_children().count() as u32;
     }
-    if let Some(list) = params.child_rule(jp::RULE_LAMBDA_LVTI_LIST) {
-        return list.child_rules(jp::RULE_LAMBDA_LVTI_PARAMETER).count() as u32;
+    if let Some(list) = params.lambda_lvti_list() {
+        return list.lambda_lvti_parameter_children().count() as u32;
     }
 
-    params.child_rules(jp::RULE_IDENTIFIER).count() as u32
+    params.identifier_children().count() as u32
 }
 
 /// Count the variables declared by a `fieldDeclaration`
 /// (`int a, b, c;` → 3), via `variableDeclarators → variableDeclarator`.
 fn field_variable_count(ctx: RuleNodeView<'_>) -> u32 {
-    ctx.child_rule(jp::RULE_VARIABLE_DECLARATORS)
-        .map(|vds| vds.child_rules(jp::RULE_VARIABLE_DECLARATOR).count() as u32)
+    let Some(field) = jp::FieldDeclarationContext::from_rule_node(ctx) else {
+        return 0;
+    };
+    field
+        .variable_declarators()
+        .ok()
+        .map(|vds| vds.variable_declarator_children().count() as u32)
         .unwrap_or(0)
 }
 
@@ -2042,10 +2058,20 @@ fn record_record_components(ctx: RuleNodeView<'_>, state: &mut State) {
 /// `recordDeclaration → recordHeader → recordComponentList → recordComponent`.
 /// These are both the record's public attributes (NPA) and the parameter list
 /// of its (canonical/compact) constructor (NArgs).
+///
+/// Uses the generated typed context (0.15 runtime) so the navigation is by
+/// named, grammar-checked accessors rather than raw `RULE_*` indices:
+/// `record_header()` is a required child (`Result`), the component list is
+/// optional (`Option`), and the components are a repeated child (iterator).
 fn count_record_components(ctx: RuleNodeView<'_>) -> u32 {
-    ctx.child_rule(jp::RULE_RECORD_HEADER)
-        .and_then(|header| header.child_rule(jp::RULE_RECORD_COMPONENT_LIST))
-        .map(|list| list.child_rules(jp::RULE_RECORD_COMPONENT).count() as u32)
+    let Some(record) = jp::RecordDeclarationContext::from_rule_node(ctx) else {
+        return 0;
+    };
+    record
+        .record_header()
+        .ok()
+        .and_then(|header| header.record_component_list())
+        .map(|list| list.record_component_children().count() as u32)
         .unwrap_or(0)
 }
 
