@@ -1254,12 +1254,20 @@ impl Walker<'_> {
         if ri != jp::RULE_EXPRESSION {
             return;
         }
+        // Read this `expression` node's operator tokens through the generated
+        // typed context (0.15.2 runtime, issue #178): `and_token()` is `&&`
+        // (distinct from `bitand_tokens()` `&`), `or_token()` is `||`, etc. —
+        // named `Option<TerminalNode>` accessors that replace `has_token(jl::…)`
+        // integer probing.
+        let Some(expr) = jp::ExpressionContext::from_rule_node(ctx) else {
+            return;
+        };
         // Short-circuit `&&`/`||`: a cyclomatic decision and an ABC condition
         // per operator (both independent of the cognitive run-collapse), plus
         // the cognitive boolean-sequence cost.
-        let this_op = if ctx.has_token(jl::AND) {
+        let this_op = if expr.and_token().is_some() {
             Some(BoolOp::And)
-        } else if ctx.has_token(jl::OR) {
+        } else if expr.or_token().is_some() {
             Some(BoolOp::Or)
         } else {
             None
@@ -1305,7 +1313,7 @@ impl Walker<'_> {
         // so a structure nested in an operand (notably a nested ternary) is
         // scored one level deeper; `visit_rule`'s `saved_cognitive` restore
         // unwinds it after the operands are walked.
-        if ctx.has_token(jl::QUESTION) && ctx.has_token(jl::COLON) {
+        if expr.question_token().is_some() && expr.colon_token().is_some() {
             let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
             self.current().cyclomatic.record_decision();
             self.current().cognitive.increase_nesting(eff);
@@ -1314,18 +1322,20 @@ impl Walker<'_> {
         }
         // Comparison / equality / instanceof → ABC conditions only. A bit-shift
         // (`<<`, `>>`, `>>>`) is NOT a condition — but the grammar spells it
-        // with multiple bare `LT`/`GT` terminals (there is no `<<` token), so
-        // `has_token(LT)`/`has_token(GT)` can't tell a shift from a relational
-        // `<`/`>`. Distinguish by count: a *relational* operator contributes
-        // exactly one `LT` (or one `GT`); a shift contributes two-or-three.
-        let (lt, gt) = count_angle_tokens(ctx);
+        // with multiple bare `LT`/`GT` terminals (there is no `<<` token), so a
+        // bare presence check can't tell a shift from a relational `<`/`>`.
+        // Distinguish by count: a *relational* operator contributes exactly one
+        // `LT` (or one `GT`); a shift contributes two-or-three. `lt_tokens()`/
+        // `gt_tokens()` are the grouped-token iterators for those bare literals.
+        let lt = expr.lt_tokens().count();
+        let gt = expr.gt_tokens().count();
         if lt == 1
             || gt == 1
-            || ctx.has_token(jl::EQUAL)
-            || ctx.has_token(jl::NOTEQUAL)
-            || ctx.has_token(jl::LE)
-            || ctx.has_token(jl::GE)
-            || ctx.has_token(jl::INSTANCEOF)
+            || expr.equal_token().is_some()
+            || expr.notequal_token().is_some()
+            || expr.le_token().is_some()
+            || expr.ge_token().is_some()
+            || expr.instanceof_token().is_some()
         {
             self.current().abc.record_condition();
         }
@@ -1789,26 +1799,6 @@ fn ctx_is_label_wrapper(ctx: RuleNodeView<'_>) -> bool {
     )
 }
 
-/// Count the direct `LT` and `GT` terminal children of an `expression`
-/// context, returning `(lt_count, gt_count)`. A relational `<`/`>` contributes
-/// exactly one; a bit-shift decomposes into two (`<<`, `>>`) or three (`>>>`)
-/// — the grammar has no dedicated shift token — so counting distinguishes the
-/// two so shifts are not miscounted as ABC conditions.
-fn count_angle_tokens(ctx: RuleNodeView<'_>) -> (usize, usize) {
-    let mut lt = 0;
-    let mut gt = 0;
-    for child in ctx.children() {
-        if let Some(t) = child.as_terminal() {
-            match t.symbol().token_type() {
-                jl::LT => lt += 1,
-                jl::GT => gt += 1,
-                _ => {}
-            }
-        }
-    }
-    (lt, gt)
-}
-
 /// Index of the `else`-branch `statement` child of an `if` statement, if
 /// present. The else body is the `statement` that appears *after* the `ELSE`
 /// terminal among the children.
@@ -2132,21 +2122,29 @@ fn visibility_from_token_holder(ctx: RuleNodeView<'_>) -> Option<bool> {
 /// a direct child token: `=`, a compound assign (`+=`, `-=`, …), or an
 /// increment/decrement (`++`, `--`). Fitzpatrick's ABC lists `++`/`--` under
 /// the assignment (A) component alongside `=`.
+///
+/// Reads the operators through the generated typed `ExpressionContext`
+/// accessors (0.15.2 runtime, issue #178) — `assign_token()`, the eleven
+/// compound-assign accessors, `inc_token()`/`dec_token()` — instead of
+/// `has_token(jl::…)` integer probing. All are `Option<TerminalNode>`.
 fn has_assignment_op(ctx: RuleNodeView<'_>) -> bool {
-    ctx.has_token(jl::ASSIGN)
-        || ctx.has_token(jl::ADD_ASSIGN)
-        || ctx.has_token(jl::SUB_ASSIGN)
-        || ctx.has_token(jl::MUL_ASSIGN)
-        || ctx.has_token(jl::DIV_ASSIGN)
-        || ctx.has_token(jl::AND_ASSIGN)
-        || ctx.has_token(jl::OR_ASSIGN)
-        || ctx.has_token(jl::XOR_ASSIGN)
-        || ctx.has_token(jl::MOD_ASSIGN)
-        || ctx.has_token(jl::LSHIFT_ASSIGN)
-        || ctx.has_token(jl::RSHIFT_ASSIGN)
-        || ctx.has_token(jl::URSHIFT_ASSIGN)
-        || ctx.has_token(jl::INC)
-        || ctx.has_token(jl::DEC)
+    let Some(expr) = jp::ExpressionContext::from_rule_node(ctx) else {
+        return false;
+    };
+    expr.assign_token().is_some()
+        || expr.add_assign_token().is_some()
+        || expr.sub_assign_token().is_some()
+        || expr.mul_assign_token().is_some()
+        || expr.div_assign_token().is_some()
+        || expr.and_assign_token().is_some()
+        || expr.or_assign_token().is_some()
+        || expr.xor_assign_token().is_some()
+        || expr.mod_assign_token().is_some()
+        || expr.lshift_assign_token().is_some()
+        || expr.rshift_assign_token().is_some()
+        || expr.urshift_assign_token().is_some()
+        || expr.inc_token().is_some()
+        || expr.dec_token().is_some()
 }
 
 /// Find the first descendant rule with `rule_index`, searching direct children
