@@ -113,7 +113,8 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
     `token_type()` against the token constants, using the runtime's `child_rule`/`child_token`/
     `has_token`/`first_rule` navigation helpers. Comments are on a hidden channel (absent from the
     tree) — recover CLOC from the eagerly-buffered token store via `mehen_antlr::loc_tokens`
-    (feeding it `mehen_antlr::token_views(parsed.tokens())`).
+    (feeding it `parsed.tokens()` directly — `&TokenStore` is `IntoIterator` since the 0.15
+    runtime).
   </Step>
   <Step title="Register the analyzer">
     Same as the other backends: register in `crates/mehen-engine/src/registry.rs`.

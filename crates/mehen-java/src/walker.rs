@@ -463,17 +463,7 @@ impl Walker<'_> {
         // The operator THIS node itself introduces (only a `&&`/`||` expression
         // does), used both to set the operands' run operator and to place a
         // predecessor for the run (its right operand follows its left).
-        let this_bool_op = if ri == jp::RULE_EXPRESSION {
-            if ctx.has_token(jl::AND) {
-                Some(BoolOp::And)
-            } else if ctx.has_token(jl::OR) {
-                Some(BoolOp::Or)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let this_bool_op = expression_bool_op(ctx);
         let child_bool_op = if ri == jp::RULE_EXPRESSION {
             if this_bool_op.is_some() {
                 this_bool_op
@@ -1264,14 +1254,10 @@ impl Walker<'_> {
         };
         // Short-circuit `&&`/`||`: a cyclomatic decision and an ABC condition
         // per operator (both independent of the cognitive run-collapse), plus
-        // the cognitive boolean-sequence cost.
-        let this_op = if expr.and_token().is_some() {
-            Some(BoolOp::And)
-        } else if expr.or_token().is_some() {
-            Some(BoolOp::Or)
-        } else {
-            None
-        };
+        // the cognitive boolean-sequence cost. Uses the same `expression_bool_op`
+        // helper as `visit_children`'s run-threading so both agree on the
+        // operator.
+        let this_op = expression_bool_op(ctx);
         if let Some(_op) = this_op {
             self.current().cyclomatic.record_decision();
             self.current().abc.record_condition();
@@ -1711,6 +1697,23 @@ fn unwrap_to_logical(ctx: RuleNodeView<'_>, depth: usize) -> Option<RuleNodeView
 /// starts a fresh boolean context.
 fn expression_has_operator_token(ctx: RuleNodeView<'_>) -> bool {
     ctx.children().any(|c| c.as_terminal().is_some())
+}
+
+/// The short-circuit boolean operator at the root of an `expression` node, if
+/// any: `&&` → [`BoolOp::And`], `||` → [`BoolOp::Or`], else `None` (including
+/// for non-`expression` nodes). Reads the typed `ExpressionContext` accessors
+/// (`and_token()` is `&&`, distinct from `bitand_tokens()` `&`). Shared by the
+/// cognitive boolean-run threading in `visit_children` and the per-operator
+/// scoring in `classify_expression` so both derive the operator identically.
+fn expression_bool_op(ctx: RuleNodeView<'_>) -> Option<BoolOp> {
+    let expr = jp::ExpressionContext::from_rule_node(ctx)?;
+    if expr.and_token().is_some() {
+        Some(BoolOp::And)
+    } else if expr.or_token().is_some() {
+        Some(BoolOp::Or)
+    } else {
+        None
+    }
 }
 
 /// Whether a `lambdaExpression`'s body is an expression (`lambdaBody:
