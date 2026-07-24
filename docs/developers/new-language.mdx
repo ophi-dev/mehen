@@ -82,8 +82,10 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
   </Step>
   <Step title="Generate the parser modules">
     ```bash
-    # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN)
-    cargo install antlr-rust-runtime --features codegen --bin antlr4-rust-gen --force
+    # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN). Pin --version to
+    # the workspace `antlr4_runtime` version so the generator matches the
+    # runtime the checked-in modules were built against.
+    cargo install antlr-rust-runtime --version 0.15.2 --features codegen --bin antlr4-rust-gen --force
     cargo xtask antlr generate <lang>
     ```
 

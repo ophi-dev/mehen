@@ -57,7 +57,7 @@ Never hand-edit the files in `../src/generated/`. To regenerate after bumping
 the grammar or the runtime:
 
 ```bash
-cargo install antlr-rust-runtime --features codegen --bin antlr4-rust-gen --force
+cargo install antlr-rust-runtime --version 0.15.2 --features codegen --bin antlr4-rust-gen --force
 cargo run -p xtask -- antlr generate java
 ```
 
