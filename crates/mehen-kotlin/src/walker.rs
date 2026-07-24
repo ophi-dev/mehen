@@ -1048,15 +1048,15 @@ fn record_constructor_properties(
         return;
     };
     for param in params.class_parameter_children() {
-        // Only `val`/`var` parameters are properties. `ClassParameterContext`
-        // exposes `val_token()` but not `var_token()` (a residual of the
-        // grouped-`(VAL | VAR)?` accessor gap, upstream #177/#178), so the
-        // keyword check stays on the underlying node's `has_token`.
-        let node = param.rule_node();
-        if !node.has_token(kp::VAL) && !node.has_token(kp::VAR) {
+        // Only `val`/`var` parameters are properties (a plain parameter is
+        // not); the typed context exposes both keyword accessors of the
+        // `(VAL | VAR)?` group.
+        if param.val_token().is_none() && param.var_token().is_none() {
             continue;
         }
-        let public = member_is_public(node);
+        // `member_is_public` scans `modifiers` generically across several
+        // context types, so it stays on the underlying node.
+        let public = member_is_public(param.rule_node());
         state.npa.record_attribute(container, public);
     }
 }
