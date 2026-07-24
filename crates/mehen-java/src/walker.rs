@@ -1849,54 +1849,66 @@ fn method_name(ctx: RuleNodeView<'_>) -> Option<String> {
 /// declaration (a field, nested type, const, compact ctor — those keep their
 /// existing open sites).
 fn wrapper_inner_method(ctx: RuleNodeView<'_>) -> Option<RuleNodeView<'_>> {
+    // Navigate via the generated typed contexts (named `Option`/`Result`
+    // accessors reach only the declared direct child of each rule), then hand
+    // back the underlying `RuleNodeView` the caller opens a space for. The
+    // typed accessors enforce the "direct child only" property that the anti-
+    // descend comments below spell out by hand.
     match ctx.rule_index() {
         jp::RULE_CLASS_BODY_DECLARATION => {
-            let member = ctx.child_rule(jp::RULE_MEMBER_DECLARATION)?;
-            for child in member.children() {
-                if let Some(c) = child.as_rule() {
-                    match c.rule_index() {
-                        jp::RULE_METHOD_DECLARATION | jp::RULE_CONSTRUCTOR_DECLARATION => {
-                            return Some(c);
-                        }
-                        jp::RULE_GENERIC_METHOD_DECLARATION => {
-                            return c.child_rule(jp::RULE_METHOD_DECLARATION);
-                        }
-                        jp::RULE_GENERIC_CONSTRUCTOR_DECLARATION => {
-                            return c.child_rule(jp::RULE_CONSTRUCTOR_DECLARATION);
-                        }
-                        _ => {}
-                    }
-                }
+            let member =
+                jp::ClassBodyDeclarationContext::from_rule_node(ctx)?.member_declaration()?;
+            // `method`/`constructor` are direct; the generic forms wrap the
+            // real declaration one level down.
+            if let Some(m) = member.method_declaration() {
+                return Some(m.rule_node());
+            }
+            if let Some(c) = member.constructor_declaration() {
+                return Some(c.rule_node());
+            }
+            if let Some(g) = member.generic_method_declaration() {
+                return g.method_declaration().ok().map(|m| m.rule_node());
+            }
+            if let Some(g) = member.generic_constructor_declaration() {
+                return g.constructor_declaration().ok().map(|c| c.rule_node());
             }
             None
         }
         // Interface method: walk the DIRECT path interfaceBodyDeclaration →
         // interfaceMemberDeclaration → (generic)interfaceMethodDeclaration →
         // interfaceCommonBodyDeclaration. `interfaceCommonBodyDeclaration` is a
-        // direct child of both method-declaration forms (`interfaceMethodModifier*
-        // [typeParameters] interfaceCommonBodyDeclaration`), so use `child_rule`
-        // — an unbounded search could reach a nested type's method.
+        // direct child of both method-declaration forms, so the typed accessors
+        // (never an unbounded search) can't reach a nested type's method.
         jp::RULE_INTERFACE_BODY_DECLARATION => {
-            let member = ctx.child_rule(jp::RULE_INTERFACE_MEMBER_DECLARATION)?;
-            let decl = member
-                .child_rule(jp::RULE_INTERFACE_METHOD_DECLARATION)
-                .or_else(|| member.child_rule(jp::RULE_GENERIC_INTERFACE_METHOD_DECLARATION))?;
-            decl.child_rule(jp::RULE_INTERFACE_COMMON_BODY_DECLARATION)
+            let member = jp::InterfaceBodyDeclarationContext::from_rule_node(ctx)?
+                .interface_member_declaration()?;
+            let common = match (
+                member.interface_method_declaration(),
+                member.generic_interface_method_declaration(),
+            ) {
+                (Some(d), _) => d.interface_common_body_declaration().ok()?,
+                (None, Some(g)) => g.interface_common_body_declaration().ok()?,
+                (None, None) => return None,
+            };
+            Some(common.rule_node())
         }
         // Annotation element: walk the DIRECT path
         // annotationTypeElementDeclaration → annotationTypeElementRest →
-        // annotationMethodOrConstantRest → annotationMethodRest. A plain
-        // `child_rule` chain (not an unbounded `find_descendant`) is required
-        // because `annotationTypeElementRest` also has nested-type alternatives
-        // (`annotationTypeDeclaration`, `classDeclaration`, …) — descending into
-        // those would find a *nested* annotation's element and open a phantom
-        // method for the outer type (`@interface A { @interface B { String
-        // v(); } }` must have no method on `A`). `None` when the element is a
-        // nested type or a constant, not a method.
-        jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION => ctx
-            .child_rule(jp::RULE_ANNOTATION_TYPE_ELEMENT_REST)?
-            .child_rule(jp::RULE_ANNOTATION_METHOD_OR_CONSTANT_REST)?
-            .child_rule(jp::RULE_ANNOTATION_METHOD_REST),
+        // annotationMethodOrConstantRest → annotationMethodRest. The typed
+        // accessors reach only named direct children, so — unlike an unbounded
+        // `find_descendant` — they never dip into `annotationTypeElementRest`'s
+        // nested-type alternatives (`annotationTypeDeclaration`,
+        // `classDeclaration`, …). That is what keeps a nested annotation's
+        // element from opening a phantom method on the outer type
+        // (`@interface A { @interface B { String v(); } }` → no method on `A`).
+        // `None` when the element is a nested type or a constant, not a method.
+        jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION => Some(
+            jp::AnnotationTypeElementDeclarationContext::from_rule_node(ctx)?
+                .annotation_type_element_rest()?
+                .annotation_method_or_constant_rest()?
+                .annotation_method_rest()?
+                .rule_node(),
+        ),
         _ => None,
     }
 }
