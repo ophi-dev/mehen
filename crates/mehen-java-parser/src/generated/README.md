@@ -4,7 +4,7 @@
 generated from the vendored grammar in `../../grammar/` by
 `cargo run -p xtask -- antlr generate java`. They are checked in (like the
 tree-sitter `grammar.rs` kind enums) so a normal `cargo build` never needs
-Java or the ANTLR jar, and all three are drift-checked by
+`antlr4-rust-gen`, and all three are drift-checked by
 `cargo run -p xtask -- antlr check-generated`.
 
 Regenerate — never hand-edit — via `cargo run -p xtask -- antlr generate java`.

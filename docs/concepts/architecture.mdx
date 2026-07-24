@@ -81,7 +81,7 @@ blocks without duplicating language logic.
 ## ANTLR-backed analyzers
 
 Kotlin and Java run through ANTLR v4 grammars generated to Rust ahead of time and checked in, so a
-normal `cargo build` never needs Java or the ANTLR jar. The shared `mehen-antlr` crate carries the
+normal `cargo build` never needs `antlr4-rust-gen`. The shared `mehen-antlr` crate carries the
 concerns every ANTLR analyzer needs but tree-sitter and the language-specific parsers handle
 differently:
 

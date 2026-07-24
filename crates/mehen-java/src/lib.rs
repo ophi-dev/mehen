@@ -159,7 +159,10 @@ fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
     use mehen_java_parser::java_lexer::{COMMENT, LINE_COMMENT, WS};
 
     mehen_antlr::loc_tokens(
-        mehen_antlr::token_views(parsed.tokens()),
+        // Since the 0.15 runtime `&TokenStore` is `IntoIterator` (issue #123),
+        // so the eagerly-buffered store feeds the LOC sweep directly — no
+        // hand-rolled index loop.
+        parsed.tokens(),
         &[COMMENT, LINE_COMMENT],
         &[WS],
         &[],

@@ -97,8 +97,8 @@ gix = { version = "^0.85", default-features = false, features = ["attributes", "
 # src/generated/`) always link the runtime they were generated against.
 # Bump deliberately and regenerate via `cargo xtask antlr generate --all`
 # with a matching `antlr4-rust-gen` (`cargo install antlr-rust-runtime
-# --version <this> --bin antlr4-rust-gen --force`).
-antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.14.2" }
+# --version <this> --features codegen --bin antlr4-rust-gen --force`).
+antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.15.2" }
 
 tree-sitter = "=0.26.11"
 # Per-language grammars (`tree-sitter-c`, `tree-sitter-go`,

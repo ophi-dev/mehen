@@ -50,7 +50,7 @@
 //!   modifier says otherwise.
 
 use mehen_antlr::runtime::token::Token;
-use mehen_antlr::runtime::{Node, RuleNodeView, TerminalNodeView};
+use mehen_antlr::runtime::{FromRuleNode, Node, RuleNodeView, TerminalNodeView};
 use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
 use mehen_metrics::{
@@ -273,7 +273,7 @@ impl Walker<'_> {
                 });
             }
             HalsteadClass::Operand => {
-                let text = term.symbol().text();
+                let text = term.symbol().text_or_empty();
                 self.current().halstead.observe_operand(HalsteadOperand {
                     kind: SmolStr::new("Operand"),
                     text: Some(SmolStr::new(text)),
@@ -312,7 +312,7 @@ impl Walker<'_> {
             // content, not folded trivia, and must keep its real start row.
             let base = (term.symbol().line() as u32).saturating_sub(1);
             let row = if folds_leading_trivia(tt) {
-                base.saturating_add(leading_newlines(term.symbol().text()))
+                base.saturating_add(leading_newlines(term.symbol().text_or_empty()))
             } else {
                 base
             };
@@ -524,7 +524,11 @@ impl Walker<'_> {
             }
             kp::RULE_CLASS_DECLARATION => {
                 let name = rule_name(ctx);
-                let is_interface = ctx.has_token(kp::INTERFACE);
+                // A `classDeclaration` leads with either `CLASS` or `INTERFACE`;
+                // the typed context exposes `interface_token()` (Option).
+                let is_interface = kp::ClassDeclarationContext::from_rule_node(ctx)
+                    .and_then(|class| class.interface_token())
+                    .is_some();
                 let kind = if is_interface {
                     SpaceKind::Interface
                 } else {
@@ -580,7 +584,7 @@ impl Walker<'_> {
         if let Some(start) = ctx.start()
             && folds_leading_trivia(start.token_type())
         {
-            let (_, trivia_bytes) = leading_trivia(start.text());
+            let (_, trivia_bytes) = leading_trivia(start.text_or_empty());
             if trivia_bytes > 0 {
                 let trimmed = span
                     .start_byte
@@ -738,7 +742,9 @@ impl Walker<'_> {
             }
             // Label-qualified break/continue add +1 (goto-like).
             kp::RULE_JUMP_EXPRESSION => {
-                if ctx.has_token(kp::BREAK_AT) || ctx.has_token(kp::CONTINUE_AT) {
+                if let Some(jump) = kp::JumpExpressionContext::from_rule_node(ctx)
+                    && (jump.break_at_token().is_some() || jump.continue_at_token().is_some())
+                {
                     self.current().cognitive.increment_by_one();
                 }
                 self.current().cognitive.boolean_seq.reset();
@@ -759,7 +765,11 @@ impl Walker<'_> {
             // the rule level — `prefixUnaryOperator` is logical `!`, whereas
             // the postfix `!!` not-null assertion is `postfixUnaryOperator`
             // and shares the same `EXCL_*` tokens but must NOT break a run.
-            kp::RULE_PREFIX_UNARY_OPERATOR if ctx.child_rule(kp::RULE_EXCL).is_some() => {
+            kp::RULE_PREFIX_UNARY_OPERATOR
+                if kp::PrefixUnaryOperatorContext::from_rule_node(ctx)
+                    .and_then(|op| op.excl())
+                    .is_some() =>
+            {
                 self.current().cognitive.boolean_seq.not_operator("!");
             }
             _ => {}
@@ -771,7 +781,11 @@ impl Walker<'_> {
             kp::RULE_ASSIGNMENT => self.current().abc.record_assignment(),
             // A `propertyDeclaration` with an initializer (`= expr`) is an
             // assignment; `val`/`var` without `=` is not.
-            kp::RULE_PROPERTY_DECLARATION if ctx.has_token(kp::ASSIGNMENT) => {
+            kp::RULE_PROPERTY_DECLARATION
+                if kp::PropertyDeclarationContext::from_rule_node(ctx)
+                    .and_then(|p| p.assignment_token())
+                    .is_some() =>
+            {
                 self.current().abc.record_assignment();
             }
             // A call: the `callSuffix` rule wraps the argument list of a
@@ -780,7 +794,11 @@ impl Walker<'_> {
             // Multi-token operators modeled as rules: elvis (`?:`),
             // safe-nav (`?.`), and the `!!` not-null assertion.
             kp::RULE_ELVIS | kp::RULE_SAFE_NAV => self.current().abc.record_condition(),
-            kp::RULE_POSTFIX_UNARY_OPERATOR if ctx.has_token(kp::EXCL_NO_WS) => {
+            kp::RULE_POSTFIX_UNARY_OPERATOR
+                if kp::PostfixUnaryOperatorContext::from_rule_node(ctx)
+                    .and_then(|op| op.excl_no_ws_token())
+                    .is_some() =>
+            {
                 self.current().abc.record_condition();
             }
             kp::RULE_IF_EXPRESSION
@@ -799,7 +817,9 @@ impl Walker<'_> {
             // enclosing function. A labeled `return@label` (`RETURN_AT`)
             // returns from a lambda, not the function, so it is excluded
             // (matches SonarKotlin); `break`/`continue` are excluded too.
-            if ctx.has_token(kp::RETURN) || ctx.has_token(kp::THROW) {
+            if let Some(jump) = kp::JumpExpressionContext::from_rule_node(ctx)
+                && (jump.return_token().is_some() || jump.throw_token().is_some())
+            {
                 self.current().nexit.record_exit();
             }
         }
@@ -944,16 +964,15 @@ fn count_function_args(ctx: RuleNodeView<'_>) -> u32 {
 }
 
 /// Count `lambdaParameter`s under a lambda literal's `lambdaParameters`.
+///
+/// Reads the generated typed context (0.15 runtime): a `lambdaLiteral` has an
+/// optional `lambdaParameters` child, which holds the repeated
+/// `lambdaParameter`s.
 fn count_lambda_args(ctx: RuleNodeView<'_>) -> u32 {
-    let mut total = 0;
-    for child in ctx.children() {
-        if let Some(c) = child.as_rule()
-            && c.rule_index() == kp::RULE_LAMBDA_PARAMETERS
-        {
-            total += c.child_rules(kp::RULE_LAMBDA_PARAMETER).count() as u32;
-        }
-    }
-    total
+    kp::LambdaLiteralContext::from_rule_node(ctx)
+        .and_then(|lambda| lambda.lambda_parameters())
+        .map(|params| params.lambda_parameter_children().count() as u32)
+        .unwrap_or(0)
 }
 
 /// Whether a member declaration is public — default unless a
@@ -1019,24 +1038,26 @@ fn record_constructor_properties(
     container: ContainerKind,
     state: &mut State,
 ) {
-    let Some(primary) = class_ctx.child_rule(kp::RULE_PRIMARY_CONSTRUCTOR) else {
+    // Navigate the typed chain (0.15 runtime): a class declaration's optional
+    // `primaryConstructor` holds a required `classParameters`, which holds the
+    // repeated `classParameter`s.
+    let Some(params) = kp::ClassDeclarationContext::from_rule_node(class_ctx)
+        .and_then(|class| class.primary_constructor())
+        .and_then(|primary| primary.class_parameters().ok())
+    else {
         return;
     };
-    let Some(params) = primary.child_rule(kp::RULE_CLASS_PARAMETERS) else {
-        return;
-    };
-    for child in params.children() {
-        if let Some(param) = child.as_rule() {
-            if param.rule_index() != kp::RULE_CLASS_PARAMETER {
-                continue;
-            }
-            // Only `val`/`var` parameters are properties.
-            if !param.has_token(kp::VAL) && !param.has_token(kp::VAR) {
-                continue;
-            }
-            let public = member_is_public(param);
-            state.npa.record_attribute(container, public);
+    for param in params.class_parameter_children() {
+        // Only `val`/`var` parameters are properties (a plain parameter is
+        // not); the typed context exposes both keyword accessors of the
+        // `(VAL | VAR)?` group.
+        if param.val_token().is_none() && param.var_token().is_none() {
+            continue;
         }
+        // `member_is_public` scans `modifiers` generically across several
+        // context types, so it stays on the underlying node.
+        let public = member_is_public(param.rule_node());
+        state.npa.record_attribute(container, public);
     }
 }
 

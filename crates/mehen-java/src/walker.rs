@@ -67,7 +67,7 @@
 //!   NPA/NPM; interface/annotation members are implicitly public.
 
 use mehen_antlr::runtime::token::Token;
-use mehen_antlr::runtime::{Node, RuleNodeView, TerminalNodeView};
+use mehen_antlr::runtime::{FromRuleNode, Node, RuleNodeView, TerminalNodeView};
 use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
 use mehen_metrics::{
@@ -310,7 +310,7 @@ impl Walker<'_> {
                 });
             }
             HalsteadClass::Operand => {
-                let text = term.symbol().text();
+                let text = term.symbol().text_or_empty();
                 self.current().halstead.observe_operand(HalsteadOperand {
                     kind: SmolStr::new("Operand"),
                     text: Some(SmolStr::new(text)),
@@ -330,7 +330,12 @@ impl Walker<'_> {
         // as phantom blank lines (`blank = sloc - ploc - only_comment`).
         if tt >= 0 {
             let start_row = (term.symbol().line() as u32).saturating_sub(1);
-            let extra_rows = term.symbol().text().bytes().filter(|&b| b == b'\n').count() as u32;
+            let extra_rows = term
+                .symbol()
+                .text_or_empty()
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count() as u32;
             for row in start_row..=start_row.saturating_add(extra_rows) {
                 self.current().loc.observe_code_line(row);
             }
@@ -458,17 +463,7 @@ impl Walker<'_> {
         // The operator THIS node itself introduces (only a `&&`/`||` expression
         // does), used both to set the operands' run operator and to place a
         // predecessor for the run (its right operand follows its left).
-        let this_bool_op = if ri == jp::RULE_EXPRESSION {
-            if ctx.has_token(jl::AND) {
-                Some(BoolOp::And)
-            } else if ctx.has_token(jl::OR) {
-                Some(BoolOp::Or)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let this_bool_op = expression_bool_op(ctx);
         let child_bool_op = if ri == jp::RULE_EXPRESSION {
             if this_bool_op.is_some() {
                 this_bool_op
@@ -1249,16 +1244,20 @@ impl Walker<'_> {
         if ri != jp::RULE_EXPRESSION {
             return;
         }
+        // Read this `expression` node's operator tokens through the generated
+        // typed context (0.15.2 runtime, issue #178): `and_token()` is `&&`
+        // (distinct from `bitand_tokens()` `&`), `or_token()` is `||`, etc. —
+        // named `Option<TerminalNode>` accessors that replace `has_token(jl::…)`
+        // integer probing.
+        let Some(expr) = jp::ExpressionContext::from_rule_node(ctx) else {
+            return;
+        };
         // Short-circuit `&&`/`||`: a cyclomatic decision and an ABC condition
         // per operator (both independent of the cognitive run-collapse), plus
-        // the cognitive boolean-sequence cost.
-        let this_op = if ctx.has_token(jl::AND) {
-            Some(BoolOp::And)
-        } else if ctx.has_token(jl::OR) {
-            Some(BoolOp::Or)
-        } else {
-            None
-        };
+        // the cognitive boolean-sequence cost. Uses the same `expression_bool_op`
+        // helper as `visit_children`'s run-threading so both agree on the
+        // operator.
+        let this_op = expression_bool_op(ctx);
         if let Some(_op) = this_op {
             self.current().cyclomatic.record_decision();
             self.current().abc.record_condition();
@@ -1300,7 +1299,7 @@ impl Walker<'_> {
         // so a structure nested in an operand (notably a nested ternary) is
         // scored one level deeper; `visit_rule`'s `saved_cognitive` restore
         // unwinds it after the operands are walked.
-        if ctx.has_token(jl::QUESTION) && ctx.has_token(jl::COLON) {
+        if expr.question_token().is_some() && expr.colon_token().is_some() {
             let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
             self.current().cyclomatic.record_decision();
             self.current().cognitive.increase_nesting(eff);
@@ -1309,18 +1308,20 @@ impl Walker<'_> {
         }
         // Comparison / equality / instanceof → ABC conditions only. A bit-shift
         // (`<<`, `>>`, `>>>`) is NOT a condition — but the grammar spells it
-        // with multiple bare `LT`/`GT` terminals (there is no `<<` token), so
-        // `has_token(LT)`/`has_token(GT)` can't tell a shift from a relational
-        // `<`/`>`. Distinguish by count: a *relational* operator contributes
-        // exactly one `LT` (or one `GT`); a shift contributes two-or-three.
-        let (lt, gt) = count_angle_tokens(ctx);
+        // with multiple bare `LT`/`GT` terminals (there is no `<<` token), so a
+        // bare presence check can't tell a shift from a relational `<`/`>`.
+        // Distinguish by count: a *relational* operator contributes exactly one
+        // `LT` (or one `GT`); a shift contributes two-or-three. `lt_tokens()`/
+        // `gt_tokens()` are the grouped-token iterators for those bare literals.
+        let lt = expr.lt_tokens().count();
+        let gt = expr.gt_tokens().count();
         if lt == 1
             || gt == 1
-            || ctx.has_token(jl::EQUAL)
-            || ctx.has_token(jl::NOTEQUAL)
-            || ctx.has_token(jl::LE)
-            || ctx.has_token(jl::GE)
-            || ctx.has_token(jl::INSTANCEOF)
+            || expr.equal_token().is_some()
+            || expr.notequal_token().is_some()
+            || expr.le_token().is_some()
+            || expr.ge_token().is_some()
+            || expr.instanceof_token().is_some()
         {
             self.current().abc.record_condition();
         }
@@ -1698,6 +1699,23 @@ fn expression_has_operator_token(ctx: RuleNodeView<'_>) -> bool {
     ctx.children().any(|c| c.as_terminal().is_some())
 }
 
+/// The short-circuit boolean operator at the root of an `expression` node, if
+/// any: `&&` → [`BoolOp::And`], `||` → [`BoolOp::Or`], else `None` (including
+/// for non-`expression` nodes). Reads the typed `ExpressionContext` accessors
+/// (`and_token()` is `&&`, distinct from `bitand_tokens()` `&`). Shared by the
+/// cognitive boolean-run threading in `visit_children` and the per-operator
+/// scoring in `classify_expression` so both derive the operator identically.
+fn expression_bool_op(ctx: RuleNodeView<'_>) -> Option<BoolOp> {
+    let expr = jp::ExpressionContext::from_rule_node(ctx)?;
+    if expr.and_token().is_some() {
+        Some(BoolOp::And)
+    } else if expr.or_token().is_some() {
+        Some(BoolOp::Or)
+    } else {
+        None
+    }
+}
+
 /// Whether a `lambdaExpression`'s body is an expression (`lambdaBody:
 /// expression`) rather than a block. An expression body is a single logical
 /// line for LLOC; a block body's statements are counted individually.
@@ -1784,26 +1802,6 @@ fn ctx_is_label_wrapper(ctx: RuleNodeView<'_>) -> bool {
     )
 }
 
-/// Count the direct `LT` and `GT` terminal children of an `expression`
-/// context, returning `(lt_count, gt_count)`. A relational `<`/`>` contributes
-/// exactly one; a bit-shift decomposes into two (`<<`, `>>`) or three (`>>>`)
-/// — the grammar has no dedicated shift token — so counting distinguishes the
-/// two so shifts are not miscounted as ABC conditions.
-fn count_angle_tokens(ctx: RuleNodeView<'_>) -> (usize, usize) {
-    let mut lt = 0;
-    let mut gt = 0;
-    for child in ctx.children() {
-        if let Some(t) = child.as_terminal() {
-            match t.symbol().token_type() {
-                jl::LT => lt += 1,
-                jl::GT => gt += 1,
-                _ => {}
-            }
-        }
-    }
-    (lt, gt)
-}
-
 /// Index of the `else`-branch `statement` child of an `if` statement, if
 /// present. The else body is the `statement` that appears *after* the `ELSE`
 /// terminal among the children.
@@ -1854,54 +1852,66 @@ fn method_name(ctx: RuleNodeView<'_>) -> Option<String> {
 /// declaration (a field, nested type, const, compact ctor — those keep their
 /// existing open sites).
 fn wrapper_inner_method(ctx: RuleNodeView<'_>) -> Option<RuleNodeView<'_>> {
+    // Navigate via the generated typed contexts (named `Option`/`Result`
+    // accessors reach only the declared direct child of each rule), then hand
+    // back the underlying `RuleNodeView` the caller opens a space for. The
+    // typed accessors enforce the "direct child only" property that the anti-
+    // descend comments below spell out by hand.
     match ctx.rule_index() {
         jp::RULE_CLASS_BODY_DECLARATION => {
-            let member = ctx.child_rule(jp::RULE_MEMBER_DECLARATION)?;
-            for child in member.children() {
-                if let Some(c) = child.as_rule() {
-                    match c.rule_index() {
-                        jp::RULE_METHOD_DECLARATION | jp::RULE_CONSTRUCTOR_DECLARATION => {
-                            return Some(c);
-                        }
-                        jp::RULE_GENERIC_METHOD_DECLARATION => {
-                            return c.child_rule(jp::RULE_METHOD_DECLARATION);
-                        }
-                        jp::RULE_GENERIC_CONSTRUCTOR_DECLARATION => {
-                            return c.child_rule(jp::RULE_CONSTRUCTOR_DECLARATION);
-                        }
-                        _ => {}
-                    }
-                }
+            let member =
+                jp::ClassBodyDeclarationContext::from_rule_node(ctx)?.member_declaration()?;
+            // `method`/`constructor` are direct; the generic forms wrap the
+            // real declaration one level down.
+            if let Some(m) = member.method_declaration() {
+                return Some(m.rule_node());
+            }
+            if let Some(c) = member.constructor_declaration() {
+                return Some(c.rule_node());
+            }
+            if let Some(g) = member.generic_method_declaration() {
+                return g.method_declaration().ok().map(|m| m.rule_node());
+            }
+            if let Some(g) = member.generic_constructor_declaration() {
+                return g.constructor_declaration().ok().map(|c| c.rule_node());
             }
             None
         }
         // Interface method: walk the DIRECT path interfaceBodyDeclaration →
         // interfaceMemberDeclaration → (generic)interfaceMethodDeclaration →
         // interfaceCommonBodyDeclaration. `interfaceCommonBodyDeclaration` is a
-        // direct child of both method-declaration forms (`interfaceMethodModifier*
-        // [typeParameters] interfaceCommonBodyDeclaration`), so use `child_rule`
-        // — an unbounded search could reach a nested type's method.
+        // direct child of both method-declaration forms, so the typed accessors
+        // (never an unbounded search) can't reach a nested type's method.
         jp::RULE_INTERFACE_BODY_DECLARATION => {
-            let member = ctx.child_rule(jp::RULE_INTERFACE_MEMBER_DECLARATION)?;
-            let decl = member
-                .child_rule(jp::RULE_INTERFACE_METHOD_DECLARATION)
-                .or_else(|| member.child_rule(jp::RULE_GENERIC_INTERFACE_METHOD_DECLARATION))?;
-            decl.child_rule(jp::RULE_INTERFACE_COMMON_BODY_DECLARATION)
+            let member = jp::InterfaceBodyDeclarationContext::from_rule_node(ctx)?
+                .interface_member_declaration()?;
+            let common = match (
+                member.interface_method_declaration(),
+                member.generic_interface_method_declaration(),
+            ) {
+                (Some(d), _) => d.interface_common_body_declaration().ok()?,
+                (None, Some(g)) => g.interface_common_body_declaration().ok()?,
+                (None, None) => return None,
+            };
+            Some(common.rule_node())
         }
         // Annotation element: walk the DIRECT path
         // annotationTypeElementDeclaration → annotationTypeElementRest →
-        // annotationMethodOrConstantRest → annotationMethodRest. A plain
-        // `child_rule` chain (not an unbounded `find_descendant`) is required
-        // because `annotationTypeElementRest` also has nested-type alternatives
-        // (`annotationTypeDeclaration`, `classDeclaration`, …) — descending into
-        // those would find a *nested* annotation's element and open a phantom
-        // method for the outer type (`@interface A { @interface B { String
-        // v(); } }` must have no method on `A`). `None` when the element is a
-        // nested type or a constant, not a method.
-        jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION => ctx
-            .child_rule(jp::RULE_ANNOTATION_TYPE_ELEMENT_REST)?
-            .child_rule(jp::RULE_ANNOTATION_METHOD_OR_CONSTANT_REST)?
-            .child_rule(jp::RULE_ANNOTATION_METHOD_REST),
+        // annotationMethodOrConstantRest → annotationMethodRest. The typed
+        // accessors reach only named direct children, so — unlike an unbounded
+        // `find_descendant` — they never dip into `annotationTypeElementRest`'s
+        // nested-type alternatives (`annotationTypeDeclaration`,
+        // `classDeclaration`, …). That is what keeps a nested annotation's
+        // element from opening a phantom method on the outer type
+        // (`@interface A { @interface B { String v(); } }` → no method on `A`).
+        // `None` when the element is a nested type or a constant, not a method.
+        jp::RULE_ANNOTATION_TYPE_ELEMENT_DECLARATION => Some(
+            jp::AnnotationTypeElementDeclarationContext::from_rule_node(ctx)?
+                .annotation_type_element_rest()?
+                .annotation_method_or_constant_rest()?
+                .annotation_method_rest()?
+                .rule_node(),
+        ),
         _ => None,
     }
 }
@@ -1985,14 +1995,23 @@ fn name_from_identifier(ctx: RuleNodeView<'_>) -> Option<String> {
 /// `receiverParameter` (`Foo this`) is not a value parameter and is excluded.
 /// A trailing varargs (`int... rest`) is a plain `formalParameter` here.
 fn count_formal_params(ctx: RuleNodeView<'_>) -> u32 {
-    let Some(params) = find_descendant(ctx, jp::RULE_FORMAL_PARAMETERS) else {
+    // `find_descendant` has no typed equivalent (the typed contexts expose
+    // named direct children, not arbitrary-depth search), so it stays; the
+    // `formalParameters` subtree is then read through its typed context.
+    let Some(params) = find_descendant(ctx, jp::RULE_FORMAL_PARAMETERS)
+        .and_then(jp::FormalParametersContext::from_rule_node)
+    else {
         return 0;
     };
-    let direct = params.child_rules(jp::RULE_FORMAL_PARAMETER).count() as u32;
-    let in_list = params
-        .child_rule(jp::RULE_FORMAL_PARAMETER_LIST)
-        .map(|list| list.child_rules(jp::RULE_FORMAL_PARAMETER).count() as u32)
-        .unwrap_or(0);
+    // Grammar: `'(' ((receiverParameter | formalParameter) (',' formalParameterList)*)? ')'`
+    // — the first value parameter is a direct `formalParameter`, the rest live
+    // in a nested `formalParameterList`. A leading `receiverParameter`
+    // (`Foo this`) is excluded (it is a separate optional child).
+    let direct = u32::from(params.formal_parameter().is_some());
+    let in_list: u32 = params
+        .formal_parameter_list_children()
+        .map(|list| list.formal_parameter_children().count() as u32)
+        .sum();
     direct + in_list
 }
 
@@ -2000,27 +2019,34 @@ fn count_formal_params(ctx: RuleNodeView<'_>) -> u32 {
 /// `identifier`, a parenthesized `formalParameterList`, or a
 /// `lambdaLVTIList`/identifier list.
 fn count_lambda_args(ctx: RuleNodeView<'_>) -> u32 {
-    let Some(params) = ctx.child_rule(jp::RULE_LAMBDA_PARAMETERS) else {
+    let Some(params) = jp::LambdaExpressionContext::from_rule_node(ctx)
+        .and_then(|lambda| lambda.lambda_parameters().ok())
+    else {
         return 0;
     };
     // `(a, b) -> …` → formalParameterList; `(var a, var b) -> …` →
     // lambdaLVTIList; `x -> …` → a single bare identifier; `(x, y) -> …` →
     // a comma-separated identifier list.
-    if let Some(list) = params.child_rule(jp::RULE_FORMAL_PARAMETER_LIST) {
-        return list.child_rules(jp::RULE_FORMAL_PARAMETER).count() as u32;
+    if let Some(list) = params.formal_parameter_list() {
+        return list.formal_parameter_children().count() as u32;
     }
-    if let Some(list) = params.child_rule(jp::RULE_LAMBDA_LVTI_LIST) {
-        return list.child_rules(jp::RULE_LAMBDA_LVTI_PARAMETER).count() as u32;
+    if let Some(list) = params.lambda_lvti_list() {
+        return list.lambda_lvti_parameter_children().count() as u32;
     }
 
-    params.child_rules(jp::RULE_IDENTIFIER).count() as u32
+    params.identifier_children().count() as u32
 }
 
 /// Count the variables declared by a `fieldDeclaration`
 /// (`int a, b, c;` → 3), via `variableDeclarators → variableDeclarator`.
 fn field_variable_count(ctx: RuleNodeView<'_>) -> u32 {
-    ctx.child_rule(jp::RULE_VARIABLE_DECLARATORS)
-        .map(|vds| vds.child_rules(jp::RULE_VARIABLE_DECLARATOR).count() as u32)
+    let Some(field) = jp::FieldDeclarationContext::from_rule_node(ctx) else {
+        return 0;
+    };
+    field
+        .variable_declarators()
+        .ok()
+        .map(|vds| vds.variable_declarator_children().count() as u32)
         .unwrap_or(0)
 }
 
@@ -2037,10 +2063,20 @@ fn record_record_components(ctx: RuleNodeView<'_>, state: &mut State) {
 /// `recordDeclaration → recordHeader → recordComponentList → recordComponent`.
 /// These are both the record's public attributes (NPA) and the parameter list
 /// of its (canonical/compact) constructor (NArgs).
+///
+/// Uses the generated typed context (0.15 runtime) so the navigation is by
+/// named, grammar-checked accessors rather than raw `RULE_*` indices:
+/// `record_header()` is a required child (`Result`), the component list is
+/// optional (`Option`), and the components are a repeated child (iterator).
 fn count_record_components(ctx: RuleNodeView<'_>) -> u32 {
-    ctx.child_rule(jp::RULE_RECORD_HEADER)
-        .and_then(|header| header.child_rule(jp::RULE_RECORD_COMPONENT_LIST))
-        .map(|list| list.child_rules(jp::RULE_RECORD_COMPONENT).count() as u32)
+    let Some(record) = jp::RecordDeclarationContext::from_rule_node(ctx) else {
+        return 0;
+    };
+    record
+        .record_header()
+        .ok()
+        .and_then(|header| header.record_component_list())
+        .map(|list| list.record_component_children().count() as u32)
         .unwrap_or(0)
 }
 
@@ -2101,21 +2137,29 @@ fn visibility_from_token_holder(ctx: RuleNodeView<'_>) -> Option<bool> {
 /// a direct child token: `=`, a compound assign (`+=`, `-=`, …), or an
 /// increment/decrement (`++`, `--`). Fitzpatrick's ABC lists `++`/`--` under
 /// the assignment (A) component alongside `=`.
+///
+/// Reads the operators through the generated typed `ExpressionContext`
+/// accessors (0.15.2 runtime, issue #178) — `assign_token()`, the eleven
+/// compound-assign accessors, `inc_token()`/`dec_token()` — instead of
+/// `has_token(jl::…)` integer probing. All are `Option<TerminalNode>`.
 fn has_assignment_op(ctx: RuleNodeView<'_>) -> bool {
-    ctx.has_token(jl::ASSIGN)
-        || ctx.has_token(jl::ADD_ASSIGN)
-        || ctx.has_token(jl::SUB_ASSIGN)
-        || ctx.has_token(jl::MUL_ASSIGN)
-        || ctx.has_token(jl::DIV_ASSIGN)
-        || ctx.has_token(jl::AND_ASSIGN)
-        || ctx.has_token(jl::OR_ASSIGN)
-        || ctx.has_token(jl::XOR_ASSIGN)
-        || ctx.has_token(jl::MOD_ASSIGN)
-        || ctx.has_token(jl::LSHIFT_ASSIGN)
-        || ctx.has_token(jl::RSHIFT_ASSIGN)
-        || ctx.has_token(jl::URSHIFT_ASSIGN)
-        || ctx.has_token(jl::INC)
-        || ctx.has_token(jl::DEC)
+    let Some(expr) = jp::ExpressionContext::from_rule_node(ctx) else {
+        return false;
+    };
+    expr.assign_token().is_some()
+        || expr.add_assign_token().is_some()
+        || expr.sub_assign_token().is_some()
+        || expr.mul_assign_token().is_some()
+        || expr.div_assign_token().is_some()
+        || expr.and_assign_token().is_some()
+        || expr.or_assign_token().is_some()
+        || expr.xor_assign_token().is_some()
+        || expr.mod_assign_token().is_some()
+        || expr.lshift_assign_token().is_some()
+        || expr.rshift_assign_token().is_some()
+        || expr.urshift_assign_token().is_some()
+        || expr.inc_token().is_some()
+        || expr.dec_token().is_some()
 }
 
 /// Find the first descendant rule with `rule_index`, searching direct children

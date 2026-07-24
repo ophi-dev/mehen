@@ -60,8 +60,7 @@ ANTLR is a first-class backend (`AnalysisBackend::Antlr`), used when a high-qual
 grammar exists but no Rust-native parser does. The shared crate `mehen-antlr` provides the runtime
 re-export, token-span conversion, recovered-error diagnostics, and hidden-channel comment (CLOC)
 extraction. The Rust lexer/parser modules are generated **offline**
-from a vendored `.g4` grammar and checked in — a normal `cargo build` never needs Java or the
-ANTLR jar.
+from a vendored `.g4` grammar and checked in; a normal `cargo build` does not run the generator.
 
 The generated modules and their vendored `.g4` grammar do **not** live in the analyzer crate.
 They live in a standalone, publishable `crates/mehen-<lang>-parser/` crate that carries only the
@@ -83,9 +82,10 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
   </Step>
   <Step title="Generate the parser modules">
     ```bash
-    export MEHEN_ANTLR_JAR=/path/to/antlr-4.13.2-complete.jar
-    # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN)
-    cargo install antlr-rust-runtime --version 0.14.2 --bin antlr4-rust-gen --force
+    # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN). Pin --version to
+    # the workspace `antlr4_runtime` version so the generator matches the
+    # runtime the checked-in modules were built against.
+    cargo install antlr-rust-runtime --version 0.15.2 --features codegen --bin antlr4-rust-gen --force
     cargo xtask antlr generate <lang>
     ```
 
@@ -115,7 +115,8 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
     `token_type()` against the token constants, using the runtime's `child_rule`/`child_token`/
     `has_token`/`first_rule` navigation helpers. Comments are on a hidden channel (absent from the
     tree) — recover CLOC from the eagerly-buffered token store via `mehen_antlr::loc_tokens`
-    (feeding it `mehen_antlr::token_views(parsed.tokens())`).
+    (feeding it `parsed.tokens()` directly — `&TokenStore` is `IntoIterator` since the 0.15
+    runtime).
   </Step>
   <Step title="Register the analyzer">
     Same as the other backends: register in `crates/mehen-engine/src/registry.rs`.
