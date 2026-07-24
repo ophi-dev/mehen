@@ -78,7 +78,11 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
   </Step>
   <Step title="Register the codegen target">
     Add an `AntlrTarget` to `xtask/src/antlr.rs::TARGETS` (slug, crate dir, grammar dir, lexer/parser
-    filenames). The crate dir is the parser crate, e.g. `crates/mehen-<lang>-parser`.
+    filenames). The crate dir is the parser crate, e.g. `crates/mehen-<lang>-parser`. The same entry
+    also carries the README's display metadata — human-facing `display_name`, `upstream_name` /
+    `upstream_url`, the `entry_rule` used in the parse example, and a one-line `sample_source` — so
+    the generated README stays in step with the grammar. Module and type names in the README are
+    derived from the `.g4` filenames automatically, matching what the generator emits.
   </Step>
   <Step title="Generate the parser modules">
     ```bash
@@ -95,9 +99,19 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
     `rustfmt::skip` attributes, so the parser crate includes them with plain `pub mod ...;`
     declarations.
 
+    The same command also renders the parser crate's `README.md` from the shared
+    `xtask/templates/parser-readme.md` template, using the target's display metadata (see the
+    previous step). The README shows how to consume the crate as a git dependency and how to
+    parse a snippet; it is checked in and drift-checked alongside the modules. Set `readme =
+    "README.md"` in the parser crate's `Cargo.toml` so it ships on the registry page when
+    published.
+
     <Warning>
-    Never edit the generated modules. `cargo xtask antlr check-generated` guards drift in CI when the
-    toolchain is available (it skips, exit 0, where the tools are absent).
+    Never edit the generated modules **or the generated `README.md`** — both are regenerated from
+    the grammar and the template. `cargo xtask antlr check-generated` guards drift (modules and
+    README) in CI when the toolchain is available (it skips, exit 0, where the tools are absent).
+    Keep the README's parse example in step with the compile-tested `//!` example in the crate's
+    `lib.rs`.
     </Warning>
   </Step>
   <Step title="Add the dependencies">

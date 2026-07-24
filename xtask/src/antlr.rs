@@ -16,6 +16,7 @@
 //! `check-generated` treats missing tools as "skipped" (exit 0) so the drift
 //! guard only runs where the toolchain is installed.
 
+use askama::Template;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
@@ -27,6 +28,48 @@ use std::{env, fs};
 /// release can regenerate modules that no longer match the pinned runtime and
 /// silently drift. Bump this in lockstep with that pin.
 const GENERATOR_VERSION: &str = "0.15.2";
+
+/// Askama model for a parser crate's generated `README.md`.
+///
+/// Rendered from `xtask/templates/parser-readme.md` alongside the generated
+/// modules so every ANTLR parser crate ships consume-me docs (a git-dependency
+/// snippet and a parse example) without hand-maintenance. The doc code mirrors
+/// the compile-tested `//!` example in the crate's `lib.rs`; keeping the two in
+/// step is a review concern, not a build one (a plain README is not a
+/// doctest). Metadata fields (runtime version, entry rule, upstream) are
+/// drift-checked by `xtask antlr check-generated`.
+#[derive(Template)]
+#[template(path = "parser-readme.md", escape = "none")]
+struct ReadmeTemplate<'a> {
+    /// CLI slug (`kotlin`) — names the regenerate command in the header.
+    slug: &'a str,
+    /// Crate name as depended on (`mehen-kotlin-parser`).
+    crate_name: &'a str,
+    /// Crate identifier for `use` paths (`mehen_kotlin_parser`).
+    crate_ident: String,
+    /// Human-facing language name (`Kotlin`).
+    display_name: &'a str,
+    /// Workspace repository URL, used for the git-dependency snippet.
+    repo_url: &'a str,
+    /// Generated lexer module name (`kotlin_lexer`).
+    lexer_module: String,
+    /// Generated lexer type name (`KotlinLexer`).
+    lexer_type: String,
+    /// Generated parser module name (`kotlin_parser`).
+    parser_module: String,
+    /// Generated parser type name (`KotlinParser`).
+    parser_type: String,
+    /// Parser entry-rule method used in the example (`kotlin_file`).
+    entry_rule: &'a str,
+    /// One-line sample source parsed in the example (`fun main() {}`).
+    sample_source: &'a str,
+    /// Upstream grammar project name (`Kotlin/kotlin-spec`).
+    upstream_name: &'a str,
+    /// Upstream grammar project URL.
+    upstream_url: &'a str,
+    /// Pinned ANTLR Rust runtime + generator version.
+    runtime_version: &'a str,
+}
 
 /// One per-crate ANTLR target understood by `xtask antlr generate <slug>`.
 pub(crate) struct AntlrTarget {
@@ -43,12 +86,41 @@ pub(crate) struct AntlrTarget {
     pub lexer_g4: &'static str,
     /// Parser grammar filename within `grammar_dir`.
     pub parser_g4: &'static str,
+    /// Human-facing language name for the crate README (e.g. `Kotlin`).
+    pub display_name: &'static str,
+    /// Upstream grammar project name, as shown in the README (e.g.
+    /// `Kotlin/kotlin-spec`).
+    pub upstream_name: &'static str,
+    /// Upstream grammar project URL.
+    pub upstream_url: &'static str,
+    /// Parser entry-rule method used in the README usage example, in the
+    /// generated snake_case form (e.g. `kotlin_file`). Must be a real entry
+    /// rule on the generated `<Lang>Parser` — it is compile-tested by the
+    /// mirrored `//!` doc example in the crate's `lib.rs`.
+    pub entry_rule: &'static str,
+    /// A minimal valid source snippet for the README usage example (e.g.
+    /// `fun main() {}`). Kept to one line — the template appends the newline.
+    pub sample_source: &'static str,
 }
 
 impl AntlrTarget {
     /// Directory the generated `*.rs` modules are written to.
     fn generated_dir(&self, workspace: &Path) -> PathBuf {
         workspace.join(self.crate_dir).join("src").join("generated")
+    }
+
+    /// Path to the checked-in, generated crate `README.md`.
+    fn readme_path(&self, workspace: &Path) -> PathBuf {
+        workspace.join(self.crate_dir).join("README.md")
+    }
+
+    /// Crate name (the last path component of `crate_dir`, e.g.
+    /// `mehen-kotlin-parser`).
+    fn crate_name(&self) -> &'static str {
+        self.crate_dir
+            .rsplit('/')
+            .next()
+            .expect("crate_dir is non-empty")
     }
 }
 
@@ -60,6 +132,11 @@ pub(crate) const TARGETS: &[AntlrTarget] = &[
         grammar_dir: "crates/mehen-kotlin-parser/grammar",
         lexer_g4: "KotlinLexer.g4",
         parser_g4: "KotlinParser.g4",
+        display_name: "Kotlin",
+        upstream_name: "Kotlin/kotlin-spec",
+        upstream_url: "https://github.com/Kotlin/kotlin-spec",
+        entry_rule: "kotlin_file",
+        sample_source: "fun main() {}",
     },
     AntlrTarget {
         slug: "java",
@@ -67,6 +144,11 @@ pub(crate) const TARGETS: &[AntlrTarget] = &[
         grammar_dir: "crates/mehen-java-parser/grammar",
         lexer_g4: "JavaLexer.g4",
         parser_g4: "JavaParser.g4",
+        display_name: "Java",
+        upstream_name: "antlr/grammars-v4",
+        upstream_url: "https://github.com/antlr/grammars-v4",
+        entry_rule: "compilation_unit",
+        sample_source: "class C {}",
     },
 ];
 
@@ -165,6 +247,73 @@ fn toolchain_help() -> String {
     )
 }
 
+/// PascalCase grammar name → the generated module's snake_case name
+/// (`KotlinLexer` → `kotlin_lexer`), matching what `antlr4-rust-gen` emits and
+/// what the parser crate's `lib.rs` declares. Handles acronym runs the usual
+/// way (`HTMLParser` → `html_parser`).
+fn to_snake_case(pascal: &str) -> String {
+    let chars: Vec<char> = pascal.chars().collect();
+    let mut out = String::with_capacity(pascal.len() + 2);
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch.is_ascii_uppercase() {
+            // A boundary precedes an uppercase run's start (prev is lowercase)
+            // and the last capital of a run before a new word (prev upper, next
+            // lower) — so `KotlinLexer`→`kotlin_lexer`, `HTMLParser`→`html_parser`.
+            let prev_lower = i > 0 && chars[i - 1].is_ascii_lowercase();
+            let boundary_after_acronym = i > 0
+                && chars[i - 1].is_ascii_uppercase()
+                && chars.get(i + 1).is_some_and(|c| c.is_ascii_lowercase());
+            if prev_lower || boundary_after_acronym {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Render a parser crate's `README.md` from the shared template.
+///
+/// Module/type names are derived from the grammar filenames the same way the
+/// generator names its output (`KotlinLexer.g4` → module `kotlin_lexer`, type
+/// `KotlinLexer`), so the README's `use` paths always match the checked-in
+/// modules. `repo_url` comes from the workspace `repository` field (xtask
+/// inherits it), keeping the git-dependency snippet in sync with the real repo.
+fn render_readme(target: &AntlrTarget, repo_url: &str) -> Result<String, String> {
+    let lexer_type = target.lexer_g4.trim_end_matches(".g4");
+    let parser_type = target.parser_g4.trim_end_matches(".g4");
+    let crate_name = target.crate_name();
+    let tmpl = ReadmeTemplate {
+        slug: target.slug,
+        crate_name,
+        crate_ident: crate_name.replace('-', "_"),
+        display_name: target.display_name,
+        repo_url,
+        lexer_module: to_snake_case(lexer_type),
+        lexer_type: lexer_type.to_string(),
+        parser_module: to_snake_case(parser_type),
+        parser_type: parser_type.to_string(),
+        entry_rule: target.entry_rule,
+        sample_source: target.sample_source,
+        upstream_name: target.upstream_name,
+        upstream_url: target.upstream_url,
+        runtime_version: GENERATOR_VERSION,
+    };
+    // Normalize the trailing newline exactly like the generated modules so a
+    // fresh render compares byte-for-byte against the checked-in file.
+    let body = tmpl
+        .render()
+        .map_err(|e| format!("failed to render README for `{}`: {e}", target.slug))?;
+    Ok(format!("{}\n", body.trim_end_matches(['\n', '\r'])))
+}
+
+/// The workspace repository URL, inherited by xtask via `repository.workspace`.
+fn repo_url() -> &'static str {
+    env!("CARGO_PKG_REPOSITORY")
+}
+
 /// Generate the Rust modules for one target into its `src/generated/` dir.
 pub(crate) fn generate(workspace: &Path, target: &AntlrTarget) -> Result<Vec<PathBuf>, String> {
     let toolchain = discover_toolchain()?
@@ -203,13 +352,23 @@ fn generate_with(
     }
     normalize_generated(&generated_dir)?;
 
+    // Render the crate README from the shared template alongside the modules,
+    // so every ANTLR parser crate ships consume-me docs that stay in step with
+    // the grammar/runtime it was generated against.
+    let readme_path = target.readme_path(workspace);
+    let readme = render_readme(target, repo_url())?;
+    fs::write(&readme_path, readme)
+        .map_err(|e| format!("failed writing {}: {e}", readme_path.display()))?;
+
     // The generator writes one module per grammar (named after the grammar)
-    // plus a `semantics.json` sidecar; report every checked-in artifact.
+    // plus a `semantics.json` sidecar; report every checked-in artifact, plus
+    // the rendered README.
     let mut written: Vec<PathBuf> = fs::read_dir(&generated_dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| is_generated_artifact(p))
         .collect();
+    written.push(readme_path);
     written.sort();
     Ok(written)
 }
@@ -246,22 +405,26 @@ fn target_has_drift(
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
 
-    // Generate into the scratch dir by temporarily retargeting. We render
-    // straight into `scratch` to avoid mutating the checked-in files.
-    let scratch_target = AntlrTarget {
-        slug: target.slug,
-        crate_dir: target.crate_dir,
-        grammar_dir: target.grammar_dir,
-        lexer_g4: target.lexer_g4,
-        parser_g4: target.parser_g4,
-    };
-    // Override generated dir via a sibling helper: generate into scratch.
-    run_pipeline_into(workspace, &scratch_target, tools, &scratch)?;
+    // Render straight into `scratch` to avoid mutating the checked-in files.
+    // `run_pipeline_into` takes the output dir explicitly and never consults
+    // `target.generated_dir()`, so the target can be passed as-is.
+    run_pipeline_into(workspace, target, tools, &scratch)?;
 
     let after = read_generated(&scratch)?;
     let _ = fs::remove_dir_all(&scratch);
 
-    Ok(before != after)
+    if before != after {
+        return Ok(true);
+    }
+
+    // The README is generated from the shared template too, so a template edit
+    // or a metadata bump (runtime version, entry rule, upstream) without a
+    // regenerate drifts it just like a module. Compare the checked-in file
+    // against a fresh render. A missing README also counts as drift.
+    let readme_path = target.readme_path(workspace);
+    let expected = render_readme(target, repo_url())?;
+    let actual = fs::read_to_string(&readme_path).unwrap_or_default();
+    Ok(actual != expected)
 }
 
 /// Run the generator pipeline writing modules into `out_dir`.
@@ -346,4 +509,55 @@ fn read_generated(dir: &Path) -> Result<Vec<(String, String)>, String> {
 /// Locate the workspace root (the `[workspace]` `Cargo.toml`).
 pub(crate) fn workspace_root() -> std::io::Result<PathBuf> {
     crate::tree_sitter::workspace_root()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_snake_case_matches_generated_module_names() {
+        // The real grammar type names both parser crates render from.
+        assert_eq!(to_snake_case("KotlinLexer"), "kotlin_lexer");
+        assert_eq!(to_snake_case("KotlinParser"), "kotlin_parser");
+        assert_eq!(to_snake_case("JavaLexer"), "java_lexer");
+        assert_eq!(to_snake_case("JavaParser"), "java_parser");
+    }
+
+    #[test]
+    fn to_snake_case_handles_acronym_runs() {
+        // Defensive for future grammars whose names carry acronyms.
+        assert_eq!(to_snake_case("HTMLParser"), "html_parser");
+        assert_eq!(to_snake_case("CSSLexer"), "css_lexer");
+        assert_eq!(to_snake_case("Lexer"), "lexer");
+    }
+
+    #[test]
+    fn readme_renders_derived_names_for_every_target() {
+        // Every target must render without error and place the derived
+        // module/type names into the README, so a new target can't silently
+        // ship a README whose `use` paths don't match its modules.
+        for target in TARGETS {
+            let readme = render_readme(target, "https://example.test/repo")
+                .unwrap_or_else(|e| panic!("render failed for `{}`: {e}", target.slug));
+            let lexer_type = target.lexer_g4.trim_end_matches(".g4");
+            let parser_type = target.parser_g4.trim_end_matches(".g4");
+            assert!(
+                readme.contains(&to_snake_case(lexer_type)),
+                "`{}` README missing lexer module name",
+                target.slug
+            );
+            assert!(
+                readme.contains(&format!("{parser_type}::{}", target.entry_rule)),
+                "`{}` README missing `{parser_type}::{}` entry-rule call",
+                target.slug,
+                target.entry_rule
+            );
+            assert!(
+                readme.contains(target.upstream_url),
+                "`{}` README missing upstream URL",
+                target.slug
+            );
+        }
+    }
 }
