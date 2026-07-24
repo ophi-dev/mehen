@@ -20,6 +20,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
 
+/// The `antlr-rust-runtime` version the checked-in modules were generated
+/// against — must match the `antlr4_runtime` pin in the workspace
+/// `[workspace.dependencies]` (root `Cargo.toml`). Installing an *unpinned*
+/// `antlr4-rust-gen` would fetch the latest crate, which after a runtime
+/// release can regenerate modules that no longer match the pinned runtime and
+/// silently drift. Bump this in lockstep with that pin.
+const GENERATOR_VERSION: &str = "0.15.2";
+
 /// One per-crate ANTLR target understood by `xtask antlr generate <slug>`.
 pub(crate) struct AntlrTarget {
     /// CLI slug, e.g. `kotlin`.
@@ -77,8 +85,8 @@ struct Toolchain {
 /// Discover the external toolchain from the environment.
 ///
 /// - `MEHEN_ANTLR_RUST_GEN` → path to the `antlr4-rust-gen` binary; if unset,
-///   the binary is expected on `PATH` (install via
-///   `cargo install antlr-rust-runtime`).
+///   the binary is expected on `PATH` (install the matching generator via
+///   `cargo install antlr-rust-runtime --version <GENERATOR_VERSION>`).
 ///
 /// Returns `Ok(None)` when a tool is missing so callers can choose to skip
 /// (check) or error (generate).
@@ -92,8 +100,21 @@ fn discover_toolchain() -> Result<Option<Toolchain>, String> {
                     path.display()
                 ));
             }
-            path
+            // Canonicalize now: the generator runs with `current_dir` set to the
+            // grammar directory, so a *relative* env path (e.g.
+            // `target/debug/antlr4-rust-gen`) validated here from the caller's
+            // cwd would otherwise fail to launch when re-resolved under
+            // `crates/<lang>-parser/grammar`. An absolute path keeps it stable
+            // across the cwd change.
+            fs::canonicalize(&path).map_err(|e| {
+                format!(
+                    "MEHEN_ANTLR_RUST_GEN points at `{}`, which could not be resolved: {e}",
+                    path.display()
+                )
+            })?
         }
+        // A bare command name is resolved via PATH by the OS at spawn time, so
+        // it is unaffected by the generator's `current_dir`.
         None => PathBuf::from("antlr4-rust-gen"),
     };
 
@@ -130,11 +151,18 @@ fn scratch_dir(kind: &str, slug: &str) -> PathBuf {
 }
 
 /// Human-readable instructions printed when the toolchain is unavailable.
+///
+/// Pins `--version` to [`GENERATOR_VERSION`] so following the hint installs the
+/// generator matching the workspace runtime pin, not whatever is latest on
+/// crates.io (an unpinned install can regenerate drifting modules after a
+/// runtime release).
 fn toolchain_help() -> String {
-    "ANTLR codegen needs `antlr4-rust-gen`: install it with \
-     `cargo install antlr-rust-runtime --features codegen --bin antlr4-rust-gen`, \
-     or set MEHEN_ANTLR_RUST_GEN to its path"
-        .to_string()
+    format!(
+        "ANTLR codegen needs `antlr4-rust-gen`: install it with \
+         `cargo install antlr-rust-runtime --version {GENERATOR_VERSION} \
+         --features codegen --bin antlr4-rust-gen`, \
+         or set MEHEN_ANTLR_RUST_GEN to its path"
+    )
 }
 
 /// Generate the Rust modules for one target into its `src/generated/` dir.
