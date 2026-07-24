@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
+# Generated from `xtask/templates/parser-readme.md` by `cargo xtask antlr
+# generate kotlin` — never hand-edit. Named explicitly so it ships on the
+# crate's registry page when published.
+readme = "README.md"
 description = "ANTLR-generated Kotlin lexer and parser (Kotlin spec grammar) on the antlr-rust-runtime."
 # Unlike the internal `mehen-*` analyzer crates (`publish = false`), this
 # crate ships ONLY the generated lexer/parser so external tools can depend
