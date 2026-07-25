@@ -22,25 +22,35 @@
 //! and `grammar/PROVENANCE.md`). `cargo xtask antlr check-generated` guards
 //! against drift in CI when the toolchain is available.
 //!
+//! ## Semantic predicates — construct with hooks
+//!
+//! The grammar declares `superClass = JavaParserBase` and calls two of its
+//! predicates. [`hooks::JavaParserBase`] is the exact Rust port; install it
+//! with `JavaParser::with_typed_hooks` (as the quickstart below does). The
+//! modules are generated under `--sem-unknown error`, so a parser built
+//! *without* hooks (`JavaParser::new`) fails loud with
+//! [`antlr4_runtime::AntlrError::Unsupported`] the moment an input reaches
+//! either predicate — it never silently mis-parses.
+//!
 //! ## Quickstart
 //!
 //! ```no_run
+//! use mehen_java_parser::hooks::JavaParserBase;
 //! use mehen_java_parser::java_parser::{self, JavaParser};
 //! use mehen_java_parser::java_lexer::JavaLexer;
+//! use antlr4_runtime::{CommonTokenStream, InputStream};
 //! // `number_of_syntax_errors` is a `Parser`-trait method, so the trait
 //! // must be in scope to call it.
 //! use antlr4_runtime::Parser;
 //!
 //! # fn main() -> Result<(), antlr4_runtime::AntlrError> {
-//! // One-call setup: build lexer + token stream + parser and run an entry
-//! // rule. `parse_with_parser` keeps the parser so you can read diagnostics.
-//! let out = java_parser::parse_with_parser(
-//!     "class C {}\n",
-//!     JavaLexer::new,
-//!     JavaParser::compilation_unit,
-//! )?;
-//! let errors = out.parser.number_of_syntax_errors();
-//! let parsed = out.parser.into_parsed_file(out.result);
+//! let lexer = JavaLexer::new(InputStream::new("class C {}\n"));
+//! let tokens = CommonTokenStream::new(lexer);
+//! // `with_typed_hooks` installs the JavaParserBase predicate port.
+//! let mut parser = JavaParser::with_typed_hooks(tokens, JavaParserBase);
+//! let result = parser.compilation_unit()?;
+//! let errors = parser.number_of_syntax_errors();
+//! let parsed = parser.into_parsed_file(result);
 //! let _ = (errors, parsed.tree());
 //! # Ok(())
 //! # }
@@ -52,6 +62,8 @@
 /// against, so downstream crates can name the runtime types (`ParseTree`,
 /// `Node`, `TokenView`, …) without pinning the runtime version themselves.
 pub use antlr4_runtime;
+
+pub mod hooks;
 
 /// ANTLR-generated Java lexer.
 ///

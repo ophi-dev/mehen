@@ -31,6 +31,7 @@ use mehen_core::{
     ParseDiagnostic, Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
 
+use mehen_java_parser::hooks::JavaParserBase;
 use mehen_java_parser::java_lexer::JavaLexer;
 use mehen_java_parser::java_parser::JavaParser;
 
@@ -56,6 +57,11 @@ impl JavaAnalyzer {
     /// Returns `None` only if the rule call hard-fails (returns `Err` rather
     /// than a recovered tree).
     ///
+    /// The parser is constructed with the [`JavaParserBase`] typed hooks — the
+    /// exact port of the grammar's `superClass` predicates. The generated
+    /// modules use `--sem-unknown error`, so a hook-less parser would hard-fail
+    /// (not mis-parse) on inputs reaching those predicates.
+    ///
     /// Replaces the runtime's default lexer console listener with a structured
     /// diagnostic collector and removes the parser console listener.
     fn parse(&self, source: &str) -> Option<ParsedJava> {
@@ -64,7 +70,7 @@ impl JavaAnalyzer {
         let lexer_diagnostics = DiagnosticCollector::default();
         lexer.add_error_listener(lexer_diagnostics.clone());
         let tokens = CommonTokenStream::new(lexer);
-        let mut parser = JavaParser::new(tokens);
+        let mut parser = JavaParser::with_typed_hooks(tokens, JavaParserBase);
         parser.remove_error_listeners();
         let result = parser.compilation_unit().ok()?;
         let lexer_diagnostics = lexer_diagnostics.diagnostics("java.syntax_error", 16);

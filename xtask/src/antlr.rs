@@ -27,7 +27,7 @@ use std::{env, fs};
 /// `antlr4-rust-gen` would fetch the latest crate, which after a runtime
 /// release can regenerate modules that no longer match the pinned runtime and
 /// silently drift. Bump this in lockstep with that pin.
-const GENERATOR_VERSION: &str = "0.15.2";
+const GENERATOR_VERSION: &str = "0.18.0";
 
 /// Askama model for a parser crate's generated `README.md`.
 ///
@@ -69,6 +69,31 @@ struct ReadmeTemplate<'a> {
     upstream_url: &'a str,
     /// Pinned ANTLR Rust runtime + generator version.
     runtime_version: &'a str,
+    /// Hand-written lexer hooks (port of the upstream `<Lang>LexerBase`),
+    /// when the grammar needs one. Switches the README examples to
+    /// `with_typed_hooks` lexer construction.
+    lexer_hooks: Option<HooksReadme<'a>>,
+    /// Hand-written parser hooks (port of the upstream `<Lang>ParserBase`),
+    /// when the grammar needs one. Switches the README examples to
+    /// `with_typed_hooks` parser construction.
+    parser_hooks: Option<HooksReadme<'a>>,
+}
+
+/// A hooks type as the README template references it: `path` is the
+/// crate-relative module path for `use` lines (`hooks::JavaParserBase`),
+/// `type_name` the bare type for expression position (`JavaParserBase`).
+struct HooksReadme<'a> {
+    path: &'a str,
+    type_name: &'a str,
+}
+
+impl<'a> HooksReadme<'a> {
+    /// Split an `AntlrTarget` hooks path (`hooks::JavaParserBase`) into the
+    /// README's `use`-path and expression-position type name.
+    fn from_path(path: &'a str) -> Self {
+        let type_name = path.rsplit("::").next().expect("rsplit is non-empty");
+        Self { path, type_name }
+    }
 }
 
 /// One per-crate ANTLR target understood by `xtask antlr generate <slug>`.
@@ -101,6 +126,29 @@ pub(crate) struct AntlrTarget {
     /// A minimal valid source snippet for the README usage example (e.g.
     /// `fun main() {}`). Kept to one line — the template appends the newline.
     pub sample_source: &'static str,
+    /// Semantic-pattern file within `grammar_dir` (passed as
+    /// `--sem-patterns`), lowering the grammar's named base-class helpers
+    /// (`this.Foo()` predicates/actions) to exact SemIR expressions or typed
+    /// hooks. `None` for grammars with no helper calls. Generation always
+    /// runs `--sem-unknown error --require-full-semantics`, so a helper the
+    /// pattern file misses fails codegen instead of silently assuming true.
+    pub sem_patterns: Option<&'static str>,
+    /// Grammar options implemented by caller-supplied hooks (passed as
+    /// `--option-hook KEY=VALUE`), e.g. `superClass=JavaParserBase` when the
+    /// parser crate ships a hand-written port of that base class. Options not
+    /// acknowledged here fail generation under `--require-full-semantics`.
+    pub option_hooks: &'static [&'static str],
+    /// Path (within the parser crate) of the hand-written hooks type the
+    /// lexer construction must install — the Rust port of the upstream
+    /// `<Lang>LexerBase` (e.g. `hooks::CSharpLexerBase`). `None` when the
+    /// lexer needs no hooks. Referenced by the generated README so the usage
+    /// example is semantically exact.
+    pub lexer_hooks: Option<&'static str>,
+    /// Path (within the parser crate) of the hand-written hooks type the
+    /// parser construction must install — the Rust port of the upstream
+    /// `<Lang>ParserBase` (e.g. `hooks::JavaParserBase`). `None` when every
+    /// parser helper lowers to a pure pattern (or there are none).
+    pub parser_hooks: Option<&'static str>,
 }
 
 impl AntlrTarget {
@@ -137,6 +185,10 @@ pub(crate) const TARGETS: &[AntlrTarget] = &[
         upstream_url: "https://github.com/Kotlin/kotlin-spec",
         entry_rule: "kotlin_file",
         sample_source: "fun main() {}",
+        sem_patterns: None,
+        option_hooks: &[],
+        lexer_hooks: None,
+        parser_hooks: None,
     },
     AntlrTarget {
         slug: "java",
@@ -149,6 +201,14 @@ pub(crate) const TARGETS: &[AntlrTarget] = &[
         upstream_url: "https://github.com/antlr/grammars-v4",
         entry_rule: "compilation_unit",
         sample_source: "class C {}",
+        // The grammar's two `this.…()` predicates come from the upstream
+        // `JavaParserBase` Java class; `patterns.toml` lowers both to typed
+        // hooks and the parser crate ships an exact Rust port (`hooks::
+        // JavaParserBase`) that the parser must be constructed with.
+        sem_patterns: Some("patterns.toml"),
+        option_hooks: &["superClass=JavaParserBase"],
+        lexer_hooks: None,
+        parser_hooks: Some("hooks::JavaParserBase"),
     },
 ];
 
@@ -300,6 +360,8 @@ fn render_readme(target: &AntlrTarget, repo_url: &str) -> Result<String, String>
         upstream_name: target.upstream_name,
         upstream_url: target.upstream_url,
         runtime_version: GENERATOR_VERSION,
+        lexer_hooks: target.lexer_hooks.map(HooksReadme::from_path),
+        parser_hooks: target.parser_hooks.map(HooksReadme::from_path),
     };
     // Normalize the trailing newline exactly like the generated modules so a
     // fresh render compares byte-for-byte against the checked-in file.
@@ -326,31 +388,9 @@ fn generate_with(
     target: &AntlrTarget,
     tools: &Toolchain,
 ) -> Result<Vec<PathBuf>, String> {
-    let grammar_dir = workspace.join(target.grammar_dir);
     let generated_dir = target.generated_dir(workspace);
     fs::create_dir_all(&generated_dir).map_err(|e| e.to_string())?;
-
-    let gen_status = Command::new(&tools.rust_gen)
-        .arg(target.lexer_g4)
-        .arg(target.parser_g4)
-        .arg("--out-dir")
-        .arg(&generated_dir)
-        .current_dir(&grammar_dir)
-        .status()
-        .map_err(|e| {
-            format!(
-                "failed to launch antlr4-rust-gen: {e}\n{}",
-                toolchain_help()
-            )
-        })?;
-    if !gen_status.success() {
-        return Err(format!(
-            "antlr4-rust-gen failed for `{}` (exit {:?})",
-            target.slug,
-            gen_status.code()
-        ));
-    }
-    normalize_generated(&generated_dir)?;
+    run_pipeline_into(workspace, target, tools, &generated_dir)?;
 
     // Render the crate README from the shared template alongside the modules,
     // so every ANTLR parser crate ships consume-me docs that stay in step with
@@ -428,6 +468,12 @@ fn target_has_drift(
 }
 
 /// Run the generator pipeline writing modules into `out_dir`.
+///
+/// Always applies the fail-loud semantic policy (`--sem-unknown error
+/// --require-full-semantics`): mehen's metrics cannot afford a parser whose
+/// semantic predicates were silently assumed true, so any grammar helper or
+/// option not covered by the target's `sem_patterns`/`option_hooks` fails
+/// generation instead of degrading parse fidelity.
 fn run_pipeline_into(
     workspace: &Path,
     target: &AntlrTarget,
@@ -435,11 +481,21 @@ fn run_pipeline_into(
     out_dir: &Path,
 ) -> Result<(), String> {
     let grammar_dir = workspace.join(target.grammar_dir);
-    let gen_status = Command::new(&tools.rust_gen)
-        .arg(target.lexer_g4)
+    let mut cmd = Command::new(&tools.rust_gen);
+    cmd.arg(target.lexer_g4)
         .arg(target.parser_g4)
         .arg("--out-dir")
         .arg(out_dir)
+        .arg("--sem-unknown")
+        .arg("error")
+        .arg("--require-full-semantics");
+    if let Some(patterns) = target.sem_patterns {
+        cmd.arg("--sem-patterns").arg(grammar_dir.join(patterns));
+    }
+    for hook in target.option_hooks {
+        cmd.arg("--option-hook").arg(hook);
+    }
+    let gen_status = cmd
         .current_dir(&grammar_dir)
         .status()
         .map_err(|e| format!("failed to launch antlr4-rust-gen: {e}"))?;
@@ -547,17 +603,56 @@ mod tests {
                 "`{}` README missing lexer module name",
                 target.slug
             );
+            // The hooks-less example calls the entry rule as a path
+            // (`JavaParser::compilation_unit`); the hooks example calls it on
+            // the constructed parser (`parser.compilation_unit()?`).
+            let entry_call = if target.lexer_hooks.is_some() || target.parser_hooks.is_some() {
+                format!("parser.{}()", target.entry_rule)
+            } else {
+                format!("{parser_type}::{}", target.entry_rule)
+            };
             assert!(
-                readme.contains(&format!("{parser_type}::{}", target.entry_rule)),
-                "`{}` README missing `{parser_type}::{}` entry-rule call",
+                readme.contains(&entry_call),
+                "`{}` README missing `{entry_call}` entry-rule call",
                 target.slug,
-                target.entry_rule
             );
             assert!(
                 readme.contains(target.upstream_url),
                 "`{}` README missing upstream URL",
                 target.slug
             );
+        }
+    }
+
+    #[test]
+    fn readme_hooks_example_references_every_hooks_path() {
+        // A target that declares hand-written hooks must render a README whose
+        // example imports and installs them — otherwise consumers copy an
+        // example that fails loud at the first hooked predicate.
+        for target in TARGETS {
+            let readme = render_readme(target, "https://example.test/repo")
+                .unwrap_or_else(|e| panic!("render failed for `{}`: {e}", target.slug));
+            for hooks in [target.lexer_hooks, target.parser_hooks]
+                .into_iter()
+                .flatten()
+            {
+                assert!(
+                    readme.contains(hooks),
+                    "`{}` README missing `use …::{hooks}` import",
+                    target.slug
+                );
+                let type_name = hooks.rsplit("::").next().unwrap();
+                assert!(
+                    readme.contains("with_typed_hooks("),
+                    "`{}` README missing with_typed_hooks construction",
+                    target.slug
+                );
+                assert!(
+                    readme.contains(&format!("{type_name}::default()")),
+                    "`{}` README missing `{type_name}::default()` install",
+                    target.slug
+                );
+            }
         }
     }
 }

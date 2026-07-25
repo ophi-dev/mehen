@@ -84,12 +84,38 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
     the generated README stays in step with the grammar. Module and type names in the README are
     derived from the `.g4` filenames automatically, matching what the generator emits.
   </Step>
+  <Step title="Cover the grammar's semantic helpers (if any)">
+    Generation always runs with `--sem-unknown error --require-full-semantics`: a metrics tool
+    cannot afford a parser whose semantic predicates were silently assumed true, so every
+    `{ this.Helper() }?` predicate, `{ this.Helper(); }` action, and hook-implemented grammar
+    option (e.g. `superClass=…`) in the grammar must be accounted for, or
+    `cargo xtask antlr generate <lang>` fails.
+
+    For a grammar with helper calls (like Java's `JavaParserBase` predicates):
+
+    1. Write a `patterns.toml` next to the `.g4` files lowering each helper — either to a pure
+       pattern expression the generator can inline (`token_index_adjacent`,
+       `cmp(ne, la(1), token(NAME))`, …) or to `lower = "hook"` for anything needing real logic.
+       Point the target's `sem_patterns` field at it.
+    2. Acknowledge hook-implemented grammar options via the target's `option_hooks` field
+       (e.g. `superClass=JavaParserBase`).
+    3. For `hook` lowerings, port the upstream base class exactly in a hand-written
+       `src/hooks.rs` implementing the generated `<Lang>ParserHooks` / `<Lang>LexerHooks`
+       trait, and set the target's `parser_hooks` / `lexer_hooks` field (e.g.
+       `hooks::JavaParserBase`) so the generated README shows the hook-correct construction.
+       The analyzer must then construct via `with_typed_hooks` — a hook-less parser fails loud
+       (`AntlrError::Unsupported`) at the first hooked coordinate rather than mis-parsing. Add
+       behavioral tests for each hook (see `crates/mehen-java-parser/tests/hooks.rs`).
+
+    A grammar with no helpers (like Kotlin's) needs none of this — the strict flags are still
+    passed and simply have nothing to reject.
+  </Step>
   <Step title="Generate the parser modules">
     ```bash
     # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN). Pin --version to
     # the workspace `antlr4_runtime` version so the generator matches the
     # runtime the checked-in modules were built against.
-    cargo install antlr-rust-runtime --version 0.15.2 --features codegen --bin antlr4-rust-gen --force
+    cargo install antlr-rust-runtime --version 0.18.0 --features codegen --bin antlr4-rust-gen --force
     cargo xtask antlr generate <lang>
     ```
 
@@ -121,8 +147,10 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
     `[workspace.dependencies]`, so the pin stays in one place.
   </Step>
   <Step title="Implement the analyzer + walker">
-    Parse via the parser crate's one-call `<lang>_parser::parse_with_parser` + `into_parsed_file`,
-    then walk the resulting `ParsedFile`'s root `Node` with your own recursive visitor (like
+    Parse via the parser crate's one-call `<lang>_parser::parse_with_parser` + `into_parsed_file`
+    (or, when the grammar has hooks, explicit construction with
+    `<Lang>Parser::with_typed_hooks` as `mehen-java` does), then walk the resulting
+    `ParsedFile`'s root `Node` with your own recursive visitor (like
     `mehen-java`/`mehen-kotlin`). The `Node`/`RuleNodeView`/`TerminalNodeView` views have **no
     parent pointer**, so thread any parent-dependent context (e.g. else-if detection) top-down.
     Match `RuleNodeView::rule_index()` against the generated `RULE_*` constants and terminal
