@@ -1,0 +1,36 @@
+version = 1
+
+# Semantic-helper lowerings for the grammars-v4 Java grammar (passed to
+# `antlr4-rust-gen --sem-patterns` by `cargo xtask antlr generate java`).
+#
+# The grammar's `superClass = JavaParserBase` declares two `this.…()` helper
+# predicates whose reference implementation lives in the upstream Java class
+# `java/java/Java/JavaParserBase.java`. Neither is expressible in the pure
+# pattern DSL (one needs a 17-token set membership test plus a second
+# lookahead, the other iterates the current rule context's children), so both
+# lower to typed hooks; the exact Rust port lives in this crate's
+# `src/hooks.rs` (`JavaParserBase`) and MUST be installed via
+# `JavaParser::with_typed_hooks` — a hook predicate evaluated without hooks
+# fails the parse under the `--sem-unknown error` policy instead of silently
+# assuming `true`.
+
+# `annotationFieldValue: { this.IsNotIdentifierAssign() }? annotationValue
+#                       | identifier '=' annotationValue`
+# True unless the lookahead is `<identifier-like> =`, steering `name = value`
+# annotation arguments to the explicit `identifier '=' annotationValue`
+# alternative instead of parsing them as an assignment *expression*.
+[[helper]]
+kind = "parser-predicate"
+name = "IsNotIdentifierAssign"
+returns = "bool"
+lower = "hook"
+
+# `recordComponentList: recordComponent (',' recordComponent)*
+#                       { this.DoLastRecordComponent() }?`
+# False when a varargs (`...`) record component is followed by another
+# component, rejecting `record R(int... xs, int y)` at parse time.
+[[helper]]
+kind = "parser-predicate"
+name = "DoLastRecordComponent"
+returns = "bool"
+lower = "hook"

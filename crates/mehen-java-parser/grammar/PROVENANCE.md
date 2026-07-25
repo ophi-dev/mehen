@@ -22,7 +22,8 @@ another grammar (unlike the Kotlin grammar's `UnicodeClasses`), so no extra
 
 **None.** Unlike the Kotlin grammar (which needs a `RCURL` mode-pop patch),
 the Java grammar is vendored unmodified. Its two Java-target semantic
-predicates are handled by the generator, not by editing the grammar:
+predicates are routed to hand-written hooks, not dropped and not patched
+out of the grammar:
 
 - `JavaParser.g4` declares `options { superClass = JavaParserBase; }` and uses
   two host-language (Java) semantic predicates:
@@ -31,25 +32,26 @@ predicates are handled by the generator, not by editing the grammar:
   - `{ this.DoLastRecordComponent() }?` (varargs record component must be
     last).
 
-  These embed Java code and cannot be translated to the Rust target. The
-  `antlr4-rust-gen` generator **drops action-backed semantic predicates**
-  (it emits an empty `PARSER_PREDICATES` table), so the generated Rust parser
-  needs **no `JavaParserBase` superclass**. ANTLR semantic predicates only
-  ever *reject* candidate parses, so dropping them widens what the grammar
-  accepts — harmless for a metrics tool, which recovers from parse errors by
-  design. The upstream `Java/JavaParserBase.java` helper is therefore **not**
-  vendored: it is Java-only and unused by the Rust target.
+  `patterns.toml` (this directory) lowers both helper calls to **typed
+  hooks**, and `../src/hooks.rs` ports the upstream
+  `Java/JavaParserBase.java` semantics exactly (`JavaParserBase`, installed
+  via `JavaParser::with_typed_hooks`). Generation runs with `--sem-unknown
+  error --require-full-semantics`, so any *new* helper appearing in a future
+  grammar update fails `cargo xtask antlr generate java` instead of silently
+  degrading parse fidelity; the same policy makes a hook-less parser
+  (`JavaParser::new`) fail loud at the first hooked predicate rather than
+  mis-parse. The upstream `Java/JavaParserBase.java` file itself is **not**
+  vendored — it is Java-only; `src/hooks.rs` is its Rust counterpart.
 
-  The `precpred(...)` calls that remain in the generated parser are
-  *precedence* predicates for left-recursive expression rules; the runtime
-  evaluates those automatically and they are unrelated to the dropped
-  action-backed predicates.
+  The `precpred(...)` calls in the generated parser are *precedence*
+  predicates for left-recursive expression rules; the runtime evaluates those
+  automatically and they are unrelated to the two hooked predicates.
 
 ## Toolchain
 
 | Tool | Version |
 |---|---|
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.15.2` |
+| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.18.0` |
 
 ## Regenerating
 
@@ -57,7 +59,7 @@ Never hand-edit the files in `../src/generated/`. To regenerate after bumping
 the grammar or the runtime:
 
 ```bash
-cargo install antlr-rust-runtime --version 0.15.2 --features codegen --bin antlr4-rust-gen --force
+cargo install antlr-rust-runtime --version 0.18.0 --features codegen --bin antlr4-rust-gen --force
 cargo run -p xtask -- antlr generate java
 ```
 

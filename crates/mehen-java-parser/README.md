@@ -36,47 +36,33 @@ the generated code.
 
 ## Parse some Java
 
-`java_parser::parse` wires up the lexer, token stream, parser, and a
-chosen entry rule in one call, returning an owned `ParsedFile` that holds the
-token store and the flat CST:
+The grammar declares helper methods on a superclass (`superClass=…`); this
+crate ships exact Rust ports as typed hooks in [`src/hooks.rs`](src/hooks.rs),
+and they **must be installed at construction**. The modules are generated
+under `--sem-unknown error`, so a lexer/parser built without its hooks
+fails loud (`AntlrError::Unsupported`) the moment an input reaches a hooked
+predicate or action — it never silently mis-parses. In particular, skip the
+hook-less one-call `java_parser::parse` / `parse_with_parser`
+helpers and construct with hooks:
 
 ```rust
-use mehen_java_parser::java_parser::{self, JavaParser};
+use mehen_java_parser::hooks::JavaParserBase;
+use mehen_java_parser::java_parser::JavaParser;
 use mehen_java_parser::java_lexer::JavaLexer;
+use mehen_java_parser::antlr4_runtime::{CommonTokenStream, InputStream, Parser};
 
 fn main() -> Result<(), mehen_java_parser::antlr4_runtime::AntlrError> {
-    let parsed = java_parser::parse(
-        "class C {}\n",
-        JavaLexer::new,
-        JavaParser::compilation_unit,
-    )?;
+    let input = InputStream::new("class C {}\n");
+    let lexer = JavaLexer::new(input);
+    let tokens = CommonTokenStream::new(lexer);
+    let mut parser = JavaParser::with_typed_hooks(tokens, JavaParserBase::default());
+    let result = parser.compilation_unit()?;
 
-    // Walk the CST from the entry-rule root, or read the buffered tokens.
+    // Parser diagnostics, then the owned `ParsedFile` (token store + flat CST).
+    let errors = parser.number_of_syntax_errors();
+    let parsed = parser.into_parsed_file(result);
     let root = parsed.tree();
-    let _ = root;
-    Ok(())
-}
-```
-
-Need parser diagnostics (e.g. the syntax-error count) after the entry rule
-runs? Use `parse_with_parser`, which hands the parser back:
-
-```rust
-use mehen_java_parser::java_parser::{self, JavaParser};
-use mehen_java_parser::java_lexer::JavaLexer;
-// `number_of_syntax_errors` is a `Parser`-trait method, so the trait must be
-// in scope to call it.
-use mehen_java_parser::antlr4_runtime::Parser;
-
-fn main() -> Result<(), mehen_java_parser::antlr4_runtime::AntlrError> {
-    let out = java_parser::parse_with_parser(
-        "class C {}\n",
-        JavaLexer::new,
-        JavaParser::compilation_unit,
-    )?;
-    let errors = out.parser.number_of_syntax_errors();
-    let parsed = out.parser.into_parsed_file(out.result);
-    let _ = (errors, parsed.tree());
+    let _ = (errors, root);
     Ok(())
 }
 ```
@@ -88,7 +74,7 @@ flat arena), so thread any parent-dependent context top-down as you walk.
 
 - **Upstream grammar:** [`antlr/grammars-v4`](https://github.com/antlr/grammars-v4)
 - **Vendored `.g4` files + any local patches:** [`grammar/`](grammar/) — see [`grammar/PROVENANCE.md`](grammar/PROVENANCE.md) for the exact commit
-- **ANTLR Rust runtime + generator:** [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.15.2`
+- **ANTLR Rust runtime + generator:** [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.18.0`
 
 ## License
 

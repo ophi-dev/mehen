@@ -33,7 +33,53 @@ re-exports the exact runtime revision the modules were generated against as
 `{{ crate_ident }}::antlr4_runtime`. Reach the runtime types (`ParsedFile`,
 `Node`, `TokenView`, …) through that path so your version can never drift from
 the generated code.
+{% if lexer_hooks.is_some() || parser_hooks.is_some() %}
+## Parse some {{ display_name }}
 
+The grammar declares helper methods on a superclass (`superClass=…`); this
+crate ships exact Rust ports as typed hooks in [`src/hooks.rs`](src/hooks.rs),
+and they **must be installed at construction**. The modules are generated
+under `--sem-unknown error`, so a lexer/parser built without its hooks
+fails loud (`AntlrError::Unsupported`) the moment an input reaches a hooked
+predicate or action — it never silently mis-parses. In particular, skip the
+hook-less one-call `{{ parser_module }}::parse` / `parse_with_parser`
+helpers and construct with hooks:
+
+```rust
+{%- if let Some(hooks) = parser_hooks %}
+use {{ crate_ident }}::{{ hooks.path }};
+{%- endif %}
+{%- if let Some(hooks) = lexer_hooks %}
+use {{ crate_ident }}::{{ hooks.path }};
+{%- endif %}
+use {{ crate_ident }}::{{ parser_module }}::{{ parser_type }};
+use {{ crate_ident }}::{{ lexer_module }}::{{ lexer_type }};
+use {{ crate_ident }}::antlr4_runtime::{CommonTokenStream, InputStream, Parser};
+
+fn main() -> Result<(), {{ crate_ident }}::antlr4_runtime::AntlrError> {
+    let input = InputStream::new("{{ sample_source }}\n");
+{%- if let Some(hooks) = lexer_hooks %}
+    let lexer = {{ lexer_type }}::with_typed_hooks(input, {{ hooks.type_name }}::default());
+{%- else %}
+    let lexer = {{ lexer_type }}::new(input);
+{%- endif %}
+    let tokens = CommonTokenStream::new(lexer);
+{%- if let Some(hooks) = parser_hooks %}
+    let mut parser = {{ parser_type }}::with_typed_hooks(tokens, {{ hooks.type_name }}::default());
+{%- else %}
+    let mut parser = {{ parser_type }}::new(tokens);
+{%- endif %}
+    let result = parser.{{ entry_rule }}()?;
+
+    // Parser diagnostics, then the owned `ParsedFile` (token store + flat CST).
+    let errors = parser.number_of_syntax_errors();
+    let parsed = parser.into_parsed_file(result);
+    let root = parsed.tree();
+    let _ = (errors, root);
+    Ok(())
+}
+```
+{%- else %}
 ## Parse some {{ display_name }}
 
 `{{ parser_module }}::parse` wires up the lexer, token stream, parser, and a
@@ -80,6 +126,7 @@ fn main() -> Result<(), {{ crate_ident }}::antlr4_runtime::AntlrError> {
     Ok(())
 }
 ```
+{%- endif %}
 
 The parse tree has **no parent pointers** (the runtime stores `Node` views in a
 flat arena), so thread any parent-dependent context top-down as you walk.
