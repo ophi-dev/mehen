@@ -86,7 +86,7 @@ num-traits = "^0.2"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 smol_str = { version = "^0.3", features = ["serde"] }
-gix = { version = "^0.85", default-features = false, features = ["attributes", "max-performance-safe", "revision", "sha1"] }
+gix = { version = "^0.86", default-features = false, features = ["attributes", "max-performance-safe", "revision", "sha1"] }
 
 # ANTLR v4 Rust runtime (`ophi-dev/antlr-rust-runtime`). The package is
 # `antlr-rust-runtime`; its library is imported as `antlr4_runtime`, so we
