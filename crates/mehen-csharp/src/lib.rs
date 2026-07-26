@@ -22,6 +22,19 @@
 //!
 //! Metric coverage follows SonarC#'s definitions where they exist; see
 //! [`walker`] for the per-metric table.
+//!
+//! # Language-version limitation
+//!
+//! The vendored grammar is **C# 7-era**. Nullable reference types, `??=`,
+//! tuple deconstruction, and file-scoped namespaces parse fine, but several
+//! post-7 constructs do not: `switch` *expressions* (C# 8), `is not` and the
+//! C# 9 logical/relational patterns (`is int i and > 5`), and `record`
+//! declarations. Affected files still produce metrics — mehen recovers from
+//! parse errors by design — but they carry `csharp.syntax_error` diagnostics
+//! and the metrics around the unparsed construct are approximations. See
+//! `crates/mehen-csharp-parser/grammar/PROVENANCE.md` for the measured impact,
+//! why upstream's `v8-spec` grammar is not a drop-in fix, and what would be
+//! needed to move to Roslyn's own (complete) grammar instead.
 
 #![forbid(unsafe_code)]
 
