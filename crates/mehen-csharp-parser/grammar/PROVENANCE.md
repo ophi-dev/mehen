@@ -19,6 +19,71 @@ is the same revision the ANTLR Rust runtime validates against the Go target on
 real C# corpora (byte-identical ASTs), so parses through this crate carry that
 parity evidence.
 
+## Language-version coverage (known limitation)
+
+This grammar is **C# 7-era**, so several mainstream post-7 constructs do not
+parse. mehen recovers from parse errors by design — an affected file still
+yields metrics, but the constructs below are reported as `csharp.syntax_error`
+diagnostics and the metrics around them are approximations.
+
+Measured on 321 files of `dotnet/runtime`'s `System.Text.Json`: 93 parsed
+cleanly, 228 produced at least one diagnostic. Verified construct-by-construct:
+
+| Construct | Version | Parses? |
+|---|---|---|
+| Nullable reference types (`string?`) | C# 8 | ✅ |
+| Null-coalescing assignment (`??=`) | C# 8 | ✅ |
+| Tuple deconstruction (`var (a, b) = …`) | C# 7 | ✅ |
+| File-scoped namespace (`namespace N;`) | C# 10 | ✅ |
+| `switch` *expression* (`v switch { … }`) | C# 8 | ❌ |
+| `is not` / negated patterns | C# 9 | ❌ |
+| Logical + relational patterns (`is int i and > 5`) | C# 9 | ❌ |
+| `record` declarations | C# 9 | ❌ |
+
+The dominant failure by far is C# 9 pattern syntax (`is not null`, `and`/`or`,
+relational patterns), which appears throughout modern .NET code.
+
+### Why not the `v8-spec` grammar
+
+Upstream also ships `csharp/v8-spec`. It is **not** an easy upgrade and does not
+solve the main problem:
+
+- It stops at C# 8, so it does **not** add the C# 9 pattern forms that cause
+  most of the failures here.
+- Its `superClass` surface is ~35 helpers (vs. this grammar's 14), including a
+  **symbol-table-driven scope stack** (`EnterTypeScope`, `ExitCurrentScope`,
+  `IsClassTypeName`, `IsDelegateTypeName`, `IsTypeParameterName`, …). Those
+  predicates resolve identifiers against declarations seen so far, so porting
+  them means implementing a semantic model, not lookahead checks — and mehen's
+  `--sem-unknown error` policy means every one must be implemented exactly or
+  generation fails.
+
+### Why not Roslyn's own grammar
+
+[`dotnet/roslyn`'s `CSharp.Generated.g4`](https://github.com/dotnet/roslyn/blob/main/src/Compilers/CSharp/Portable/Generated/CSharp.Generated.g4)
+is the only ANTLR grammar with complete, current C# coverage (records, `is not`,
+`and`/`or`/relational patterns, list patterns, file-scoped namespaces,
+collection expressions, raw strings). Measured against ANTLR 4.13.2, exactly two
+things block it:
+
+1. **Six empty rules** → 23 × `error(153)` (empty-string closure). Two are
+   `/* epsilon */` (Roslyn's *omitted* syntax nodes for the blank slots in
+   `Foo<,>` / `new int[,]`); four are `/* see lexical specification */` token
+   stubs. Fixable in the grammar.
+2. **Mutual left recursion** → `error(119)`, in five rule cycles (expression,
+   type, declaration, `name`/`qualified_name`, `pattern`/`binary_pattern`).
+   ANTLR only rewrites *direct* left recursion. This is the hard blocker, and
+   it is tracked upstream as
+   [`antlr-rust-runtime#151`](https://github.com/ophi-dev/antlr-rust-runtime/issues/151)
+   (which now carries this grammar as its case study).
+
+Note that `error(119)` is invisible until (1) is resolved — ANTLR reports errors
+in stages — which is why this grammar is often written off for vaguer reasons.
+
+Closing the gap properly needs either upstream mutual-left-recursion support
+(#151) plus a lexer for those four stubs, or an upstream C# 9+ grammar, or a
+locally maintained fork. All are out of scope for the initial analyzer.
+
 ## Local patches
 
 **None.** The grammar is vendored unmodified. Its `superClass` helpers are
