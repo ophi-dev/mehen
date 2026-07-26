@@ -2069,6 +2069,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "mehen-csharp"
+version = "1.7.0"
+dependencies = [
+ "insta",
+ "mehen-antlr",
+ "mehen-core",
+ "mehen-csharp-parser",
+ "mehen-metrics",
+ "mehen-report",
+ "serde_json",
+ "smol_str",
+]
+
+[[package]]
+name = "mehen-csharp-parser"
+version = "1.7.0"
+dependencies = [
+ "antlr-rust-runtime",
+]
+
+[[package]]
 name = "mehen-engine"
 version = "1.7.0"
 dependencies = [
@@ -2081,6 +2102,7 @@ dependencies = [
  "log",
  "mehen-c",
  "mehen-core",
+ "mehen-csharp",
  "mehen-git",
  "mehen-go",
  "mehen-java",

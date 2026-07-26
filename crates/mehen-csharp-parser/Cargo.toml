@@ -1,0 +1,33 @@
+[package]
+name = "mehen-csharp-parser"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+# Generated from `xtask/templates/parser-readme.md` by `cargo xtask antlr
+# generate csharp` — never hand-edit. Named explicitly so it ships on the
+# crate's registry page when published.
+readme = "README.md"
+description = "ANTLR-generated C# lexer and parser (grammars-v4 C# grammar) on the antlr-rust-runtime."
+# Unlike the internal `mehen-*` analyzer crates (`publish = false`), this
+# crate ships ONLY the generated lexer/parser (plus the hand-written
+# `CSharpLexerBase` hooks port the grammar requires) so external tools can
+# depend on the C# parser alone via a git tag on this repo — the same way
+# `mehen` itself consumes ruff/oxc/sqruff parser crates. It carries no
+# mehen-specific logic and no dependency on `mehen-core`.
+publish = true
+
+[dependencies]
+# The generated modules reference the runtime by its real crate name
+# (`use antlr4_runtime::…`). Pinned in exactly one place — the workspace
+# `[workspace.dependencies]` `antlr4_runtime` entry — so every consumer
+# links the same revision the modules were generated against. Regenerate
+# with `cargo xtask antlr generate csharp` after any bump.
+antlr4_runtime = { workspace = true }
+
+# The generated modules are checked in verbatim and intentionally expose
+# their whole surface, so this crate deliberately does NOT opt into the
+# workspace `unreachable_pub` lint (`[lints] workspace = true`) that the
+# hand-written crates use.

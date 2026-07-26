@@ -1,0 +1,107 @@
+version = 1
+
+# Semantic-helper lowerings for the grammars-v4 C# grammar (passed to
+# `antlr4-rust-gen --sem-patterns` by `cargo xtask antlr generate csharp`).
+# Mirrors `patterns/csharp.toml` in `ophi-dev/antlr-rust-runtime`, which the
+# runtime's Rust-vs-Go AST parity CI validates against real C# corpora.
+#
+# The grammar declares `superClass = CSharpLexerBase` / `CSharpParserBase`.
+# The LEXER base is genuinely stateful (interpolated-string nesting, `#if`
+# preprocessor evaluation and inactive-section skipping), so all of its
+# helpers lower to typed hooks implemented by this crate's `src/hooks.rs` —
+# a port of the runtime's parity-tested `csharp_lexer_base.rs`. The PARSER
+# base's four predicates are pure lookahead/context checks, so they lower to
+# inline SemIR patterns and need no hook object at all.
+
+# ── CSharpLexerBase (stateful → hooks) ──────────────────────────────────────
+
+[[helper]]
+kind = "lexer-action"
+name = "OnInterpolatedRegularStringStart"
+returns = "unit"
+lower = "hook"
+
+[[helper]]
+kind = "lexer-action"
+name = "OnInterpolatedVerbatiumStringStart"
+returns = "unit"
+lower = "hook"
+
+[[helper]]
+kind = "lexer-action"
+name = "OnOpenBrace"
+returns = "unit"
+lower = "hook"
+
+[[helper]]
+kind = "lexer-action"
+name = "OnCloseBrace"
+returns = "unit"
+lower = "hook"
+
+[[helper]]
+kind = "lexer-action"
+name = "OnColon"
+returns = "unit"
+lower = "hook"
+
+[[helper]]
+kind = "lexer-action"
+name = "OpenBraceInside"
+returns = "unit"
+lower = "hook"
+
+[[helper]]
+kind = "lexer-action"
+name = "OnDoubleQuoteInside"
+returns = "unit"
+lower = "hook"
+
+[[helper]]
+kind = "lexer-action"
+name = "OnCloseBraceInside"
+returns = "unit"
+lower = "hook"
+
+[[helper]]
+kind = "lexer-predicate"
+name = "IsRegularCharInside"
+returns = "bool"
+lower = "hook"
+
+[[helper]]
+kind = "lexer-predicate"
+name = "IsVerbatiumDoubleQuoteInside"
+returns = "bool"
+lower = "hook"
+
+# ── CSharpParserBase (pure → inline patterns) ───────────────────────────────
+
+# `local_variable_declaration` must not start with the contextual keyword
+# `var` used as a type name; compares the `local_variable_type` child's text.
+[[helper]]
+kind = "parser-predicate"
+name = "IsLocalVariableDeclaration"
+returns = "bool"
+lower = "cmp(ne, ctx_rule_text(local_variable_type), str(\"var\"))"
+
+# `>` `>` (and `>` `>=`) are lexed as separate tokens; these predicates check
+# the two most recently consumed tokens were ADJACENT in the char stream so
+# `List<List<int>>` closes two generics while `a > > b` stays two operators.
+[[helper]]
+kind = "parser-predicate"
+name = "IsRightArrow"
+returns = "bool"
+lower = "token_index_adjacent"
+
+[[helper]]
+kind = "parser-predicate"
+name = "IsRightShift"
+returns = "bool"
+lower = "token_index_adjacent"
+
+[[helper]]
+kind = "parser-predicate"
+name = "IsRightShiftAssignment"
+returns = "bool"
+lower = "token_index_adjacent"

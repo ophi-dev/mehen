@@ -11,7 +11,7 @@ This section documents how to build mehen, run its tests, and contribute changes
 - A recent stable Rust toolchain. See [rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
 - For tree-sitter grammar regeneration (Go / C / PowerShell): a Linux or macOS shell, or
   Windows via WSL.
-- For ANTLR grammar regeneration (Kotlin, Java): the `antlr4-rust-gen` generator, pinned to the
+- For ANTLR grammar regeneration (Kotlin, Java, C#): the `antlr4-rust-gen` generator, pinned to the
   workspace runtime version
   (`cargo install antlr-rust-runtime --version 0.15.2 --features codegen --bin antlr4-rust-gen`).
   Only needed to *regenerate* parsers; a normal build uses the checked-in modules.
@@ -84,6 +84,7 @@ failures.
 | `crates/mehen-rust` | Rust analyzer (`ra_ap_syntax`). |
 | `crates/mehen-kotlin` | Kotlin analyzer (ANTLR — official Kotlin spec grammar). |
 | `crates/mehen-java` | Java analyzer (ANTLR — grammars-v4 Java grammar). |
+| `crates/mehen-csharp` | C# analyzer (ANTLR — grammars-v4 C# grammar). |
 | `crates/mehen-sql` | SQL analyzer (sqruff) — publishes the dedicated `sql.*` metric family. |
 | `crates/mehen-go`, `mehen-c`, `mehen-powershell` | Tree-sitter-backed analyzers. |
 | `crates/mehen-markdown` | Markdown analyzer (pulldown-cmark) with embedded-code dispatch via `LanguageDispatcher`. |

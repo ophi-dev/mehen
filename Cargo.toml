@@ -7,6 +7,7 @@ members = [
     "crates/mehen-antlr",
     "crates/mehen-kotlin-parser",
     "crates/mehen-java-parser",
+    "crates/mehen-csharp-parser",
     "crates/mehen-markdown",
     "crates/mehen-python",
     "crates/mehen-typescript",
@@ -17,6 +18,7 @@ members = [
     "crates/mehen-c",
     "crates/mehen-kotlin",
     "crates/mehen-java",
+    "crates/mehen-csharp",
     "crates/mehen-powershell",
     "crates/mehen-sql",
     "crates/mehen-engine",
@@ -54,9 +56,11 @@ mehen-antlr = { path = "crates/mehen-antlr" }
 # (path-only, `publish = false`), these are publishable so external tools
 # can depend on just the parser via a git tag — the same way this repo
 # consumes ruff/oxc/sqruff parser crates. The owning analyzer crates
-# (`mehen-kotlin`, `mehen-java`) depend on them for the generated grammar.
+# (`mehen-kotlin`, `mehen-java`, `mehen-csharp`) depend on them for the
+# generated grammar.
 mehen-kotlin-parser = { path = "crates/mehen-kotlin-parser" }
 mehen-java-parser = { path = "crates/mehen-java-parser" }
+mehen-csharp-parser = { path = "crates/mehen-csharp-parser" }
 mehen-markdown = { path = "crates/mehen-markdown" }
 mehen-python = { path = "crates/mehen-python" }
 mehen-typescript = { path = "crates/mehen-typescript" }
@@ -67,6 +71,7 @@ mehen-go = { path = "crates/mehen-go" }
 mehen-c = { path = "crates/mehen-c" }
 mehen-kotlin = { path = "crates/mehen-kotlin" }
 mehen-java = { path = "crates/mehen-java" }
+mehen-csharp = { path = "crates/mehen-csharp" }
 mehen-powershell = { path = "crates/mehen-powershell" }
 mehen-sql = { path = "crates/mehen-sql" }
 mehen-engine = { path = "crates/mehen-engine" }

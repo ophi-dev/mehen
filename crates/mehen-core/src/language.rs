@@ -26,6 +26,7 @@ pub enum Language {
     Go,
     Kotlin,
     Java,
+    CSharp,
     PowerShell,
     C,
     Markdown,
@@ -59,6 +60,7 @@ impl Language {
             Language::Go => "go",
             Language::Kotlin => "kotlin",
             Language::Java => "java",
+            Language::CSharp => "csharp",
             Language::PowerShell => "powershell",
             Language::C => "c",
             Language::Markdown => "markdown",
@@ -91,6 +93,9 @@ impl FromStr for Language {
             "go" => Language::Go,
             "kotlin" | "kt" | "kts" => Language::Kotlin,
             "java" => Language::Java,
+            // `cs` is the file extension; `csx` is a C# script. `c#`/`c-sharp`
+            // are accepted spellings a user may type on the CLI.
+            "csharp" | "cs" | "csx" | "c#" | "c-sharp" => Language::CSharp,
             "powershell" | "pwsh" | "ps1" | "psm1" | "psd1" => Language::PowerShell,
             "c" | "h" => Language::C,
             "markdown" | "md" | "mdx" | "mdown" | "mkd" | "mkdn" => Language::Markdown,
@@ -116,6 +121,7 @@ pub fn language_aliases(lang: Language) -> &'static [&'static str] {
         Language::Go => &["go"],
         Language::Kotlin => &["kotlin", "kt", "kts"],
         Language::Java => &["java"],
+        Language::CSharp => &["csharp", "cs", "csx", "c#", "c-sharp"],
         Language::PowerShell => &["powershell", "pwsh", "ps1", "psm1", "psd1"],
         Language::C => &["c", "h"],
         Language::Markdown => &["markdown", "md", "mdx", "mdown", "mkd", "mkdn"],
@@ -141,6 +147,7 @@ mod tests {
             Language::Go,
             Language::Kotlin,
             Language::Java,
+            Language::CSharp,
             Language::PowerShell,
             Language::C,
             Language::Markdown,
@@ -156,6 +163,8 @@ mod tests {
         assert_eq!("rb".parse::<Language>().unwrap(), Language::Ruby);
         assert_eq!("kts".parse::<Language>().unwrap(), Language::Kotlin);
         assert_eq!("mdx".parse::<Language>().unwrap(), Language::Markdown);
+        assert_eq!("cs".parse::<Language>().unwrap(), Language::CSharp);
+        assert_eq!("C#".parse::<Language>().unwrap(), Language::CSharp);
     }
 
     #[test]

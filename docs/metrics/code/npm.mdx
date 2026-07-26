@@ -31,6 +31,7 @@ Despite the name, this metric has nothing to do with the npm package manager. NP
 | Language | Public method is… |
 |---|---|
 | Java / Kotlin | A method declared `public` (or with no modifier in Kotlin). |
+| C# | A method, constructor, operator, property, or indexer declared `public`. A member with no access modifier is `private`, and `internal` is assembly-scoped, so neither counts. Interface members are always public. |
 | TypeScript / JS | A class method without `private` / `protected` / `#` prefix. |
 | Python | A method that does not start with `_`. |
 | Ruby | A method *not* declared `private` or `protected`. |

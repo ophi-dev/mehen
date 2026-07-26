@@ -26,6 +26,9 @@ pub fn detect_language(path: &Utf8Path) -> Option<Language> {
         "rb" => Language::Ruby,
         "kt" | "kts" => Language::Kotlin,
         "java" => Language::Java,
+        // `.csx` is a C# script file (dotnet-script / `csi`); it shares the
+        // compilation-unit grammar, so it routes to the same analyzer.
+        "cs" | "csx" => Language::CSharp,
         "ps1" | "psm1" | "psd1" => Language::PowerShell,
         "c" | "h" => Language::C,
         "php" | "php3" | "php4" | "php5" | "php7" | "php8" | "phtml" => Language::Php,

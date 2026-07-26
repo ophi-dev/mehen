@@ -1,0 +1,33 @@
+[package]
+name = "mehen-csharp"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Mehen 1.0 — C# language analyzer (internal)."
+publish = false
+
+[dependencies]
+mehen-core = { workspace = true }
+mehen-metrics = { workspace = true }
+# The generated C# lexer/parser (plus the hand-written `CSharpLexerBase` hooks
+# the grammar's `superClass` requires) live in the standalone, publishable
+# `mehen-csharp-parser` crate, produced by `cargo xtask antlr generate csharp`.
+# This analyzer depends on it for the grammar and reaches the ANTLR runtime
+# through its `antlr4_runtime` re-export.
+mehen-csharp-parser = { workspace = true }
+# `mehen-antlr` owns the runtime version pin and the shared span/comment/
+# diagnostic helpers; the walker reaches the runtime types (`Node`,
+# `RuleNodeView`, `TokenView`, …) through its `runtime` re-export.
+mehen-antlr = { workspace = true }
+smol_str = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+mehen-report = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -138,6 +138,12 @@ fn register_default_analyzers(registry: &mut AnalyzerRegistry) {
     {
         let _ = registry.register(Language::Java, || Box::new(mehen_java::JavaAnalyzer::new()));
     }
+    #[cfg(feature = "lang-csharp")]
+    {
+        let _ = registry.register(Language::CSharp, || {
+            Box::new(mehen_csharp::CSharpAnalyzer::new())
+        });
+    }
     #[cfg(feature = "lang-powershell")]
     {
         let _ = registry.register(Language::PowerShell, || {

@@ -27,6 +27,7 @@ mehen-go = { workspace = true, optional = true }
 mehen-c = { workspace = true, optional = true }
 mehen-kotlin = { workspace = true, optional = true }
 mehen-java = { workspace = true, optional = true }
+mehen-csharp = { workspace = true, optional = true }
 mehen-powershell = { workspace = true, optional = true }
 mehen-sql = { workspace = true, optional = true }
 
@@ -59,6 +60,7 @@ default = [
     "lang-c",
     "lang-kotlin",
     "lang-java",
+    "lang-csharp",
     "lang-powershell",
     "lang-sql",
 ]
@@ -71,6 +73,7 @@ lang-go = ["dep:mehen-go"]
 lang-c = ["dep:mehen-c"]
 lang-kotlin = ["dep:mehen-kotlin"]
 lang-java = ["dep:mehen-java"]
+lang-csharp = ["dep:mehen-csharp"]
 lang-powershell = ["dep:mehen-powershell"]
 lang-sql = ["dep:mehen-sql"]
 

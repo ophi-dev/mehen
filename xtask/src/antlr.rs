@@ -210,6 +210,27 @@ pub(crate) const TARGETS: &[AntlrTarget] = &[
         lexer_hooks: None,
         parser_hooks: Some("hooks::JavaParserBase"),
     },
+    AntlrTarget {
+        slug: "csharp",
+        crate_dir: "crates/mehen-csharp-parser",
+        grammar_dir: "crates/mehen-csharp-parser/grammar",
+        lexer_g4: "CSharpLexer.g4",
+        parser_g4: "CSharpParser.g4",
+        display_name: "C#",
+        upstream_name: "antlr/grammars-v4",
+        upstream_url: "https://github.com/antlr/grammars-v4",
+        entry_rule: "compilation_unit",
+        sample_source: "class C {}",
+        // The LEXER base class is stateful (interpolated strings, `#if`
+        // preprocessor evaluation) → typed hooks ported in `hooks::
+        // CSharpLexerBase`. The PARSER base's four predicates are pure
+        // lookahead/context checks, fully lowered by `patterns.toml` —
+        // no parser hook object is needed.
+        sem_patterns: Some("patterns.toml"),
+        option_hooks: &["superClass=CSharpLexerBase", "superClass=CSharpParserBase"],
+        lexer_hooks: Some("hooks::CSharpLexerBase"),
+        parser_hooks: None,
+    },
 ];
 
 /// Resolve a target by slug.

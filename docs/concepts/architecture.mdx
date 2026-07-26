@@ -16,7 +16,7 @@ mehen's internals are organized around a clean separation between parsing, analy
 | `mehen-metrics` | Shared metric formulas, accumulators, finalizers (Halstead, cyclomatic, cognitive, MI, ABC, LOC, NOM, NPA, NPM, WMC). |
 | `mehen-<lang>` | Per-language analyzer crates. Each owns parsing and metric interpretation. |
 | `mehen-tree-sitter` | Shared tree-sitter wrapper and CST traversal helpers, used only by the tree-sitter-backed languages. |
-| `mehen-antlr` | Shared support for ANTLR-backed analyzers (Kotlin, Java) — re-exports the runtime and provides char→byte span conversion, recovered-error diagnostics, and hidden-channel comment (CLOC) extraction. |
+| `mehen-antlr` | Shared support for ANTLR-backed analyzers (Kotlin, Java, C#) — re-exports the runtime and provides char→byte span conversion, recovered-error diagnostics, and hidden-channel comment (CLOC) extraction. |
 | `mehen-markdown` | Markdown analyzer (pulldown-cmark) with embedded-code dispatch via `LanguageDispatcher`. |
 | `mehen-sql` | SQL analyzer (sqruff). Publishes a dedicated `sql.*` metric family instead of the source-code families; the sqruff CST is confined behind a parser-neutral `SqlFileFacts` adapter. |
 | `mehen-git` | Git operations for `mehen diff`. |
@@ -37,6 +37,7 @@ returns the same `LanguageAnalysis` shape. mehen does not force a single AST mod
 | Rust | [`ra_ap_syntax`](https://docs.rs/ra_ap_syntax/) | The same syntax library rust-analyzer uses internally. |
 | Kotlin | [ANTLR](https://www.antlr.org/) (official [Kotlin spec grammar](https://github.com/Kotlin/kotlin-spec)) | Semantically-named rules for `when` entries, elvis `?:`, safe-call `?.`, `catch` blocks, labeled jumps, and property accessors — richer than a tree-sitter CST. |
 | Java | [ANTLR](https://www.antlr.org/) ([grammars-v4 Java grammar](https://github.com/antlr/grammars-v4/tree/master/java/java)) | Records, sealed types, switch expressions, text blocks, pattern matching, modules — as first-class, semantically-named rules. |
+| C# | [ANTLR](https://www.antlr.org/) ([grammars-v4 C# grammar](https://github.com/antlr/grammars-v4/tree/master/csharp)) | Properties/accessors, indexers, events, local functions, expression-bodied members, `when` pattern guards, interpolated strings, and `#if` preprocessor directives. |
 | SQL | [sqruff](https://github.com/quarylabs/sqruff) | Dialect-aware SQL CST (postgres, T-SQL, snowflake, bigquery, …) for CTE/join/subquery structure and object-touch analysis. |
 | Markdown | [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) | CommonMark + GFM with byte-accurate spans. |
 | Go, C, PowerShell | tree-sitter | Mature grammars where tree-sitter's coverage is the best available. |
@@ -80,7 +81,7 @@ blocks without duplicating language logic.
 
 ## ANTLR-backed analyzers
 
-Kotlin and Java run through ANTLR v4 grammars generated to Rust ahead of time and checked in, so a
+Kotlin, Java, and C# run through ANTLR v4 grammars generated to Rust ahead of time and checked in, so a
 normal `cargo build` never needs `antlr4-rust-gen`. The shared `mehen-antlr` crate carries the
 concerns every ANTLR analyzer needs but tree-sitter and the language-specific parsers handle
 differently:
