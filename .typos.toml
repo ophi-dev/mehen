@@ -70,3 +70,9 @@ Ccomment = "Ccomment"
 "mis" = "mis"
 "Hashi" = "Hashi"
 "requireds" = "requireds"
+# Deliberately malformed SQL keyword in the error-recovery probe input quoted
+# by design-docs/sql_parser_comparison.md §8.2. The misspelling *is* the test:
+# it is what makes `sqlparser::Parser::parse_sql` return a hard `Err` while
+# sqruff recovers with an `Unparsable` node. Keep verbatim so the probe stays
+# reproducible.
+"SELCT" = "SELCT"

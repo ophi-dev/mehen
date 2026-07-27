@@ -4,21 +4,26 @@
 **Author:** evaluation pass (hands-on, repos cloned and one candidate built)
 **Date:** 2026-05-24
 **Companion doc:** [`mehen_sql_metrics_research_foundation.md`](./mehen_sql_metrics_research_foundation.md)
+**Addendum:** [§8 — `apache/datafusion-sqlparser-rs` re-evaluation](#8-addendum--apachedatafusion-sqlparser-rs-2026-07-27) (2026-07-27, post-adoption)
 
 ## 0. TL;DR
 
-| | **sqruff** (`quarylabs/sqruff`) | **sqlfluffrs** (`sqlfluff/sqlfluff/sqlfluffrs`) | **ANTLR grammars-v4 + `antlr-rust-runtime`** |
-|---|---|---|---|
-| Verdict | **Recommended primary parser** | Not recommended as a dependency now | Niche supplement for deep PL/SQL / T-SQL only |
-| Language | Native Rust | Rust, but a build-component of a Python project | Generated Rust over a young Rust runtime |
-| License | Apache-2.0 | MIT | MIT/BSD per-grammar + BSD-3 runtime |
-| Build as git dep | Plain `cargo build` (verified) | **Requires Python + SQLFluff source to codegen dialects at build time** | Needs ANTLR (Java) at dev time; generated Rust can be committed |
-| Node model | One `SyntaxKind` enum (1087 variants) shared across all dialects | String-typed segments shared across dialects | One generic `ParseTree`; **rule vocabulary differs per dialect grammar** |
-| Built-in analysis | CTE/query graph, scopes, aliases, wildcards, **column lineage** | None (pure lex+parse) | None (pure CST) |
-| Dialects | 17, all hand-written Rust, feature-gated | ~28 (transpiled from Python) | 20 independent grammars |
-| Source spans | Verified line:col on every node | `pos_marker` per token | Token line:col |
+| | **sqruff** (`quarylabs/sqruff`) | **sqlfluffrs** (`sqlfluff/sqlfluff/sqlfluffrs`) | **ANTLR grammars-v4 + `antlr-rust-runtime`** | **`sqlparser`** (`apache/datafusion-sqlparser-rs`) † |
+|---|---|---|---|---|
+| Verdict | **Recommended primary parser** | Not recommended as a dependency now | Niche supplement for deep PL/SQL / T-SQL only | Rejected — AST discards comments, no error recovery |
+| Language | Native Rust | Rust, but a build-component of a Python project | Generated Rust over a young Rust runtime | Native Rust |
+| License | Apache-2.0 | MIT | MIT/BSD per-grammar + BSD-3 runtime | Apache-2.0 (ASF-governed) |
+| Build as git dep | Plain `cargo build` (verified) | **Requires Python + SQLFluff source to codegen dialects at build time** | Needs ANTLR (Java) at dev time; generated Rust can be committed | Published on crates.io, semver |
+| Node model | One `SyntaxKind` enum (1087 variants) shared across all dialects | String-typed segments shared across dialects | One generic `ParseTree`; **rule vocabulary differs per dialect grammar** | Typed `enum Statement`/`Expr` — **AST, lossy** |
+| Built-in analysis | CTE/query graph, scopes, aliases, wildcards, **column lineage** | None (pure lex+parse) | None (pure CST) | None (explicitly syntax-only, no semantics) |
+| Dialects | 17, all hand-written Rust, feature-gated | ~28 (transpiled from Python) | 20 independent grammars | 16 dialect structs |
+| Source spans | Verified line:col on every node | `pos_marker` per token | Token line:col | `Spanned` trait, **officially incomplete** (#1548) |
+| Comments in tree | **Yes** (comment nodes w/ byte spans) | Yes (tokens) | Yes (hidden channel) | **No** — tokenizer-only |
+| Error recovery | **Yes** (`Unparsable` nodes) | Yes (`unparsable`) | Yes (`Error` nodes) | **No** — one error ⇒ zero statements |
 
-**Bottom line:** sqruff is the only candidate that compiles as an ordinary Rust git dependency, exposes a single dialect-agnostic typed node model with reliable spans, and already ships the higher-level CTE/scope/lineage analysis that the metrics document assumes. It covers essentially the entire proposed metric catalogue. The other two each carry a structural blocker (sqlfluffrs: a Python build-time dependency; ANTLR: no shared node vocabulary + unrunnable semantic predicates for the most important dialects).
+**Bottom line:** sqruff is the only candidate that compiles as an ordinary Rust git dependency, exposes a single dialect-agnostic typed node model with reliable spans, and already ships the higher-level CTE/scope/lineage analysis that the metrics document assumes. It covers essentially the entire proposed metric catalogue. The other three each carry a structural blocker (sqlfluffrs: a Python build-time dependency; ANTLR: no shared node vocabulary + unrunnable semantic predicates for the most important dialects; `sqlparser`: a lossy AST with no comment nodes and no error recovery, so the `sql.loc.*` and `sql.parser.*` families cannot be computed).
+
+† Added by the [§8 addendum](#8-addendum--apachedatafusion-sqlparser-rs-2026-07-27) (2026-07-27); not part of the original 2026-05-24 evaluation.
 
 ---
 
@@ -223,3 +228,162 @@ sqruff-lib-dialects = { git = "https://github.com/quarylabs/sqruff", tag = "v0.3
 - sqruff parse probe: `/tmp/sql-parser-eval/probe` (path-deps on `lib-core` + `lib-dialects[postgres]`), built and run with `rustc 1.89.0`; results in §2.3.
 - sqlfluffrs build blocker: read from `sqlfluffrs/sqlfluffrs_dialects/build.rs` and confirmed `src/dialect/` absent in a fresh checkout; dialect count from `src/sqlfluff/dialects/dialect_*.py` (28).
 - ANTLR predicate/base-class findings: `rg` over `grammars-v4/sql/*/*.g4` (`superClass`, `}?`) and the shipped per-language `*Base` directories (no Rust); runtime capabilities from `antlr-rust-runtime/README.md` + `docs/runtime-testsuite.md` and the generic `ParseTree` walker in `tests/kotlin-parity/dumper/src/main.rs`.
+
+---
+
+## 8. Addendum — `apache/datafusion-sqlparser-rs` (2026-07-27)
+
+**Status:** post-adoption re-evaluation · **Verdict: keep sqruff; do not migrate.**
+
+A fourth candidate that the original pass never evaluated: the `sqlparser` crate
+(`apache/datafusion-sqlparser-rs`), the SQL front end for Apache DataFusion.
+It is the most prominent SQL parser in the Rust ecosystem, so its absence from
+§0 was a real gap. This addendum closes it.
+
+Probed at **`sqlparser` v0.62.0** (crates.io, Apache-2.0) against
+**sqruff v0.39.0** as currently pinned in `crates/mehen-sql/Cargo.toml`.
+
+### 8.1 The decisive difference: AST vs CST
+
+sqruff produces a **lossless CST** — every byte of input, including comments and
+whitespace, is a node. `sqlparser` produces an **abstract** syntax tree that
+discards trivia by design; its README advertises round-tripping "with comments
+removed, normalized whitespace and keyword capitalization".
+
+For a query engine that is the correct trade-off: DataFusion wants semantics,
+not formatting. For a *metrics* tool it is disqualifying. Two published metric
+families are trivia- or recovery-derived and have no AST equivalent:
+
+- `sql.loc.{physical,code,comment,blank,logical,comment_density,max_statement_lines,avg_statement_lines}`
+  — `loc.rs` classifies lines by **comment byte coverage** taken from
+  `SyntaxKind::{Comment,InlineComment,BlockComment}` nodes. Its module doc
+  explains why a marker scan is wrong: an interior line of a multi-line block
+  comment carries no `/*`/`*/` of its own. The four unit tests at the foot of
+  `loc.rs` encode exactly those edge cases.
+- `sql.parser.{unparsable_segment_count,unparsable_line_count,unparsable_ratio,diagnostic_count}`
+  — these exist only because sqruff emits `SyntaxKind::Unparsable` recovery
+  nodes and keeps going.
+
+That is 12 of the crate's metric keys that depend on properties `sqlparser`
+does not expose in its tree, plus the per-statement `MetricSpace` attribution
+and `change_risk_evidence` contributions that need spans on deep nodes.
+
+### 8.2 Empirical probe
+
+A throwaway crate (`cargo add sqlparser --features visitor`) run against the
+same inputs as our `SqlAnalyzer`. Every row below was executed, not inferred.
+
+| Probe | `sqlparser` 0.62 | sqruff 0.39 (via `mehen-sql`) |
+|---|---|---|
+| §2.3 "gnarly" query (recursive CTE, window+frame, nested CASE, correlated subquery) | ✅ parses, 1 stmt, span `L1:1..L29:17` | ✅ parses, 0 unparsable |
+| **Comments in tree** | ❌ **absent** — AST debug contains no comment text; `SELECT 1 AS x -- trailing` round-trips to `SELECT 1 AS x FROM t` | ✅ comment nodes with byte spans |
+| Comments from tokenizer | ⚠️ 3 tokens as `Token::Whitespace(SingleLineComment/MultiLineComment)` with line:col — recoverable via a second pass | ✅ already tree-attached |
+| **Error recovery** on `SELECT a FROM t; SELCT SELCT bogus ***; SELECT b FROM u;` | ❌ **hard `Err`, zero statements** — both valid statements lost | ✅ `Ok`: `loc.code=3`, `unparsable_segment_count=1`, `unparsable_ratio=0.67`, warning diagnostic |
+| T-SQL `BEGIN TRY … END CATCH` | ❌ `Err` *even with* `MsSqlDialect` | ✅ 0 unparsable (with `-- sqlfluff:dialect:tsql`) |
+| T-SQL `WHILE @i < 10 BEGIN … END` | ❌ `Err` with `MsSqlDialect` | ✅ 0 unparsable |
+| PL/SQL `BEGIN IF x > 1 THEN NULL; END IF; END;` | ❌ `Err` with `OracleDialect` | ✅ 0 unparsable (with `:oracle`) |
+| `CREATE PROCEDURE p AS BEGIN … END` | ❌ `Err` (both MsSql and Oracle) | ✅ 0 unparsable |
+| QUALIFY · UNNEST · `$$…$$` · MERGE · GROUPING SETS · PIVOT | ✅ all OK on `GenericDialect` | ✅ all supported |
+| `Send + Sync` tree | ✅ `Vec<Statement>` is both | ❌ `Rc`-based `ErasedSegment` is neither |
+| Transitive crates (`cargo tree --edges normal`, parser subtree only) | **13** | **40** |
+
+**Caveat on the procedural rows.** sqruff's advantage there is *conditional*: it
+only materializes with an explicit dialect. Under inference all three fall back
+to `ansi` and report `unparsable=1, ratio=1.00`. Since `requested_dialect()` in
+`lib.rs` still returns `None`, the only way to set one today is an in-file
+`-- sqlfluff:dialect:<name>` directive. See §8.5.
+
+This result also **inverts §4.2's assumption** that procedural depth requires
+the ANTLR `plsql`/`tsql` grammars: sqruff handles all four procedural probes
+that `sqlparser` rejects outright.
+
+### 8.3 Where `sqlparser` genuinely wins
+
+1. **`Send + Sync` AST.** The one real architectural improvement. `facts.rs`
+   documents the current workaround in its module header — extract everything
+   into owned `SqlFileFacts` inside one `analyze()` call because the `Rc` tree
+   cannot cross threads. With `sqlparser` the adapter seam would be optional
+   rather than mandatory.
+2. **Governance and API stability.** ASF-owned, on crates.io with semver, 3.3k
+   stars, 300 contributors, 66M all-time downloads, 323 reverse dependencies.
+   The README states the maintainers "do not plan for any substantial changes
+   to this crate's API." This directly addresses the §2.5 risk — sqruff is a
+   `0.x` internal crate of a linter app, git-tag pinned, with no semver promise
+   (cf. the duplicate-`Dialect` `E0308` breakage from ungrouped bumps).
+3. **Lighter tree:** 13 vs 40 crates. No `fancy-regex`, `serde_yaml`, `strum`,
+   or `unsafe-libyaml`.
+4. **Typed ergonomics.** A real `enum Statement` beats matching a 1087-variant
+   flat `SyntaxKind`. Our own code shows the cost of the latter: `facts.rs`
+   repeatedly falls back to raw-text sniffing (`stmt.raw().to_ascii_uppercase()`,
+   `seg.raw().eq_ignore_ascii_case("NOT")`, string-matching `"USING"`) where a
+   typed AST would offer field access.
+
+### 8.4 Where it loses
+
+- **Comments absent from the AST** (§8.1). Recoverable via
+  `tokenize_with_location()`, but that means a second tokenizer pass plus
+  re-deriving the trivia/code interleaving sqruff supplies directly.
+- **No error recovery.** `parse_sql` returns `Result<Vec<Statement>>`: one
+  syntax error anywhere yields nothing. For a tool pointed at whole repos this
+  is not an edge case — a single vendor-specific statement in a migration file
+  would zero out that file's metrics instead of degrading them.
+- **Weaker procedural SQL,** contrary to expectation (§8.2).
+- **Spans officially incomplete.** The `Spanned` docs state nodes "may be
+  missing span information entirely, in which case they return `Span::empty()`",
+  with per-type "partial span / Missing spans" annotations on `Expr`,
+  `JoinOperator`, `GroupByExpr`, `JoinConstraint` and more
+  ([issue #1548](https://github.com/apache/datafusion-sqlparser-rs/issues/1548)).
+  Simple projection and `WHERE` spans were correct in the probe, but the gaps
+  sit exactly where per-statement attribution needs them.
+- **No analysis layer.** No CTE graph, scopes, `wildcard_info`, or lineage.
+  This costs less than §5 assumed, since `facts.rs` already re-derives the CTE
+  graph itself — but Phase-4 `sql.lineage.*` would lose sqruff's `lineage`
+  crate entirely.
+
+### 8.5 Recommendation
+
+**Keep sqruff.** A migration would rewrite `facts.rs`, `loc.rs`, and
+`dialect.rs` against a tree carrying *less* information than the current one —
+trading comment nodes, error recovery, and procedural coverage for
+`Send + Sync`, a lighter tree, and ASF governance. All 142 metric keys and
+every `insta` snapshot would need revalidation. The `SqlFileFacts` adapter seam
+(§6) makes the swap mechanically possible, which is the seam working as
+designed; it should stay unexercised. The two costs that would justify it — the
+API-churn tax and the missing-`Send` friction — are each currently cheaper than
+the rewrite.
+
+Two cheaper follow-ups, both parser-agnostic:
+
+1. **Wire up `requested_dialect()`** (`lib.rs`). sqruff's procedural advantage
+   only materializes with an explicit dialect, and there is no CLI flag to set
+   one. Highest-value SQL change currently available.
+2. **Keep the sqruff Dependabot group aligned** so the two `sqruff-*` git tags
+   never drift apart.
+
+**Where `sqlparser` could still earn a place:** as an optional cross-check
+oracle for `sql.dialect.confidence`. Parsing a file with both and comparing
+statement counts is genuine signal — its permissive `GenericDialect`
+disagreeing with sqruff's inferred dialect indicates low confidence. Additive,
+no rewrite required.
+
+### 8.6 Addendum evidence log
+
+- Probe crate: `/tmp/sqlparser-probe` (`sqlparser` v0.62.0, `visitor` feature),
+  `rustc` 1.97.1. Covered: gnarly-query parse, comment presence in AST vs
+  tokenizer, error recovery, `Send + Sync` (compile-time assertion), inner-node
+  span quality, and a dialect syntax matrix over `Generic`/`MsSql`/`Oracle`/
+  `Snowflake`.
+- sqruff side: a temporary integration test in `crates/mehen-sql/tests/`
+  driving `SqlAnalyzer::analyze` on identical inputs (removed afterwards;
+  working tree left clean).
+- Metric-key counts: `grep -oh '"sql\.[a-z_.]*"' crates/mehen-sql/src/*.rs`
+  → 142 distinct literal keys, of which 8 `sql.loc.*` and 4 `sql.parser.*` are
+  trivia/recovery-derived. Two families are built dynamically via `format!`
+  (`sql.dialect.is_<name>`, `sql.statement.kind_count.<label>`) and so are not
+  in that literal count.
+- Dependency counts: `cargo tree --edges normal --prefix none`, deduplicated,
+  excluding dev-dependencies and (on our side) `mehen-*`/`smol_str`, leaving
+  the parser subtree only.
+- Dialect inventory: `sqlparser::dialect` exposes 16 dialect structs plus
+  `dialect_from_str`; our sqruff build compiles 12 feature-gated dialects
+  alongside the always-present `ansi`.
