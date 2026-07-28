@@ -48,9 +48,11 @@ the main reason 212 files still report errors.
 Also note the performance finding recorded in PROVENANCE.md: Roslyn's
 optional body braces (`'{'? member_declaration* '}'?`, present for error
 recovery) make member boundaries ambiguous and cost O(n^2) in members per
-type — 18 members took 6.5s, and one 700-line file took 272s. Requiring the
+type — 18 members took 6.5s, and one 953-line file took 272s. Requiring the
 braces makes it flat (18 members in 0.07s, ~93x faster) and the whole corpus
 runs in 61s instead of over 600s. That patch is NOT yet applied here.
+Filed upstream as antlr-rust-runtime#248, with a one-command reproduction in
+`repro/roslyn-csharp-perf/` at the repo root.
 
 Usage:
     python3 prepare-roslyn-grammar.py CSharp.Generated.g4 --out-dir .

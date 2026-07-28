@@ -86,11 +86,15 @@ runtime:
    | 12 | 2.29 s | 0.06 s |
    | 18 | 6.54 s | 0.07 s |
 
-   One 700-line real file (`JsonDocument.Parse.cs`) took **272 s**. Requiring
+   One 953-line real file (`JsonDocument.Parse.cs`) took **272 s**. Requiring
    the braces makes it flat (~93× faster at 18 members) and takes the whole
    corpus from >600 s to **61 s**, with all 13 probes still passing. Whether to
    apply that patch is a deliberate trade: it gives up Roslyn's error-recovery
    tolerance for malformed bodies, which a metrics tool arguably wants to keep.
+
+   Filed upstream as
+   [`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runtime/issues/248),
+   with a one-command reproduction in `repro/roslyn-csharp-perf/`.
 
 Note also that this grammar is **permissive by design** — it models Roslyn's
 syntax nodes (including error-recovery nodes such as `incomplete_member`), not

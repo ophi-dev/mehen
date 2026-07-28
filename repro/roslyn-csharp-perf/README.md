@@ -1,7 +1,7 @@
 # Roslyn C# grammar — member-scaling performance repro
 
 Self-contained reproduction for
-[`antlr-rust-runtime` performance issue](https://github.com/ophi-dev/antlr-rust-runtime/issues)
+[`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runtime/issues/248)
 on `dotnet/roslyn`'s published C# grammar. Everything needed is here — no need
 to re-derive a lexer or hunt for fixtures.
 
