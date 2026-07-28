@@ -58,31 +58,45 @@ solve the main problem:
   `--sem-unknown error` policy means every one must be implemented exactly or
   generation fails.
 
-### Why not Roslyn's own grammar
+### Status of the Roslyn-grammar migration
 
-[`dotnet/roslyn`'s `CSharp.Generated.g4`](https://github.com/dotnet/roslyn/blob/main/src/Compilers/CSharp/Portable/Generated/CSharp.Generated.g4)
-is the only ANTLR grammar with complete, current C# coverage (records, `is not`,
-`and`/`or`/relational patterns, list patterns, file-scoped namespaces,
-collection expressions, raw strings). Measured against ANTLR 4.13.2, exactly two
-things block it:
+`prepare-roslyn-grammar.py` (this directory) derives a generatable grammar pair
+from [`dotnet/roslyn`'s `CSharp.Generated.g4`](https://github.com/dotnet/roslyn/blob/main/src/Compilers/CSharp/Portable/Generated/CSharp.Generated.g4).
+Since runtime 0.21.0 accepted mutual left recursion (upstream #221), that path
+works: generation is clean, the parser compiles, and **13/13** modern-C# probes
+parse. On the 321-file `System.Text.Json` corpus it reaches **109 clean vs 93**
+for this C#7 grammar.
 
-1. **Six empty rules** → 23 × `error(153)` (empty-string closure). Two are
-   `/* epsilon */` (Roslyn's *omitted* syntax nodes for the blank slots in
-   `Foo<,>` / `new int[,]`); four are `/* see lexical specification */` token
-   stubs. Fixable in the grammar.
-2. **Mutual left recursion** → `error(119)`, in five rule cycles (expression,
-   type, declaration, `name`/`qualified_name`, `pattern`/`binary_pattern`).
-   ANTLR only rewrites *direct* left recursion. This is the hard blocker, and
-   it is tracked upstream as
-   [`antlr-rust-runtime#151`](https://github.com/ophi-dev/antlr-rust-runtime/issues/151)
-   (which now carries this grammar as its case study).
+It is not yet wired in. Two things remain, both in the preparation, not the
+runtime:
 
-Note that `error(119)` is invisible until (1) is resolved — ANTLR reports errors
-in stages — which is why this grammar is often written off for vaguer reasons.
+1. **Interpolated strings.** The prep's `INTERPOLATION` lexer mode is never
+   entered — `$"` is harvested as an ordinary literal instead of a
+   mode-pushing token — so any file containing `$"…{expr}…"` fails. This is the
+   main cause of the remaining 212 error files.
 
-Closing the gap properly needs either upstream mutual-left-recursion support
-(#151) plus a lexer for those four stubs, or an upstream C# 9+ grammar, or a
-locally maintained fork. All are out of scope for the initial analyzer.
+2. **Optional body braces cost O(n²).** Roslyn spells every type body as
+   `'{'? member_declaration* '}'?` (optional, for error recovery), which makes
+   member boundaries ambiguous. Measured on a synthetic class:
+
+   | members | as-published | braces required |
+   |---|---|---|
+   | 4 | 0.28 s | 0.05 s |
+   | 8 | 0.92 s | 0.05 s |
+   | 12 | 2.29 s | 0.06 s |
+   | 18 | 6.54 s | 0.07 s |
+
+   One 700-line real file (`JsonDocument.Parse.cs`) took **272 s**. Requiring
+   the braces makes it flat (~93× faster at 18 members) and takes the whole
+   corpus from >600 s to **61 s**, with all 13 probes still passing. Whether to
+   apply that patch is a deliberate trade: it gives up Roslyn's error-recovery
+   tolerance for malformed bodies, which a metrics tool arguably wants to keep.
+
+Note also that this grammar is **permissive by design** — it models Roslyn's
+syntax nodes (including error-recovery nodes such as `incomplete_member`), not
+the exact accepted language — and it encodes **no operator precedence**, since
+real C# precedence lives in Roslyn's hand-written parser. Neither matters for
+mehen's token-level metrics, but both would matter for a validating parser.
 
 ## Local patches
 

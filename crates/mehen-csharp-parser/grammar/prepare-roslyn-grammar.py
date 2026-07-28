@@ -31,19 +31,26 @@ vendored `CSharpLexer.g4` / `CSharpParser.g4` from a pinned upstream revision,
 so the patch set is reproducible and reviewable rather than hand-edited. See
 `PROVENANCE.md` for the pinned commit and the rationale.
 
-Status: NOT YET IN USE. The emitted grammar generates cleanly under
-`antlr4-rust-gen` 0.21.0 (mutual left recursion accepted, per upstream #221) and
-the resulting parser compiles, but the `expression` cycle mis-parses: hub
-inlining retains the hub-only *prefix*-shaped satellite
-(`prefix_unary_expression`) while inlining the binary/suffix ones, and their
-leading tokens overlap, so `a + b` parses as a prefix-unary and bare `a` fails
-outright. Tracked upstream as
-https://github.com/ophi-dev/antlr-rust-runtime/issues/245. The vendored
-grammars-v4 C# 7 grammar remains the analyzer's source until that is fixed.
+Status: NOT YET IN USE — the prep is close but not complete.
 
-The other three cycles in Roslyn's grammar (`type`, `pattern`, `name`) already
-parse correctly, so this is expected to be a small upstream fix rather than a
-dead end.
+Working: generation under `antlr4-rust-gen` 0.21.0 is clean (mutual left
+recursion accepted per upstream #221), the parser compiles, and 13/13
+modern-C# probes parse (records, `is not`, `and`/`or`/relational patterns,
+list patterns, collection expressions, file-scoped namespaces, `??=`,
+nullable refs, switch expressions). On 321 real files from `dotnet/runtime`'s
+`System.Text.Json`, 109 parse clean versus 93 for the vendored C#7 grammar.
+
+Remaining gap: interpolated strings. The INTERPOLATION lexer mode below is
+never entered, because `$"` is harvested as an ordinary literal token rather
+than a mode-pushing one, so any file using `$"...{expr}..."` fails. That is
+the main reason 212 files still report errors.
+
+Also note the performance finding recorded in PROVENANCE.md: Roslyn's
+optional body braces (`'{'? member_declaration* '}'?`, present for error
+recovery) make member boundaries ambiguous and cost O(n^2) in members per
+type — 18 members took 6.5s, and one 700-line file took 272s. Requiring the
+braces makes it flat (18 members in 0.07s, ~93x faster) and the whole corpus
+runs in 61s instead of over 600s. That patch is NOT yet applied here.
 
 Usage:
     python3 prepare-roslyn-grammar.py CSharp.Generated.g4 --out-dir .
@@ -132,6 +139,42 @@ def rule_span(src: str, name: str) -> re.Match[str] | None:
     return re.search(rf"^{re.escape(name)}\n((?:  [:|].*\n)+)  ;\n", src, re.M)
 
 
+def prune_unreachable(src: str, entry: str = "compilation_unit") -> tuple[str, list[str]]:
+    """Drop rules unreachable from `entry`, repeatedly until a fixpoint.
+
+    Tokenizing the lexical wrapper rules (`decimal_integer_literal_token` →
+    `DEC_INT_LIT`) orphans the character-level helpers they used to call
+    (`decimal_digit : '0' | '1' | …`, `hexadecimal_digit`, `integer_type_suffix`,
+    `identifier_start_character`, …). Those must be removed *before* literals
+    are harvested: otherwise their single-character literals become named tokens
+    that win equal-length lexer matches, so `'1'` shadows `DEC_INT_LIT` and
+    `'a'` shadows `IDENTIFIER` — which silently breaks every parse while the
+    grammar still generates cleanly.
+    """
+    removed: list[str] = []
+    while True:
+        rules = {
+            m.group(1): m.group(2)
+            for m in re.finditer(r"^([a-z_][a-zA-Z_0-9]*)\n((?:  [:|].*\n)+)  ;\n", src, re.M)
+        }
+        reachable = {entry}
+        frontier = [entry]
+        while frontier:
+            body = rules.get(frontier.pop(), "")
+            for name in re.findall(r"\b([a-z_][a-zA-Z_0-9]*)\b", strip_comments(body)):
+                if name in rules and name not in reachable:
+                    reachable.add(name)
+                    frontier.append(name)
+        dead = [name for name in rules if name not in reachable]
+        if not dead:
+            return src, removed
+        for name in dead:
+            m = rule_span(src, name)
+            if m:
+                src = src[: m.start()] + src[m.end() :]
+        removed.extend(dead)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("source", type=Path, help="upstream CSharp.Generated.g4")
@@ -168,6 +211,11 @@ def main() -> int:
             print(f"error: lexer-bound rule not found: {rule}", file=sys.stderr)
             return 1
         src = src[: m.start()] + f"{rule}\n  : {token}\n  ;\n" + src[m.end() :]
+
+    # -- 3b. Prune rules the tokenization orphaned ---------------------------
+    src, pruned = prune_unreachable(src)
+    if pruned:
+        print(f"pruned {len(pruned)} unreachable rules: {', '.join(sorted(pruned))}")
 
     # -- 4. Harvest the remaining inline literals into named tokens ----------
     # A combined grammar would let ANTLR synthesize implicit tokens for these,
