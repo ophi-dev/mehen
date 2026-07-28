@@ -206,4 +206,34 @@ mod tests {
         assert_eq!(a.root.spaces[0].kind, SpaceKind::Class);
         assert_eq!(a.root.spaces[0].name.as_deref(), Some("C"));
     }
+
+    #[test]
+    fn recovered_error_nodes_carry_byte_spans() {
+        // Since the 0.19 runtime the offending token reaches the diagnostic
+        // path (upstream #196), so a recovered parse error must report a real
+        // byte range rather than only a line number in its message.
+        let src = "class C {\n    void m() { int x = @@@; }\n}\n";
+        let a = analyze(src, "C.java");
+        let spanned: Vec<_> = a
+            .diagnostics
+            .iter()
+            .filter_map(|d| d.span.as_ref())
+            .collect();
+        assert!(
+            !spanned.is_empty(),
+            "recovered error nodes should carry spans, got {:?}",
+            a.diagnostics
+        );
+        for span in spanned {
+            assert!(
+                span.end_byte > span.start_byte,
+                "span must be non-empty: {span:?}"
+            );
+            assert!(
+                (span.end_byte as usize) <= src.len(),
+                "span must stay inside the source: {span:?}"
+            );
+            assert_eq!(span.start_line, 2, "the bad token is on line 2");
+        }
+    }
 }

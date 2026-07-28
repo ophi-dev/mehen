@@ -119,11 +119,11 @@ loud rather than mis-lex.
 
 | Tool | Version |
 |---|---|
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.18.0` |
+| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.21.0` |
 
 Regenerate with:
 
 ```bash
-cargo install antlr-rust-runtime --version 0.18.0 --features codegen --bin antlr4-rust-gen --force
+cargo install antlr-rust-runtime --version 0.21.0 --features codegen --bin antlr4-rust-gen --force
 cargo run -p xtask -- antlr generate csharp
 ```
