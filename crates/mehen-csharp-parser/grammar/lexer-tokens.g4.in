@@ -1,0 +1,106 @@
+// Lexer rules supplied for Roslyn's parser-only C# grammar, spliced verbatim
+// into the generated `CSharpLexer.g4` by `prepare-roslyn-grammar.py`.
+//
+// Roslyn's `CSharp.Generated.g4` describes its terminals as character-level
+// *parser* rules (`identifier_token : '@'? identifier_start_character …`,
+// `decimal_digit : '0' | '1' | …`). Those cannot stay in the parser: single
+// character tokens would shadow multi-character ones, so `'C'` beats
+// `IDENTIFIER` and `'1'` beats a decimal literal. Each rule below replaces one
+// such Roslyn rule, following the C# lexical grammar (ECMA-334 §6.4).
+//
+// This file is hand-written ANTLR (not generated), kept separate from the
+// script so the ANTLR-level escaping is readable and reviewable as grammar
+// source rather than as nested Python string escapes.
+//
+// The `TOKEN <-> roslyn_rule` mapping is declared in the script's
+// LEXER_TOKEN_RULES table; adding a rule here requires adding it there too.
+
+// §6.4.3 Identifiers. `@` is the verbatim-identifier prefix; the character
+// classes follow identifier_start_character / identifier_part_character.
+IDENTIFIER
+    : '@'? [\p{L}\p{Nl}_] [\p{L}\p{Nl}\p{Nd}\p{Mn}\p{Mc}\p{Pc}\p{Cf}]*
+    ;
+
+// §6.4.5.3 Integer literals. Two suffix slots cover `ul` / `lu`.
+DEC_INT_LIT
+    : [0-9] [0-9_]* [uUlL]? [uUlL]?
+    ;
+
+HEX_INT_LIT
+    : '0' [xX] [0-9a-fA-F_]+ [uUlL]? [uUlL]?
+    ;
+
+BIN_INT_LIT
+    : '0' [bB] [01_]+ [uUlL]? [uUlL]?
+    ;
+
+// §6.4.5.5 Real literals — embedded dot, leading dot, exponent-only, and
+// suffix-only forms.
+REAL_LIT
+    : [0-9] [0-9_]* '.' [0-9] [0-9_]* ExponentPart? [fFdDmM]?
+    | '.' [0-9] [0-9_]* ExponentPart? [fFdDmM]?
+    | [0-9] [0-9_]* ExponentPart [fFdDmM]?
+    | [0-9] [0-9_]* [fFdDmM]
+    ;
+
+fragment ExponentPart
+    : [eE] [+-]? [0-9] [0-9_]*
+    ;
+
+// §6.4.5.6 Character literals.
+CHAR_LIT
+    : '\'' ( '\\' . | ~['\\\r\n] ) '\''
+    ;
+
+// §6.4.5.7 String literals.
+STRING_LIT
+    : '"' ( '\\' . | ~["\\\r\n] )* '"'
+    ;
+
+VERBATIM_STRING_LIT
+    : '@"' ( '""' | ~'"' )* '"'
+    ;
+
+// C# 11 raw string literals. The real rule requires the closing fence to be at
+// least as long as the opening one, which a context-free lexer rule cannot
+// express; a non-greedy match is sufficient here because every metric that
+// touches a string literal (LOC rows, Halstead operand) only needs the token's
+// extent, not its internal structure.
+ML_RAW_STRING_LIT
+    : '"""' '"'* .*? '"""' '"'*
+    ;
+
+SL_RAW_STRING_LIT
+    : '""' ~[\r\n]*? '""'
+    ;
+
+// ---- trivia -------------------------------------------------------------
+// Comments go to a dedicated channel so the CLOC sweep can read them while the
+// parser never sees them. Roslyn models trivia as syntax, so its grammar has no
+// rules for these at all.
+SINGLE_LINE_DOC_COMMENT : '///' ~[\r\n]*  -> channel(COMMENTS_CHANNEL) ;
+DELIMITED_DOC_COMMENT   : '/**' .*? '*/'  -> channel(COMMENTS_CHANNEL) ;
+SINGLE_LINE_COMMENT     : '//'  ~[\r\n]*  -> channel(COMMENTS_CHANNEL) ;
+DELIMITED_COMMENT       : '/*'  .*? '*/'  -> channel(COMMENTS_CHANNEL) ;
+WHITESPACES             : [ \t\r\n\f]+    -> channel(HIDDEN) ;
+BYTE_ORDER_MARK         : '﻿'        -> skip ;
+
+// A preprocessor directive line. mehen does not evaluate `#if` (unlike the
+// grammars-v4 lexer's `CSharpLexerBase`, which needs a stateful hook for it);
+// directives are routed to their own channel so they are neither code nor
+// comment for LOC, and inactive regions are still parsed as ordinary code.
+DIRECTIVE_LINE          : '#' ~[\r\n]*    -> channel(DIRECTIVE) ;
+
+// ---- mode-scoped tokens ------------------------------------------------
+// Interpolated-string text is only valid between `$"` and a hole; a broad
+// negated set in the default mode would swallow ordinary code (this is exactly
+// the failure that made an earlier flat-lexer attempt lex `class C ` as one
+// token). Same for XML doc-comment text.
+mode INTERPOLATION;
+INTERPOLATED_TEXT : ~[{}"\\]+ ;
+INTERP_HOLE_OPEN  : '{' -> pushMode(DEFAULT_MODE) ;
+INTERP_END        : '"' -> popMode ;
+
+mode XML_DOC;
+XML_TEXT_LIT : ~[<>&\r\n]+ ;
+XML_DOC_END  : [\r\n] -> popMode ;
