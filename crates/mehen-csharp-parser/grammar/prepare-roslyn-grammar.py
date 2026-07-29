@@ -31,28 +31,24 @@ vendored `CSharpLexer.g4` / `CSharpParser.g4` from a pinned upstream revision,
 so the patch set is reproducible and reviewable rather than hand-edited. See
 `PROVENANCE.md` for the pinned commit and the rationale.
 
-Status: NOT YET IN USE — the prep is close but not complete.
+Status: NOT YET IN USE — one gap remains.
 
-Working: generation under `antlr4-rust-gen` 0.21.0 is clean (mutual left
-recursion accepted per upstream #221), the parser compiles, and 13/13
-modern-C# probes parse (records, `is not`, `and`/`or`/relational patterns,
-list patterns, collection expressions, file-scoped namespaces, `??=`,
-nullable refs, switch expressions). On 321 real files from `dotnet/runtime`'s
-`System.Text.Json`, 109 parse clean versus 93 for the vendored C#7 grammar.
+Working: generation is clean under `antlr4-rust-gen` 0.21.0, the parser compiles,
+13/13 modern-C# probes parse (records, `is not`, `and`/`or`/relational patterns,
+list patterns, collection expressions, file-scoped namespaces, `??=`, nullable
+refs, switch expressions), and 108/321 real `System.Text.Json` files parse clean
+versus 93 for the vendored C#7 grammar.
 
-Remaining gap: interpolated strings. The INTERPOLATION lexer mode below is
-never entered, because `$"` is harvested as an ordinary literal token rather
-than a mode-pushing one, so any file using `$"...{expr}..."` fails. That is
-the main reason 212 files still report errors.
+Remaining gap: interpolated strings. `$"` is harvested as an ordinary literal, so
+the INTERPOLATION lexer mode below is never entered and any file using
+`$"...{expr}..."` fails. That is the main reason 213 files still report errors.
 
-Also note the performance finding recorded in PROVENANCE.md: Roslyn's
-optional body braces (`'{'? member_declaration* '}'?`, present for error
-recovery) make member boundaries ambiguous and cost O(n^2) in members per
-type — 18 members took 6.5s, and one 953-line file took 272s. Requiring the
-braces makes it flat (18 members in 0.07s, ~93x faster) and the whole corpus
-runs in 61s instead of over 600s. That patch is NOT yet applied here.
-Filed upstream as antlr-rust-runtime#248, with a one-command reproduction in
-`repro/roslyn-csharp-perf/` at the repo root.
+Performance is no longer a blocker. Restoring the `record` contextual keyword
+(see RECORD_KEYWORD_* below) removed a ~quadratic-in-members-per-type prediction
+cost: 24 members went from 12.2s to 0.42s, the worst real file from 272s to under
+6s, and the 321-file corpus from over 600s to ~3m50s. 52 files still exceed 1s,
+so some residual cost remains. `repro/roslyn-csharp-perf/` at the repo root
+reproduces both variants with one command.
 
 Usage:
     python3 prepare-roslyn-grammar.py CSharp.Generated.g4 --out-dir .
@@ -122,6 +118,48 @@ NULLABILITY_FIXES = [
         "skipped_tokens_trivia\n  : syntax_token+\n  ;",
     ),
 ]
+
+# Roslyn's grammar generator reads only `<Kind>` children of a `<Field>`, not
+# `<ContextualKind>`. `RecordDeclarationSyntax.Keyword` is declared as
+#
+#     <Field Name="Keyword" Type="SyntaxToken" Override="true">
+#       <ContextualKind Name="RecordKeyword"/>
+#     </Field>
+#
+# and it is the ONLY `<ContextualKind>` in all of `Syntax.xml` (versus 1018
+# plain `<Kind>`), so it is the single field that hits that blind spot. The
+# published grammar therefore contains no `'record'` literal at all and spells
+# the keyword as the catch-all `syntax_token`, which accepts every identifier,
+# keyword, literal, operator, and punctuation token.
+#
+# The cost is severe: `class` becomes viable as both `class_declaration` and
+# `record_declaration`, so full-context prediction carries the impossible
+# record path across every member boundary — ~quadratic in members per type
+# (24 members took 13.5 s; one real 953-line file took 272 s).
+#
+# `record` is a *contextual* keyword — legal as an ordinary name (`int record =
+# 1;`) — so it must NOT become a reserved token. (Reserving it silently
+# mis-parses `record R(int X);` as two enum members plus a parenthesized
+# expression, with zero reported errors.) Instead the declaration position is
+# restricted to an identifier whose text is `record`, via a predicate that the
+# pattern DSL lowers to a pure SemIR comparison — no hooks required.
+RECORD_KEYWORD_TARGET = (
+    "record_declaration\n  : attribute_list* modifier* syntax_token"
+)
+RECORD_KEYWORD_REPLACEMENT = (
+    "record_declaration\n  : attribute_list* modifier* record_keyword"
+)
+RECORD_KEYWORD_RULE = """
+
+// Contextual keyword: `record` lexes as an ordinary IDENTIFIER (it is legal as a
+// name), so the declaration position is restricted by a predicate on the token
+// text. This restores Roslyn's <ContextualKind Name="RecordKeyword"/>, which its
+// grammar generator drops. Lowered by `patterns.toml` to a pure SemIR
+// comparison, so no hooks are needed.
+record_keyword
+  : {this.IsRecordKeyword()}? identifier_token
+  ;
+"""
 
 # Roslyn's "omitted" syntax nodes: genuinely empty productions that model a
 # blank slot in `Foo<,>` and `new int[,]`. ANTLR cannot have an empty rule
@@ -205,6 +243,13 @@ def main() -> int:
             print(f"error: nullability target not found: {old.splitlines()[0]}", file=sys.stderr)
             return 1
         src = src.replace(old, new)
+
+    # -- 2b. Restore the `record` contextual keyword -------------------------
+    if RECORD_KEYWORD_TARGET not in src:
+        print("error: record_declaration shape changed upstream", file=sys.stderr)
+        return 1
+    src = src.replace(RECORD_KEYWORD_TARGET, RECORD_KEYWORD_REPLACEMENT, 1)
+    src = src.rstrip() + "\n" + RECORD_KEYWORD_RULE
 
     # -- 3. Point character-level rules at real lexer tokens -----------------
     for rule, token in LEXER_TOKEN_RULES.items():
@@ -296,7 +341,25 @@ def main() -> int:
     )
     (args.out_dir / "CSharpLexer.g4").write_text(lexer + "\n")
 
-    print(f"wrote CSharpParser.g4 and CSharpLexer.g4 ({len(literals)} literal tokens)")
+    # -- 7. Emit the semantic-pattern file ----------------------------------
+    (args.out_dir / "patterns.toml").write_text(
+        "version = 1\n\n"
+        "# `record` is a contextual keyword. Roslyn declares\n"
+        "# `<ContextualKind Name=\"RecordKeyword\"/>` on\n"
+        "# RecordDeclarationSyntax.Keyword, but its grammar generator reads only\n"
+        "# `<Kind>`, so the published grammar spells the keyword as the catch-all\n"
+        "# `syntax_token` — which makes `class` viable as a record declaration and\n"
+        "# costs ~quadratic prediction time per type member. `prepare-roslyn-grammar.py`\n"
+        "# restores the restriction as a text comparison on the lookahead token; it\n"
+        "# lowers to a pure SemIR expression, so no typed hook is needed.\n\n"
+        "[[helper]]\n"
+        'kind = "parser-predicate"\n'
+        'name = "IsRecordKeyword"\n'
+        'returns = "bool"\n'
+        'lower = "cmp(eq, token_text(1), str(\\"record\\"))"\n'
+    )
+
+    print(f"wrote CSharpParser.g4, CSharpLexer.g4, patterns.toml ({len(literals)} literal tokens)")
     return 0
 
 

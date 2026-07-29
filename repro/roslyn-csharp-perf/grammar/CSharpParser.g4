@@ -348,7 +348,7 @@ interface_declaration
   ;
 
 record_declaration
-  : attribute_list* modifier* syntax_token (KW_CLASS | KW_STRUCT)? identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
+  : attribute_list* modifier* record_keyword (KW_CLASS | KW_STRUCT)? identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
   ;
 
 struct_declaration
@@ -1439,3 +1439,13 @@ single_line_raw_string_literal_token
   : SL_RAW_STRING_LIT
   ;
 
+
+
+// Contextual keyword: `record` lexes as an ordinary IDENTIFIER (it is legal as a
+// name), so the declaration position is restricted by a predicate on the token
+// text. This restores Roslyn's <ContextualKind Name="RecordKeyword"/>, which its
+// grammar generator drops. Lowered by `patterns.toml` to a pure SemIR
+// comparison, so no hooks are needed.
+record_keyword
+  : {this.IsRecordKeyword()}? identifier_token
+  ;

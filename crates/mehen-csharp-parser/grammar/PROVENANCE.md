@@ -61,40 +61,51 @@ solve the main problem:
 ### Status of the Roslyn-grammar migration
 
 `prepare-roslyn-grammar.py` (this directory) derives a generatable grammar pair
-from [`dotnet/roslyn`'s `CSharp.Generated.g4`](https://github.com/dotnet/roslyn/blob/main/src/Compilers/CSharp/Portable/Generated/CSharp.Generated.g4).
+plus `patterns.toml` from [`dotnet/roslyn`'s `CSharp.Generated.g4`](https://github.com/dotnet/roslyn/blob/main/src/Compilers/CSharp/Portable/Generated/CSharp.Generated.g4).
 Since runtime 0.21.0 accepted mutual left recursion (upstream #221), that path
-works: generation is clean, the parser compiles, and **13/13** modern-C# probes
-parse. On the 321-file `System.Text.Json` corpus it reaches **109 clean vs 93**
+works: generation is clean, the parser compiles, **13/13** modern-C# probes
+parse, and the 321-file `System.Text.Json` corpus reaches **108 clean vs 93**
 for this C#7 grammar.
 
-It is not yet wired in. Two things remain, both in the preparation, not the
-runtime:
+One gap remains before it can be wired in: **interpolated strings**. The prep's
+`INTERPOLATION` lexer mode is never entered — `$"` is harvested as an ordinary
+literal rather than a mode-pushing token — so any file containing `$"…{expr}…"`
+fails. That is the main cause of the remaining 213 error files.
 
-1. **Interpolated strings.** The prep's `INTERPOLATION` lexer mode is never
-   entered — `$"` is harvested as an ordinary literal instead of a
-   mode-pushing token — so any file containing `$"…{expr}…"` fails. This is the
-   main cause of the remaining 212 error files.
+#### The `record` contextual keyword (fixed)
 
-2. **Optional body braces cost O(n²).** Roslyn spells every type body as
-   `'{'? member_declaration* '}'?` (optional, for error recovery), which makes
-   member boundaries ambiguous. Measured on a synthetic class:
+Roslyn's `Syntax.xml` declares the record keyword as
+`<ContextualKind Name="RecordKeyword"/>`, and its grammar generator reads only
+`<Kind>` children of a `<Field>`. That is the **only** `<ContextualKind>` in the
+whole file (versus 1018 plain `<Kind>`), so it is the single field that hits the
+blind spot: the published grammar has **no `'record'` literal at all** and falls
+back to the catch-all `syntax_token`, which accepts every identifier, keyword,
+literal, operator, and punctuation token.
 
-   | members | as-published | braces required |
-   |---|---|---|
-   | 4 | 0.28 s | 0.05 s |
-   | 8 | 0.92 s | 0.05 s |
-   | 12 | 2.29 s | 0.06 s |
-   | 18 | 6.54 s | 0.07 s |
+The cost was severe — `class` became viable as both `class_declaration` and
+`record_declaration`, so full-context prediction carried the impossible record
+path across every member boundary:
 
-   One 953-line real file (`JsonDocument.Parse.cs`) took **272 s**. Requiring
-   the braces makes it flat (~93× faster at 18 members) and takes the whole
-   corpus from >600 s to **61 s**, with all 13 probes still passing. Whether to
-   apply that patch is a deliberate trade: it gives up Roslyn's error-recovery
-   tolerance for malformed bodies, which a metrics tool arguably wants to keep.
+| members in one class | as-published | record restored |
+|---|---|---|
+| 4 | 188 ms | 27 ms |
+| 12 | 2 166 ms | 204 ms |
+| 24 | 12 160 ms | **423 ms** |
 
-   Filed upstream as
-   [`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runtime/issues/248),
-   with a one-command reproduction in `repro/roslyn-csharp-perf/`.
+One real 953-line file (`JsonDocument.Parse.cs`) took **272 s**; the whole
+321-file library timed out past 600 s. With the keyword restored the library
+completes in ~3 m 50 s and the worst file is under 6 s. 52 files still exceed
+1 s, so some residual cost remains.
+
+The prep restores it as a *contextual* keyword, not a reserved token — `record`
+is legal as an ordinary name (`int record = 1;`), and reserving it silently
+mis-parses `record R(int X);` as two enum members plus a parenthesized
+expression with zero reported errors. `patterns.toml` lowers the restriction to
+a pure SemIR comparison, so no typed hook is needed.
+
+Diagnosed by the antlr-rust-runtime team on
+[`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runtime/issues/248);
+`repro/roslyn-csharp-perf/` at the repo root reproduces both variants.
 
 Note also that this grammar is **permissive by design** — it models Roslyn's
 syntax nodes (including error-recovery nodes such as `incomplete_member`), not

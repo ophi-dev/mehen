@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-command reproduction of the Roslyn-grammar member-scaling blow-up.
 #
-#   ./run.sh              # as-published grammar (slow, quadratic)
-#   ./run.sh braces       # with body braces made required (flat)
+#   ./run.sh slow    # as-published: record keyword is the catch-all `syntax_token`
+#   ./run.sh fixed   # record contextual keyword restored (default)
 #
 # Needs `antlr4-rust-gen` 0.21.0 on PATH:
 #   cargo install antlr-rust-runtime --version 0.21.0 \
@@ -10,13 +10,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VARIANT="${1:-as-published}"
+VARIANT="${1:-fixed}"
 # ANTLR requires the file name to match the grammar name, so each variant
 # lives in its own directory with identically-named files.
 case "$VARIANT" in
-  as-published) GDIR=grammar ;;
-  braces)       GDIR=grammar/braces-required ;;
-  *) echo "usage: $0 [as-published|braces]" >&2; exit 2 ;;
+  fixed)  GDIR=grammar ;;                          # record contextual keyword restored
+  slow)   GDIR=grammar/unnarrowed-record ;;        # as-published: keyword is `syntax_token`
+  *) echo "usage: $0 [fixed|slow]" >&2; exit 2 ;;
 esac
 
 command -v antlr4-rust-gen >/dev/null || {
@@ -29,7 +29,7 @@ rm -rf src/generated && mkdir -p src/generated
 # `--sem-unknown error --require-full-semantics` mirrors how mehen generates:
 # nothing may be silently assumed. The grammar needs no hooks or patterns.
 antlr4-rust-gen "$GDIR/CSharpLexer.g4" "$GDIR/CSharpParser.g4" \
-  --out-dir src/generated \
+  --out-dir src/generated --sem-patterns "$GDIR/patterns.toml" \
   --sem-unknown error --require-full-semantics
 
 echo "== building =="

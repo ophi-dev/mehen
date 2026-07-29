@@ -336,27 +336,27 @@ type_declaration
   ;
 
 class_declaration
-  : attribute_list* modifier* KW_CLASS identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183 member_declaration* OP_185 OP_174?
+  : attribute_list* modifier* KW_CLASS identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
   ;
 
 extension_block_declaration
-  : attribute_list* modifier* KW_EXTENSION type_parameter_list? parameter_list? type_parameter_constraint_clause* OP_183 member_declaration* OP_185 OP_174?
+  : attribute_list* modifier* KW_EXTENSION type_parameter_list? parameter_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
   ;
 
 interface_declaration
-  : attribute_list* modifier* KW_INTERFACE identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183 member_declaration* OP_185 OP_174?
+  : attribute_list* modifier* KW_INTERFACE identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
   ;
 
 record_declaration
-  : attribute_list* modifier* syntax_token (KW_CLASS | KW_STRUCT)? identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183 member_declaration* OP_185 OP_174?
+  : attribute_list* modifier* syntax_token (KW_CLASS | KW_STRUCT)? identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
   ;
 
 struct_declaration
-  : attribute_list* modifier* KW_STRUCT identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183 member_declaration* OP_185 OP_174?
+  : attribute_list* modifier* KW_STRUCT identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
   ;
 
 union_declaration
-  : attribute_list* modifier* KW_UNION identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183 member_declaration* OP_185 OP_174?
+  : attribute_list* modifier* KW_UNION identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
   ;
 
 delegate_declaration
@@ -1439,3 +1439,13 @@ single_line_raw_string_literal_token
   : SL_RAW_STRING_LIT
   ;
 
+
+
+// Contextual keyword: `record` lexes as an ordinary IDENTIFIER (it is legal as a
+// name), so the declaration position is restricted by a predicate on the token
+// text. This restores Roslyn's <ContextualKind Name="RecordKeyword"/>, which its
+// grammar generator drops. Lowered by `patterns.toml` to a pure SemIR
+// comparison, so no hooks are needed.
+record_keyword
+  : {this.IsRecordKeyword()}? identifier_token
+  ;
