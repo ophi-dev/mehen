@@ -31,24 +31,32 @@ vendored `CSharpLexer.g4` / `CSharpParser.g4` from a pinned upstream revision,
 so the patch set is reproducible and reviewable rather than hand-edited. See
 `PROVENANCE.md` for the pinned commit and the rationale.
 
-Status: NOT YET IN USE — one gap remains.
+Status: NOT YET WIRED IN — the parser works; the analyzer walker does not exist
+yet for this grammar shape.
 
-Working: generation is clean under `antlr4-rust-gen` 0.21.0, the parser compiles,
-13/13 modern-C# probes parse (records, `is not`, `and`/`or`/relational patterns,
-list patterns, collection expressions, file-scoped namespaces, `??=`, nullable
-refs, switch expressions), and 108/321 real `System.Text.Json` files parse clean
-versus 93 for the vendored C#7 grammar.
+Verified on runtime/generator 0.21.0: generation is clean under
+`--sem-unknown error --require-full-semantics`, the parser compiles, and 19/19
+modern-C# probes parse — records, `is not`, `and`/`or`/relational patterns, list
+patterns, collection expressions, file-scoped namespaces, `??=`, nullable refs,
+switch expressions, and all five interpolated-string shapes (simple, nested
+braces, escaped braces, format clause, nested interpolated string, verbatim).
 
-Remaining gap: interpolated strings. `$"` is harvested as an ordinary literal, so
-the INTERPOLATION lexer mode below is never entered and any file using
-`$"...{expr}..."` fails. That is the main reason 213 files still report errors.
+Interpolation needs three lexer modes plus a typed hook that owns the mode
+transitions (`hooks-interpolation.rs.in`), because the `}` closing a hole is
+lexically identical to one closing a nested block. That is deliberate: mehen is
+the demonstrative consumer of antlr-rust-runtime, so using its hook and
+`--sem-patterns` surfaces to express real grammar power is the point, not a cost.
 
-Performance is no longer a blocker. Restoring the `record` contextual keyword
-(see RECORD_KEYWORD_* below) removed a ~quadratic-in-members-per-type prediction
-cost: 24 members went from 12.2s to 0.42s, the worst real file from 272s to under
-6s, and the 321-file corpus from over 600s to ~3m50s. 52 files still exceed 1s,
-so some residual cost remains. `repro/roslyn-csharp-perf/` at the repo root
-reproduces both variants with one command.
+On 321 real `System.Text.Json` files: 115 parse clean (vs 93 for the vendored
+C#7 grammar) in ~4m. 206 still report errors and 25 files exceed 2s, so the
+remaining work is characterizing those — the causes are not yet known, and past
+experience on this grammar says measure before concluding.
+
+Remaining to switch the analyzer over: rewrite `mehen-csharp`'s walker for this
+grammar's rule names, accounting for #221 inlining 16 of 17 LR-cycle satellites
+(invocation/member_access/assignment/conditional all collapse into
+RULE_EXPRESSION and must be classified by token probe), then re-map the 85
+existing C# metric tests.
 
 Usage:
     python3 prepare-roslyn-grammar.py CSharp.Generated.g4 --out-dir .
@@ -160,6 +168,21 @@ record_keyword
   : {this.IsRecordKeyword()}? identifier_token
   ;
 """
+
+# Interpolated strings need lexer modes, so the tokens that delimit them cannot
+# be plain harvested literals. These literals are therefore NOT harvested; the
+# parser is rewritten to reference the named, mode-switching tokens that
+# `lexer-tokens.g4.in` defines instead.
+#
+# `'{'` and `'}'` stay ordinary harvested literals — they are ordinary C# braces
+# almost everywhere. The interpolation-hole bookkeeping is done by the typed
+# hook in `src/hooks.rs`, which watches accepted tokens rather than by giving
+# the brace tokens grammar actions (a `}` cannot know from the grammar alone
+# whether it closes a hole or a nested block).
+INTERP_TOKEN_LITERALS = {
+    '$"': "INTERP_START",
+    '$@"': "INTERP_VERBATIM_START",
+}
 
 # Roslyn's "omitted" syntax nodes are genuinely empty productions that model a
 # blank slot: `omitted_type_argument` for the unbound generic `Dictionary<,>` and
@@ -296,7 +319,13 @@ def main() -> int:
     # but a split pair needs them named so `tokenVocab` can carry them.
     body = strip_comments(src)
     literals = sorted(
-        {lit for lit in re.findall(r"'((?:[^'\\\n]|\\.)*)'", body) if lit},
+        {
+            lit
+            for lit in re.findall(r"'((?:[^'\\\n]|\\.)*)'", body)
+            # Interpolation delimiters are mode-switching named tokens, not
+            # harvested literals (see INTERP_TOKEN_LITERALS).
+            if lit and lit not in INTERP_TOKEN_LITERALS
+        },
         key=lambda s: (-len(s), s),
     )
     names: dict[str, str] = {}
@@ -317,6 +346,9 @@ def main() -> int:
 
     for lit in literals:  # longest-first so `>>=` is not clobbered by `>`
         src = src.replace(f"'{lit}'", names[lit])
+    # Longest-first here too: `$@"` must be replaced before `$"`.
+    for lit in sorted(INTERP_TOKEN_LITERALS, key=len, reverse=True):
+        src = src.replace(f"'{lit}'", INTERP_TOKEN_LITERALS[lit])
 
     # -- 5. Emit the parser grammar -----------------------------------------
     src = re.sub(r"^//[^\n]*\n", "", src)  # drop the auto-generated banner
@@ -364,7 +396,17 @@ def main() -> int:
             "// ---- keywords, operators, punctuation (must precede IDENTIFIER) ----",
         ]
         + [f"{names[lit]} : '{lit}' ;" for lit in literals]
-        + ["", token_rules.read_text().rstrip()]
+        + [
+            "",
+            # `lexer-tokens.g4.in` refers to the harvested `{` and `"` tokens
+            # by placeholder, because their generated names are index-based and
+            # shift whenever the upstream grammar's literal set changes.
+            token_rules.read_text()
+            .rstrip()
+            .replace("@LBRACE@", names["{"])
+            .replace("@DQUOTE@", names['"'])
+            .replace("@RBRACE@", names["}"]),
+        ]
     )
     (args.out_dir / "CSharpLexer.g4").write_text(lexer + "\n")
 

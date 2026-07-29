@@ -9,15 +9,15 @@ compilation_unit
   ;
 
 extern_alias_directive
-  : KW_EXTERN KW_ALIAS identifier_token OP_174
+  : KW_EXTERN KW_ALIAS identifier_token OP_172
   ;
 
 using_directive
-  : KW_GLOBAL? KW_USING (KW_STATIC | (KW_UNSAFE? name_equals))? type OP_174
+  : KW_GLOBAL? KW_USING (KW_STATIC | (KW_UNSAFE? name_equals))? type OP_172
   ;
 
 name_equals
-  : identifier_name OP_176
+  : identifier_name OP_174
   ;
 
 identifier_name
@@ -26,11 +26,11 @@ identifier_name
   ;
 
 attribute_list
-  : OP_179 attribute_target_specifier? attribute (OP_169 attribute)* OP_180
+  : OP_177 attribute_target_specifier? attribute (OP_167 attribute)* OP_178
   ;
 
 attribute_target_specifier
-  : syntax_token OP_173
+  : syntax_token OP_171
   ;
 
 attribute
@@ -44,7 +44,7 @@ name
   ;
 
 alias_qualified_name
-  : identifier_name OP_135 simple_name
+  : identifier_name OP_133 simple_name
   ;
 
 simple_name
@@ -57,15 +57,15 @@ generic_name
   ;
 
 type_argument_list
-  : OP_175 (type? (OP_169 type?)*)? OP_177
+  : OP_173 (type? (OP_167 type?)*)? OP_175
   ;
 
 qualified_name
-  : name OP_171 simple_name
+  : name OP_169 simple_name
   ;
 
 attribute_argument_list
-  : OP_165 (attribute_argument (OP_169 attribute_argument)*)? OP_166
+  : OP_163 (attribute_argument (OP_167 attribute_argument)*)? OP_164
   ;
 
 attribute_argument
@@ -73,7 +73,7 @@ attribute_argument
   ;
 
 name_colon
-  : identifier_name OP_173
+  : identifier_name OP_171
   ;
 
 member_declaration
@@ -94,7 +94,7 @@ base_field_declaration
   ;
 
 event_field_declaration
-  : attribute_list* modifier* KW_EVENT variable_declaration OP_174
+  : attribute_list* modifier* KW_EVENT variable_declaration OP_172
   ;
 
 modifier
@@ -125,7 +125,7 @@ modifier
   ;
 
 variable_declaration
-  : type variable_declarator (OP_169 variable_declarator)*
+  : type variable_declarator (OP_167 variable_declarator)*
   ;
 
 variable_declarator
@@ -133,7 +133,7 @@ variable_declarator
   ;
 
 bracketed_argument_list
-  : OP_179 argument (OP_169 argument)* OP_180
+  : OP_177 argument (OP_167 argument)* OP_178
   ;
 
 argument
@@ -141,11 +141,11 @@ argument
   ;
 
 equals_value_clause
-  : OP_176 expression
+  : OP_174 expression
   ;
 
 field_declaration
-  : attribute_list* modifier* variable_declaration OP_174
+  : attribute_list* modifier* variable_declaration OP_172
   ;
 
 base_method_declaration
@@ -157,11 +157,11 @@ base_method_declaration
   ;
 
 constructor_declaration
-  : attribute_list* modifier* identifier_token parameter_list constructor_initializer? (block | (arrow_expression_clause OP_174))
+  : attribute_list* modifier* identifier_token parameter_list constructor_initializer? (block | (arrow_expression_clause OP_172))
   ;
 
 parameter_list
-  : OP_165 (parameter (OP_169 parameter)*)? OP_166
+  : OP_163 (parameter (OP_167 parameter)*)? OP_164
   ;
 
 parameter
@@ -169,39 +169,39 @@ parameter
   ;
 
 constructor_initializer
-  : OP_173 (KW_BASE | KW_THIS) argument_list
+  : OP_171 (KW_BASE | KW_THIS) argument_list
   ;
 
 argument_list
-  : OP_165 (argument (OP_169 argument)*)? OP_166
+  : OP_163 (argument (OP_167 argument)*)? OP_164
   ;
 
 block
-  : attribute_list* OP_183 statement* OP_185
+  : attribute_list* OP_181 statement* OP_183
   ;
 
 arrow_expression_clause
-  : OP_140 expression
+  : OP_138 expression
   ;
 
 conversion_operator_declaration
-  : attribute_list* modifier* (KW_IMPLICIT | KW_EXPLICIT) explicit_interface_specifier? KW_OPERATOR KW_CHECKED? type parameter_list (block | (arrow_expression_clause OP_174))
+  : attribute_list* modifier* (KW_IMPLICIT | KW_EXPLICIT) explicit_interface_specifier? KW_OPERATOR KW_CHECKED? type parameter_list (block | (arrow_expression_clause OP_172))
   ;
 
 explicit_interface_specifier
-  : name OP_171
+  : name OP_169
   ;
 
 destructor_declaration
-  : attribute_list* modifier* OP_186 identifier_token parameter_list (block | (arrow_expression_clause OP_174))
+  : attribute_list* modifier* OP_184 identifier_token parameter_list (block | (arrow_expression_clause OP_172))
   ;
 
 method_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause OP_174))
+  : attribute_list* modifier* type explicit_interface_specifier? identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause OP_172))
   ;
 
 type_parameter_list
-  : OP_175 type_parameter (OP_169 type_parameter)* OP_177
+  : OP_173 type_parameter (OP_167 type_parameter)* OP_175
   ;
 
 type_parameter
@@ -209,7 +209,7 @@ type_parameter
   ;
 
 type_parameter_constraint_clause
-  : KW_WHERE identifier_name OP_173 type_parameter_constraint (OP_169 type_parameter_constraint)*
+  : KW_WHERE identifier_name OP_171 type_parameter_constraint (OP_167 type_parameter_constraint)*
   ;
 
 type_parameter_constraint
@@ -221,7 +221,7 @@ type_parameter_constraint
   ;
 
 allows_constraint_clause
-  : KW_ALLOWS allows_constraint (OP_169 allows_constraint)*
+  : KW_ALLOWS allows_constraint (OP_167 allows_constraint)*
   ;
 
 allows_constraint
@@ -233,12 +233,12 @@ ref_struct_constraint
   ;
 
 class_or_struct_constraint
-  : KW_CLASS OP_178?
-  | KW_STRUCT OP_178?
+  : KW_CLASS OP_176?
+  | KW_STRUCT OP_176?
   ;
 
 constructor_constraint
-  : KW_NEW OP_165 OP_166
+  : KW_NEW OP_163 OP_164
   ;
 
 default_constraint
@@ -250,7 +250,7 @@ type_constraint
   ;
 
 operator_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? KW_OPERATOR KW_CHECKED? (OP_168 | OP_170 | OP_159 | OP_186 | OP_127 | OP_129 | OP_167 | OP_172 | OP_163 | OP_137 | OP_142 | OP_106 | OP_184 | OP_164 | OP_181 | OP_139 | OP_121 | OP_175 | OP_138 | OP_177 | OP_141 | KW_FALSE | KW_TRUE | KW_IS | OP_128 | OP_130 | OP_126 | OP_133 | OP_123 | OP_125 | OP_157 | OP_147 | OP_104 | OP_105 | OP_078) parameter_list (block | (arrow_expression_clause OP_174))
+  : attribute_list* modifier* type explicit_interface_specifier? KW_OPERATOR KW_CHECKED? (OP_166 | OP_168 | OP_157 | OP_184 | OP_125 | OP_127 | OP_165 | OP_170 | OP_161 | OP_135 | OP_140 | OP_105 | OP_182 | OP_162 | OP_179 | OP_137 | OP_120 | OP_173 | OP_136 | OP_175 | OP_139 | KW_FALSE | KW_TRUE | KW_IS | OP_126 | OP_128 | OP_124 | OP_131 | OP_121 | OP_123 | OP_155 | OP_145 | OP_103 | OP_104 | OP_078) parameter_list (block | (arrow_expression_clause OP_172))
   ;
 
 base_namespace_declaration
@@ -259,11 +259,11 @@ base_namespace_declaration
   ;
 
 file_scoped_namespace_declaration
-  : attribute_list* modifier* KW_NAMESPACE name OP_174 extern_alias_directive* using_directive* member_declaration*
+  : attribute_list* modifier* KW_NAMESPACE name OP_172 extern_alias_directive* using_directive* member_declaration*
   ;
 
 namespace_declaration
-  : attribute_list* modifier* KW_NAMESPACE name OP_183 extern_alias_directive* using_directive* member_declaration* OP_185 OP_174?
+  : attribute_list* modifier* KW_NAMESPACE name OP_181 extern_alias_directive* using_directive* member_declaration* OP_183 OP_172?
   ;
 
 base_property_declaration
@@ -273,27 +273,27 @@ base_property_declaration
   ;
 
 event_declaration
-  : attribute_list* modifier* KW_EVENT type explicit_interface_specifier? identifier_token (accessor_list | OP_174)
+  : attribute_list* modifier* KW_EVENT type explicit_interface_specifier? identifier_token (accessor_list | OP_172)
   ;
 
 accessor_list
-  : OP_183 accessor_declaration* OP_185
+  : OP_181 accessor_declaration* OP_183
   ;
 
 accessor_declaration
-  : attribute_list* modifier* (KW_GET | KW_SET | KW_INIT | KW_ADD | KW_REMOVE | identifier_token) (block | (arrow_expression_clause OP_174))
+  : attribute_list* modifier* (KW_GET | KW_SET | KW_INIT | KW_ADD | KW_REMOVE | identifier_token) (block | (arrow_expression_clause OP_172))
   ;
 
 indexer_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? KW_THIS bracketed_parameter_list (accessor_list | (arrow_expression_clause OP_174))
+  : attribute_list* modifier* type explicit_interface_specifier? KW_THIS bracketed_parameter_list (accessor_list | (arrow_expression_clause OP_172))
   ;
 
 bracketed_parameter_list
-  : OP_179 parameter (OP_169 parameter)* OP_180
+  : OP_177 parameter (OP_167 parameter)* OP_178
   ;
 
 property_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? identifier_token (accessor_list | ((arrow_expression_clause | equals_value_clause) OP_174))
+  : attribute_list* modifier* type explicit_interface_specifier? identifier_token (accessor_list | ((arrow_expression_clause | equals_value_clause) OP_172))
   ;
 
 base_type_declaration
@@ -302,11 +302,11 @@ base_type_declaration
   ;
 
 enum_declaration
-  : attribute_list* modifier* KW_ENUM identifier_token base_list? OP_183? (enum_member_declaration (OP_169 enum_member_declaration)* OP_169?)? OP_185? OP_174?
+  : attribute_list* modifier* KW_ENUM identifier_token base_list? OP_181? (enum_member_declaration (OP_167 enum_member_declaration)* OP_167?)? OP_183? OP_172?
   ;
 
 base_list
-  : OP_173 base_type (OP_169 base_type)*
+  : OP_171 base_type (OP_167 base_type)*
   ;
 
 base_type
@@ -336,31 +336,31 @@ type_declaration
   ;
 
 class_declaration
-  : attribute_list* modifier* KW_CLASS identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
+  : attribute_list* modifier* KW_CLASS identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_181? member_declaration* OP_183? OP_172?
   ;
 
 extension_block_declaration
-  : attribute_list* modifier* KW_EXTENSION type_parameter_list? parameter_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
+  : attribute_list* modifier* KW_EXTENSION type_parameter_list? parameter_list? type_parameter_constraint_clause* OP_181? member_declaration* OP_183? OP_172?
   ;
 
 interface_declaration
-  : attribute_list* modifier* KW_INTERFACE identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
+  : attribute_list* modifier* KW_INTERFACE identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_181? member_declaration* OP_183? OP_172?
   ;
 
 record_declaration
-  : attribute_list* modifier* record_keyword (KW_CLASS | KW_STRUCT)? identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
+  : attribute_list* modifier* record_keyword (KW_CLASS | KW_STRUCT)? identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_181? member_declaration* OP_183? OP_172?
   ;
 
 struct_declaration
-  : attribute_list* modifier* KW_STRUCT identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
+  : attribute_list* modifier* KW_STRUCT identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_181? member_declaration* OP_183? OP_172?
   ;
 
 union_declaration
-  : attribute_list* modifier* KW_UNION identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_183? member_declaration* OP_185? OP_174?
+  : attribute_list* modifier* KW_UNION identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* OP_181? member_declaration* OP_183? OP_172?
   ;
 
 delegate_declaration
-  : attribute_list* modifier* KW_DELEGATE type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* OP_174
+  : attribute_list* modifier* KW_DELEGATE type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* OP_172
   ;
 
 global_statement
@@ -388,11 +388,11 @@ array_type
   ;
 
 array_rank_specifier
-  : OP_179 (expression? (OP_169 expression?)*)? OP_180
+  : OP_177 (expression? (OP_167 expression?)*)? OP_178
   ;
 
 function_pointer_type
-  : KW_DELEGATE OP_167 function_pointer_calling_convention? function_pointer_parameter_list
+  : KW_DELEGATE OP_165 function_pointer_calling_convention? function_pointer_parameter_list
   ;
 
 function_pointer_calling_convention
@@ -401,7 +401,7 @@ function_pointer_calling_convention
   ;
 
 function_pointer_unmanaged_calling_convention_list
-  : OP_179 function_pointer_unmanaged_calling_convention (OP_169 function_pointer_unmanaged_calling_convention)* OP_180
+  : OP_177 function_pointer_unmanaged_calling_convention (OP_167 function_pointer_unmanaged_calling_convention)* OP_178
   ;
 
 function_pointer_unmanaged_calling_convention
@@ -409,7 +409,7 @@ function_pointer_unmanaged_calling_convention
   ;
 
 function_pointer_parameter_list
-  : OP_175 function_pointer_parameter (OP_169 function_pointer_parameter)* OP_177
+  : OP_173 function_pointer_parameter (OP_167 function_pointer_parameter)* OP_175
   ;
 
 function_pointer_parameter
@@ -417,11 +417,11 @@ function_pointer_parameter
   ;
 
 nullable_type
-  : type OP_178
+  : type OP_176
   ;
 
 pointer_type
-  : type OP_167
+  : type OP_165
   ;
 
 predefined_type
@@ -452,7 +452,7 @@ scoped_type
   ;
 
 tuple_type
-  : OP_165 tuple_element (OP_169 tuple_element)+ OP_166
+  : OP_163 tuple_element (OP_167 tuple_element)+ OP_164
   ;
 
 tuple_element
@@ -487,7 +487,7 @@ statement
   ;
 
 break_statement
-  : attribute_list* KW_BREAK identifier_name? OP_174
+  : attribute_list* KW_BREAK identifier_name? OP_172
   ;
 
 checked_statement
@@ -500,43 +500,43 @@ common_for_each_statement
   ;
 
 for_each_statement
-  : attribute_list* KW_AWAIT? KW_FOREACH OP_165 type identifier_token KW_IN expression OP_166 statement
+  : attribute_list* KW_AWAIT? KW_FOREACH OP_163 type identifier_token KW_IN expression OP_164 statement
   ;
 
 for_each_variable_statement
-  : attribute_list* KW_AWAIT? KW_FOREACH OP_165 expression KW_IN expression OP_166 statement
+  : attribute_list* KW_AWAIT? KW_FOREACH OP_163 expression KW_IN expression OP_164 statement
   ;
 
 continue_statement
-  : attribute_list* KW_CONTINUE identifier_name? OP_174
+  : attribute_list* KW_CONTINUE identifier_name? OP_172
   ;
 
 do_statement
-  : attribute_list* KW_DO statement KW_WHILE OP_165 expression OP_166 OP_174
+  : attribute_list* KW_DO statement KW_WHILE OP_163 expression OP_164 OP_172
   ;
 
 empty_statement
-  : attribute_list* OP_174
+  : attribute_list* OP_172
   ;
 
 expression_statement
-  : attribute_list* expression OP_174
+  : attribute_list* expression OP_172
   ;
 
 fixed_statement
-  : attribute_list* KW_FIXED OP_165 variable_declaration OP_166 statement
+  : attribute_list* KW_FIXED OP_163 variable_declaration OP_164 statement
   ;
 
 for_statement
-  : attribute_list* KW_FOR OP_165 (variable_declaration? | (expression (OP_169 expression)*)?) OP_174 expression? OP_174 (expression (OP_169 expression)*)? OP_166 statement
+  : attribute_list* KW_FOR OP_163 (variable_declaration? | (expression (OP_167 expression)*)?) OP_172 expression? OP_172 (expression (OP_167 expression)*)? OP_164 statement
   ;
 
 goto_statement
-  : attribute_list* KW_GOTO (KW_CASE | KW_DEFAULT)? expression? OP_174
+  : attribute_list* KW_GOTO (KW_CASE | KW_DEFAULT)? expression? OP_172
   ;
 
 if_statement
-  : attribute_list* KW_IF OP_165 expression OP_166 statement else_clause?
+  : attribute_list* KW_IF OP_163 expression OP_164 statement else_clause?
   ;
 
 else_clause
@@ -544,27 +544,27 @@ else_clause
   ;
 
 labeled_statement
-  : attribute_list* identifier_token OP_173 statement
+  : attribute_list* identifier_token OP_171 statement
   ;
 
 local_declaration_statement
-  : attribute_list* KW_AWAIT? KW_USING? modifier* variable_declaration OP_174
+  : attribute_list* KW_AWAIT? KW_USING? modifier* variable_declaration OP_172
   ;
 
 local_function_statement
-  : attribute_list* modifier* type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause OP_174))
+  : attribute_list* modifier* type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause OP_172))
   ;
 
 lock_statement
-  : attribute_list* KW_LOCK OP_165 expression OP_166 statement
+  : attribute_list* KW_LOCK OP_163 expression OP_164 statement
   ;
 
 return_statement
-  : attribute_list* KW_RETURN expression? OP_174
+  : attribute_list* KW_RETURN expression? OP_172
   ;
 
 switch_statement
-  : attribute_list* KW_SWITCH OP_165? expression OP_166? OP_183 switch_section* OP_185
+  : attribute_list* KW_SWITCH OP_163? expression OP_164? OP_181 switch_section* OP_183
   ;
 
 switch_section
@@ -578,7 +578,7 @@ switch_label
   ;
 
 case_pattern_switch_label
-  : KW_CASE pattern when_clause? OP_173
+  : KW_CASE pattern when_clause? OP_171
   ;
 
 pattern
@@ -619,7 +619,7 @@ discard_designation
   ;
 
 parenthesized_variable_designation
-  : OP_165 (variable_designation (OP_169 variable_designation)*)? OP_166
+  : OP_163 (variable_designation (OP_167 variable_designation)*)? OP_164
   ;
 
 single_variable_designation
@@ -631,11 +631,11 @@ discard_pattern
   ;
 
 list_pattern
-  : OP_179 (pattern (OP_169 pattern)* OP_169?)? OP_180 variable_designation?
+  : OP_177 (pattern (OP_167 pattern)* OP_167?)? OP_178 variable_designation?
   ;
 
 parenthesized_pattern
-  : OP_165 pattern OP_166
+  : OP_163 pattern OP_164
   ;
 
 recursive_pattern
@@ -643,7 +643,7 @@ recursive_pattern
   ;
 
 positional_pattern_clause
-  : OP_165 (subpattern (OP_169 subpattern)*)? OP_166
+  : OP_163 (subpattern (OP_167 subpattern)*)? OP_164
   ;
 
 subpattern
@@ -656,24 +656,24 @@ base_expression_colon
   ;
 
 expression_colon
-  : expression OP_173
+  : expression OP_171
   ;
 
 property_pattern_clause
-  : OP_183 (subpattern (OP_169 subpattern)* OP_169?)? OP_185
+  : OP_181 (subpattern (OP_167 subpattern)* OP_167?)? OP_183
   ;
 
 relational_pattern
-  : OP_121 expression
+  : OP_120 expression
+  | OP_173 expression
+  | OP_136 expression
+  | OP_137 expression
   | OP_175 expression
-  | OP_138 expression
   | OP_139 expression
-  | OP_177 expression
-  | OP_141 expression
   ;
 
 slice_pattern
-  : OP_132 pattern?
+  : OP_130 pattern?
   ;
 
 type_pattern
@@ -693,15 +693,15 @@ when_clause
   ;
 
 case_switch_label
-  : KW_CASE expression OP_173
+  : KW_CASE expression OP_171
   ;
 
 default_switch_label
-  : KW_DEFAULT OP_173
+  : KW_DEFAULT OP_171
   ;
 
 throw_statement
-  : attribute_list* KW_THROW expression? OP_174
+  : attribute_list* KW_THROW expression? OP_172
   ;
 
 try_statement
@@ -713,11 +713,11 @@ catch_clause
   ;
 
 catch_declaration
-  : OP_165 type identifier_token? OP_166
+  : OP_163 type identifier_token? OP_164
   ;
 
 catch_filter_clause
-  : KW_WHEN OP_165 expression OP_166
+  : KW_WHEN OP_163 expression OP_164
   ;
 
 finally_clause
@@ -729,15 +729,15 @@ unsafe_statement
   ;
 
 using_statement
-  : attribute_list* KW_AWAIT? KW_USING OP_165 (variable_declaration | expression) OP_166 statement
+  : attribute_list* KW_AWAIT? KW_USING OP_163 (variable_declaration | expression) OP_164 statement
   ;
 
 while_statement
-  : attribute_list* KW_WHILE OP_165 expression OP_166 statement
+  : attribute_list* KW_WHILE OP_163 expression OP_164 statement
   ;
 
 yield_statement
-  : attribute_list* KW_YIELD (KW_RETURN | KW_BREAK) expression? OP_174
+  : attribute_list* KW_YIELD (KW_RETURN | KW_BREAK) expression? OP_172
   ;
 
 expression
@@ -804,15 +804,15 @@ lambda_expression
   ;
 
 parenthesized_lambda_expression
-  : attribute_list* modifier* type? parameter_list OP_140 (block | expression)
+  : attribute_list* modifier* type? parameter_list OP_138 (block | expression)
   ;
 
 simple_lambda_expression
-  : attribute_list* modifier* parameter OP_140 (block | expression)
+  : attribute_list* modifier* parameter OP_138 (block | expression)
   ;
 
 anonymous_object_creation_expression
-  : KW_NEW OP_183 (anonymous_object_member_declarator (OP_169 anonymous_object_member_declarator)* OP_169?)? OP_185
+  : KW_NEW OP_181 (anonymous_object_member_declarator (OP_167 anonymous_object_member_declarator)* OP_167?)? OP_183
   ;
 
 anonymous_object_member_declarator
@@ -824,11 +824,11 @@ array_creation_expression
   ;
 
 initializer_expression
-  : OP_183 (expression (OP_169 expression)* OP_169?)? OP_185
+  : OP_181 (expression (OP_167 expression)* OP_167?)? OP_183
   ;
 
 assignment_expression
-  : expression (OP_176 | OP_128 | OP_130 | OP_126 | OP_133 | OP_123 | OP_125 | OP_147 | OP_157 | OP_104 | OP_105 | OP_078 | OP_107) expression
+  : expression (OP_174 | OP_126 | OP_128 | OP_124 | OP_131 | OP_121 | OP_123 | OP_145 | OP_155 | OP_103 | OP_104 | OP_078 | OP_106) expression
   ;
 
 await_expression
@@ -849,20 +849,20 @@ object_creation_expression
   ;
 
 binary_expression
-  : expression (OP_168 | OP_170 | OP_167 | OP_172 | OP_163 | OP_137 | OP_142 | OP_106 | OP_158 | OP_124 | OP_184 | OP_164 | OP_181 | OP_139 | OP_121 | OP_175 | OP_138 | OP_177 | OP_141 | KW_IS | KW_AS | OP_143) expression
+  : expression (OP_166 | OP_168 | OP_165 | OP_170 | OP_161 | OP_135 | OP_140 | OP_105 | OP_156 | OP_122 | OP_182 | OP_162 | OP_179 | OP_137 | OP_120 | OP_173 | OP_136 | OP_175 | OP_139 | KW_IS | KW_AS | OP_141) expression
   ;
 
 cast_expression
-  : OP_165 type OP_166 expression
+  : OP_163 type OP_164 expression
   ;
 
 checked_expression
-  : KW_CHECKED OP_165 expression OP_166
-  | KW_UNCHECKED OP_165 expression OP_166
+  : KW_CHECKED OP_163 expression OP_164
+  | KW_UNCHECKED OP_163 expression OP_164
   ;
 
 collection_expression
-  : OP_179 (collection_element (OP_169 collection_element)* OP_169?)? OP_180
+  : OP_177 (collection_element (OP_167 collection_element)* OP_167?)? OP_178
   ;
 
 collection_element
@@ -876,7 +876,7 @@ expression_element
   ;
 
 spread_element
-  : OP_132 expression
+  : OP_130 expression
   ;
 
 with_element
@@ -884,11 +884,11 @@ with_element
   ;
 
 conditional_access_expression
-  : expression OP_178 expression
+  : expression OP_176 expression
   ;
 
 conditional_expression
-  : expression OP_178 expression OP_173 expression
+  : expression OP_176 expression OP_171 expression
   ;
 
 declaration_expression
@@ -896,7 +896,7 @@ declaration_expression
   ;
 
 default_expression
-  : KW_DEFAULT OP_165 type OP_166
+  : KW_DEFAULT OP_163 type OP_164
   ;
 
 element_access_expression
@@ -912,7 +912,7 @@ field_expression
   ;
 
 implicit_array_creation_expression
-  : KW_NEW OP_179 OP_169* OP_180 initializer_expression
+  : KW_NEW OP_177 OP_167* OP_178 initializer_expression
   ;
 
 implicit_element_access
@@ -920,7 +920,7 @@ implicit_element_access
   ;
 
 implicit_stack_alloc_array_creation_expression
-  : KW_STACKALLOC OP_179 OP_180 initializer_expression
+  : KW_STACKALLOC OP_177 OP_178 initializer_expression
   ;
 
 instance_expression
@@ -937,8 +937,8 @@ this_expression
   ;
 
 interpolated_string_expression
-  : OP_122 interpolated_string_content* OP_160
-  | OP_103 interpolated_string_content* OP_160
+  : INTERP_START interpolated_string_content* OP_158
+  | INTERP_VERBATIM_START interpolated_string_content* OP_158
   | interpolated_multi_line_raw_string_start_token interpolated_string_content* interpolated_raw_string_end_token
   | interpolated_single_line_raw_string_start_token interpolated_string_content* interpolated_raw_string_end_token
   ;
@@ -953,27 +953,27 @@ interpolated_string_text
   ;
 
 interpolation
-  : OP_183 expression interpolation_alignment_clause? interpolation_format_clause? OP_185
+  : OP_181 expression interpolation_alignment_clause? interpolation_format_clause? OP_183
   ;
 
 interpolation_alignment_clause
-  : OP_169 expression
+  : OP_167 expression
   ;
 
 interpolation_format_clause
-  : OP_173 interpolated_string_text_token
+  : OP_171 interpolated_string_text_token
   ;
 
 interpolated_multi_line_raw_string_start_token
-  : OP_162+ OP_102 OP_160*
+  : OP_160+ OP_102 OP_158*
   ;
 
 interpolated_raw_string_end_token
-  : OP_102 OP_160* /* must match number of quotes in raw_string_start_token */
+  : OP_102 OP_158* /* must match number of quotes in raw_string_start_token */
   ;
 
 interpolated_single_line_raw_string_start_token
-  : OP_162+ OP_102 OP_160*
+  : OP_160+ OP_102 OP_158*
   ;
 
 invocation_expression
@@ -1001,47 +1001,47 @@ literal_expression
   ;
 
 utf8_multi_line_raw_string_literal_token
-  : multi_line_raw_string_literal_token (KW_U8 | KW_U8_156)
+  : multi_line_raw_string_literal_token (KW_U8 | KW_U8_154)
   ;
 
 utf8_single_line_raw_string_literal_token
-  : single_line_raw_string_literal_token (KW_U8 | KW_U8_156)
+  : single_line_raw_string_literal_token (KW_U8 | KW_U8_154)
   ;
 
 utf8_string_literal_token
-  : string_literal_token (KW_U8 | KW_U8_156)
+  : string_literal_token (KW_U8 | KW_U8_154)
   ;
 
 make_ref_expression
-  : KW___MAKEREF OP_165 expression OP_166
+  : KW___MAKEREF OP_163 expression OP_164
   ;
 
 member_access_expression
-  : expression (OP_171 | OP_131) simple_name
+  : expression (OP_169 | OP_129) simple_name
   ;
 
 member_binding_expression
-  : OP_171 simple_name
+  : OP_169 simple_name
   ;
 
 parenthesized_expression
-  : OP_165 expression OP_166
+  : OP_163 expression OP_164
   ;
 
 postfix_unary_expression
-  : expression (OP_127 | OP_129 | OP_159)
+  : expression (OP_125 | OP_127 | OP_157)
   ;
 
 prefix_unary_expression
-  : OP_159 expression
-  | OP_164 expression
-  | OP_167 expression
+  : OP_157 expression
+  | OP_162 expression
+  | OP_165 expression
+  | OP_166 expression
+  | OP_125 expression
   | OP_168 expression
   | OP_127 expression
-  | OP_170 expression
-  | OP_129 expression
-  | OP_181 expression
-  | OP_186 expression
+  | OP_179 expression
+  | OP_184 expression
   ;
 
 query_expression
@@ -1073,11 +1073,11 @@ join_into_clause
   ;
 
 let_clause
-  : KW_LET identifier_token OP_176 expression
+  : KW_LET identifier_token OP_174 expression
   ;
 
 order_by_clause
-  : KW_ORDERBY ordering (OP_169 ordering)*
+  : KW_ORDERBY ordering (OP_167 ordering)*
   ;
 
 ordering
@@ -1106,7 +1106,7 @@ query_continuation
   ;
 
 range_expression
-  : expression? OP_132 expression?
+  : expression? OP_130 expression?
   ;
 
 ref_expression
@@ -1114,15 +1114,15 @@ ref_expression
   ;
 
 ref_type_expression
-  : KW___REFTYPE OP_165 expression OP_166
+  : KW___REFTYPE OP_163 expression OP_164
   ;
 
 ref_value_expression
-  : KW___REFVALUE OP_165 expression OP_169 type OP_166
+  : KW___REFVALUE OP_163 expression OP_167 type OP_164
   ;
 
 size_of_expression
-  : KW_SIZEOF OP_165 type OP_166
+  : KW_SIZEOF OP_163 type OP_164
   ;
 
 stack_alloc_array_creation_expression
@@ -1130,11 +1130,11 @@ stack_alloc_array_creation_expression
   ;
 
 switch_expression
-  : expression KW_SWITCH OP_183 (switch_expression_arm (OP_169 switch_expression_arm)* OP_169?)? OP_185
+  : expression KW_SWITCH OP_181 (switch_expression_arm (OP_167 switch_expression_arm)* OP_167?)? OP_183
   ;
 
 switch_expression_arm
-  : pattern when_clause? OP_140 expression
+  : pattern when_clause? OP_138 expression
   ;
 
 throw_expression
@@ -1142,15 +1142,15 @@ throw_expression
   ;
 
 tuple_expression
-  : OP_165 argument (OP_169 argument)+ OP_166
+  : OP_163 argument (OP_167 argument)+ OP_164
   ;
 
 type_of_expression
-  : KW_TYPEOF OP_165 type OP_166
+  : KW_TYPEOF OP_163 type OP_164
   ;
 
 unsafe_expression
-  : KW_UNSAFE OP_165 expression OP_166
+  : KW_UNSAFE OP_163 expression OP_164
   ;
 
 with_expression
@@ -1357,69 +1357,69 @@ verbatim_string_literal_token
 
 
 operator_token
-  : OP_159
+  : OP_157
+  | OP_120
+  | OP_161
   | OP_121
-  | OP_163
+  | OP_122
+  | OP_162
   | OP_123
+  | OP_165
   | OP_124
-  | OP_164
+  | OP_166
   | OP_125
-  | OP_167
   | OP_126
   | OP_168
   | OP_127
   | OP_128
   | OP_170
-  | OP_129
-  | OP_130
-  | OP_172
-  | OP_133
-  | OP_175
+  | OP_131
+  | OP_173
+  | OP_135
+  | OP_103
+  | OP_136
+  | OP_174
   | OP_137
-  | OP_104
-  | OP_138
-  | OP_176
+  | OP_175
   | OP_139
-  | OP_177
-  | OP_141
-  | OP_142
+  | OP_140
+  | OP_104
   | OP_105
-  | OP_106
   | OP_078
-  | OP_143
-  | OP_107
+  | OP_141
+  | OP_106
   | KW_AS
   | KW_IS
-  | OP_181
-  | OP_147
+  | OP_179
+  | OP_145
+  | OP_182
+  | OP_155
+  | OP_156
   | OP_184
-  | OP_157
-  | OP_158
-  | OP_186
   ;
 
 punctuation_token
-  : OP_160
-  | OP_161
-  | OP_165
-  | OP_166
+  : OP_158
+  | OP_159
+  | OP_163
+  | OP_164
+  | OP_167
+  | OP_129
   | OP_169
-  | OP_131
-  | OP_171
+  | OP_130
   | OP_132
+  | OP_171
+  | OP_133
+  | OP_172
   | OP_134
-  | OP_173
-  | OP_135
-  | OP_174
-  | OP_136
-  | OP_140
+  | OP_138
+  | OP_176
+  | OP_177
+  | OP_143
+  | OP_144
   | OP_178
-  | OP_179
-  | OP_145
-  | OP_146
-  | OP_180
+  | OP_181
   | OP_183
-  | OP_185
   ;
 
 

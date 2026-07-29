@@ -91,16 +91,61 @@ BYTE_ORDER_MARK         : '﻿'        -> skip ;
 // comment for LOC, and inactive regions are still parsed as ordinary code.
 DIRECTIVE_LINE          : '#' ~[\r\n]*    -> channel(DIRECTIVE) ;
 
-// ---- mode-scoped tokens ------------------------------------------------
-// Interpolated-string text is only valid between `$"` and a hole; a broad
-// negated set in the default mode would swallow ordinary code (this is exactly
-// the failure that made an earlier flat-lexer attempt lex `class C ` as one
-// token). Same for XML doc-comment text.
-mode INTERPOLATION;
-INTERPOLATED_TEXT : ~[{}"\\]+ ;
-INTERP_HOLE_OPEN  : '{' -> pushMode(DEFAULT_MODE) ;
-INTERP_END        : '"' -> popMode ;
+// ---- interpolated strings ----------------------------------------------
+// Roslyn spells interpolated strings as
+//
+//     interpolated_string_expression
+//       : '$"'  interpolated_string_content* '"'
+//       | '$@"' interpolated_string_content* '"' ;
+//     interpolation : '{' expression … '}' ;
+//
+// The *text* between holes needs its own lexer mode: in the default mode a
+// broad negated set would swallow ordinary code (an earlier flat-lexer attempt
+// lexed `class C ` as one token that way).
+//
+// The mode *transitions* are driven entirely by the typed hook in
+// `../src/hooks.rs`, not by grammar commands, because the interesting decision
+// is not expressible declaratively: the `}` that closes a hole is lexically
+// identical to the one closing a nested block —
+//
+//     $"a{ new[]{ 1, 2 }.Length }b"
+//                ^^^^^^^^^  must NOT end the hole
+//
+// so it needs a brace depth per open hole and a *conditional* pop. Keeping the
+// grammar free of mode commands also keeps the two halves from fighting over
+// the mode stack. See `CSharpLexerHooks` for the state machine.
+//
+// `prepare-roslyn-grammar.py` rewrites the harvested `'$"'` / `'$@"'` literals
+// to the named tokens below (INTERP_TOKEN_LITERALS) so the hook can recognize
+// them by a stable name.
+INTERP_START          : '$"' ;
+INTERP_VERBATIM_START : '$@"' ;
 
-mode XML_DOC;
-XML_TEXT_LIT : ~[<>&\r\n]+ ;
-XML_DOC_END  : [\r\n] -> popMode ;
+mode INTERPOLATION;
+
+// `{{` / `}}` are escaped literal braces, not holes — first so they win the
+// longest match over the single-brace rules below.
+INTERP_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
+INTERP_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
+
+// Text between holes.
+INTERPOLATED_TEXT : ~[{}"\\]+ ;
+
+// A hole opens / the string ends. Both emit the token type the parser expects
+// (`{` and `"` respectively); the hook performs the mode change.
+INTERP_HOLE_OPEN : '{' -> type(@LBRACE@) ;
+INTERP_END       : '"' -> type(@DQUOTE@) ;
+
+// A format specifier (`{x:D4}`) is a third mode: after the `:` that ends a
+// hole's expression, the remaining text up to the closing `}` is literal format
+// text, not C# code — `D4` must not lex as an identifier. (The grammars-v4 C#
+// lexer has an INTERPOLATION_FORMAT mode for the same reason.) The hook enters
+// this mode on a `:` seen at brace depth 0 inside a hole.
+mode INTERPOLATION_FORMAT;
+
+// The format text, emitted as the same token the grammar's
+// `interpolation_format_clause : ':' interpolated_string_text_token` expects.
+INTERP_FORMAT_TEXT : ~[}"]+ -> type(INTERPOLATED_TEXT) ;
+
+// The `}` that closes the hole; the hook restores the interpolation mode.
+INTERP_FORMAT_END : '}' -> type(@RBRACE@) ;

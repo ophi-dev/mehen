@@ -115,11 +115,10 @@ KW_VOID : 'void' ;
 KW_WHEN : 'when' ;
 KW_WITH : 'with' ;
 OP_102 : '"""' ;
-OP_103 : '$@"' ;
-OP_104 : '<<=' ;
-OP_105 : '>>=' ;
-OP_106 : '>>>' ;
-OP_107 : '??=' ;
+OP_103 : '<<=' ;
+OP_104 : '>>=' ;
+OP_105 : '>>>' ;
+OP_106 : '??=' ;
 KW_ADD : 'add' ;
 KW_AND : 'and' ;
 KW_FOR : 'for' ;
@@ -133,33 +132,32 @@ KW_REF : 'ref' ;
 KW_SET : 'set' ;
 KW_TRY : 'try' ;
 KW_VAR : 'var' ;
-OP_121 : '!=' ;
-OP_122 : '$"' ;
-OP_123 : '%=' ;
-OP_124 : '&&' ;
-OP_125 : '&=' ;
-OP_126 : '*=' ;
-OP_127 : '++' ;
-OP_128 : '+=' ;
-OP_129 : '--' ;
-OP_130 : '-=' ;
-OP_131 : '->' ;
-OP_132 : '..' ;
-OP_133 : '/=' ;
-OP_134 : '/>' ;
-OP_135 : '::' ;
-OP_136 : '</' ;
-OP_137 : '<<' ;
-OP_138 : '<=' ;
-OP_139 : '==' ;
-OP_140 : '=>' ;
-OP_141 : '>=' ;
-OP_142 : '>>' ;
-OP_143 : '??' ;
+OP_120 : '!=' ;
+OP_121 : '%=' ;
+OP_122 : '&&' ;
+OP_123 : '&=' ;
+OP_124 : '*=' ;
+OP_125 : '++' ;
+OP_126 : '+=' ;
+OP_127 : '--' ;
+OP_128 : '-=' ;
+OP_129 : '->' ;
+OP_130 : '..' ;
+OP_131 : '/=' ;
+OP_132 : '/>' ;
+OP_133 : '::' ;
+OP_134 : '</' ;
+OP_135 : '<<' ;
+OP_136 : '<=' ;
+OP_137 : '==' ;
+OP_138 : '=>' ;
+OP_139 : '>=' ;
+OP_140 : '>>' ;
+OP_141 : '??' ;
 KW_U8 : 'U8' ;
-OP_145 : '\'' ;
-OP_146 : '\\' ;
-OP_147 : '^=' ;
+OP_143 : '\'' ;
+OP_144 : '\\' ;
+OP_145 : '^=' ;
 KW_AS : 'as' ;
 KW_BY : 'by' ;
 KW_DO : 'do' ;
@@ -168,37 +166,37 @@ KW_IN : 'in' ;
 KW_IS : 'is' ;
 KW_ON : 'on' ;
 KW_OR : 'or' ;
-KW_U8_156 : 'u8' ;
-OP_157 : '|=' ;
-OP_158 : '||' ;
-OP_159 : '!' ;
-OP_160 : '"' ;
-OP_161 : '#' ;
-OP_162 : '$' ;
-OP_163 : '%' ;
-OP_164 : '&' ;
-OP_165 : '(' ;
-OP_166 : ')' ;
-OP_167 : '*' ;
-OP_168 : '+' ;
-OP_169 : ',' ;
-OP_170 : '-' ;
-OP_171 : '.' ;
-OP_172 : '/' ;
-OP_173 : ':' ;
-OP_174 : ';' ;
-OP_175 : '<' ;
-OP_176 : '=' ;
-OP_177 : '>' ;
-OP_178 : '?' ;
-OP_179 : '[' ;
-OP_180 : ']' ;
-OP_181 : '^' ;
+KW_U8_154 : 'u8' ;
+OP_155 : '|=' ;
+OP_156 : '||' ;
+OP_157 : '!' ;
+OP_158 : '"' ;
+OP_159 : '#' ;
+OP_160 : '$' ;
+OP_161 : '%' ;
+OP_162 : '&' ;
+OP_163 : '(' ;
+OP_164 : ')' ;
+OP_165 : '*' ;
+OP_166 : '+' ;
+OP_167 : ',' ;
+OP_168 : '-' ;
+OP_169 : '.' ;
+OP_170 : '/' ;
+OP_171 : ':' ;
+OP_172 : ';' ;
+OP_173 : '<' ;
+OP_174 : '=' ;
+OP_175 : '>' ;
+OP_176 : '?' ;
+OP_177 : '[' ;
+OP_178 : ']' ;
+OP_179 : '^' ;
 KW__ : '_' ;
-OP_183 : '{' ;
-OP_184 : '|' ;
-OP_185 : '}' ;
-OP_186 : '~' ;
+OP_181 : '{' ;
+OP_182 : '|' ;
+OP_183 : '}' ;
+OP_184 : '~' ;
 
 // Lexer rules supplied for Roslyn's parser-only C# grammar, spliced verbatim
 // into the generated `CSharpLexer.g4` by `prepare-roslyn-grammar.py`.
@@ -293,16 +291,61 @@ BYTE_ORDER_MARK         : '﻿'        -> skip ;
 // comment for LOC, and inactive regions are still parsed as ordinary code.
 DIRECTIVE_LINE          : '#' ~[\r\n]*    -> channel(DIRECTIVE) ;
 
-// ---- mode-scoped tokens ------------------------------------------------
-// Interpolated-string text is only valid between `$"` and a hole; a broad
-// negated set in the default mode would swallow ordinary code (this is exactly
-// the failure that made an earlier flat-lexer attempt lex `class C ` as one
-// token). Same for XML doc-comment text.
-mode INTERPOLATION;
-INTERPOLATED_TEXT : ~[{}"\\]+ ;
-INTERP_HOLE_OPEN  : '{' -> pushMode(DEFAULT_MODE) ;
-INTERP_END        : '"' -> popMode ;
+// ---- interpolated strings ----------------------------------------------
+// Roslyn spells interpolated strings as
+//
+//     interpolated_string_expression
+//       : '$"'  interpolated_string_content* '"'
+//       | '$@"' interpolated_string_content* '"' ;
+//     interpolation : '{' expression … '}' ;
+//
+// The *text* between holes needs its own lexer mode: in the default mode a
+// broad negated set would swallow ordinary code (an earlier flat-lexer attempt
+// lexed `class C ` as one token that way).
+//
+// The mode *transitions* are driven entirely by the typed hook in
+// `../src/hooks.rs`, not by grammar commands, because the interesting decision
+// is not expressible declaratively: the `}` that closes a hole is lexically
+// identical to the one closing a nested block —
+//
+//     $"a{ new[]{ 1, 2 }.Length }b"
+//                ^^^^^^^^^  must NOT end the hole
+//
+// so it needs a brace depth per open hole and a *conditional* pop. Keeping the
+// grammar free of mode commands also keeps the two halves from fighting over
+// the mode stack. See `CSharpLexerHooks` for the state machine.
+//
+// `prepare-roslyn-grammar.py` rewrites the harvested `'$"'` / `'$@"'` literals
+// to the named tokens below (INTERP_TOKEN_LITERALS) so the hook can recognize
+// them by a stable name.
+INTERP_START          : '$"' ;
+INTERP_VERBATIM_START : '$@"' ;
 
-mode XML_DOC;
-XML_TEXT_LIT : ~[<>&\r\n]+ ;
-XML_DOC_END  : [\r\n] -> popMode ;
+mode INTERPOLATION;
+
+// `{{` / `}}` are escaped literal braces, not holes — first so they win the
+// longest match over the single-brace rules below.
+INTERP_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
+INTERP_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
+
+// Text between holes.
+INTERPOLATED_TEXT : ~[{}"\\]+ ;
+
+// A hole opens / the string ends. Both emit the token type the parser expects
+// (`{` and `"` respectively); the hook performs the mode change.
+INTERP_HOLE_OPEN : '{' -> type(OP_181) ;
+INTERP_END       : '"' -> type(OP_158) ;
+
+// A format specifier (`{x:D4}`) is a third mode: after the `:` that ends a
+// hole's expression, the remaining text up to the closing `}` is literal format
+// text, not C# code — `D4` must not lex as an identifier. (The grammars-v4 C#
+// lexer has an INTERPOLATION_FORMAT mode for the same reason.) The hook enters
+// this mode on a `:` seen at brace depth 0 inside a hole.
+mode INTERPOLATION_FORMAT;
+
+// The format text, emitted as the same token the grammar's
+// `interpolation_format_clause : ':' interpolated_string_text_token` expects.
+INTERP_FORMAT_TEXT : ~[}"]+ -> type(INTERPOLATED_TEXT) ;
+
+// The `}` that closes the hole; the hook restores the interpolation mode.
+INTERP_FORMAT_END : '}' -> type(OP_183) ;
