@@ -72,6 +72,19 @@ One gap remains before it can be wired in: **interpolated strings**. The prep's
 literal rather than a mode-pushing token — so any file containing `$"…{expr}…"`
 fails. That is the main cause of the remaining 213 error files.
 
+#### Roslyn's "omitted" syntax nodes (fixed)
+
+Two rules are genuinely empty productions modelling a blank slot:
+`omitted_type_argument` (the unbound generic `Dictionary<,>`) and
+`omitted_array_size_expression` (the multi-dimensional `int[,]`). ANTLR forbids
+an empty rule inside a closure, so the rules must go — but simply deleting their
+alternatives **loses real syntax**: the `','` in
+`'[' (expression (',' expression)*)? ']'` then has nothing to match on either
+side, and `int[,]` / `Dictionary<,>` stop parsing. The prep instead makes the
+list elements optional at the two use sites, which is exactly what an empty node
+expressed there. `repro/roslyn-csharp-perf/fixtures/omitted-nodes.cs` is the
+regression test; `run.sh` asserts it parses with zero errors.
+
 #### The `record` contextual keyword (fixed)
 
 Roslyn's `Syntax.xml` declares the record keyword as

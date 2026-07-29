@@ -57,7 +57,7 @@ generic_name
   ;
 
 type_argument_list
-  : OP_175 (type (OP_169 type)*)? OP_177
+  : OP_175 (type? (OP_169 type?)*)? OP_177
   ;
 
 qualified_name
@@ -388,7 +388,7 @@ array_type
   ;
 
 array_rank_specifier
-  : OP_179 (expression (OP_169 expression)*)? OP_180
+  : OP_179 (expression? (OP_169 expression?)*)? OP_180
   ;
 
 function_pointer_type

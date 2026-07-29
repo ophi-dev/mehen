@@ -43,6 +43,9 @@ done
 printf '%s\n' "  (elapsed ms / recovered errors / fixture)"
 ./target/release/time-parse target/fixtures/members-*.cs
 
+echo "== regression: omitted-node syntax must parse with 0 errors =="
+./target/release/time-parse fixtures/omitted-nodes.cs
+
 if [ "$#" -gt 1 ]; then
   shift
   echo "== extra files =="

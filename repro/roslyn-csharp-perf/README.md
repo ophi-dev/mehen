@@ -100,6 +100,7 @@ works as a variable, field, and method name; 13/13 modern-C# probes pass.
 | `grammar/` | The prepared pair plus `patterns.toml`. Roslyn ships a **parser-only** grammar, so the lexer (terminals, comment/directive channels, interpolation and XML-doc modes) is supplied here. |
 | `grammar/unnarrowed-record/` | Same, with the record fix reverted — the `slow` control. |
 | `fixtures/gen-fixture.py` | Emits a class with N members. The cost scales with members per type, not file length, so a generated fixture reproduces it exactly and avoids vendoring third-party source. |
+| `fixtures/omitted-nodes.cs` | Regression fixture for Roslyn's "omitted" (empty) syntax nodes — `int[,]`, `int[,,]`, `Dictionary<,>`. Deleting those empty rules without preserving the syntax they expressed silently breaks all of it; `run.sh` asserts 0 errors here. |
 | `src/bin/time-parse.rs` | Times `compilation_unit` per file; prints ms + recovered-error count. |
 | `run.sh` | Generate → build → measure, either variant. |
 

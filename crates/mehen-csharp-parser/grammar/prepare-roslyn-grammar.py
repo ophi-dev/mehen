@@ -161,12 +161,33 @@ record_keyword
   ;
 """
 
-# Roslyn's "omitted" syntax nodes: genuinely empty productions that model a
-# blank slot in `Foo<,>` and `new int[,]`. ANTLR cannot have an empty rule
-# inside a closure, so the rule is dropped and its use sites — which are
-# alternatives of an alternation — are removed, leaving the surrounding
-# optional/closure to express the same language.
+# Roslyn's "omitted" syntax nodes are genuinely empty productions that model a
+# blank slot: `omitted_type_argument` for the unbound generic `Dictionary<,>` and
+# `omitted_array_size_expression` for the multi-dimensional `int[,]`. They appear
+# as alternatives of `type` and `expression` respectively.
+#
+# ANTLR cannot have an empty rule inside a closure, so the rules must go — but
+# simply deleting their alternatives LOSES REAL SYNTAX: `int[,]` and
+# `Dictionary<,>` then fail to parse, because the `','` in
+# `'[' (expression (',' expression)*)? ']'` has nothing to match on either side.
+# (I shipped that bug once; these two cases are now regression-tested.)
+#
+# The faithful rewrite makes the list *elements* optional at the two use sites,
+# which is exactly what an empty node expressed there.
 OMITTED_NODES = ("omitted_type_argument", "omitted_array_size_expression")
+
+OMITTED_USE_SITE_FIXES = [
+    # Unbound generic names: `Dictionary<,>`, `List<>`.
+    (
+        "type_argument_list\n  : '<' (type (',' type)*)? '>'\n  ;",
+        "type_argument_list\n  : '<' (type? (',' type?)*)? '>'\n  ;",
+    ),
+    # Multi-dimensional array ranks: `int[,]`, `int[,,]`.
+    (
+        "array_rank_specifier\n  : '[' (expression (',' expression)*)? ']'\n  ;",
+        "array_rank_specifier\n  : '[' (expression? (',' expression?)*)? ']'\n  ;",
+    ),
+]
 
 
 def strip_comments(text: str) -> str:
@@ -226,6 +247,12 @@ def main() -> int:
     # -- 1. Drop the omitted-node rules and their use sites ------------------
     for name in OMITTED_NODES:
         src = re.sub(rf"^{name}\n  : /\* epsilon \*/\n  ;\n\n", "", src, flags=re.M)
+    # Preserve the syntax those empty nodes expressed (see OMITTED_USE_SITE_FIXES).
+    for old, new in OMITTED_USE_SITE_FIXES:
+        if old not in src:
+            print(f"error: omitted-node use site not found: {old.splitlines()[0]}", file=sys.stderr)
+            return 1
+        src = src.replace(old, new, 1)
     kept = [
         line
         for line in src.split("\n")
