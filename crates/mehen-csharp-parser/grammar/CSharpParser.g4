@@ -9,15 +9,15 @@ compilation_unit
   ;
 
 extern_alias_directive
-  : KW_EXTERN KW_ALIAS identifier_token OP_168
+  : KW_EXTERN KW_ALIAS identifier_token SEMICOLON
   ;
 
 using_directive
-  : KW_GLOBAL? KW_USING (KW_STATIC | (KW_UNSAFE? name_equals))? type OP_168
+  : KW_GLOBAL? KW_USING (KW_STATIC | (KW_UNSAFE? name_equals))? type SEMICOLON
   ;
 
 name_equals
-  : identifier_name OP_170
+  : identifier_name EQ
   ;
 
 identifier_name
@@ -26,7 +26,7 @@ identifier_name
   ;
 
 attribute_list
-  : OP_173 attribute_target_specifier? attribute (OP_163 attribute)* OP_174
+  : LBRACKET attribute_target_specifier? attribute (COMMA attribute)* RBRACKET
   ;
 
 attribute_target_specifier
@@ -44,7 +44,7 @@ name
   ;
 
 alias_qualified_name
-  : identifier_name OP_130 simple_name
+  : identifier_name COLON_COLON simple_name
   ;
 
 simple_name
@@ -57,15 +57,15 @@ generic_name
   ;
 
 type_argument_list
-  : OP_169 (type? (OP_163 type?)*)? OP_171
+  : LT (type? (COMMA type?)*)? GT
   ;
 
 qualified_name
-  : name OP_165 simple_name
+  : name DOT simple_name
   ;
 
 attribute_argument_list
-  : OP_159 (attribute_argument (OP_163 attribute_argument)*)? OP_160
+  : LPAREN (attribute_argument (COMMA attribute_argument)*)? RPAREN
   ;
 
 attribute_argument
@@ -94,7 +94,7 @@ base_field_declaration
   ;
 
 event_field_declaration
-  : attribute_list* modifier* KW_EVENT variable_declaration OP_168
+  : attribute_list* modifier* KW_EVENT variable_declaration SEMICOLON
   ;
 
 modifier
@@ -125,7 +125,7 @@ modifier
   ;
 
 variable_declaration
-  : type variable_declarator (OP_163 variable_declarator)*
+  : type variable_declarator (COMMA variable_declarator)*
   ;
 
 variable_declarator
@@ -133,7 +133,7 @@ variable_declarator
   ;
 
 bracketed_argument_list
-  : OP_173 argument (OP_163 argument)* OP_174
+  : LBRACKET argument (COMMA argument)* RBRACKET
   ;
 
 argument
@@ -141,11 +141,11 @@ argument
   ;
 
 equals_value_clause
-  : OP_170 expression
+  : EQ expression
   ;
 
 field_declaration
-  : attribute_list* modifier* variable_declaration OP_168
+  : attribute_list* modifier* variable_declaration SEMICOLON
   ;
 
 base_method_declaration
@@ -157,11 +157,11 @@ base_method_declaration
   ;
 
 constructor_declaration
-  : attribute_list* modifier* identifier_token parameter_list constructor_initializer? (block | (arrow_expression_clause OP_168))
+  : attribute_list* modifier* identifier_token parameter_list constructor_initializer? (block | (arrow_expression_clause SEMICOLON))
   ;
 
 parameter_list
-  : OP_159 (parameter (OP_163 parameter)*)? OP_160
+  : LPAREN (parameter (COMMA parameter)*)? RPAREN
   ;
 
 parameter
@@ -173,7 +173,7 @@ constructor_initializer
   ;
 
 argument_list
-  : OP_159 (argument (OP_163 argument)*)? OP_160
+  : LPAREN (argument (COMMA argument)*)? RPAREN
   ;
 
 block
@@ -181,27 +181,27 @@ block
   ;
 
 arrow_expression_clause
-  : OP_135 expression
+  : ARROW expression
   ;
 
 conversion_operator_declaration
-  : attribute_list* modifier* (KW_IMPLICIT | KW_EXPLICIT) explicit_interface_specifier? KW_OPERATOR KW_CHECKED? type parameter_list (block | (arrow_expression_clause OP_168))
+  : attribute_list* modifier* (KW_IMPLICIT | KW_EXPLICIT) explicit_interface_specifier? KW_OPERATOR KW_CHECKED? type parameter_list (block | (arrow_expression_clause SEMICOLON))
   ;
 
 explicit_interface_specifier
-  : name OP_165
+  : name DOT
   ;
 
 destructor_declaration
-  : attribute_list* modifier* OP_180 identifier_token parameter_list (block | (arrow_expression_clause OP_168))
+  : attribute_list* modifier* TILDE identifier_token parameter_list (block | (arrow_expression_clause SEMICOLON))
   ;
 
 method_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause OP_168))
+  : attribute_list* modifier* type explicit_interface_specifier? identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause SEMICOLON))
   ;
 
 type_parameter_list
-  : OP_169 type_parameter (OP_163 type_parameter)* OP_171
+  : LT type_parameter (COMMA type_parameter)* GT
   ;
 
 type_parameter
@@ -209,7 +209,7 @@ type_parameter
   ;
 
 type_parameter_constraint_clause
-  : KW_WHERE identifier_name COLON type_parameter_constraint (OP_163 type_parameter_constraint)*
+  : KW_WHERE identifier_name COLON type_parameter_constraint (COMMA type_parameter_constraint)*
   ;
 
 type_parameter_constraint
@@ -221,7 +221,7 @@ type_parameter_constraint
   ;
 
 allows_constraint_clause
-  : KW_ALLOWS allows_constraint (OP_163 allows_constraint)*
+  : KW_ALLOWS allows_constraint (COMMA allows_constraint)*
   ;
 
 allows_constraint
@@ -233,12 +233,12 @@ ref_struct_constraint
   ;
 
 class_or_struct_constraint
-  : KW_CLASS OP_172?
-  | KW_STRUCT OP_172?
+  : KW_CLASS QUESTION?
+  | KW_STRUCT QUESTION?
   ;
 
 constructor_constraint
-  : KW_NEW OP_159 OP_160
+  : KW_NEW LPAREN RPAREN
   ;
 
 default_constraint
@@ -250,7 +250,7 @@ type_constraint
   ;
 
 operator_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? KW_OPERATOR KW_CHECKED? (OP_162 | OP_164 | OP_153 | OP_180 | OP_122 | OP_124 | OP_161 | OP_166 | OP_157 | OP_132 | right_shift | unsigned_right_shift | OP_178 | OP_158 | OP_175 | OP_134 | OP_117 | OP_169 | OP_133 | OP_171 | OP_136 | KW_FALSE | KW_TRUE | KW_IS | OP_123 | OP_125 | OP_121 | OP_128 | OP_118 | OP_120 | OP_151 | OP_141 | OP_102 | right_shift_assignment | unsigned_right_shift_assignment) parameter_list (block | (arrow_expression_clause OP_168))
+  : attribute_list* modifier* type explicit_interface_specifier? KW_OPERATOR KW_CHECKED? (PLUS | MINUS | BANG | TILDE | PLUS_PLUS | MINUS_MINUS | STAR | SLASH | PERCENT | LT_LT | right_shift | unsigned_right_shift | PIPE | AMP | CARET | EQ_EQ | NE | LT | LE | GT | GE | KW_FALSE | KW_TRUE | KW_IS | PLUS_EQ | MINUS_EQ | STAR_EQ | SLASH_EQ | PERCENT_EQ | AMP_EQ | PIPE_EQ | CARET_EQ | LT_LT_EQ | right_shift_assignment | unsigned_right_shift_assignment) parameter_list (block | (arrow_expression_clause SEMICOLON))
   ;
 
 base_namespace_declaration
@@ -259,11 +259,11 @@ base_namespace_declaration
   ;
 
 file_scoped_namespace_declaration
-  : attribute_list* modifier* KW_NAMESPACE name OP_168 extern_alias_directive* using_directive* member_declaration*
+  : attribute_list* modifier* KW_NAMESPACE name SEMICOLON extern_alias_directive* using_directive* member_declaration*
   ;
 
 namespace_declaration
-  : attribute_list* modifier* KW_NAMESPACE name LBRACE extern_alias_directive* using_directive* member_declaration* RBRACE OP_168?
+  : attribute_list* modifier* KW_NAMESPACE name LBRACE extern_alias_directive* using_directive* member_declaration* RBRACE SEMICOLON?
   ;
 
 base_property_declaration
@@ -273,7 +273,7 @@ base_property_declaration
   ;
 
 event_declaration
-  : attribute_list* modifier* KW_EVENT type explicit_interface_specifier? identifier_token (accessor_list | OP_168)
+  : attribute_list* modifier* KW_EVENT type explicit_interface_specifier? identifier_token (accessor_list | SEMICOLON)
   ;
 
 accessor_list
@@ -281,19 +281,19 @@ accessor_list
   ;
 
 accessor_declaration
-  : attribute_list* modifier* (KW_GET | KW_SET | KW_INIT | KW_ADD | KW_REMOVE | identifier_token) (block | (arrow_expression_clause OP_168) | OP_168)
+  : attribute_list* modifier* (KW_GET | KW_SET | KW_INIT | KW_ADD | KW_REMOVE | identifier_token) (block | (arrow_expression_clause SEMICOLON) | SEMICOLON)
   ;
 
 indexer_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? KW_THIS bracketed_parameter_list (accessor_list | (arrow_expression_clause OP_168))
+  : attribute_list* modifier* type explicit_interface_specifier? KW_THIS bracketed_parameter_list (accessor_list | (arrow_expression_clause SEMICOLON))
   ;
 
 bracketed_parameter_list
-  : OP_173 parameter (OP_163 parameter)* OP_174
+  : LBRACKET parameter (COMMA parameter)* RBRACKET
   ;
 
 property_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? identifier_token (accessor_list (equals_value_clause OP_168)? | ((arrow_expression_clause | equals_value_clause) OP_168))
+  : attribute_list* modifier* type explicit_interface_specifier? identifier_token (accessor_list (equals_value_clause SEMICOLON)? | ((arrow_expression_clause | equals_value_clause) SEMICOLON))
   ;
 
 base_type_declaration
@@ -302,11 +302,11 @@ base_type_declaration
   ;
 
 enum_declaration
-  : attribute_list* modifier* KW_ENUM identifier_token base_list? (LBRACE (enum_member_declaration (OP_163 enum_member_declaration)* OP_163?)? RBRACE)? OP_168?
+  : attribute_list* modifier* KW_ENUM identifier_token base_list? (LBRACE (enum_member_declaration (COMMA enum_member_declaration)* COMMA?)? RBRACE)? SEMICOLON?
   ;
 
 base_list
-  : COLON base_type (OP_163 base_type)*
+  : COLON base_type (COMMA base_type)*
   ;
 
 base_type
@@ -336,31 +336,31 @@ type_declaration
   ;
 
 class_declaration
-  : attribute_list* modifier* KW_CLASS identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  : attribute_list* modifier* KW_CLASS identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? SEMICOLON?
   ;
 
 extension_block_declaration
-  : attribute_list* modifier* KW_EXTENSION type_parameter_list? parameter_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  : attribute_list* modifier* KW_EXTENSION type_parameter_list? parameter_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? SEMICOLON?
   ;
 
 interface_declaration
-  : attribute_list* modifier* KW_INTERFACE identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  : attribute_list* modifier* KW_INTERFACE identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? SEMICOLON?
   ;
 
 record_declaration
-  : attribute_list* modifier* record_keyword (KW_CLASS | KW_STRUCT)? identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  : attribute_list* modifier* record_keyword (KW_CLASS | KW_STRUCT)? identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? SEMICOLON?
   ;
 
 struct_declaration
-  : attribute_list* modifier* KW_STRUCT identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  : attribute_list* modifier* KW_STRUCT identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? SEMICOLON?
   ;
 
 union_declaration
-  : attribute_list* modifier* KW_UNION identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  : attribute_list* modifier* KW_UNION identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? SEMICOLON?
   ;
 
 delegate_declaration
-  : attribute_list* modifier* KW_DELEGATE type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* OP_168
+  : attribute_list* modifier* KW_DELEGATE type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* SEMICOLON
   ;
 
 global_statement
@@ -388,11 +388,11 @@ array_type
   ;
 
 array_rank_specifier
-  : OP_173 (expression? (OP_163 expression?)*)? OP_174
+  : LBRACKET (expression? (COMMA expression?)*)? RBRACKET
   ;
 
 function_pointer_type
-  : KW_DELEGATE OP_161 function_pointer_calling_convention? function_pointer_parameter_list
+  : KW_DELEGATE STAR function_pointer_calling_convention? function_pointer_parameter_list
   ;
 
 function_pointer_calling_convention
@@ -401,7 +401,7 @@ function_pointer_calling_convention
   ;
 
 function_pointer_unmanaged_calling_convention_list
-  : OP_173 function_pointer_unmanaged_calling_convention (OP_163 function_pointer_unmanaged_calling_convention)* OP_174
+  : LBRACKET function_pointer_unmanaged_calling_convention (COMMA function_pointer_unmanaged_calling_convention)* RBRACKET
   ;
 
 function_pointer_unmanaged_calling_convention
@@ -409,7 +409,7 @@ function_pointer_unmanaged_calling_convention
   ;
 
 function_pointer_parameter_list
-  : OP_169 function_pointer_parameter (OP_163 function_pointer_parameter)* OP_171
+  : LT function_pointer_parameter (COMMA function_pointer_parameter)* GT
   ;
 
 function_pointer_parameter
@@ -417,11 +417,11 @@ function_pointer_parameter
   ;
 
 nullable_type
-  : type OP_172
+  : type QUESTION
   ;
 
 pointer_type
-  : type OP_161
+  : type STAR
   ;
 
 predefined_type
@@ -452,7 +452,7 @@ scoped_type
   ;
 
 tuple_type
-  : OP_159 tuple_element (OP_163 tuple_element)+ OP_160
+  : LPAREN tuple_element (COMMA tuple_element)+ RPAREN
   ;
 
 tuple_element
@@ -487,7 +487,7 @@ statement
   ;
 
 break_statement
-  : attribute_list* KW_BREAK identifier_name? OP_168
+  : attribute_list* KW_BREAK identifier_name? SEMICOLON
   ;
 
 checked_statement
@@ -500,43 +500,43 @@ common_for_each_statement
   ;
 
 for_each_statement
-  : attribute_list* KW_AWAIT? KW_FOREACH OP_159 type identifier_token KW_IN expression OP_160 statement
+  : attribute_list* KW_AWAIT? KW_FOREACH LPAREN type identifier_token KW_IN expression RPAREN statement
   ;
 
 for_each_variable_statement
-  : attribute_list* KW_AWAIT? KW_FOREACH OP_159 expression KW_IN expression OP_160 statement
+  : attribute_list* KW_AWAIT? KW_FOREACH LPAREN expression KW_IN expression RPAREN statement
   ;
 
 continue_statement
-  : attribute_list* KW_CONTINUE identifier_name? OP_168
+  : attribute_list* KW_CONTINUE identifier_name? SEMICOLON
   ;
 
 do_statement
-  : attribute_list* KW_DO statement KW_WHILE OP_159 expression OP_160 OP_168
+  : attribute_list* KW_DO statement KW_WHILE LPAREN expression RPAREN SEMICOLON
   ;
 
 empty_statement
-  : attribute_list* OP_168
+  : attribute_list* SEMICOLON
   ;
 
 expression_statement
-  : attribute_list* expression OP_168
+  : attribute_list* expression SEMICOLON
   ;
 
 fixed_statement
-  : attribute_list* KW_FIXED OP_159 variable_declaration OP_160 statement
+  : attribute_list* KW_FIXED LPAREN variable_declaration RPAREN statement
   ;
 
 for_statement
-  : attribute_list* KW_FOR OP_159 (variable_declaration? | (expression (OP_163 expression)*)?) OP_168 expression? OP_168 (expression (OP_163 expression)*)? OP_160 statement
+  : attribute_list* KW_FOR LPAREN (variable_declaration? | (expression (COMMA expression)*)?) SEMICOLON expression? SEMICOLON (expression (COMMA expression)*)? RPAREN statement
   ;
 
 goto_statement
-  : attribute_list* KW_GOTO (KW_CASE | KW_DEFAULT)? expression? OP_168
+  : attribute_list* KW_GOTO (KW_CASE | KW_DEFAULT)? expression? SEMICOLON
   ;
 
 if_statement
-  : attribute_list* KW_IF OP_159 expression OP_160 statement else_clause?
+  : attribute_list* KW_IF LPAREN expression RPAREN statement else_clause?
   ;
 
 else_clause
@@ -548,23 +548,23 @@ labeled_statement
   ;
 
 local_declaration_statement
-  : attribute_list* KW_AWAIT? KW_USING? modifier* variable_declaration OP_168
+  : attribute_list* KW_AWAIT? KW_USING? modifier* variable_declaration SEMICOLON
   ;
 
 local_function_statement
-  : attribute_list* modifier* type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause OP_168))
+  : attribute_list* modifier* type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause SEMICOLON))
   ;
 
 lock_statement
-  : attribute_list* KW_LOCK OP_159 expression OP_160 statement
+  : attribute_list* KW_LOCK LPAREN expression RPAREN statement
   ;
 
 return_statement
-  : attribute_list* KW_RETURN expression? OP_168
+  : attribute_list* KW_RETURN expression? SEMICOLON
   ;
 
 switch_statement
-  : attribute_list* KW_SWITCH OP_159? expression OP_160? LBRACE switch_section* RBRACE
+  : attribute_list* KW_SWITCH LPAREN? expression RPAREN? LBRACE switch_section* RBRACE
   ;
 
 switch_section
@@ -619,7 +619,7 @@ discard_designation
   ;
 
 parenthesized_variable_designation
-  : OP_159 (variable_designation (OP_163 variable_designation)*)? OP_160
+  : LPAREN (variable_designation (COMMA variable_designation)*)? RPAREN
   ;
 
 single_variable_designation
@@ -631,11 +631,11 @@ discard_pattern
   ;
 
 list_pattern
-  : OP_173 (pattern (OP_163 pattern)* OP_163?)? OP_174 variable_designation?
+  : LBRACKET (pattern (COMMA pattern)* COMMA?)? RBRACKET variable_designation?
   ;
 
 parenthesized_pattern
-  : OP_159 pattern OP_160
+  : LPAREN pattern RPAREN
   ;
 
 recursive_pattern
@@ -643,7 +643,7 @@ recursive_pattern
   ;
 
 positional_pattern_clause
-  : OP_159 (subpattern (OP_163 subpattern)*)? OP_160
+  : LPAREN (subpattern (COMMA subpattern)*)? RPAREN
   ;
 
 subpattern
@@ -660,20 +660,20 @@ expression_colon
   ;
 
 property_pattern_clause
-  : LBRACE (subpattern (OP_163 subpattern)* OP_163?)? RBRACE
+  : LBRACE (subpattern (COMMA subpattern)* COMMA?)? RBRACE
   ;
 
 relational_pattern
-  : OP_117 expression
-  | OP_169 expression
-  | OP_133 expression
-  | OP_134 expression
-  | OP_171 expression
-  | OP_136 expression
+  : NE expression
+  | LT expression
+  | LE expression
+  | EQ_EQ expression
+  | GT expression
+  | GE expression
   ;
 
 slice_pattern
-  : OP_127 pattern?
+  : DOT_DOT pattern?
   ;
 
 type_pattern
@@ -701,7 +701,7 @@ default_switch_label
   ;
 
 throw_statement
-  : attribute_list* KW_THROW expression? OP_168
+  : attribute_list* KW_THROW expression? SEMICOLON
   ;
 
 try_statement
@@ -713,11 +713,11 @@ catch_clause
   ;
 
 catch_declaration
-  : OP_159 type identifier_token? OP_160
+  : LPAREN type identifier_token? RPAREN
   ;
 
 catch_filter_clause
-  : KW_WHEN OP_159 expression OP_160
+  : KW_WHEN LPAREN expression RPAREN
   ;
 
 finally_clause
@@ -729,15 +729,15 @@ unsafe_statement
   ;
 
 using_statement
-  : attribute_list* KW_AWAIT? KW_USING OP_159 (variable_declaration | expression) OP_160 statement
+  : attribute_list* KW_AWAIT? KW_USING LPAREN (variable_declaration | expression) RPAREN statement
   ;
 
 while_statement
-  : attribute_list* KW_WHILE OP_159 expression OP_160 statement
+  : attribute_list* KW_WHILE LPAREN expression RPAREN statement
   ;
 
 yield_statement
-  : attribute_list* KW_YIELD (KW_RETURN | KW_BREAK) expression? OP_168
+  : attribute_list* KW_YIELD (KW_RETURN | KW_BREAK) expression? SEMICOLON
   ;
 
 expression
@@ -804,15 +804,15 @@ lambda_expression
   ;
 
 parenthesized_lambda_expression
-  : attribute_list* modifier* type? parameter_list OP_135 (block | expression)
+  : attribute_list* modifier* type? parameter_list ARROW (block | expression)
   ;
 
 simple_lambda_expression
-  : attribute_list* modifier* parameter OP_135 (block | expression)
+  : attribute_list* modifier* parameter ARROW (block | expression)
   ;
 
 anonymous_object_creation_expression
-  : KW_NEW LBRACE (anonymous_object_member_declarator (OP_163 anonymous_object_member_declarator)* OP_163?)? RBRACE
+  : KW_NEW LBRACE (anonymous_object_member_declarator (COMMA anonymous_object_member_declarator)* COMMA?)? RBRACE
   ;
 
 anonymous_object_member_declarator
@@ -824,11 +824,11 @@ array_creation_expression
   ;
 
 initializer_expression
-  : LBRACE (expression (OP_163 expression)* OP_163?)? RBRACE
+  : LBRACE (expression (COMMA expression)* COMMA?)? RBRACE
   ;
 
 assignment_expression
-  : expression (OP_170 | OP_123 | OP_125 | OP_121 | OP_128 | OP_118 | OP_120 | OP_141 | OP_151 | OP_102 | right_shift_assignment | unsigned_right_shift_assignment | OP_103) expression
+  : expression (EQ | PLUS_EQ | MINUS_EQ | STAR_EQ | SLASH_EQ | PERCENT_EQ | AMP_EQ | CARET_EQ | PIPE_EQ | LT_LT_EQ | right_shift_assignment | unsigned_right_shift_assignment | QUESTION_QUESTION_EQ) expression
   ;
 
 await_expression
@@ -849,20 +849,20 @@ object_creation_expression
   ;
 
 binary_expression
-  : expression (OP_162 | OP_164 | OP_161 | OP_166 | OP_157 | OP_132 | right_shift | unsigned_right_shift | OP_152 | OP_119 | OP_178 | OP_158 | OP_175 | OP_134 | OP_117 | OP_169 | OP_133 | OP_171 | OP_136 | KW_IS | KW_AS | OP_137) expression
+  : expression (PLUS | MINUS | STAR | SLASH | PERCENT | LT_LT | right_shift | unsigned_right_shift | PIPE_PIPE | AMP_AMP | PIPE | AMP | CARET | EQ_EQ | NE | LT | LE | GT | GE | KW_IS | KW_AS | QUESTION_QUESTION) expression
   ;
 
 cast_expression
-  : OP_159 type OP_160 expression
+  : LPAREN type RPAREN expression
   ;
 
 checked_expression
-  : KW_CHECKED OP_159 expression OP_160
-  | KW_UNCHECKED OP_159 expression OP_160
+  : KW_CHECKED LPAREN expression RPAREN
+  | KW_UNCHECKED LPAREN expression RPAREN
   ;
 
 collection_expression
-  : OP_173 (collection_element (OP_163 collection_element)* OP_163?)? OP_174
+  : LBRACKET (collection_element (COMMA collection_element)* COMMA?)? RBRACKET
   ;
 
 collection_element
@@ -876,7 +876,7 @@ expression_element
   ;
 
 spread_element
-  : OP_127 expression
+  : DOT_DOT expression
   ;
 
 with_element
@@ -884,11 +884,11 @@ with_element
   ;
 
 conditional_access_expression
-  : expression OP_172 expression
+  : expression QUESTION expression
   ;
 
 conditional_expression
-  : expression OP_172 expression COLON expression
+  : expression QUESTION expression COLON expression
   ;
 
 declaration_expression
@@ -896,7 +896,7 @@ declaration_expression
   ;
 
 default_expression
-  : KW_DEFAULT OP_159 type OP_160
+  : KW_DEFAULT LPAREN type RPAREN
   ;
 
 element_access_expression
@@ -912,7 +912,7 @@ field_expression
   ;
 
 implicit_array_creation_expression
-  : KW_NEW OP_173 OP_163* OP_174 initializer_expression
+  : KW_NEW LBRACKET COMMA* RBRACKET initializer_expression
   ;
 
 implicit_element_access
@@ -920,7 +920,7 @@ implicit_element_access
   ;
 
 implicit_stack_alloc_array_creation_expression
-  : KW_STACKALLOC OP_173 OP_174 initializer_expression
+  : KW_STACKALLOC LBRACKET RBRACKET initializer_expression
   ;
 
 instance_expression
@@ -957,7 +957,7 @@ interpolation
   ;
 
 interpolation_alignment_clause
-  : OP_163 expression
+  : COMMA expression
   ;
 
 interpolation_format_clause
@@ -965,15 +965,15 @@ interpolation_format_clause
   ;
 
 interpolated_multi_line_raw_string_start_token
-  : OP_156+ OP_101 DQUOTE*
+  : DOLLAR+ TRIPLE_DQUOTE DQUOTE*
   ;
 
 interpolated_raw_string_end_token
-  : OP_101 DQUOTE* /* must match number of quotes in raw_string_start_token */
+  : TRIPLE_DQUOTE DQUOTE* /* must match number of quotes in raw_string_start_token */
   ;
 
 interpolated_single_line_raw_string_start_token
-  : OP_156+ OP_101 DQUOTE*
+  : DOLLAR+ TRIPLE_DQUOTE DQUOTE*
   ;
 
 invocation_expression
@@ -1013,35 +1013,35 @@ utf8_string_literal_token
   ;
 
 make_ref_expression
-  : KW___MAKEREF OP_159 expression OP_160
+  : KW___MAKEREF LPAREN expression RPAREN
   ;
 
 member_access_expression
-  : expression (OP_165 | OP_126) simple_name
+  : expression (DOT | MINUS_GT) simple_name
   ;
 
 member_binding_expression
-  : OP_165 simple_name
+  : DOT simple_name
   ;
 
 parenthesized_expression
-  : OP_159 expression OP_160
+  : LPAREN expression RPAREN
   ;
 
 postfix_unary_expression
-  : expression (OP_122 | OP_124 | OP_153)
+  : expression (PLUS_PLUS | MINUS_MINUS | BANG)
   ;
 
 prefix_unary_expression
-  : OP_153 expression
-  | OP_158 expression
-  | OP_161 expression
-  | OP_162 expression
-  | OP_122 expression
-  | OP_164 expression
-  | OP_124 expression
-  | OP_175 expression
-  | OP_180 expression
+  : BANG expression
+  | AMP expression
+  | STAR expression
+  | PLUS expression
+  | PLUS_PLUS expression
+  | MINUS expression
+  | MINUS_MINUS expression
+  | CARET expression
+  | TILDE expression
   ;
 
 query_expression
@@ -1073,11 +1073,11 @@ join_into_clause
   ;
 
 let_clause
-  : KW_LET identifier_token OP_170 expression
+  : KW_LET identifier_token EQ expression
   ;
 
 order_by_clause
-  : KW_ORDERBY ordering (OP_163 ordering)*
+  : KW_ORDERBY ordering (COMMA ordering)*
   ;
 
 ordering
@@ -1106,7 +1106,7 @@ query_continuation
   ;
 
 range_expression
-  : expression? OP_127 expression?
+  : expression? DOT_DOT expression?
   ;
 
 ref_expression
@@ -1114,15 +1114,15 @@ ref_expression
   ;
 
 ref_type_expression
-  : KW___REFTYPE OP_159 expression OP_160
+  : KW___REFTYPE LPAREN expression RPAREN
   ;
 
 ref_value_expression
-  : KW___REFVALUE OP_159 expression OP_163 type OP_160
+  : KW___REFVALUE LPAREN expression COMMA type RPAREN
   ;
 
 size_of_expression
-  : KW_SIZEOF OP_159 type OP_160
+  : KW_SIZEOF LPAREN type RPAREN
   ;
 
 stack_alloc_array_creation_expression
@@ -1130,11 +1130,11 @@ stack_alloc_array_creation_expression
   ;
 
 switch_expression
-  : expression KW_SWITCH LBRACE (switch_expression_arm (OP_163 switch_expression_arm)* OP_163?)? RBRACE
+  : expression KW_SWITCH LBRACE (switch_expression_arm (COMMA switch_expression_arm)* COMMA?)? RBRACE
   ;
 
 switch_expression_arm
-  : pattern when_clause? OP_135 expression
+  : pattern when_clause? ARROW expression
   ;
 
 throw_expression
@@ -1142,15 +1142,15 @@ throw_expression
   ;
 
 tuple_expression
-  : OP_159 argument (OP_163 argument)+ OP_160
+  : LPAREN argument (COMMA argument)+ RPAREN
   ;
 
 type_of_expression
-  : KW_TYPEOF OP_159 type OP_160
+  : KW_TYPEOF LPAREN type RPAREN
   ;
 
 unsafe_expression
-  : KW_UNSAFE OP_159 expression OP_160
+  : KW_UNSAFE LPAREN expression RPAREN
   ;
 
 with_expression
@@ -1414,67 +1414,67 @@ verbatim_string_literal_token
 
 
 operator_token
-  : OP_153
-  | OP_117
-  | OP_157
-  | OP_118
-  | OP_119
-  | OP_158
-  | OP_120
-  | OP_161
-  | OP_121
-  | OP_162
-  | OP_122
-  | OP_123
-  | OP_164
-  | OP_124
-  | OP_125
-  | OP_166
-  | OP_128
-  | OP_169
-  | OP_132
-  | OP_102
-  | OP_133
-  | OP_170
-  | OP_134
-  | OP_171
-  | OP_136
+  : BANG
+  | NE
+  | PERCENT
+  | PERCENT_EQ
+  | AMP_AMP
+  | AMP
+  | AMP_EQ
+  | STAR
+  | STAR_EQ
+  | PLUS
+  | PLUS_PLUS
+  | PLUS_EQ
+  | MINUS
+  | MINUS_MINUS
+  | MINUS_EQ
+  | SLASH
+  | SLASH_EQ
+  | LT
+  | LT_LT
+  | LT_LT_EQ
+  | LE
+  | EQ
+  | EQ_EQ
+  | GT
+  | GE
   | right_shift
   | right_shift_assignment
   | unsigned_right_shift
   | unsigned_right_shift_assignment
-  | OP_137
-  | OP_103
+  | QUESTION_QUESTION
+  | QUESTION_QUESTION_EQ
   | KW_AS
   | KW_IS
-  | OP_175
-  | OP_141
-  | OP_178
-  | OP_151
-  | OP_152
-  | OP_180
+  | CARET
+  | CARET_EQ
+  | PIPE
+  | PIPE_EQ
+  | PIPE_PIPE
+  | TILDE
   ;
 
 punctuation_token
   : DQUOTE
-  | OP_155
-  | OP_159
-  | OP_160
-  | OP_163
-  | OP_126
-  | OP_165
-  | OP_127
-  | OP_129
+  | HASH
+  | LPAREN
+  | RPAREN
+  | COMMA
+  | MINUS_GT
+  | DOT
+  | DOT_DOT
+  | SLASH_GT
   | COLON
-  | OP_130
-  | OP_168
-  | OP_131
-  | OP_135
-  | OP_172
-  | OP_173
-  | OP_139
-  | OP_140
-  | OP_174
+  | COLON_COLON
+  | SEMICOLON
+  | LT_SLASH
+  | ARROW
+  | QUESTION
+  | LBRACKET
+  | ESCAPED_QUOTE
+  | ESCAPED_BACKSLASH
+  | RBRACKET
   | LBRACE
   | RBRACE
   ;
@@ -1518,17 +1518,17 @@ record_keyword
   ;
 
 right_shift
-  : OP_171 OP_171 {this.IsRightShift()}? // adjacent in the char stream?
+  : GT GT {this.IsRightShift()}? // adjacent in the char stream?
   ;
 
 unsigned_right_shift
-  : OP_171 OP_171 {this.IsUnsignedRightShift()}? OP_171 {this.IsUnsignedRightShift()}? // adjacent in the char stream?
+  : GT GT {this.IsUnsignedRightShift()}? GT {this.IsUnsignedRightShift()}? // adjacent in the char stream?
   ;
 
 right_shift_assignment
-  : OP_171 OP_136 {this.IsRightShiftAssignment()}? // adjacent in the char stream?
+  : GT GE {this.IsRightShiftAssignment()}? // adjacent in the char stream?
   ;
 
 unsigned_right_shift_assignment
-  : OP_171 OP_171 {this.IsUnsignedRightShiftAssignment()}? OP_136 {this.IsUnsignedRightShiftAssignment()}? // adjacent in the char stream?
+  : GT GT {this.IsUnsignedRightShiftAssignment()}? GE {this.IsUnsignedRightShiftAssignment()}? // adjacent in the char stream?
   ;

@@ -210,13 +210,20 @@ INTERP_TOKEN_LITERALS = {
     '$@"': "INTERP_VERBATIM_START",
 }
 
-# Literals that get a stable, meaningful token name instead of the index-based
-# `OP_nnn`. Harvested names are derived from a literal's position in a sorted
-# list, so adding or removing any literal renumbers unrelated tokens — fine
-# inside the generated grammar, but not for the hand-written interpolation hook
-# in `../src/hooks.rs`, which has to name these four in Rust source. (The lexer
-# grammar works around the same problem with `@LBRACE@`-style placeholders; real
-# names are clearer than extending that scheme into Rust.)
+# Meaningful names for every operator and punctuation literal, replacing the
+# index-based `OP_nnn` fallback.
+#
+# The fallback name is derived from a literal's position in a sorted list, so
+# adding or removing *any* literal renumbers unrelated tokens. That is harmless
+# inside the generated grammar, where names are only referenced by other
+# generated text, but not for anything hand-written that has to name a token:
+# `lexer-tokens.g4.in` uses `type(LBRACE)` commands, and `mehen-csharp`'s walker
+# classifies metrics by token (`&&` for a cognitive boolean run, `++` for an ABC
+# assignment, `?` for a conditional). Index names would silently rebind those on
+# the next upstream grammar update — a metric regression with no compile error.
+#
+# Keyword literals need no entry: they are named from their own text
+# (`KW_CLASS`), which is already stable.
 # Literals whose meaning depends on whether the lexer is inside an interpolation
 # hole, so `lexer-tokens.g4.in` defines them itself (gated rules first, then the
 # plain fallback) rather than having them harvested into the literals block above
@@ -224,10 +231,69 @@ INTERP_TOKEN_LITERALS = {
 HOLE_SENSITIVE_LITERALS = frozenset({"{", "}", ":"})
 
 STABLE_TOKEN_NAMES = {
+    # Punctuation and delimiters.
     "{": "LBRACE",
     "}": "RBRACE",
+    "(": "LPAREN",
+    ")": "RPAREN",
+    "[": "LBRACKET",
+    "]": "RBRACKET",
     '"': "DQUOTE",
     ":": "COLON",
+    "::": "COLON_COLON",
+    ";": "SEMICOLON",
+    ",": "COMMA",
+    ".": "DOT",
+    "..": "DOT_DOT",
+    "#": "HASH",
+    "$": "DOLLAR",
+    "'''": "TRIPLE_QUOTE",
+    '"""': "TRIPLE_DQUOTE",
+    "\\'": "ESCAPED_QUOTE",
+    "\\\\": "ESCAPED_BACKSLASH",
+    # Arithmetic and bitwise.
+    "+": "PLUS",
+    "-": "MINUS",
+    "*": "STAR",
+    "/": "SLASH",
+    "%": "PERCENT",
+    "&": "AMP",
+    "|": "PIPE",
+    "^": "CARET",
+    "~": "TILDE",
+    "<<": "LT_LT",
+    # Comparison and logic.
+    "!": "BANG",
+    "<": "LT",
+    ">": "GT",
+    "<=": "LE",
+    ">=": "GE",
+    "==": "EQ_EQ",
+    "!=": "NE",
+    "&&": "AMP_AMP",
+    "||": "PIPE_PIPE",
+    # Assignment and increment.
+    "=": "EQ",
+    "+=": "PLUS_EQ",
+    "-=": "MINUS_EQ",
+    "*=": "STAR_EQ",
+    "/=": "SLASH_EQ",
+    "%=": "PERCENT_EQ",
+    "&=": "AMP_EQ",
+    "|=": "PIPE_EQ",
+    "^=": "CARET_EQ",
+    "<<=": "LT_LT_EQ",
+    "++": "PLUS_PLUS",
+    "--": "MINUS_MINUS",
+    # Null handling, lambda, and misc.
+    "?": "QUESTION",
+    "??": "QUESTION_QUESTION",
+    "??=": "QUESTION_QUESTION_EQ",
+    "=>": "ARROW",
+    "->": "MINUS_GT",
+    # XML doc-comment fragments Roslyn's grammar mentions.
+    "</": "LT_SLASH",
+    "/>": "SLASH_GT",
 }
 
 # Two more generator blind spots, in the same family as the `record`
@@ -745,13 +811,28 @@ def main() -> int:
         key=lambda s: (-len(s), s),
     )
     names: dict[str, str] = {}
+    unnamed: list[str] = []
     for index, lit in enumerate(literals):
         if lit in STABLE_TOKEN_NAMES:
             names[lit] = STABLE_TOKEN_NAMES[lit]
         elif re.fullmatch(r"[a-zA-Z_][a-zA-Z_0-9]*", lit):
             names[lit] = f"KW_{lit.upper()}"
         else:
+            # Reached only for an operator STABLE_TOKEN_NAMES does not cover.
+            # Named by index so generation can continue and the report below can
+            # list every gap at once, then rejected.
             names[lit] = f"OP_{index:03d}"
+            unnamed.append(lit)
+    if unnamed:
+        # Index names are position-derived, so they rebind on any upstream
+        # literal change. Failing here keeps that from reaching hand-written
+        # code that names tokens (the walker, `lexer-tokens.g4.in`).
+        print(
+            "error: operator literals missing from STABLE_TOKEN_NAMES: "
+            + ", ".join(repr(lit) for lit in unnamed),
+            file=sys.stderr,
+        )
+        return 1
     # Keyword names can collide when the grammar spells the same word in two
     # cases (`U8`/`u8`); disambiguate deterministically by index.
     seen: dict[str, str] = {}

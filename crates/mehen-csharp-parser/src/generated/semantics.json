@@ -31,12 +31,12 @@
         {"kind": "parser-action", "rule": "pattern", "rule_index": 115, "index": null, "atn_state": 2098, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
         {"kind": "parser-action", "rule": "expression", "rule_index": 149, "index": null, "atn_state": 2365, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
         {"kind": "parser-predicate", "rule": "record_keyword", "rule_index": 238, "index": 17, "atn_state": null, "line": 1517, "column": 4, "body": "this.IsRecordKeyword()", "disposition": "translated", "template": "LookaheadTextEquals { offset: 1, text: \"record\" }"},
-        {"kind": "parser-predicate", "rule": "right_shift", "rule_index": 239, "index": 18, "atn_state": null, "line": 1521, "column": 18, "body": "this.IsRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
-        {"kind": "parser-predicate", "rule": "unsigned_right_shift", "rule_index": 240, "index": 19, "atn_state": null, "line": 1525, "column": 18, "body": "this.IsUnsignedRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
-        {"kind": "parser-predicate", "rule": "unsigned_right_shift", "rule_index": 240, "index": 20, "atn_state": null, "line": 1525, "column": 56, "body": "this.IsUnsignedRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
-        {"kind": "parser-predicate", "rule": "right_shift_assignment", "rule_index": 241, "index": 21, "atn_state": null, "line": 1529, "column": 18, "body": "this.IsRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"},
-        {"kind": "parser-predicate", "rule": "unsigned_right_shift_assignment", "rule_index": 242, "index": 22, "atn_state": null, "line": 1533, "column": 18, "body": "this.IsUnsignedRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"},
-        {"kind": "parser-predicate", "rule": "unsigned_right_shift_assignment", "rule_index": 242, "index": 23, "atn_state": null, "line": 1533, "column": 66, "body": "this.IsUnsignedRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"}
+        {"kind": "parser-predicate", "rule": "right_shift", "rule_index": 239, "index": 18, "atn_state": null, "line": 1521, "column": 10, "body": "this.IsRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift", "rule_index": 240, "index": 19, "atn_state": null, "line": 1525, "column": 10, "body": "this.IsUnsignedRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift", "rule_index": 240, "index": 20, "atn_state": null, "line": 1525, "column": 44, "body": "this.IsUnsignedRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "right_shift_assignment", "rule_index": 241, "index": 21, "atn_state": null, "line": 1529, "column": 10, "body": "this.IsRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift_assignment", "rule_index": 242, "index": 22, "atn_state": null, "line": 1533, "column": 10, "body": "this.IsUnsignedRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift_assignment", "rule_index": 242, "index": 23, "atn_state": null, "line": 1533, "column": 54, "body": "this.IsUnsignedRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"}
       ]
     }
   ]

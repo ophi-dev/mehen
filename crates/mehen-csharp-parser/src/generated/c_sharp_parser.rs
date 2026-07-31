@@ -120,9 +120,9 @@ pub const KW_UINT: i32 = 100;
 pub const KW_VOID: i32 = 101;
 pub const KW_WHEN: i32 = 102;
 pub const KW_WITH: i32 = 103;
-pub const OP_101: i32 = 104;
-pub const OP_102: i32 = 105;
-pub const OP_103: i32 = 106;
+pub const TRIPLE_DQUOTE: i32 = 104;
+pub const LT_LT_EQ: i32 = 105;
+pub const QUESTION_QUESTION_EQ: i32 = 106;
 pub const KW_ADD: i32 = 107;
 pub const KW_AND: i32 = 108;
 pub const KW_FOR: i32 = 109;
@@ -136,31 +136,31 @@ pub const KW_REF: i32 = 116;
 pub const KW_SET: i32 = 117;
 pub const KW_TRY: i32 = 118;
 pub const KW_VAR: i32 = 119;
-pub const OP_117: i32 = 120;
-pub const OP_118: i32 = 121;
-pub const OP_119: i32 = 122;
-pub const OP_120: i32 = 123;
-pub const OP_121: i32 = 124;
-pub const OP_122: i32 = 125;
-pub const OP_123: i32 = 126;
-pub const OP_124: i32 = 127;
-pub const OP_125: i32 = 128;
-pub const OP_126: i32 = 129;
-pub const OP_127: i32 = 130;
-pub const OP_128: i32 = 131;
-pub const OP_129: i32 = 132;
-pub const OP_130: i32 = 133;
-pub const OP_131: i32 = 134;
-pub const OP_132: i32 = 135;
-pub const OP_133: i32 = 136;
-pub const OP_134: i32 = 137;
-pub const OP_135: i32 = 138;
-pub const OP_136: i32 = 139;
-pub const OP_137: i32 = 140;
+pub const NE: i32 = 120;
+pub const PERCENT_EQ: i32 = 121;
+pub const AMP_AMP: i32 = 122;
+pub const AMP_EQ: i32 = 123;
+pub const STAR_EQ: i32 = 124;
+pub const PLUS_PLUS: i32 = 125;
+pub const PLUS_EQ: i32 = 126;
+pub const MINUS_MINUS: i32 = 127;
+pub const MINUS_EQ: i32 = 128;
+pub const MINUS_GT: i32 = 129;
+pub const DOT_DOT: i32 = 130;
+pub const SLASH_EQ: i32 = 131;
+pub const SLASH_GT: i32 = 132;
+pub const COLON_COLON: i32 = 133;
+pub const LT_SLASH: i32 = 134;
+pub const LT_LT: i32 = 135;
+pub const LE: i32 = 136;
+pub const EQ_EQ: i32 = 137;
+pub const ARROW: i32 = 138;
+pub const GE: i32 = 139;
+pub const QUESTION_QUESTION: i32 = 140;
 pub const KW_U8: i32 = 141;
-pub const OP_139: i32 = 142;
-pub const OP_140: i32 = 143;
-pub const OP_141: i32 = 144;
+pub const ESCAPED_QUOTE: i32 = 142;
+pub const ESCAPED_BACKSLASH: i32 = 143;
+pub const CARET_EQ: i32 = 144;
 pub const KW_AS: i32 = 145;
 pub const KW_BY: i32 = 146;
 pub const KW_DO: i32 = 147;
@@ -170,33 +170,33 @@ pub const KW_IS: i32 = 150;
 pub const KW_ON: i32 = 151;
 pub const KW_OR: i32 = 152;
 pub const KW_U8_150: i32 = 153;
-pub const OP_151: i32 = 154;
-pub const OP_152: i32 = 155;
-pub const OP_153: i32 = 156;
+pub const PIPE_EQ: i32 = 154;
+pub const PIPE_PIPE: i32 = 155;
+pub const BANG: i32 = 156;
 pub const DQUOTE: i32 = 157;
-pub const OP_155: i32 = 158;
-pub const OP_156: i32 = 159;
-pub const OP_157: i32 = 160;
-pub const OP_158: i32 = 161;
-pub const OP_159: i32 = 162;
-pub const OP_160: i32 = 163;
-pub const OP_161: i32 = 164;
-pub const OP_162: i32 = 165;
-pub const OP_163: i32 = 166;
-pub const OP_164: i32 = 167;
-pub const OP_165: i32 = 168;
-pub const OP_166: i32 = 169;
-pub const OP_168: i32 = 170;
-pub const OP_169: i32 = 171;
-pub const OP_170: i32 = 172;
-pub const OP_171: i32 = 173;
-pub const OP_172: i32 = 174;
-pub const OP_173: i32 = 175;
-pub const OP_174: i32 = 176;
-pub const OP_175: i32 = 177;
+pub const HASH: i32 = 158;
+pub const DOLLAR: i32 = 159;
+pub const PERCENT: i32 = 160;
+pub const AMP: i32 = 161;
+pub const LPAREN: i32 = 162;
+pub const RPAREN: i32 = 163;
+pub const STAR: i32 = 164;
+pub const PLUS: i32 = 165;
+pub const COMMA: i32 = 166;
+pub const MINUS: i32 = 167;
+pub const DOT: i32 = 168;
+pub const SLASH: i32 = 169;
+pub const SEMICOLON: i32 = 170;
+pub const LT: i32 = 171;
+pub const EQ: i32 = 172;
+pub const GT: i32 = 173;
+pub const QUESTION: i32 = 174;
+pub const LBRACKET: i32 = 175;
+pub const RBRACKET: i32 = 176;
+pub const CARET: i32 = 177;
 pub const KW: i32 = 178;
-pub const OP_178: i32 = 179;
-pub const OP_180: i32 = 180;
+pub const PIPE: i32 = 179;
+pub const TILDE: i32 = 180;
 pub const IDENTIFIER: i32 = 181;
 pub const DEC_INT_LIT: i32 = 182;
 pub const HEX_INT_LIT: i32 = 183;
@@ -471,7 +471,7 @@ pub static METADATA: GrammarMetadata = GrammarMetadata::new(
     "CSharpParser",
     &["compilation_unit", "extern_alias_directive", "using_directive", "name_equals", "identifier_name", "attribute_list", "attribute_target_specifier", "attribute", "name", "alias_qualified_name", "simple_name", "generic_name", "type_argument_list", "attribute_argument_list", "attribute_argument", "name_colon", "member_declaration", "base_field_declaration", "event_field_declaration", "modifier", "variable_declaration", "variable_declarator", "bracketed_argument_list", "argument", "equals_value_clause", "field_declaration", "base_method_declaration", "constructor_declaration", "parameter_list", "parameter", "constructor_initializer", "argument_list", "block", "arrow_expression_clause", "conversion_operator_declaration", "explicit_interface_specifier", "destructor_declaration", "method_declaration", "type_parameter_list", "type_parameter", "type_parameter_constraint_clause", "type_parameter_constraint", "allows_constraint_clause", "allows_constraint", "ref_struct_constraint", "class_or_struct_constraint", "constructor_constraint", "default_constraint", "type_constraint", "operator_declaration", "base_namespace_declaration", "file_scoped_namespace_declaration", "namespace_declaration", "base_property_declaration", "event_declaration", "accessor_list", "accessor_declaration", "indexer_declaration", "bracketed_parameter_list", "property_declaration", "base_type_declaration", "enum_declaration", "base_list", "base_type", "primary_constructor_base_type", "simple_base_type", "enum_member_declaration", "type_declaration", "class_declaration", "extension_block_declaration", "interface_declaration", "record_declaration", "struct_declaration", "union_declaration", "delegate_declaration", "global_statement", "incomplete_member", "type", "array_type", "array_rank_specifier", "function_pointer_type", "function_pointer_calling_convention", "function_pointer_unmanaged_calling_convention_list", "function_pointer_unmanaged_calling_convention", "function_pointer_parameter_list", "function_pointer_parameter", "predefined_type", "ref_type", "scoped_type", "tuple_type", "tuple_element", "statement", "break_statement", "checked_statement", "common_for_each_statement", "for_each_statement", "for_each_variable_statement", "continue_statement", "do_statement", "empty_statement", "expression_statement", "fixed_statement", "for_statement", "goto_statement", "if_statement", "else_clause", "labeled_statement", "local_declaration_statement", "local_function_statement", "lock_statement", "return_statement", "switch_statement", "switch_section", "switch_label", "case_pattern_switch_label", "pattern", "constant_pattern", "declaration_pattern", "variable_designation", "discard_designation", "parenthesized_variable_designation", "single_variable_designation", "discard_pattern", "list_pattern", "parenthesized_pattern", "recursive_pattern", "positional_pattern_clause", "subpattern", "base_expression_colon", "expression_colon", "property_pattern_clause", "relational_pattern", "slice_pattern", "type_pattern", "unary_pattern", "var_pattern", "when_clause", "case_switch_label", "default_switch_label", "throw_statement", "try_statement", "catch_clause", "catch_declaration", "catch_filter_clause", "finally_clause", "unsafe_statement", "using_statement", "while_statement", "yield_statement", "expression", "anonymous_function_expression", "anonymous_method_expression", "lambda_expression", "parenthesized_lambda_expression", "simple_lambda_expression", "anonymous_object_creation_expression", "anonymous_object_member_declarator", "array_creation_expression", "initializer_expression", "await_expression", "base_object_creation_expression", "implicit_object_creation_expression", "object_creation_expression", "cast_expression", "checked_expression", "collection_expression", "collection_element", "expression_element", "spread_element", "with_element", "declaration_expression", "default_expression", "element_binding_expression", "field_expression", "implicit_array_creation_expression", "implicit_element_access", "implicit_stack_alloc_array_creation_expression", "instance_expression", "base_expression", "this_expression", "interpolated_string_expression", "interpolated_string_content", "interpolated_string_text", "interpolation", "interpolation_alignment_clause", "interpolation_format_clause", "interpolated_multi_line_raw_string_start_token", "interpolated_raw_string_end_token", "interpolated_single_line_raw_string_start_token", "literal_expression", "utf8_multi_line_raw_string_literal_token", "utf8_single_line_raw_string_literal_token", "utf8_string_literal_token", "make_ref_expression", "member_binding_expression", "parenthesized_expression", "prefix_unary_expression", "query_expression", "from_clause", "query_body", "query_clause", "join_clause", "join_into_clause", "let_clause", "order_by_clause", "ordering", "where_clause", "select_or_group_clause", "group_clause", "select_clause", "query_continuation", "ref_expression", "ref_type_expression", "ref_value_expression", "size_of_expression", "stack_alloc_array_creation_expression", "switch_expression_arm", "throw_expression", "tuple_expression", "type_of_expression", "unsafe_expression", "syntax_token", "identifier_token", "keyword", "numeric_literal_token", "integer_literal_token", "decimal_integer_literal_token", "hexadecimal_integer_literal_token", "real_literal_token", "character_literal_token", "string_literal_token", "regular_string_literal_token", "verbatim_string_literal_token", "operator_token", "punctuation_token", "interpolated_string_text_token", "multi_line_raw_string_literal_token", "single_line_raw_string_literal_token", "record_keyword", "right_shift", "unsigned_right_shift", "right_shift_assignment", "unsigned_right_shift_assignment"],
     &[None, None, None, Some("\'__refvalue\'"), Some("\'descending\'"), Some("\'stackalloc\'"), Some("\'__arglist\'"), Some("\'__makeref\'"), Some("\'__reftype\'"), Some("\'ascending\'"), Some("\'extension\'"), Some("\'interface\'"), Some("\'namespace\'"), Some("\'protected\'"), Some("\'unchecked\'"), Some("\'unmanaged\'"), Some("\'abstract\'"), Some("\'continue\'"), Some("\'delegate\'"), Some("\'explicit\'"), Some("\'implicit\'"), Some("\'internal\'"), Some("\'operator\'"), Some("\'override\'"), Some("\'readonly\'"), Some("\'required\'"), Some("\'volatile\'"), Some("\'checked\'"), Some("\'decimal\'"), Some("\'default\'"), Some("\'finally\'"), Some("\'foreach\'"), Some("\'managed\'"), Some("\'orderby\'"), Some("\'partial\'"), Some("\'private\'"), Some("\'virtual\'"), Some("\'allows\'"), Some("\'closed\'"), Some("\'double\'"), Some("\'equals\'"), Some("\'extern\'"), Some("\'global\'"), Some("\'object\'"), Some("\'params\'"), Some("\'public\'"), Some("\'remove\'"), Some("\'return\'"), Some("\'scoped\'"), Some("\'sealed\'"), Some("\'select\'"), Some("\'sizeof\'"), Some("\'static\'"), Some("\'string\'"), Some("\'struct\'"), Some("\'switch\'"), Some("\'typeof\'"), Some("\'unsafe\'"), Some("\'ushort\'"), Some("\'alias\'"), Some("\'async\'"), Some("\'await\'"), Some("\'break\'"), Some("\'catch\'"), Some("\'class\'"), Some("\'const\'"), Some("\'event\'"), Some("\'false\'"), Some("\'field\'"), Some("\'fixed\'"), Some("\'float\'"), Some("\'group\'"), Some("\'sbyte\'"), Some("\'short\'"), Some("\'throw\'"), Some("\'ulong\'"), Some("\'union\'"), Some("\'using\'"), Some("\'where\'"), Some("\'while\'"), Some("\'yield\'"), Some("\'base\'"), Some("\'bool\'"), Some("\'byte\'"), Some("\'case\'"), Some("\'char\'"), Some("\'else\'"), Some("\'enum\'"), Some("\'file\'"), Some("\'from\'"), Some("\'goto\'"), Some("\'init\'"), Some("\'into\'"), Some("\'join\'"), Some("\'lock\'"), Some("\'long\'"), Some("\'null\'"), Some("\'safe\'"), Some("\'this\'"), Some("\'true\'"), Some("\'uint\'"), Some("\'void\'"), Some("\'when\'"), Some("\'with\'"), Some("\'\"\"\"\'"), Some("\'<<=\'"), Some("\'??=\'"), Some("\'add\'"), Some("\'and\'"), Some("\'for\'"), Some("\'get\'"), Some("\'int\'"), Some("\'let\'"), Some("\'new\'"), Some("\'not\'"), Some("\'out\'"), Some("\'ref\'"), Some("\'set\'"), Some("\'try\'"), Some("\'var\'"), Some("\'!=\'"), Some("\'%=\'"), Some("\'&&\'"), Some("\'&=\'"), Some("\'*=\'"), Some("\'++\'"), Some("\'+=\'"), Some("\'--\'"), Some("\'-=\'"), Some("\'->\'"), Some("\'..\'"), Some("\'/=\'"), Some("\'/>\'"), Some("\'::\'"), Some("\'</\'"), Some("\'<<\'"), Some("\'<=\'"), Some("\'==\'"), Some("\'=>\'"), Some("\'>=\'"), Some("\'??\'"), Some("\'U8\'"), Some("\'\\\'\'"), Some("\'\\\\\'"), Some("\'^=\'"), Some("\'as\'"), Some("\'by\'"), Some("\'do\'"), Some("\'if\'"), Some("\'in\'"), Some("\'is\'"), Some("\'on\'"), Some("\'or\'"), Some("\'u8\'"), Some("\'|=\'"), Some("\'||\'"), Some("\'!\'"), None, Some("\'#\'"), Some("\'$\'"), Some("\'%\'"), Some("\'&\'"), Some("\'(\'"), Some("\')\'"), Some("\'*\'"), Some("\'+\'"), Some("\',\'"), Some("\'-\'"), Some("\'.\'"), Some("\'/\'"), Some("\';\'"), Some("\'<\'"), Some("\'=\'"), Some("\'>\'"), Some("\'?\'"), Some("\'[\'"), Some("\']\'"), Some("\'^\'"), Some("\'_\'"), Some("\'|\'"), Some("\'~\'"), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, Some("\'\u{feff}\'"), None, Some("\'$\"\'"), Some("\'$@\"\'"), Some("\'{\'"), Some("\'}\'"), Some("\':\'"), None, None, Some("\'\"\"\'")],
-    &[None, Some("INTERPOLATED_TEXT"), Some("XML_TEXT_LIT"), Some("KW___REFVALUE"), Some("KW_DESCENDING"), Some("KW_STACKALLOC"), Some("KW___ARGLIST"), Some("KW___MAKEREF"), Some("KW___REFTYPE"), Some("KW_ASCENDING"), Some("KW_EXTENSION"), Some("KW_INTERFACE"), Some("KW_NAMESPACE"), Some("KW_PROTECTED"), Some("KW_UNCHECKED"), Some("KW_UNMANAGED"), Some("KW_ABSTRACT"), Some("KW_CONTINUE"), Some("KW_DELEGATE"), Some("KW_EXPLICIT"), Some("KW_IMPLICIT"), Some("KW_INTERNAL"), Some("KW_OPERATOR"), Some("KW_OVERRIDE"), Some("KW_READONLY"), Some("KW_REQUIRED"), Some("KW_VOLATILE"), Some("KW_CHECKED"), Some("KW_DECIMAL"), Some("KW_DEFAULT"), Some("KW_FINALLY"), Some("KW_FOREACH"), Some("KW_MANAGED"), Some("KW_ORDERBY"), Some("KW_PARTIAL"), Some("KW_PRIVATE"), Some("KW_VIRTUAL"), Some("KW_ALLOWS"), Some("KW_CLOSED"), Some("KW_DOUBLE"), Some("KW_EQUALS"), Some("KW_EXTERN"), Some("KW_GLOBAL"), Some("KW_OBJECT"), Some("KW_PARAMS"), Some("KW_PUBLIC"), Some("KW_REMOVE"), Some("KW_RETURN"), Some("KW_SCOPED"), Some("KW_SEALED"), Some("KW_SELECT"), Some("KW_SIZEOF"), Some("KW_STATIC"), Some("KW_STRING"), Some("KW_STRUCT"), Some("KW_SWITCH"), Some("KW_TYPEOF"), Some("KW_UNSAFE"), Some("KW_USHORT"), Some("KW_ALIAS"), Some("KW_ASYNC"), Some("KW_AWAIT"), Some("KW_BREAK"), Some("KW_CATCH"), Some("KW_CLASS"), Some("KW_CONST"), Some("KW_EVENT"), Some("KW_FALSE"), Some("KW_FIELD"), Some("KW_FIXED"), Some("KW_FLOAT"), Some("KW_GROUP"), Some("KW_SBYTE"), Some("KW_SHORT"), Some("KW_THROW"), Some("KW_ULONG"), Some("KW_UNION"), Some("KW_USING"), Some("KW_WHERE"), Some("KW_WHILE"), Some("KW_YIELD"), Some("KW_BASE"), Some("KW_BOOL"), Some("KW_BYTE"), Some("KW_CASE"), Some("KW_CHAR"), Some("KW_ELSE"), Some("KW_ENUM"), Some("KW_FILE"), Some("KW_FROM"), Some("KW_GOTO"), Some("KW_INIT"), Some("KW_INTO"), Some("KW_JOIN"), Some("KW_LOCK"), Some("KW_LONG"), Some("KW_NULL"), Some("KW_SAFE"), Some("KW_THIS"), Some("KW_TRUE"), Some("KW_UINT"), Some("KW_VOID"), Some("KW_WHEN"), Some("KW_WITH"), Some("OP_101"), Some("OP_102"), Some("OP_103"), Some("KW_ADD"), Some("KW_AND"), Some("KW_FOR"), Some("KW_GET"), Some("KW_INT"), Some("KW_LET"), Some("KW_NEW"), Some("KW_NOT"), Some("KW_OUT"), Some("KW_REF"), Some("KW_SET"), Some("KW_TRY"), Some("KW_VAR"), Some("OP_117"), Some("OP_118"), Some("OP_119"), Some("OP_120"), Some("OP_121"), Some("OP_122"), Some("OP_123"), Some("OP_124"), Some("OP_125"), Some("OP_126"), Some("OP_127"), Some("OP_128"), Some("OP_129"), Some("OP_130"), Some("OP_131"), Some("OP_132"), Some("OP_133"), Some("OP_134"), Some("OP_135"), Some("OP_136"), Some("OP_137"), Some("KW_U8"), Some("OP_139"), Some("OP_140"), Some("OP_141"), Some("KW_AS"), Some("KW_BY"), Some("KW_DO"), Some("KW_IF"), Some("KW_IN"), Some("KW_IS"), Some("KW_ON"), Some("KW_OR"), Some("KW_U8_150"), Some("OP_151"), Some("OP_152"), Some("OP_153"), Some("DQUOTE"), Some("OP_155"), Some("OP_156"), Some("OP_157"), Some("OP_158"), Some("OP_159"), Some("OP_160"), Some("OP_161"), Some("OP_162"), Some("OP_163"), Some("OP_164"), Some("OP_165"), Some("OP_166"), Some("OP_168"), Some("OP_169"), Some("OP_170"), Some("OP_171"), Some("OP_172"), Some("OP_173"), Some("OP_174"), Some("OP_175"), Some("KW__"), Some("OP_178"), Some("OP_180"), Some("IDENTIFIER"), Some("DEC_INT_LIT"), Some("HEX_INT_LIT"), Some("BIN_INT_LIT"), Some("REAL_LIT"), Some("CHAR_LIT"), Some("STRING_LIT"), Some("VERBATIM_STRING_LIT"), Some("ML_RAW_STRING_LIT"), Some("SL_RAW_STRING_LIT"), Some("SINGLE_LINE_DOC_COMMENT"), Some("DELIMITED_DOC_COMMENT"), Some("SINGLE_LINE_COMMENT"), Some("DELIMITED_COMMENT"), Some("WHITESPACES"), Some("BYTE_ORDER_MARK"), Some("DIRECTIVE_LINE"), Some("INTERP_START"), Some("INTERP_VERBATIM_START"), Some("LBRACE"), Some("RBRACE"), Some("COLON"), Some("INTERP_ESCAPED_OPEN"), Some("INTERP_ESCAPED_CLOSE"), Some("INTERP_V_ESCAPED_QUOTE")],
+    &[None, Some("INTERPOLATED_TEXT"), Some("XML_TEXT_LIT"), Some("KW___REFVALUE"), Some("KW_DESCENDING"), Some("KW_STACKALLOC"), Some("KW___ARGLIST"), Some("KW___MAKEREF"), Some("KW___REFTYPE"), Some("KW_ASCENDING"), Some("KW_EXTENSION"), Some("KW_INTERFACE"), Some("KW_NAMESPACE"), Some("KW_PROTECTED"), Some("KW_UNCHECKED"), Some("KW_UNMANAGED"), Some("KW_ABSTRACT"), Some("KW_CONTINUE"), Some("KW_DELEGATE"), Some("KW_EXPLICIT"), Some("KW_IMPLICIT"), Some("KW_INTERNAL"), Some("KW_OPERATOR"), Some("KW_OVERRIDE"), Some("KW_READONLY"), Some("KW_REQUIRED"), Some("KW_VOLATILE"), Some("KW_CHECKED"), Some("KW_DECIMAL"), Some("KW_DEFAULT"), Some("KW_FINALLY"), Some("KW_FOREACH"), Some("KW_MANAGED"), Some("KW_ORDERBY"), Some("KW_PARTIAL"), Some("KW_PRIVATE"), Some("KW_VIRTUAL"), Some("KW_ALLOWS"), Some("KW_CLOSED"), Some("KW_DOUBLE"), Some("KW_EQUALS"), Some("KW_EXTERN"), Some("KW_GLOBAL"), Some("KW_OBJECT"), Some("KW_PARAMS"), Some("KW_PUBLIC"), Some("KW_REMOVE"), Some("KW_RETURN"), Some("KW_SCOPED"), Some("KW_SEALED"), Some("KW_SELECT"), Some("KW_SIZEOF"), Some("KW_STATIC"), Some("KW_STRING"), Some("KW_STRUCT"), Some("KW_SWITCH"), Some("KW_TYPEOF"), Some("KW_UNSAFE"), Some("KW_USHORT"), Some("KW_ALIAS"), Some("KW_ASYNC"), Some("KW_AWAIT"), Some("KW_BREAK"), Some("KW_CATCH"), Some("KW_CLASS"), Some("KW_CONST"), Some("KW_EVENT"), Some("KW_FALSE"), Some("KW_FIELD"), Some("KW_FIXED"), Some("KW_FLOAT"), Some("KW_GROUP"), Some("KW_SBYTE"), Some("KW_SHORT"), Some("KW_THROW"), Some("KW_ULONG"), Some("KW_UNION"), Some("KW_USING"), Some("KW_WHERE"), Some("KW_WHILE"), Some("KW_YIELD"), Some("KW_BASE"), Some("KW_BOOL"), Some("KW_BYTE"), Some("KW_CASE"), Some("KW_CHAR"), Some("KW_ELSE"), Some("KW_ENUM"), Some("KW_FILE"), Some("KW_FROM"), Some("KW_GOTO"), Some("KW_INIT"), Some("KW_INTO"), Some("KW_JOIN"), Some("KW_LOCK"), Some("KW_LONG"), Some("KW_NULL"), Some("KW_SAFE"), Some("KW_THIS"), Some("KW_TRUE"), Some("KW_UINT"), Some("KW_VOID"), Some("KW_WHEN"), Some("KW_WITH"), Some("TRIPLE_DQUOTE"), Some("LT_LT_EQ"), Some("QUESTION_QUESTION_EQ"), Some("KW_ADD"), Some("KW_AND"), Some("KW_FOR"), Some("KW_GET"), Some("KW_INT"), Some("KW_LET"), Some("KW_NEW"), Some("KW_NOT"), Some("KW_OUT"), Some("KW_REF"), Some("KW_SET"), Some("KW_TRY"), Some("KW_VAR"), Some("NE"), Some("PERCENT_EQ"), Some("AMP_AMP"), Some("AMP_EQ"), Some("STAR_EQ"), Some("PLUS_PLUS"), Some("PLUS_EQ"), Some("MINUS_MINUS"), Some("MINUS_EQ"), Some("MINUS_GT"), Some("DOT_DOT"), Some("SLASH_EQ"), Some("SLASH_GT"), Some("COLON_COLON"), Some("LT_SLASH"), Some("LT_LT"), Some("LE"), Some("EQ_EQ"), Some("ARROW"), Some("GE"), Some("QUESTION_QUESTION"), Some("KW_U8"), Some("ESCAPED_QUOTE"), Some("ESCAPED_BACKSLASH"), Some("CARET_EQ"), Some("KW_AS"), Some("KW_BY"), Some("KW_DO"), Some("KW_IF"), Some("KW_IN"), Some("KW_IS"), Some("KW_ON"), Some("KW_OR"), Some("KW_U8_150"), Some("PIPE_EQ"), Some("PIPE_PIPE"), Some("BANG"), Some("DQUOTE"), Some("HASH"), Some("DOLLAR"), Some("PERCENT"), Some("AMP"), Some("LPAREN"), Some("RPAREN"), Some("STAR"), Some("PLUS"), Some("COMMA"), Some("MINUS"), Some("DOT"), Some("SLASH"), Some("SEMICOLON"), Some("LT"), Some("EQ"), Some("GT"), Some("QUESTION"), Some("LBRACKET"), Some("RBRACKET"), Some("CARET"), Some("KW__"), Some("PIPE"), Some("TILDE"), Some("IDENTIFIER"), Some("DEC_INT_LIT"), Some("HEX_INT_LIT"), Some("BIN_INT_LIT"), Some("REAL_LIT"), Some("CHAR_LIT"), Some("STRING_LIT"), Some("VERBATIM_STRING_LIT"), Some("ML_RAW_STRING_LIT"), Some("SL_RAW_STRING_LIT"), Some("SINGLE_LINE_DOC_COMMENT"), Some("DELIMITED_DOC_COMMENT"), Some("SINGLE_LINE_COMMENT"), Some("DELIMITED_COMMENT"), Some("WHITESPACES"), Some("BYTE_ORDER_MARK"), Some("DIRECTIVE_LINE"), Some("INTERP_START"), Some("INTERP_VERBATIM_START"), Some("LBRACE"), Some("RBRACE"), Some("COLON"), Some("INTERP_ESCAPED_OPEN"), Some("INTERP_ESCAPED_CLOSE"), Some("INTERP_V_ESCAPED_QUOTE")],
     &[None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None],
     &[],
     &[],
@@ -2511,11 +2511,11 @@ impl<'a, State: __RecoveryContextState> ExternAliasDirectiveContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ExternAliasDirectiveContext", "KW_ALIAS"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ExternAliasDirectiveContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("ExternAliasDirectiveContext", "SEMICOLON"))
     }
 }
 
@@ -2587,9 +2587,9 @@ impl<'a> ExternAliasDirectiveContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated ExternAliasDirectiveContext is missing required child OP_168")
+            unreachable!("validated ExternAliasDirectiveContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -2765,11 +2765,11 @@ impl<'a, State: __RecoveryContextState> UsingDirectiveContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("UsingDirectiveContext", "KW_USING"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("UsingDirectiveContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("UsingDirectiveContext", "SEMICOLON"))
     }
 }
 
@@ -2855,9 +2855,9 @@ impl<'a> UsingDirectiveContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated UsingDirectiveContext is missing required child OP_168")
+            unreachable!("validated UsingDirectiveContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -3007,11 +3007,11 @@ impl<'a, State: __RecoveryContextState> NameEqualsContext<'a, State> {
             .map(|node| IdentifierNameContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("NameEqualsContext", "identifier_name"))
     }
-    pub fn op_170_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn eq_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 172)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("NameEqualsContext", "OP_170"))
+            .ok_or_else(|| MissingChildError::new("NameEqualsContext", "EQ"))
     }
 }
 
@@ -3071,9 +3071,9 @@ impl<'a> NameEqualsContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_170_token(&self) -> TerminalNode<'a> {
+    pub fn eq_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 172).next() else {
-            unreachable!("validated NameEqualsContext is missing required child OP_170")
+            unreachable!("validated NameEqualsContext is missing required child EQ")
         };
         TerminalNode::new(node)
     }
@@ -3435,20 +3435,20 @@ impl<'a, State: __RecoveryContextState> AttributeListContext<'a, State> {
         __rule_children(self.__node, 7)
             .map(move |node| AttributeContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("AttributeListContext", "OP_173"))
+            .ok_or_else(|| MissingChildError::new("AttributeListContext", "LBRACKET"))
     }
-    pub fn op_174_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("AttributeListContext", "OP_174"))
+            .ok_or_else(|| MissingChildError::new("AttributeListContext", "RBRACKET"))
     }
 }
 
@@ -3508,18 +3508,18 @@ impl<'a> AttributeListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 7)
             .map(move |node| AttributeContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> TerminalNode<'a> {
+    pub fn lbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 175).next() else {
-            unreachable!("validated AttributeListContext is missing required child OP_173")
+            unreachable!("validated AttributeListContext is missing required child LBRACKET")
         };
         TerminalNode::new(node)
     }
-    pub fn op_174_token(&self) -> TerminalNode<'a> {
+    pub fn rbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 176).next() else {
-            unreachable!("validated AttributeListContext is missing required child OP_174")
+            unreachable!("validated AttributeListContext is missing required child RBRACKET")
         };
         TerminalNode::new(node)
     }
@@ -4108,7 +4108,7 @@ impl<'a, State: __RecoveryContextState> NameContext<'a, State> {
             .next()
             .map(|node| SimpleNameContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_165_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 168)
             .next()
             .map(TerminalNode::new)
@@ -4177,7 +4177,7 @@ impl<'a> NameContext<'a, ValidatedTreeContext> {
             .next()
             .map(|node| SimpleNameContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_165_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 168)
             .next()
             .map(TerminalNode::new)
@@ -4334,11 +4334,11 @@ impl<'a, State: __RecoveryContextState> AliasQualifiedNameContext<'a, State> {
             .map(|node| SimpleNameContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("AliasQualifiedNameContext", "simple_name"))
     }
-    pub fn op_130_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn colon_colon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 133)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("AliasQualifiedNameContext", "OP_130"))
+            .ok_or_else(|| MissingChildError::new("AliasQualifiedNameContext", "COLON_COLON"))
     }
 }
 
@@ -4407,9 +4407,9 @@ impl<'a> AliasQualifiedNameContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_130_token(&self) -> TerminalNode<'a> {
+    pub fn colon_colon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 133).next() else {
-            unreachable!("validated AliasQualifiedNameContext is missing required child OP_130")
+            unreachable!("validated AliasQualifiedNameContext is missing required child COLON_COLON")
         };
         TerminalNode::new(node)
     }
@@ -4985,20 +4985,20 @@ impl<'a, State: __RecoveryContextState> TypeArgumentListContext<'a, State> {
         __rule_children(self.__node, 77)
             .map(move |node| TypeContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lt_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TypeArgumentListContext", "OP_169"))
+            .ok_or_else(|| MissingChildError::new("TypeArgumentListContext", "LT"))
     }
-    pub fn op_171_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn gt_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TypeArgumentListContext", "OP_171"))
+            .ok_or_else(|| MissingChildError::new("TypeArgumentListContext", "GT"))
     }
 }
 
@@ -5053,18 +5053,18 @@ impl<'a> TypeArgumentListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 77)
             .map(move |node| TypeContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> TerminalNode<'a> {
+    pub fn lt_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 171).next() else {
-            unreachable!("validated TypeArgumentListContext is missing required child OP_169")
+            unreachable!("validated TypeArgumentListContext is missing required child LT")
         };
         TerminalNode::new(node)
     }
-    pub fn op_171_token(&self) -> TerminalNode<'a> {
+    pub fn gt_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 173).next() else {
-            unreachable!("validated TypeArgumentListContext is missing required child OP_171")
+            unreachable!("validated TypeArgumentListContext is missing required child GT")
         };
         TerminalNode::new(node)
     }
@@ -5212,19 +5212,19 @@ impl<'a, State: __RecoveryContextState> AttributeArgumentListContext<'a, State> 
         __rule_children(self.__node, 14)
             .map(move |node| AttributeArgumentContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("AttributeArgumentListContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("AttributeArgumentListContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("AttributeArgumentListContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("AttributeArgumentListContext", "RPAREN"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -5280,19 +5280,19 @@ impl<'a> AttributeArgumentListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 14)
             .map(move |node| AttributeArgumentContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated AttributeArgumentListContext is missing required child OP_159")
+            unreachable!("validated AttributeArgumentListContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated AttributeArgumentListContext is missing required child OP_160")
+            unreachable!("validated AttributeArgumentListContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -6383,11 +6383,11 @@ impl<'a, State: __RecoveryContextState> EventFieldDeclarationContext<'a, State> 
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("EventFieldDeclarationContext", "KW_EVENT"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("EventFieldDeclarationContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("EventFieldDeclarationContext", "SEMICOLON"))
     }
 }
 
@@ -6461,9 +6461,9 @@ impl<'a> EventFieldDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated EventFieldDeclarationContext is missing required child OP_168")
+            unreachable!("validated EventFieldDeclarationContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -7046,7 +7046,7 @@ impl<'a, State: __RecoveryContextState> VariableDeclarationContext<'a, State> {
             .map(|node| TypeContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("VariableDeclarationContext", "type"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -7111,7 +7111,7 @@ impl<'a> VariableDeclarationContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -7482,20 +7482,20 @@ impl<'a, State: __RecoveryContextState> BracketedArgumentListContext<'a, State> 
         __rule_children(self.__node, 23)
             .map(move |node| ArgumentContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("BracketedArgumentListContext", "OP_173"))
+            .ok_or_else(|| MissingChildError::new("BracketedArgumentListContext", "LBRACKET"))
     }
-    pub fn op_174_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("BracketedArgumentListContext", "OP_174"))
+            .ok_or_else(|| MissingChildError::new("BracketedArgumentListContext", "RBRACKET"))
     }
 }
 
@@ -7550,18 +7550,18 @@ impl<'a> BracketedArgumentListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 23)
             .map(move |node| ArgumentContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> TerminalNode<'a> {
+    pub fn lbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 175).next() else {
-            unreachable!("validated BracketedArgumentListContext is missing required child OP_173")
+            unreachable!("validated BracketedArgumentListContext is missing required child LBRACKET")
         };
         TerminalNode::new(node)
     }
-    pub fn op_174_token(&self) -> TerminalNode<'a> {
+    pub fn rbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 176).next() else {
-            unreachable!("validated BracketedArgumentListContext is missing required child OP_174")
+            unreachable!("validated BracketedArgumentListContext is missing required child RBRACKET")
         };
         TerminalNode::new(node)
     }
@@ -7955,11 +7955,11 @@ impl<'a, State: __RecoveryContextState> EqualsValueClauseContext<'a, State> {
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("EqualsValueClauseContext", "expression"))
     }
-    pub fn op_170_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn eq_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 172)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("EqualsValueClauseContext", "OP_170"))
+            .ok_or_else(|| MissingChildError::new("EqualsValueClauseContext", "EQ"))
     }
 }
 
@@ -8019,9 +8019,9 @@ impl<'a> EqualsValueClauseContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_170_token(&self) -> TerminalNode<'a> {
+    pub fn eq_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 172).next() else {
-            unreachable!("validated EqualsValueClauseContext is missing required child OP_170")
+            unreachable!("validated EqualsValueClauseContext is missing required child EQ")
         };
         TerminalNode::new(node)
     }
@@ -8179,11 +8179,11 @@ impl<'a, State: __RecoveryContextState> FieldDeclarationContext<'a, State> {
             .map(|node| VariableDeclarationContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("FieldDeclarationContext", "variable_declaration"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("FieldDeclarationContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("FieldDeclarationContext", "SEMICOLON"))
     }
 }
 
@@ -8251,9 +8251,9 @@ impl<'a> FieldDeclarationContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated FieldDeclarationContext is missing required child OP_168")
+            unreachable!("validated FieldDeclarationContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -8671,7 +8671,7 @@ impl<'a, State: __RecoveryContextState> ConstructorDeclarationContext<'a, State>
             .map(|node| IdentifierTokenContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("ConstructorDeclarationContext", "identifier_token"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -8766,7 +8766,7 @@ impl<'a> ConstructorDeclarationContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -8915,19 +8915,19 @@ impl<'a, State: __RecoveryContextState> ParameterListContext<'a, State> {
         __rule_children(self.__node, 29)
             .map(move |node| ParameterContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ParameterListContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("ParameterListContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ParameterListContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("ParameterListContext", "RPAREN"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -8983,19 +8983,19 @@ impl<'a> ParameterListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 29)
             .map(move |node| ParameterContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated ParameterListContext is missing required child OP_159")
+            unreachable!("validated ParameterListContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated ParameterListContext is missing required child OP_160")
+            unreachable!("validated ParameterListContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -9647,19 +9647,19 @@ impl<'a, State: __RecoveryContextState> ArgumentListContext<'a, State> {
         __rule_children(self.__node, 23)
             .map(move |node| ArgumentContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ArgumentListContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("ArgumentListContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ArgumentListContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("ArgumentListContext", "RPAREN"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -9715,19 +9715,19 @@ impl<'a> ArgumentListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 23)
             .map(move |node| ArgumentContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated ArgumentListContext is missing required child OP_159")
+            unreachable!("validated ArgumentListContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated ArgumentListContext is missing required child OP_160")
+            unreachable!("validated ArgumentListContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -10105,11 +10105,11 @@ impl<'a, State: __RecoveryContextState> ArrowExpressionClauseContext<'a, State> 
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("ArrowExpressionClauseContext", "expression"))
     }
-    pub fn op_135_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn arrow_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 138)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ArrowExpressionClauseContext", "OP_135"))
+            .ok_or_else(|| MissingChildError::new("ArrowExpressionClauseContext", "ARROW"))
     }
 }
 
@@ -10169,9 +10169,9 @@ impl<'a> ArrowExpressionClauseContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_135_token(&self) -> TerminalNode<'a> {
+    pub fn arrow_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 138).next() else {
-            unreachable!("validated ArrowExpressionClauseContext is missing required child OP_135")
+            unreachable!("validated ArrowExpressionClauseContext is missing required child ARROW")
         };
         TerminalNode::new(node)
     }
@@ -10371,7 +10371,7 @@ impl<'a, State: __RecoveryContextState> ConversionOperatorDeclarationContext<'a,
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -10487,7 +10487,7 @@ impl<'a> ConversionOperatorDeclarationContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -10638,11 +10638,11 @@ impl<'a, State: __RecoveryContextState> ExplicitInterfaceSpecifierContext<'a, St
             .map(|node| NameContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("ExplicitInterfaceSpecifierContext", "name"))
     }
-    pub fn op_165_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn dot_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 168)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ExplicitInterfaceSpecifierContext", "OP_165"))
+            .ok_or_else(|| MissingChildError::new("ExplicitInterfaceSpecifierContext", "DOT"))
     }
 }
 
@@ -10702,9 +10702,9 @@ impl<'a> ExplicitInterfaceSpecifierContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_165_token(&self) -> TerminalNode<'a> {
+    pub fn dot_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 168).next() else {
-            unreachable!("validated ExplicitInterfaceSpecifierContext is missing required child OP_165")
+            unreachable!("validated ExplicitInterfaceSpecifierContext is missing required child DOT")
         };
         TerminalNode::new(node)
     }
@@ -10878,16 +10878,16 @@ impl<'a, State: __RecoveryContextState> DestructorDeclarationContext<'a, State> 
             .map(|node| IdentifierTokenContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("DestructorDeclarationContext", "identifier_token"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_180_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn tilde_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 180)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("DestructorDeclarationContext", "OP_180"))
+            .ok_or_else(|| MissingChildError::new("DestructorDeclarationContext", "TILDE"))
     }
 }
 
@@ -10974,14 +10974,14 @@ impl<'a> DestructorDeclarationContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_180_token(&self) -> TerminalNode<'a> {
+    pub fn tilde_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 180).next() else {
-            unreachable!("validated DestructorDeclarationContext is missing required child OP_180")
+            unreachable!("validated DestructorDeclarationContext is missing required child TILDE")
         };
         TerminalNode::new(node)
     }
@@ -11175,7 +11175,7 @@ impl<'a, State: __RecoveryContextState> MethodDeclarationContext<'a, State> {
             .map(|node| IdentifierTokenContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("MethodDeclarationContext", "identifier_token"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -11288,7 +11288,7 @@ impl<'a> MethodDeclarationContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -11437,20 +11437,20 @@ impl<'a, State: __RecoveryContextState> TypeParameterListContext<'a, State> {
         __rule_children(self.__node, 39)
             .map(move |node| TypeParameterContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lt_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TypeParameterListContext", "OP_169"))
+            .ok_or_else(|| MissingChildError::new("TypeParameterListContext", "LT"))
     }
-    pub fn op_171_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn gt_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TypeParameterListContext", "OP_171"))
+            .ok_or_else(|| MissingChildError::new("TypeParameterListContext", "GT"))
     }
 }
 
@@ -11505,18 +11505,18 @@ impl<'a> TypeParameterListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 39)
             .map(move |node| TypeParameterContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> TerminalNode<'a> {
+    pub fn lt_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 171).next() else {
-            unreachable!("validated TypeParameterListContext is missing required child OP_169")
+            unreachable!("validated TypeParameterListContext is missing required child LT")
         };
         TerminalNode::new(node)
     }
-    pub fn op_171_token(&self) -> TerminalNode<'a> {
+    pub fn gt_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 173).next() else {
-            unreachable!("validated TypeParameterListContext is missing required child OP_171")
+            unreachable!("validated TypeParameterListContext is missing required child GT")
         };
         TerminalNode::new(node)
     }
@@ -11908,7 +11908,7 @@ impl<'a, State: __RecoveryContextState> TypeParameterConstraintClauseContext<'a,
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("TypeParameterConstraintClauseContext", "KW_WHERE"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn colon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
@@ -11985,7 +11985,7 @@ impl<'a> TypeParameterConstraintClauseContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn colon_token(&self) -> TerminalNode<'a> {
@@ -12383,7 +12383,7 @@ impl<'a, State: __RecoveryContextState> AllowsConstraintClauseContext<'a, State>
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("AllowsConstraintClauseContext", "KW_ALLOWS"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -12445,7 +12445,7 @@ impl<'a> AllowsConstraintClauseContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -13015,7 +13015,7 @@ impl<'a, State: __RecoveryContextState> ClassOrStructConstraintContext<'a, State
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_172_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 174)
             .next()
             .map(TerminalNode::new)
@@ -13079,7 +13079,7 @@ impl<'a> ClassOrStructConstraintContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_172_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 174)
             .next()
             .map(TerminalNode::new)
@@ -13230,17 +13230,17 @@ impl<'a, State: __RecoveryContextState> ConstructorConstraintContext<'a, State> 
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ConstructorConstraintContext", "KW_NEW"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ConstructorConstraintContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("ConstructorConstraintContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ConstructorConstraintContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("ConstructorConstraintContext", "RPAREN"))
     }
 }
 
@@ -13297,15 +13297,15 @@ impl<'a> ConstructorConstraintContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated ConstructorConstraintContext is missing required child OP_159")
+            unreachable!("validated ConstructorConstraintContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated ConstructorConstraintContext is missing required child OP_160")
+            unreachable!("validated ConstructorConstraintContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -13930,77 +13930,77 @@ impl<'a, State: __RecoveryContextState> OperatorDeclarationContext<'a, State> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_102_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 105)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_117_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ne_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 120)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_118_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 121)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_120_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 123)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_121_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 124)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_122_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 125)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_123_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 126)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_124_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 127)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_125_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 128)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_128_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 131)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_132_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 135)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_133_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn le_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 136)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_134_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 137)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_136_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ge_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_141_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 144)
             .next()
             .map(TerminalNode::new)
@@ -14010,72 +14010,72 @@ impl<'a, State: __RecoveryContextState> OperatorDeclarationContext<'a, State> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_151_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 154)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_153_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn bang_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 156)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_157_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 160)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_158_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 161)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_162_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 165)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_164_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 167)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_166_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 169)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_171_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_175_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 177)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_178_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 179)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_180_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn tilde_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 180)
             .next()
             .map(TerminalNode::new)
@@ -14211,77 +14211,77 @@ impl<'a> OperatorDeclarationContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_102_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 105)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_117_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ne_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 120)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_118_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 121)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_120_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 123)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_121_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 124)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_122_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 125)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_123_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 126)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_124_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 127)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_125_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 128)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_128_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 131)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_132_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 135)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_133_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn le_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 136)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_134_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 137)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_136_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ge_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_141_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 144)
             .next()
             .map(TerminalNode::new)
@@ -14291,72 +14291,72 @@ impl<'a> OperatorDeclarationContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_151_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 154)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_153_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn bang_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 156)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_157_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 160)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_158_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 161)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_162_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 165)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_164_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 167)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_166_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 169)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_171_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_175_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 177)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_178_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 179)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_180_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn tilde_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 180)
             .next()
             .map(TerminalNode::new)
@@ -14742,11 +14742,11 @@ impl<'a, State: __RecoveryContextState> FileScopedNamespaceDeclarationContext<'a
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("FileScopedNamespaceDeclarationContext", "KW_NAMESPACE"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("FileScopedNamespaceDeclarationContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("FileScopedNamespaceDeclarationContext", "SEMICOLON"))
     }
 }
 
@@ -14832,9 +14832,9 @@ impl<'a> FileScopedNamespaceDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated FileScopedNamespaceDeclarationContext is missing required child OP_168")
+            unreachable!("validated FileScopedNamespaceDeclarationContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -15010,7 +15010,7 @@ impl<'a, State: __RecoveryContextState> NamespaceDeclarationContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("NamespaceDeclarationContext", "KW_NAMESPACE"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -15111,7 +15111,7 @@ impl<'a> NamespaceDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -15523,7 +15523,7 @@ impl<'a, State: __RecoveryContextState> EventDeclarationContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("EventDeclarationContext", "KW_EVENT"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -15619,7 +15619,7 @@ impl<'a> EventDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -16033,7 +16033,7 @@ impl<'a, State: __RecoveryContextState> AccessorDeclarationContext<'a, State> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -16135,7 +16135,7 @@ impl<'a> AccessorDeclarationContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -16321,7 +16321,7 @@ impl<'a, State: __RecoveryContextState> IndexerDeclarationContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("IndexerDeclarationContext", "KW_THIS"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -16422,7 +16422,7 @@ impl<'a> IndexerDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -16571,20 +16571,20 @@ impl<'a, State: __RecoveryContextState> BracketedParameterListContext<'a, State>
         __rule_children(self.__node, 29)
             .map(move |node| ParameterContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("BracketedParameterListContext", "OP_173"))
+            .ok_or_else(|| MissingChildError::new("BracketedParameterListContext", "LBRACKET"))
     }
-    pub fn op_174_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("BracketedParameterListContext", "OP_174"))
+            .ok_or_else(|| MissingChildError::new("BracketedParameterListContext", "RBRACKET"))
     }
 }
 
@@ -16639,18 +16639,18 @@ impl<'a> BracketedParameterListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 29)
             .map(move |node| ParameterContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> TerminalNode<'a> {
+    pub fn lbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 175).next() else {
-            unreachable!("validated BracketedParameterListContext is missing required child OP_173")
+            unreachable!("validated BracketedParameterListContext is missing required child LBRACKET")
         };
         TerminalNode::new(node)
     }
-    pub fn op_174_token(&self) -> TerminalNode<'a> {
+    pub fn rbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 176).next() else {
-            unreachable!("validated BracketedParameterListContext is missing required child OP_174")
+            unreachable!("validated BracketedParameterListContext is missing required child RBRACKET")
         };
         TerminalNode::new(node)
     }
@@ -16834,7 +16834,7 @@ impl<'a, State: __RecoveryContextState> PropertyDeclarationContext<'a, State> {
             .map(|node| IdentifierTokenContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("PropertyDeclarationContext", "identifier_token"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -16934,7 +16934,7 @@ impl<'a> PropertyDeclarationContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -17317,10 +17317,10 @@ impl<'a, State: __RecoveryContextState> EnumDeclarationContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("EnumDeclarationContext", "KW_ENUM"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -17416,10 +17416,10 @@ impl<'a> EnumDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -17578,7 +17578,7 @@ impl<'a, State: __RecoveryContextState> BaseListContext<'a, State> {
         __rule_children(self.__node, 63)
             .map(move |node| BaseTypeContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn colon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
@@ -17640,7 +17640,7 @@ impl<'a> BaseListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 63)
             .map(move |node| BaseTypeContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn colon_token(&self) -> TerminalNode<'a> {
@@ -18943,7 +18943,7 @@ impl<'a, State: __RecoveryContextState> ClassDeclarationContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ClassDeclarationContext", "KW_CLASS"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -19053,7 +19053,7 @@ impl<'a> ClassDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -19240,7 +19240,7 @@ impl<'a, State: __RecoveryContextState> ExtensionBlockDeclarationContext<'a, Sta
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ExtensionBlockDeclarationContext", "KW_EXTENSION"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -19336,7 +19336,7 @@ impl<'a> ExtensionBlockDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -19534,7 +19534,7 @@ impl<'a, State: __RecoveryContextState> InterfaceDeclarationContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("InterfaceDeclarationContext", "KW_INTERFACE"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -19644,7 +19644,7 @@ impl<'a> InterfaceDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -19852,7 +19852,7 @@ impl<'a, State: __RecoveryContextState> RecordDeclarationContext<'a, State> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -19975,7 +19975,7 @@ impl<'a> RecordDeclarationContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -20173,7 +20173,7 @@ impl<'a, State: __RecoveryContextState> StructDeclarationContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("StructDeclarationContext", "KW_STRUCT"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -20283,7 +20283,7 @@ impl<'a> StructDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -20481,7 +20481,7 @@ impl<'a, State: __RecoveryContextState> UnionDeclarationContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("UnionDeclarationContext", "KW_UNION"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -20591,7 +20591,7 @@ impl<'a> UnionDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -20787,11 +20787,11 @@ impl<'a, State: __RecoveryContextState> DelegateDeclarationContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("DelegateDeclarationContext", "KW_DELEGATE"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("DelegateDeclarationContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("DelegateDeclarationContext", "SEMICOLON"))
     }
 }
 
@@ -20892,9 +20892,9 @@ impl<'a> DelegateDeclarationContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated DelegateDeclarationContext is missing required child OP_168")
+            unreachable!("validated DelegateDeclarationContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -21517,12 +21517,12 @@ impl<'a, State: __RecoveryContextState> TypeContext<'a, State> {
             .next()
             .map(|node| TupleTypeContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_172_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 174)
             .next()
             .map(TerminalNode::new)
@@ -21615,12 +21615,12 @@ impl<'a> TypeContext<'a, ValidatedTreeContext> {
             .next()
             .map(|node| TupleTypeContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_172_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 174)
             .next()
             .map(TerminalNode::new)
@@ -21981,20 +21981,20 @@ impl<'a, State: __RecoveryContextState> ArrayRankSpecifierContext<'a, State> {
         __rule_children(self.__node, 149)
             .map(move |node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ArrayRankSpecifierContext", "OP_173"))
+            .ok_or_else(|| MissingChildError::new("ArrayRankSpecifierContext", "LBRACKET"))
     }
-    pub fn op_174_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ArrayRankSpecifierContext", "OP_174"))
+            .ok_or_else(|| MissingChildError::new("ArrayRankSpecifierContext", "RBRACKET"))
     }
 }
 
@@ -22049,18 +22049,18 @@ impl<'a> ArrayRankSpecifierContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 149)
             .map(move |node| ExpressionContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> TerminalNode<'a> {
+    pub fn lbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 175).next() else {
-            unreachable!("validated ArrayRankSpecifierContext is missing required child OP_173")
+            unreachable!("validated ArrayRankSpecifierContext is missing required child LBRACKET")
         };
         TerminalNode::new(node)
     }
-    pub fn op_174_token(&self) -> TerminalNode<'a> {
+    pub fn rbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 176).next() else {
-            unreachable!("validated ArrayRankSpecifierContext is missing required child OP_174")
+            unreachable!("validated ArrayRankSpecifierContext is missing required child RBRACKET")
         };
         TerminalNode::new(node)
     }
@@ -22221,11 +22221,11 @@ impl<'a, State: __RecoveryContextState> FunctionPointerTypeContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("FunctionPointerTypeContext", "KW_DELEGATE"))
     }
-    pub fn op_161_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn star_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("FunctionPointerTypeContext", "OP_161"))
+            .ok_or_else(|| MissingChildError::new("FunctionPointerTypeContext", "STAR"))
     }
 }
 
@@ -22296,9 +22296,9 @@ impl<'a> FunctionPointerTypeContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_161_token(&self) -> TerminalNode<'a> {
+    pub fn star_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 164).next() else {
-            unreachable!("validated FunctionPointerTypeContext is missing required child OP_161")
+            unreachable!("validated FunctionPointerTypeContext is missing required child STAR")
         };
         TerminalNode::new(node)
     }
@@ -22665,20 +22665,20 @@ impl<'a, State: __RecoveryContextState> FunctionPointerUnmanagedCallingConventio
         __rule_children(self.__node, 83)
             .map(move |node| FunctionPointerUnmanagedCallingConventionContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("FunctionPointerUnmanagedCallingConventionListContext", "OP_173"))
+            .ok_or_else(|| MissingChildError::new("FunctionPointerUnmanagedCallingConventionListContext", "LBRACKET"))
     }
-    pub fn op_174_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("FunctionPointerUnmanagedCallingConventionListContext", "OP_174"))
+            .ok_or_else(|| MissingChildError::new("FunctionPointerUnmanagedCallingConventionListContext", "RBRACKET"))
     }
 }
 
@@ -22733,18 +22733,18 @@ impl<'a> FunctionPointerUnmanagedCallingConventionListContext<'a, ValidatedTreeC
         __rule_children(self.__node, 83)
             .map(move |node| FunctionPointerUnmanagedCallingConventionContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> TerminalNode<'a> {
+    pub fn lbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 175).next() else {
-            unreachable!("validated FunctionPointerUnmanagedCallingConventionListContext is missing required child OP_173")
+            unreachable!("validated FunctionPointerUnmanagedCallingConventionListContext is missing required child LBRACKET")
         };
         TerminalNode::new(node)
     }
-    pub fn op_174_token(&self) -> TerminalNode<'a> {
+    pub fn rbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 176).next() else {
-            unreachable!("validated FunctionPointerUnmanagedCallingConventionListContext is missing required child OP_174")
+            unreachable!("validated FunctionPointerUnmanagedCallingConventionListContext is missing required child RBRACKET")
         };
         TerminalNode::new(node)
     }
@@ -23096,20 +23096,20 @@ impl<'a, State: __RecoveryContextState> FunctionPointerParameterListContext<'a, 
         __rule_children(self.__node, 85)
             .map(move |node| FunctionPointerParameterContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lt_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("FunctionPointerParameterListContext", "OP_169"))
+            .ok_or_else(|| MissingChildError::new("FunctionPointerParameterListContext", "LT"))
     }
-    pub fn op_171_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn gt_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("FunctionPointerParameterListContext", "OP_171"))
+            .ok_or_else(|| MissingChildError::new("FunctionPointerParameterListContext", "GT"))
     }
 }
 
@@ -23164,18 +23164,18 @@ impl<'a> FunctionPointerParameterListContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 85)
             .map(move |node| FunctionPointerParameterContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> TerminalNode<'a> {
+    pub fn lt_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 171).next() else {
-            unreachable!("validated FunctionPointerParameterListContext is missing required child OP_169")
+            unreachable!("validated FunctionPointerParameterListContext is missing required child LT")
         };
         TerminalNode::new(node)
     }
-    pub fn op_171_token(&self) -> TerminalNode<'a> {
+    pub fn gt_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 173).next() else {
-            unreachable!("validated FunctionPointerParameterListContext is missing required child OP_171")
+            unreachable!("validated FunctionPointerParameterListContext is missing required child GT")
         };
         TerminalNode::new(node)
     }
@@ -24334,19 +24334,19 @@ impl<'a, State: __RecoveryContextState> TupleTypeContext<'a, State> {
         __rule_children(self.__node, 90)
             .map(move |node| TupleElementContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TupleTypeContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("TupleTypeContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TupleTypeContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("TupleTypeContext", "RPAREN"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -24402,19 +24402,19 @@ impl<'a> TupleTypeContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 90)
             .map(move |node| TupleElementContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated TupleTypeContext is missing required child OP_159")
+            unreachable!("validated TupleTypeContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated TupleTypeContext is missing required child OP_160")
+            unreachable!("validated TupleTypeContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -25215,11 +25215,11 @@ impl<'a, State: __RecoveryContextState> BreakStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("BreakStatementContext", "KW_BREAK"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("BreakStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("BreakStatementContext", "SEMICOLON"))
     }
 }
 
@@ -25285,9 +25285,9 @@ impl<'a> BreakStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated BreakStatementContext is missing required child OP_168")
+            unreachable!("validated BreakStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -25917,17 +25917,17 @@ impl<'a, State: __RecoveryContextState> ForEachStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ForEachStatementContext", "KW_IN"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ForEachStatementContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("ForEachStatementContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ForEachStatementContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("ForEachStatementContext", "RPAREN"))
     }
 }
 
@@ -26035,15 +26035,15 @@ impl<'a> ForEachStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated ForEachStatementContext is missing required child OP_159")
+            unreachable!("validated ForEachStatementContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated ForEachStatementContext is missing required child OP_160")
+            unreachable!("validated ForEachStatementContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -26218,17 +26218,17 @@ impl<'a, State: __RecoveryContextState> ForEachVariableStatementContext<'a, Stat
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ForEachVariableStatementContext", "KW_IN"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ForEachVariableStatementContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("ForEachVariableStatementContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ForEachVariableStatementContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("ForEachVariableStatementContext", "RPAREN"))
     }
 }
 
@@ -26313,15 +26313,15 @@ impl<'a> ForEachVariableStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated ForEachVariableStatementContext is missing required child OP_159")
+            unreachable!("validated ForEachVariableStatementContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated ForEachVariableStatementContext is missing required child OP_160")
+            unreachable!("validated ForEachVariableStatementContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -26480,11 +26480,11 @@ impl<'a, State: __RecoveryContextState> ContinueStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ContinueStatementContext", "KW_CONTINUE"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ContinueStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("ContinueStatementContext", "SEMICOLON"))
     }
 }
 
@@ -26550,9 +26550,9 @@ impl<'a> ContinueStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated ContinueStatementContext is missing required child OP_168")
+            unreachable!("validated ContinueStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -26724,23 +26724,23 @@ impl<'a, State: __RecoveryContextState> DoStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("DoStatementContext", "KW_DO"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("DoStatementContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("DoStatementContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("DoStatementContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("DoStatementContext", "RPAREN"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("DoStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("DoStatementContext", "SEMICOLON"))
     }
 }
 
@@ -26825,21 +26825,21 @@ impl<'a> DoStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated DoStatementContext is missing required child OP_159")
+            unreachable!("validated DoStatementContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated DoStatementContext is missing required child OP_160")
+            unreachable!("validated DoStatementContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated DoStatementContext is missing required child OP_168")
+            unreachable!("validated DoStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -26987,11 +26987,11 @@ impl<'a, State: __RecoveryContextState> EmptyStatementContext<'a, State> {
         __rule_children(self.__node, 5)
             .map(move |node| AttributeListContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("EmptyStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("EmptyStatementContext", "SEMICOLON"))
     }
 }
 
@@ -27046,9 +27046,9 @@ impl<'a> EmptyStatementContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 5)
             .map(move |node| AttributeListContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated EmptyStatementContext is missing required child OP_168")
+            unreachable!("validated EmptyStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -27202,11 +27202,11 @@ impl<'a, State: __RecoveryContextState> ExpressionStatementContext<'a, State> {
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("ExpressionStatementContext", "expression"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ExpressionStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("ExpressionStatementContext", "SEMICOLON"))
     }
 }
 
@@ -27270,9 +27270,9 @@ impl<'a> ExpressionStatementContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated ExpressionStatementContext is missing required child OP_168")
+            unreachable!("validated ExpressionStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -27438,17 +27438,17 @@ impl<'a, State: __RecoveryContextState> FixedStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("FixedStatementContext", "KW_FIXED"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("FixedStatementContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("FixedStatementContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("FixedStatementContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("FixedStatementContext", "RPAREN"))
     }
 }
 
@@ -27527,15 +27527,15 @@ impl<'a> FixedStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated FixedStatementContext is missing required child OP_159")
+            unreachable!("validated FixedStatementContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated FixedStatementContext is missing required child OP_160")
+            unreachable!("validated FixedStatementContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -27704,22 +27704,22 @@ impl<'a, State: __RecoveryContextState> ForStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ForStatementContext", "KW_FOR"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ForStatementContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("ForStatementContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ForStatementContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("ForStatementContext", "RPAREN"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_168_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn semicolon_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 170).map(TerminalNode::new)
     }
 }
@@ -27799,22 +27799,22 @@ impl<'a> ForStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated ForStatementContext is missing required child OP_159")
+            unreachable!("validated ForStatementContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated ForStatementContext is missing required child OP_160")
+            unreachable!("validated ForStatementContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_168_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn semicolon_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 170).map(TerminalNode::new)
     }
 }
@@ -27982,11 +27982,11 @@ impl<'a, State: __RecoveryContextState> GotoStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("GotoStatementContext", "KW_GOTO"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("GotoStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("GotoStatementContext", "SEMICOLON"))
     }
 }
 
@@ -28062,9 +28062,9 @@ impl<'a> GotoStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated GotoStatementContext is missing required child OP_168")
+            unreachable!("validated GotoStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -28235,17 +28235,17 @@ impl<'a, State: __RecoveryContextState> IfStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("IfStatementContext", "KW_IF"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("IfStatementContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("IfStatementContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("IfStatementContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("IfStatementContext", "RPAREN"))
     }
 }
 
@@ -28329,15 +28329,15 @@ impl<'a> IfStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated IfStatementContext is missing required child OP_159")
+            unreachable!("validated IfStatementContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated IfStatementContext is missing required child OP_160")
+            unreachable!("validated IfStatementContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -28960,11 +28960,11 @@ impl<'a, State: __RecoveryContextState> LocalDeclarationStatementContext<'a, Sta
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("LocalDeclarationStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("LocalDeclarationStatementContext", "SEMICOLON"))
     }
 }
 
@@ -29042,9 +29042,9 @@ impl<'a> LocalDeclarationStatementContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated LocalDeclarationStatementContext is missing required child OP_168")
+            unreachable!("validated LocalDeclarationStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -29233,7 +29233,7 @@ impl<'a, State: __RecoveryContextState> LocalFunctionStatementContext<'a, State>
             .map(|node| IdentifierTokenContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("LocalFunctionStatementContext", "identifier_token"))
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -29341,7 +29341,7 @@ impl<'a> LocalFunctionStatementContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
@@ -29508,17 +29508,17 @@ impl<'a, State: __RecoveryContextState> LockStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("LockStatementContext", "KW_LOCK"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("LockStatementContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("LockStatementContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("LockStatementContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("LockStatementContext", "RPAREN"))
     }
 }
 
@@ -29597,15 +29597,15 @@ impl<'a> LockStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated LockStatementContext is missing required child OP_159")
+            unreachable!("validated LockStatementContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated LockStatementContext is missing required child OP_160")
+            unreachable!("validated LockStatementContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -29764,11 +29764,11 @@ impl<'a, State: __RecoveryContextState> ReturnStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ReturnStatementContext", "KW_RETURN"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ReturnStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("ReturnStatementContext", "SEMICOLON"))
     }
 }
 
@@ -29834,9 +29834,9 @@ impl<'a> ReturnStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated ReturnStatementContext is missing required child OP_168")
+            unreachable!("validated ReturnStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -30000,12 +30000,12 @@ impl<'a, State: __RecoveryContextState> SwitchStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("SwitchStatementContext", "KW_SWITCH"))
     }
-    pub fn op_159_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lparen_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_160_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn rparen_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
@@ -30094,12 +30094,12 @@ impl<'a> SwitchStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lparen_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_160_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn rparen_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
@@ -32092,19 +32092,19 @@ impl<'a, State: __RecoveryContextState> ParenthesizedVariableDesignationContext<
         __rule_children(self.__node, 118)
             .map(move |node| VariableDesignationContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ParenthesizedVariableDesignationContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("ParenthesizedVariableDesignationContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ParenthesizedVariableDesignationContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("ParenthesizedVariableDesignationContext", "RPAREN"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -32160,19 +32160,19 @@ impl<'a> ParenthesizedVariableDesignationContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 118)
             .map(move |node| VariableDesignationContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated ParenthesizedVariableDesignationContext is missing required child OP_159")
+            unreachable!("validated ParenthesizedVariableDesignationContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated ParenthesizedVariableDesignationContext is missing required child OP_160")
+            unreachable!("validated ParenthesizedVariableDesignationContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -32729,20 +32729,20 @@ impl<'a, State: __RecoveryContextState> ListPatternContext<'a, State> {
             .next()
             .map(|node| VariableDesignationContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ListPatternContext", "OP_173"))
+            .ok_or_else(|| MissingChildError::new("ListPatternContext", "LBRACKET"))
     }
-    pub fn op_174_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ListPatternContext", "OP_174"))
+            .ok_or_else(|| MissingChildError::new("ListPatternContext", "RBRACKET"))
     }
 }
 
@@ -32802,18 +32802,18 @@ impl<'a> ListPatternContext<'a, ValidatedTreeContext> {
             .next()
             .map(|node| VariableDesignationContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> TerminalNode<'a> {
+    pub fn lbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 175).next() else {
-            unreachable!("validated ListPatternContext is missing required child OP_173")
+            unreachable!("validated ListPatternContext is missing required child LBRACKET")
         };
         TerminalNode::new(node)
     }
-    pub fn op_174_token(&self) -> TerminalNode<'a> {
+    pub fn rbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 176).next() else {
-            unreachable!("validated ListPatternContext is missing required child OP_174")
+            unreachable!("validated ListPatternContext is missing required child RBRACKET")
         };
         TerminalNode::new(node)
     }
@@ -32963,17 +32963,17 @@ impl<'a, State: __RecoveryContextState> ParenthesizedPatternContext<'a, State> {
             .map(|node| PatternContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("ParenthesizedPatternContext", "pattern"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ParenthesizedPatternContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("ParenthesizedPatternContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ParenthesizedPatternContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("ParenthesizedPatternContext", "RPAREN"))
     }
 }
 
@@ -33033,15 +33033,15 @@ impl<'a> ParenthesizedPatternContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated ParenthesizedPatternContext is missing required child OP_159")
+            unreachable!("validated ParenthesizedPatternContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated ParenthesizedPatternContext is missing required child OP_160")
+            unreachable!("validated ParenthesizedPatternContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -33418,19 +33418,19 @@ impl<'a, State: __RecoveryContextState> PositionalPatternClauseContext<'a, State
         __rule_children(self.__node, 127)
             .map(move |node| SubpatternContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("PositionalPatternClauseContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("PositionalPatternClauseContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("PositionalPatternClauseContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("PositionalPatternClauseContext", "RPAREN"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -33486,19 +33486,19 @@ impl<'a> PositionalPatternClauseContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 127)
             .map(move |node| SubpatternContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated PositionalPatternClauseContext is missing required child OP_159")
+            unreachable!("validated PositionalPatternClauseContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated PositionalPatternClauseContext is missing required child OP_160")
+            unreachable!("validated PositionalPatternClauseContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -34284,7 +34284,7 @@ impl<'a, State: __RecoveryContextState> PropertyPatternClauseContext<'a, State> 
         __rule_children(self.__node, 127)
             .map(move |node| SubpatternContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn lbrace_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
@@ -34352,7 +34352,7 @@ impl<'a> PropertyPatternClauseContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 127)
             .map(move |node| SubpatternContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn lbrace_token(&self) -> TerminalNode<'a> {
@@ -34513,32 +34513,32 @@ impl<'a, State: __RecoveryContextState> RelationalPatternContext<'a, State> {
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("RelationalPatternContext", "expression"))
     }
-    pub fn op_117_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ne_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 120)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_133_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn le_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 136)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_134_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 137)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_136_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ge_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_171_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
@@ -34601,32 +34601,32 @@ impl<'a> RelationalPatternContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_117_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ne_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 120)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_133_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn le_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 136)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_134_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 137)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_136_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ge_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_171_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
@@ -34776,11 +34776,11 @@ impl<'a, State: __RecoveryContextState> SlicePatternContext<'a, State> {
             .next()
             .map(|node| PatternContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_127_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn dot_dot_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 130)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("SlicePatternContext", "OP_127"))
+            .ok_or_else(|| MissingChildError::new("SlicePatternContext", "DOT_DOT"))
     }
 }
 
@@ -34836,9 +34836,9 @@ impl<'a> SlicePatternContext<'a, ValidatedTreeContext> {
             .next()
             .map(|node| PatternContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_127_token(&self) -> TerminalNode<'a> {
+    pub fn dot_dot_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 130).next() else {
-            unreachable!("validated SlicePatternContext is missing required child OP_127")
+            unreachable!("validated SlicePatternContext is missing required child DOT_DOT")
         };
         TerminalNode::new(node)
     }
@@ -36290,11 +36290,11 @@ impl<'a, State: __RecoveryContextState> ThrowStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ThrowStatementContext", "KW_THROW"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ThrowStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("ThrowStatementContext", "SEMICOLON"))
     }
 }
 
@@ -36360,9 +36360,9 @@ impl<'a> ThrowStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated ThrowStatementContext is missing required child OP_168")
+            unreachable!("validated ThrowStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -36995,17 +36995,17 @@ impl<'a, State: __RecoveryContextState> CatchDeclarationContext<'a, State> {
             .next()
             .map(|node| IdentifierTokenContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CatchDeclarationContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("CatchDeclarationContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CatchDeclarationContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("CatchDeclarationContext", "RPAREN"))
     }
 }
 
@@ -37070,15 +37070,15 @@ impl<'a> CatchDeclarationContext<'a, ValidatedTreeContext> {
             .next()
             .map(|node| IdentifierTokenContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated CatchDeclarationContext is missing required child OP_159")
+            unreachable!("validated CatchDeclarationContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated CatchDeclarationContext is missing required child OP_160")
+            unreachable!("validated CatchDeclarationContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -37234,17 +37234,17 @@ impl<'a, State: __RecoveryContextState> CatchFilterClauseContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("CatchFilterClauseContext", "KW_WHEN"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CatchFilterClauseContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("CatchFilterClauseContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CatchFilterClauseContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("CatchFilterClauseContext", "RPAREN"))
     }
 }
 
@@ -37310,15 +37310,15 @@ impl<'a> CatchFilterClauseContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated CatchFilterClauseContext is missing required child OP_159")
+            unreachable!("validated CatchFilterClauseContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated CatchFilterClauseContext is missing required child OP_160")
+            unreachable!("validated CatchFilterClauseContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -37933,17 +37933,17 @@ impl<'a, State: __RecoveryContextState> UsingStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("UsingStatementContext", "KW_USING"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("UsingStatementContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("UsingStatementContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("UsingStatementContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("UsingStatementContext", "RPAREN"))
     }
 }
 
@@ -38028,15 +38028,15 @@ impl<'a> UsingStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated UsingStatementContext is missing required child OP_159")
+            unreachable!("validated UsingStatementContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated UsingStatementContext is missing required child OP_160")
+            unreachable!("validated UsingStatementContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -38202,17 +38202,17 @@ impl<'a, State: __RecoveryContextState> WhileStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("WhileStatementContext", "KW_WHILE"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("WhileStatementContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("WhileStatementContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("WhileStatementContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("WhileStatementContext", "RPAREN"))
     }
 }
 
@@ -38291,15 +38291,15 @@ impl<'a> WhileStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated WhileStatementContext is missing required child OP_159")
+            unreachable!("validated WhileStatementContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated WhileStatementContext is missing required child OP_160")
+            unreachable!("validated WhileStatementContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -38468,11 +38468,11 @@ impl<'a, State: __RecoveryContextState> YieldStatementContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("YieldStatementContext", "KW_YIELD"))
     }
-    pub fn op_168_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn semicolon_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("YieldStatementContext", "OP_168"))
+            .ok_or_else(|| MissingChildError::new("YieldStatementContext", "SEMICOLON"))
     }
 }
 
@@ -38548,9 +38548,9 @@ impl<'a> YieldStatementContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_168_token(&self) -> TerminalNode<'a> {
+    pub fn semicolon_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 170).next() else {
-            unreachable!("validated YieldStatementContext is missing required child OP_168")
+            unreachable!("validated YieldStatementContext is missing required child SEMICOLON")
         };
         TerminalNode::new(node)
     }
@@ -38922,102 +38922,102 @@ impl<'a, State: __RecoveryContextState> ExpressionContext<'a, State> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_102_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 105)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_103_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_question_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 106)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_117_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ne_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 120)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_118_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 121)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_119_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 122)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_120_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 123)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_121_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 124)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_122_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 125)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_123_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 126)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_124_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 127)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_125_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 128)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_126_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 129)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_127_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 130)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_128_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 131)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_132_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 135)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_133_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn le_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 136)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_134_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 137)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_136_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ge_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_137_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 140)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_141_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 144)
             .next()
             .map(TerminalNode::new)
@@ -39032,85 +39032,85 @@ impl<'a, State: __RecoveryContextState> ExpressionContext<'a, State> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_151_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 154)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_152_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 155)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_153_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn bang_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 156)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_157_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 160)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_158_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 161)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_162_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 165)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_164_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 167)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_165_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 168)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_166_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 169)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_170_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 172)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_171_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_172_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 174)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_175_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 177)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_178_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 179)
             .next()
             .map(TerminalNode::new)
@@ -39407,102 +39407,102 @@ impl<'a> ExpressionContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_102_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 105)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_103_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_question_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 106)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_117_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ne_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 120)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_118_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 121)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_119_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 122)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_120_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 123)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_121_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 124)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_122_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 125)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_123_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 126)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_124_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 127)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_125_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 128)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_126_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 129)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_127_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 130)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_128_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 131)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_132_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 135)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_133_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn le_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 136)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_134_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 137)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_136_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ge_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_137_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 140)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_141_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 144)
             .next()
             .map(TerminalNode::new)
@@ -39517,85 +39517,85 @@ impl<'a> ExpressionContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_151_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 154)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_152_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 155)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_153_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn bang_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 156)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_157_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 160)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_158_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 161)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_162_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 165)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_164_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 167)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_165_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 168)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_166_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 169)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_170_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 172)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_171_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_172_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 174)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_175_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 177)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_178_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 179)
             .next()
             .map(TerminalNode::new)
@@ -40446,11 +40446,11 @@ impl<'a, State: __RecoveryContextState> ParenthesizedLambdaExpressionContext<'a,
             .next()
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_135_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn arrow_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 138)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ParenthesizedLambdaExpressionContext", "OP_135"))
+            .ok_or_else(|| MissingChildError::new("ParenthesizedLambdaExpressionContext", "ARROW"))
     }
 }
 
@@ -40533,9 +40533,9 @@ impl<'a> ParenthesizedLambdaExpressionContext<'a, ValidatedTreeContext> {
             .next()
             .map(|node| ExpressionContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_135_token(&self) -> TerminalNode<'a> {
+    pub fn arrow_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 138).next() else {
-            unreachable!("validated ParenthesizedLambdaExpressionContext is missing required child OP_135")
+            unreachable!("validated ParenthesizedLambdaExpressionContext is missing required child ARROW")
         };
         TerminalNode::new(node)
     }
@@ -40703,11 +40703,11 @@ impl<'a, State: __RecoveryContextState> SimpleLambdaExpressionContext<'a, State>
             .next()
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_135_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn arrow_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 138)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("SimpleLambdaExpressionContext", "OP_135"))
+            .ok_or_else(|| MissingChildError::new("SimpleLambdaExpressionContext", "ARROW"))
     }
 }
 
@@ -40785,9 +40785,9 @@ impl<'a> SimpleLambdaExpressionContext<'a, ValidatedTreeContext> {
             .next()
             .map(|node| ExpressionContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_135_token(&self) -> TerminalNode<'a> {
+    pub fn arrow_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 138).next() else {
-            unreachable!("validated SimpleLambdaExpressionContext is missing required child OP_135")
+            unreachable!("validated SimpleLambdaExpressionContext is missing required child ARROW")
         };
         TerminalNode::new(node)
     }
@@ -40941,7 +40941,7 @@ impl<'a, State: __RecoveryContextState> AnonymousObjectCreationExpressionContext
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("AnonymousObjectCreationExpressionContext", "KW_NEW"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn lbrace_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
@@ -41015,7 +41015,7 @@ impl<'a> AnonymousObjectCreationExpressionContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn lbrace_token(&self) -> TerminalNode<'a> {
@@ -41614,7 +41614,7 @@ impl<'a, State: __RecoveryContextState> InitializerExpressionContext<'a, State> 
         __rule_children(self.__node, 149)
             .map(move |node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn lbrace_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
@@ -41682,7 +41682,7 @@ impl<'a> InitializerExpressionContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 149)
             .map(move |node| ExpressionContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
     pub fn lbrace_token(&self) -> TerminalNode<'a> {
@@ -42736,17 +42736,17 @@ impl<'a, State: __RecoveryContextState> CastExpressionContext<'a, State> {
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("CastExpressionContext", "expression"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CastExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("CastExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CastExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("CastExpressionContext", "RPAREN"))
     }
 }
 
@@ -42815,15 +42815,15 @@ impl<'a> CastExpressionContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated CastExpressionContext is missing required child OP_159")
+            unreachable!("validated CastExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated CastExpressionContext is missing required child OP_160")
+            unreachable!("validated CastExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -42983,17 +42983,17 @@ impl<'a, State: __RecoveryContextState> CheckedExpressionContext<'a, State> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CheckedExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("CheckedExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CheckedExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("CheckedExpressionContext", "RPAREN"))
     }
 }
 
@@ -43063,15 +43063,15 @@ impl<'a> CheckedExpressionContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated CheckedExpressionContext is missing required child OP_159")
+            unreachable!("validated CheckedExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated CheckedExpressionContext is missing required child OP_160")
+            unreachable!("validated CheckedExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -43219,20 +43219,20 @@ impl<'a, State: __RecoveryContextState> CollectionExpressionContext<'a, State> {
         __rule_children(self.__node, 166)
             .map(move |node| CollectionElementContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CollectionExpressionContext", "OP_173"))
+            .ok_or_else(|| MissingChildError::new("CollectionExpressionContext", "LBRACKET"))
     }
-    pub fn op_174_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("CollectionExpressionContext", "OP_174"))
+            .ok_or_else(|| MissingChildError::new("CollectionExpressionContext", "RBRACKET"))
     }
 }
 
@@ -43287,18 +43287,18 @@ impl<'a> CollectionExpressionContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 166)
             .map(move |node| CollectionElementContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> TerminalNode<'a> {
+    pub fn lbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 175).next() else {
-            unreachable!("validated CollectionExpressionContext is missing required child OP_173")
+            unreachable!("validated CollectionExpressionContext is missing required child LBRACKET")
         };
         TerminalNode::new(node)
     }
-    pub fn op_174_token(&self) -> TerminalNode<'a> {
+    pub fn rbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 176).next() else {
-            unreachable!("validated CollectionExpressionContext is missing required child OP_174")
+            unreachable!("validated CollectionExpressionContext is missing required child RBRACKET")
         };
         TerminalNode::new(node)
     }
@@ -43871,11 +43871,11 @@ impl<'a, State: __RecoveryContextState> SpreadElementContext<'a, State> {
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("SpreadElementContext", "expression"))
     }
-    pub fn op_127_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn dot_dot_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 130)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("SpreadElementContext", "OP_127"))
+            .ok_or_else(|| MissingChildError::new("SpreadElementContext", "DOT_DOT"))
     }
 }
 
@@ -43935,9 +43935,9 @@ impl<'a> SpreadElementContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_127_token(&self) -> TerminalNode<'a> {
+    pub fn dot_dot_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 130).next() else {
-            unreachable!("validated SpreadElementContext is missing required child OP_127")
+            unreachable!("validated SpreadElementContext is missing required child DOT_DOT")
         };
         TerminalNode::new(node)
     }
@@ -44528,17 +44528,17 @@ impl<'a, State: __RecoveryContextState> DefaultExpressionContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("DefaultExpressionContext", "KW_DEFAULT"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("DefaultExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("DefaultExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("DefaultExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("DefaultExpressionContext", "RPAREN"))
     }
 }
 
@@ -44604,15 +44604,15 @@ impl<'a> DefaultExpressionContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated DefaultExpressionContext is missing required child OP_159")
+            unreachable!("validated DefaultExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated DefaultExpressionContext is missing required child OP_160")
+            unreachable!("validated DefaultExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -45173,20 +45173,20 @@ impl<'a, State: __RecoveryContextState> ImplicitArrayCreationExpressionContext<'
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ImplicitArrayCreationExpressionContext", "KW_NEW"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ImplicitArrayCreationExpressionContext", "OP_173"))
+            .ok_or_else(|| MissingChildError::new("ImplicitArrayCreationExpressionContext", "LBRACKET"))
     }
-    pub fn op_174_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ImplicitArrayCreationExpressionContext", "OP_174"))
+            .ok_or_else(|| MissingChildError::new("ImplicitArrayCreationExpressionContext", "RBRACKET"))
     }
 }
 
@@ -45252,18 +45252,18 @@ impl<'a> ImplicitArrayCreationExpressionContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> TerminalNode<'a> {
+    pub fn lbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 175).next() else {
-            unreachable!("validated ImplicitArrayCreationExpressionContext is missing required child OP_173")
+            unreachable!("validated ImplicitArrayCreationExpressionContext is missing required child LBRACKET")
         };
         TerminalNode::new(node)
     }
-    pub fn op_174_token(&self) -> TerminalNode<'a> {
+    pub fn rbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 176).next() else {
-            unreachable!("validated ImplicitArrayCreationExpressionContext is missing required child OP_174")
+            unreachable!("validated ImplicitArrayCreationExpressionContext is missing required child RBRACKET")
         };
         TerminalNode::new(node)
     }
@@ -45623,17 +45623,17 @@ impl<'a, State: __RecoveryContextState> ImplicitStackAllocArrayCreationExpressio
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("ImplicitStackAllocArrayCreationExpressionContext", "KW_STACKALLOC"))
     }
-    pub fn op_173_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ImplicitStackAllocArrayCreationExpressionContext", "OP_173"))
+            .ok_or_else(|| MissingChildError::new("ImplicitStackAllocArrayCreationExpressionContext", "LBRACKET"))
     }
-    pub fn op_174_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rbracket_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ImplicitStackAllocArrayCreationExpressionContext", "OP_174"))
+            .ok_or_else(|| MissingChildError::new("ImplicitStackAllocArrayCreationExpressionContext", "RBRACKET"))
     }
 }
 
@@ -45699,15 +45699,15 @@ impl<'a> ImplicitStackAllocArrayCreationExpressionContext<'a, ValidatedTreeConte
         };
         TerminalNode::new(node)
     }
-    pub fn op_173_token(&self) -> TerminalNode<'a> {
+    pub fn lbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 175).next() else {
-            unreachable!("validated ImplicitStackAllocArrayCreationExpressionContext is missing required child OP_173")
+            unreachable!("validated ImplicitStackAllocArrayCreationExpressionContext is missing required child LBRACKET")
         };
         TerminalNode::new(node)
     }
-    pub fn op_174_token(&self) -> TerminalNode<'a> {
+    pub fn rbracket_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 176).next() else {
-            unreachable!("validated ImplicitStackAllocArrayCreationExpressionContext is missing required child OP_174")
+            unreachable!("validated ImplicitStackAllocArrayCreationExpressionContext is missing required child RBRACKET")
         };
         TerminalNode::new(node)
     }
@@ -47386,11 +47386,11 @@ impl<'a, State: __RecoveryContextState> InterpolationAlignmentClauseContext<'a, 
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("InterpolationAlignmentClauseContext", "expression"))
     }
-    pub fn op_163_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn comma_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 166)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("InterpolationAlignmentClauseContext", "OP_163"))
+            .ok_or_else(|| MissingChildError::new("InterpolationAlignmentClauseContext", "COMMA"))
     }
 }
 
@@ -47450,9 +47450,9 @@ impl<'a> InterpolationAlignmentClauseContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_163_token(&self) -> TerminalNode<'a> {
+    pub fn comma_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 166).next() else {
-            unreachable!("validated InterpolationAlignmentClauseContext is missing required child OP_163")
+            unreachable!("validated InterpolationAlignmentClauseContext is missing required child COMMA")
         };
         TerminalNode::new(node)
     }
@@ -47812,16 +47812,16 @@ impl<'a, State> InterpolatedMultiLineRawStringStartTokenContext<'a, State> {
 
 #[allow(dead_code, private_bounds, clippy::all)]
 impl<'a, State: __RecoveryContextState> InterpolatedMultiLineRawStringStartTokenContext<'a, State> {
-    pub fn op_101_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn triple_dquote_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 104)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("InterpolatedMultiLineRawStringStartTokenContext", "OP_101"))
+            .ok_or_else(|| MissingChildError::new("InterpolatedMultiLineRawStringStartTokenContext", "TRIPLE_DQUOTE"))
     }
     pub fn dquote_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 157).map(TerminalNode::new)
     }
-    pub fn op_156_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn dollar_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 159).map(TerminalNode::new)
     }
 }
@@ -47873,16 +47873,16 @@ impl<'a> InterpolatedMultiLineRawStringStartTokenContext<'a, ValidatedTreeContex
         }
     }
 
-    pub fn op_101_token(&self) -> TerminalNode<'a> {
+    pub fn triple_dquote_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 104).next() else {
-            unreachable!("validated InterpolatedMultiLineRawStringStartTokenContext is missing required child OP_101")
+            unreachable!("validated InterpolatedMultiLineRawStringStartTokenContext is missing required child TRIPLE_DQUOTE")
         };
         TerminalNode::new(node)
     }
     pub fn dquote_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 157).map(TerminalNode::new)
     }
-    pub fn op_156_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn dollar_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 159).map(TerminalNode::new)
     }
 }
@@ -48025,11 +48025,11 @@ impl<'a, State> InterpolatedRawStringEndTokenContext<'a, State> {
 
 #[allow(dead_code, private_bounds, clippy::all)]
 impl<'a, State: __RecoveryContextState> InterpolatedRawStringEndTokenContext<'a, State> {
-    pub fn op_101_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn triple_dquote_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 104)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("InterpolatedRawStringEndTokenContext", "OP_101"))
+            .ok_or_else(|| MissingChildError::new("InterpolatedRawStringEndTokenContext", "TRIPLE_DQUOTE"))
     }
     pub fn dquote_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 157).map(TerminalNode::new)
@@ -48083,9 +48083,9 @@ impl<'a> InterpolatedRawStringEndTokenContext<'a, ValidatedTreeContext> {
         }
     }
 
-    pub fn op_101_token(&self) -> TerminalNode<'a> {
+    pub fn triple_dquote_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 104).next() else {
-            unreachable!("validated InterpolatedRawStringEndTokenContext is missing required child OP_101")
+            unreachable!("validated InterpolatedRawStringEndTokenContext is missing required child TRIPLE_DQUOTE")
         };
         TerminalNode::new(node)
     }
@@ -48232,16 +48232,16 @@ impl<'a, State> InterpolatedSingleLineRawStringStartTokenContext<'a, State> {
 
 #[allow(dead_code, private_bounds, clippy::all)]
 impl<'a, State: __RecoveryContextState> InterpolatedSingleLineRawStringStartTokenContext<'a, State> {
-    pub fn op_101_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn triple_dquote_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 104)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("InterpolatedSingleLineRawStringStartTokenContext", "OP_101"))
+            .ok_or_else(|| MissingChildError::new("InterpolatedSingleLineRawStringStartTokenContext", "TRIPLE_DQUOTE"))
     }
     pub fn dquote_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 157).map(TerminalNode::new)
     }
-    pub fn op_156_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn dollar_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 159).map(TerminalNode::new)
     }
 }
@@ -48293,16 +48293,16 @@ impl<'a> InterpolatedSingleLineRawStringStartTokenContext<'a, ValidatedTreeConte
         }
     }
 
-    pub fn op_101_token(&self) -> TerminalNode<'a> {
+    pub fn triple_dquote_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 104).next() else {
-            unreachable!("validated InterpolatedSingleLineRawStringStartTokenContext is missing required child OP_101")
+            unreachable!("validated InterpolatedSingleLineRawStringStartTokenContext is missing required child TRIPLE_DQUOTE")
         };
         TerminalNode::new(node)
     }
     pub fn dquote_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 157).map(TerminalNode::new)
     }
-    pub fn op_156_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn dollar_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 159).map(TerminalNode::new)
     }
 }
@@ -49448,17 +49448,17 @@ impl<'a, State: __RecoveryContextState> MakeRefExpressionContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("MakeRefExpressionContext", "KW___MAKEREF"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("MakeRefExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("MakeRefExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("MakeRefExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("MakeRefExpressionContext", "RPAREN"))
     }
 }
 
@@ -49524,15 +49524,15 @@ impl<'a> MakeRefExpressionContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated MakeRefExpressionContext is missing required child OP_159")
+            unreachable!("validated MakeRefExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated MakeRefExpressionContext is missing required child OP_160")
+            unreachable!("validated MakeRefExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -49682,11 +49682,11 @@ impl<'a, State: __RecoveryContextState> MemberBindingExpressionContext<'a, State
             .map(|node| SimpleNameContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("MemberBindingExpressionContext", "simple_name"))
     }
-    pub fn op_165_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn dot_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 168)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("MemberBindingExpressionContext", "OP_165"))
+            .ok_or_else(|| MissingChildError::new("MemberBindingExpressionContext", "DOT"))
     }
 }
 
@@ -49746,9 +49746,9 @@ impl<'a> MemberBindingExpressionContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_165_token(&self) -> TerminalNode<'a> {
+    pub fn dot_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 168).next() else {
-            unreachable!("validated MemberBindingExpressionContext is missing required child OP_165")
+            unreachable!("validated MemberBindingExpressionContext is missing required child DOT")
         };
         TerminalNode::new(node)
     }
@@ -49898,17 +49898,17 @@ impl<'a, State: __RecoveryContextState> ParenthesizedExpressionContext<'a, State
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("ParenthesizedExpressionContext", "expression"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ParenthesizedExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("ParenthesizedExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("ParenthesizedExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("ParenthesizedExpressionContext", "RPAREN"))
     }
 }
 
@@ -49968,15 +49968,15 @@ impl<'a> ParenthesizedExpressionContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated ParenthesizedExpressionContext is missing required child OP_159")
+            unreachable!("validated ParenthesizedExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated ParenthesizedExpressionContext is missing required child OP_160")
+            unreachable!("validated ParenthesizedExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -50126,47 +50126,47 @@ impl<'a, State: __RecoveryContextState> PrefixUnaryExpressionContext<'a, State> 
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("PrefixUnaryExpressionContext", "expression"))
     }
-    pub fn op_122_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 125)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_124_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 127)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_153_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn bang_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 156)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_158_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 161)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_162_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 165)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_164_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 167)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_175_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 177)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_180_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn tilde_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 180)
             .next()
             .map(TerminalNode::new)
@@ -50229,47 +50229,47 @@ impl<'a> PrefixUnaryExpressionContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_122_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 125)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_124_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 127)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_153_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn bang_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 156)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_158_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 161)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_162_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 165)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_164_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 167)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_175_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 177)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_180_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn tilde_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 180)
             .next()
             .map(TerminalNode::new)
@@ -51861,11 +51861,11 @@ impl<'a, State: __RecoveryContextState> LetClauseContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("LetClauseContext", "KW_LET"))
     }
-    pub fn op_170_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn eq_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 172)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("LetClauseContext", "OP_170"))
+            .ok_or_else(|| MissingChildError::new("LetClauseContext", "EQ"))
     }
 }
 
@@ -51940,9 +51940,9 @@ impl<'a> LetClauseContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_170_token(&self) -> TerminalNode<'a> {
+    pub fn eq_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 172).next() else {
-            unreachable!("validated LetClauseContext is missing required child OP_170")
+            unreachable!("validated LetClauseContext is missing required child EQ")
         };
         TerminalNode::new(node)
     }
@@ -52096,7 +52096,7 @@ impl<'a, State: __RecoveryContextState> OrderByClauseContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("OrderByClauseContext", "KW_ORDERBY"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -52158,7 +52158,7 @@ impl<'a> OrderByClauseContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -53846,17 +53846,17 @@ impl<'a, State: __RecoveryContextState> RefTypeExpressionContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("RefTypeExpressionContext", "KW___REFTYPE"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("RefTypeExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("RefTypeExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("RefTypeExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("RefTypeExpressionContext", "RPAREN"))
     }
 }
 
@@ -53922,15 +53922,15 @@ impl<'a> RefTypeExpressionContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated RefTypeExpressionContext is missing required child OP_159")
+            unreachable!("validated RefTypeExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated RefTypeExpressionContext is missing required child OP_160")
+            unreachable!("validated RefTypeExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -54092,23 +54092,23 @@ impl<'a, State: __RecoveryContextState> RefValueExpressionContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("RefValueExpressionContext", "KW___REFVALUE"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("RefValueExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("RefValueExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("RefValueExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("RefValueExpressionContext", "RPAREN"))
     }
-    pub fn op_163_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn comma_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 166)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("RefValueExpressionContext", "OP_163"))
+            .ok_or_else(|| MissingChildError::new("RefValueExpressionContext", "COMMA"))
     }
 }
 
@@ -54183,21 +54183,21 @@ impl<'a> RefValueExpressionContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated RefValueExpressionContext is missing required child OP_159")
+            unreachable!("validated RefValueExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated RefValueExpressionContext is missing required child OP_160")
+            unreachable!("validated RefValueExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_token(&self) -> TerminalNode<'a> {
+    pub fn comma_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 166).next() else {
-            unreachable!("validated RefValueExpressionContext is missing required child OP_163")
+            unreachable!("validated RefValueExpressionContext is missing required child COMMA")
         };
         TerminalNode::new(node)
     }
@@ -54353,17 +54353,17 @@ impl<'a, State: __RecoveryContextState> SizeOfExpressionContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("SizeOfExpressionContext", "KW_SIZEOF"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("SizeOfExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("SizeOfExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("SizeOfExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("SizeOfExpressionContext", "RPAREN"))
     }
 }
 
@@ -54429,15 +54429,15 @@ impl<'a> SizeOfExpressionContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated SizeOfExpressionContext is missing required child OP_159")
+            unreachable!("validated SizeOfExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated SizeOfExpressionContext is missing required child OP_160")
+            unreachable!("validated SizeOfExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -54824,11 +54824,11 @@ impl<'a, State: __RecoveryContextState> SwitchExpressionArmContext<'a, State> {
             .map(|node| ExpressionContext::__from_child_node(node, self.__invocation_states.as_deref()))
             .ok_or_else(|| MissingChildError::new("SwitchExpressionArmContext", "expression"))
     }
-    pub fn op_135_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn arrow_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 138)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("SwitchExpressionArmContext", "OP_135"))
+            .ok_or_else(|| MissingChildError::new("SwitchExpressionArmContext", "ARROW"))
     }
 }
 
@@ -54902,9 +54902,9 @@ impl<'a> SwitchExpressionArmContext<'a, ValidatedTreeContext> {
             self.__invocation_states.as_deref(),
         )
     }
-    pub fn op_135_token(&self) -> TerminalNode<'a> {
+    pub fn arrow_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 138).next() else {
-            unreachable!("validated SwitchExpressionArmContext is missing required child OP_135")
+            unreachable!("validated SwitchExpressionArmContext is missing required child ARROW")
         };
         TerminalNode::new(node)
     }
@@ -55268,19 +55268,19 @@ impl<'a, State: __RecoveryContextState> TupleExpressionContext<'a, State> {
         __rule_children(self.__node, 23)
             .map(move |node| ArgumentContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TupleExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("TupleExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TupleExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("TupleExpressionContext", "RPAREN"))
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -55336,19 +55336,19 @@ impl<'a> TupleExpressionContext<'a, ValidatedTreeContext> {
         __rule_children(self.__node, 23)
             .map(move |node| ArgumentContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated TupleExpressionContext is missing required child OP_159")
+            unreachable!("validated TupleExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated TupleExpressionContext is missing required child OP_160")
+            unreachable!("validated TupleExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_163_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn comma_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 166).map(TerminalNode::new)
     }
 }
@@ -55503,17 +55503,17 @@ impl<'a, State: __RecoveryContextState> TypeOfExpressionContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("TypeOfExpressionContext", "KW_TYPEOF"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TypeOfExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("TypeOfExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("TypeOfExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("TypeOfExpressionContext", "RPAREN"))
     }
 }
 
@@ -55579,15 +55579,15 @@ impl<'a> TypeOfExpressionContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated TypeOfExpressionContext is missing required child OP_159")
+            unreachable!("validated TypeOfExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated TypeOfExpressionContext is missing required child OP_160")
+            unreachable!("validated TypeOfExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -55743,17 +55743,17 @@ impl<'a, State: __RecoveryContextState> UnsafeExpressionContext<'a, State> {
             .map(TerminalNode::new)
             .ok_or_else(|| MissingChildError::new("UnsafeExpressionContext", "KW_UNSAFE"))
     }
-    pub fn op_159_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn lparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("UnsafeExpressionContext", "OP_159"))
+            .ok_or_else(|| MissingChildError::new("UnsafeExpressionContext", "LPAREN"))
     }
-    pub fn op_160_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn rparen_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("UnsafeExpressionContext", "OP_160"))
+            .ok_or_else(|| MissingChildError::new("UnsafeExpressionContext", "RPAREN"))
     }
 }
 
@@ -55819,15 +55819,15 @@ impl<'a> UnsafeExpressionContext<'a, ValidatedTreeContext> {
         };
         TerminalNode::new(node)
     }
-    pub fn op_159_token(&self) -> TerminalNode<'a> {
+    pub fn lparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 162).next() else {
-            unreachable!("validated UnsafeExpressionContext is missing required child OP_159")
+            unreachable!("validated UnsafeExpressionContext is missing required child LPAREN")
         };
         TerminalNode::new(node)
     }
-    pub fn op_160_token(&self) -> TerminalNode<'a> {
+    pub fn rparen_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 163).next() else {
-            unreachable!("validated UnsafeExpressionContext is missing required child OP_160")
+            unreachable!("validated UnsafeExpressionContext is missing required child RPAREN")
         };
         TerminalNode::new(node)
     }
@@ -59551,92 +59551,92 @@ impl<'a, State: __RecoveryContextState> OperatorTokenContext<'a, State> {
             .next()
             .map(|node| UnsignedRightShiftAssignmentContext::__from_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_102_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 105)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_103_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_question_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 106)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_117_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ne_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 120)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_118_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 121)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_119_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 122)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_120_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 123)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_121_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 124)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_122_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 125)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_123_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 126)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_124_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 127)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_125_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 128)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_128_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 131)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_132_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 135)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_133_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn le_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 136)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_134_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 137)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_136_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ge_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_137_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 140)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_141_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 144)
             .next()
             .map(TerminalNode::new)
@@ -59651,77 +59651,77 @@ impl<'a, State: __RecoveryContextState> OperatorTokenContext<'a, State> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_151_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 154)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_152_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 155)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_153_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn bang_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 156)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_157_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 160)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_158_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 161)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_162_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 165)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_164_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 167)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_166_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 169)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_170_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 172)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_171_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_175_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 177)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_178_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 179)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_180_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn tilde_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 180)
             .next()
             .map(TerminalNode::new)
@@ -59795,92 +59795,92 @@ impl<'a> OperatorTokenContext<'a, ValidatedTreeContext> {
             .next()
             .map(|node| UnsignedRightShiftAssignmentContext::<ValidatedTreeContext>::__from_validated_child_node(node, self.__invocation_states.as_deref()))
     }
-    pub fn op_102_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 105)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_103_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_question_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 106)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_117_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ne_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 120)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_118_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 121)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_119_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 122)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_120_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 123)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_121_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 124)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_122_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 125)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_123_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 126)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_124_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 127)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_125_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 128)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_128_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 131)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_132_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 135)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_133_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn le_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 136)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_134_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 137)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_136_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn ge_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_137_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 140)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_141_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 144)
             .next()
             .map(TerminalNode::new)
@@ -59895,77 +59895,77 @@ impl<'a> OperatorTokenContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_151_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 154)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_152_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 155)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_153_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn bang_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 156)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_157_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn percent_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 160)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_158_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn amp_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 161)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_161_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn star_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 164)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_162_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn plus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 165)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_164_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 167)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_166_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 169)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_169_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 171)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_170_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn eq_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 172)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_171_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_175_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn caret_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 177)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_178_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn pipe_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 179)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_180_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn tilde_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 180)
             .next()
             .map(TerminalNode::new)
@@ -60110,42 +60110,42 @@ impl<'a, State> PunctuationTokenContext<'a, State> {
 
 #[allow(dead_code, private_bounds, clippy::all)]
 impl<'a, State: __RecoveryContextState> PunctuationTokenContext<'a, State> {
-    pub fn op_126_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 129)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_127_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 130)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_129_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 132)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_130_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn colon_colon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 133)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_131_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_slash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 134)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_135_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn arrow_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 138)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_139_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn escaped_quote_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 142)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_140_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn escaped_backslash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 143)
             .next()
             .map(TerminalNode::new)
@@ -60155,47 +60155,47 @@ impl<'a, State: __RecoveryContextState> PunctuationTokenContext<'a, State> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_155_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn hash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 158)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_159_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lparen_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_160_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn rparen_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_163_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn comma_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 166)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_165_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 168)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_172_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 174)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lbracket_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_174_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn rbracket_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
@@ -60264,42 +60264,42 @@ impl<'a> PunctuationTokenContext<'a, ValidatedTreeContext> {
         }
     }
 
-    pub fn op_126_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn minus_gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 129)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_127_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 130)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_129_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn slash_gt_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 132)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_130_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn colon_colon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 133)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_131_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lt_slash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 134)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_135_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn arrow_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 138)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_139_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn escaped_quote_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 142)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_140_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn escaped_backslash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 143)
             .next()
             .map(TerminalNode::new)
@@ -60309,47 +60309,47 @@ impl<'a> PunctuationTokenContext<'a, ValidatedTreeContext> {
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_155_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn hash_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 158)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_159_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lparen_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 162)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_160_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn rparen_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 163)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_163_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn comma_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 166)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_165_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn dot_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 168)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_168_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn semicolon_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 170)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_172_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn question_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 174)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_173_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn lbracket_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 175)
             .next()
             .map(TerminalNode::new)
     }
-    pub fn op_174_token(&self) -> Option<TerminalNode<'a>> {
+    pub fn rbracket_token(&self) -> Option<TerminalNode<'a>> {
         __token_children(self.__node, 176)
             .next()
             .map(TerminalNode::new)
@@ -61313,7 +61313,7 @@ impl<'a, State> RightShiftContext<'a, State> {
 
 #[allow(dead_code, private_bounds, clippy::all)]
 impl<'a, State: __RecoveryContextState> RightShiftContext<'a, State> {
-    pub fn op_171_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn gt_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 173).map(TerminalNode::new)
     }
 }
@@ -61365,7 +61365,7 @@ impl<'a> RightShiftContext<'a, ValidatedTreeContext> {
         }
     }
 
-    pub fn op_171_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn gt_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 173).map(TerminalNode::new)
     }
 }
@@ -61508,7 +61508,7 @@ impl<'a, State> UnsignedRightShiftContext<'a, State> {
 
 #[allow(dead_code, private_bounds, clippy::all)]
 impl<'a, State: __RecoveryContextState> UnsignedRightShiftContext<'a, State> {
-    pub fn op_171_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn gt_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 173).map(TerminalNode::new)
     }
 }
@@ -61560,7 +61560,7 @@ impl<'a> UnsignedRightShiftContext<'a, ValidatedTreeContext> {
         }
     }
 
-    pub fn op_171_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn gt_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 173).map(TerminalNode::new)
     }
 }
@@ -61703,17 +61703,17 @@ impl<'a, State> RightShiftAssignmentContext<'a, State> {
 
 #[allow(dead_code, private_bounds, clippy::all)]
 impl<'a, State: __RecoveryContextState> RightShiftAssignmentContext<'a, State> {
-    pub fn op_136_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn ge_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("RightShiftAssignmentContext", "OP_136"))
+            .ok_or_else(|| MissingChildError::new("RightShiftAssignmentContext", "GE"))
     }
-    pub fn op_171_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn gt_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 173)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("RightShiftAssignmentContext", "OP_171"))
+            .ok_or_else(|| MissingChildError::new("RightShiftAssignmentContext", "GT"))
     }
 }
 
@@ -61764,15 +61764,15 @@ impl<'a> RightShiftAssignmentContext<'a, ValidatedTreeContext> {
         }
     }
 
-    pub fn op_136_token(&self) -> TerminalNode<'a> {
+    pub fn ge_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 139).next() else {
-            unreachable!("validated RightShiftAssignmentContext is missing required child OP_136")
+            unreachable!("validated RightShiftAssignmentContext is missing required child GE")
         };
         TerminalNode::new(node)
     }
-    pub fn op_171_token(&self) -> TerminalNode<'a> {
+    pub fn gt_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 173).next() else {
-            unreachable!("validated RightShiftAssignmentContext is missing required child OP_171")
+            unreachable!("validated RightShiftAssignmentContext is missing required child GT")
         };
         TerminalNode::new(node)
     }
@@ -61916,13 +61916,13 @@ impl<'a, State> UnsignedRightShiftAssignmentContext<'a, State> {
 
 #[allow(dead_code, private_bounds, clippy::all)]
 impl<'a, State: __RecoveryContextState> UnsignedRightShiftAssignmentContext<'a, State> {
-    pub fn op_136_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
+    pub fn ge_token(&self) -> Result<TerminalNode<'a>, MissingChildError> {
         __token_children(self.__node, 139)
             .next()
             .map(TerminalNode::new)
-            .ok_or_else(|| MissingChildError::new("UnsignedRightShiftAssignmentContext", "OP_136"))
+            .ok_or_else(|| MissingChildError::new("UnsignedRightShiftAssignmentContext", "GE"))
     }
-    pub fn op_171_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn gt_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 173).map(TerminalNode::new)
     }
 }
@@ -61974,13 +61974,13 @@ impl<'a> UnsignedRightShiftAssignmentContext<'a, ValidatedTreeContext> {
         }
     }
 
-    pub fn op_136_token(&self) -> TerminalNode<'a> {
+    pub fn ge_token(&self) -> TerminalNode<'a> {
         let Some(node) = __token_children(self.__node, 139).next() else {
-            unreachable!("validated UnsignedRightShiftAssignmentContext is missing required child OP_136")
+            unreachable!("validated UnsignedRightShiftAssignmentContext is missing required child GE")
         };
         TerminalNode::new(node)
     }
-    pub fn op_171_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
+    pub fn gt_tokens(&self) -> impl Iterator<Item = TerminalNode<'a>> + '_ {
         __token_children(self.__node, 173).map(TerminalNode::new)
     }
 }
@@ -62038,18 +62038,18 @@ pub fn validate_tree_structure(
         let _ = context.identifier_token().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_extern_token().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_alias_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 2 => {
                     let context = UsingDirectiveContext::__from_listener_node(context, None);
         let _ = context.r#type().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_using_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 3 => {
                     let context = NameEqualsContext::__from_listener_node(context, None);
         let _ = context.identifier_name().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_170_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.eq_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 4 => {
                 },
@@ -62066,8 +62066,8 @@ pub fn validate_tree_structure(
                 });
             }
         }
-        let _ = context.op_173_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_174_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lbracket_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rbracket_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 6 => {
                     let context = AttributeTargetSpecifierContext::__from_listener_node(context, None);
@@ -62084,7 +62084,7 @@ pub fn validate_tree_structure(
                     let context = AliasQualifiedNameContext::__from_listener_node(context, None);
         let _ = context.identifier_name().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.simple_name().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_130_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.colon_colon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 10 => {
                 },
@@ -62095,13 +62095,13 @@ pub fn validate_tree_structure(
                 },
                 12 => {
                     let context = TypeArgumentListContext::__from_listener_node(context, None);
-        let _ = context.op_169_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_171_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lt_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.gt_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 13 => {
                     let context = AttributeArgumentListContext::__from_listener_node(context, None);
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 14 => {
                     let context = AttributeArgumentContext::__from_listener_node(context, None);
@@ -62120,7 +62120,7 @@ pub fn validate_tree_structure(
                     let context = EventFieldDeclarationContext::__from_listener_node(context, None);
         let _ = context.variable_declaration().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_event_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 19 => {
                 },
@@ -62156,8 +62156,8 @@ pub fn validate_tree_structure(
                 });
             }
         }
-        let _ = context.op_173_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_174_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lbracket_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rbracket_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 23 => {
                     let context = ArgumentContext::__from_listener_node(context, None);
@@ -62166,12 +62166,12 @@ pub fn validate_tree_structure(
                 24 => {
                     let context = EqualsValueClauseContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_170_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.eq_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 25 => {
                     let context = FieldDeclarationContext::__from_listener_node(context, None);
         let _ = context.variable_declaration().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 26 => {
                 },
@@ -62182,8 +62182,8 @@ pub fn validate_tree_structure(
                 },
                 28 => {
                     let context = ParameterListContext::__from_listener_node(context, None);
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 29 => {
                 },
@@ -62194,8 +62194,8 @@ pub fn validate_tree_structure(
                 },
                 31 => {
                     let context = ArgumentListContext::__from_listener_node(context, None);
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 32 => {
                     let context = BlockContext::__from_listener_node(context, None);
@@ -62205,7 +62205,7 @@ pub fn validate_tree_structure(
                 33 => {
                     let context = ArrowExpressionClauseContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_135_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.arrow_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 34 => {
                     let context = ConversionOperatorDeclarationContext::__from_listener_node(context, None);
@@ -62216,13 +62216,13 @@ pub fn validate_tree_structure(
                 35 => {
                     let context = ExplicitInterfaceSpecifierContext::__from_listener_node(context, None);
         let _ = context.name().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_165_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.dot_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 36 => {
                     let context = DestructorDeclarationContext::__from_listener_node(context, None);
         let _ = context.parameter_list().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.identifier_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_180_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.tilde_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 37 => {
                     let context = MethodDeclarationContext::__from_listener_node(context, None);
@@ -62243,8 +62243,8 @@ pub fn validate_tree_structure(
                 });
             }
         }
-        let _ = context.op_169_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_171_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lt_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.gt_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 39 => {
                     let context = TypeParameterContext::__from_listener_node(context, None);
@@ -62298,8 +62298,8 @@ pub fn validate_tree_structure(
                 46 => {
                     let context = ConstructorConstraintContext::__from_listener_node(context, None);
         let _ = context.kw_new_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 47 => {
                     let context = DefaultConstraintContext::__from_listener_node(context, None);
@@ -62321,7 +62321,7 @@ pub fn validate_tree_structure(
                     let context = FileScopedNamespaceDeclarationContext::__from_listener_node(context, None);
         let _ = context.name().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_namespace_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 52 => {
                     let context = NamespaceDeclarationContext::__from_listener_node(context, None);
@@ -62364,8 +62364,8 @@ pub fn validate_tree_structure(
                 });
             }
         }
-        let _ = context.op_173_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_174_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lbracket_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rbracket_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 59 => {
                     let context = PropertyDeclarationContext::__from_listener_node(context, None);
@@ -62446,7 +62446,7 @@ pub fn validate_tree_structure(
         let _ = context.r#type().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.identifier_token().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_delegate_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 75 => {
                     let context = GlobalStatementContext::__from_listener_node(context, None);
@@ -62475,14 +62475,14 @@ pub fn validate_tree_structure(
                 },
                 79 => {
                     let context = ArrayRankSpecifierContext::__from_listener_node(context, None);
-        let _ = context.op_173_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_174_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lbracket_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rbracket_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 80 => {
                     let context = FunctionPointerTypeContext::__from_listener_node(context, None);
         let _ = context.function_pointer_parameter_list().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_delegate_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_161_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.star_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 81 => {
                 },
@@ -62499,8 +62499,8 @@ pub fn validate_tree_structure(
                 });
             }
         }
-        let _ = context.op_173_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_174_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lbracket_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rbracket_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 83 => {
                     let context = FunctionPointerUnmanagedCallingConventionContext::__from_listener_node(context, None);
@@ -62519,8 +62519,8 @@ pub fn validate_tree_structure(
                 });
             }
         }
-        let _ = context.op_169_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_171_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lt_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.gt_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 85 => {
                     let context = FunctionPointerParameterContext::__from_listener_node(context, None);
@@ -62551,14 +62551,14 @@ pub fn validate_tree_structure(
                 });
             }
         }
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
         {
-            let actual = context.op_163_tokens().count();
+            let actual = context.comma_tokens().count();
             if actual < 1 {
                 return Err(CSharpValidationError::InvalidChildCount {
                     context: "TupleTypeContext",
-                    child: "OP_163",
+                    child: "COMMA",
                     minimum: 1,
                     actual,
                 });
@@ -62574,7 +62574,7 @@ pub fn validate_tree_structure(
                 92 => {
                     let context = BreakStatementContext::__from_listener_node(context, None);
         let _ = context.kw_break_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 93 => {
                     let context = CheckedStatementContext::__from_listener_node(context, None);
@@ -62590,8 +62590,8 @@ pub fn validate_tree_structure(
         let _ = context.identifier_token().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_foreach_token().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_in_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 96 => {
                     let context = ForEachVariableStatementContext::__from_listener_node(context, None);
@@ -62609,13 +62609,13 @@ pub fn validate_tree_structure(
         }
         let _ = context.kw_foreach_token().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_in_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 97 => {
                     let context = ContinueStatementContext::__from_listener_node(context, None);
         let _ = context.kw_continue_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 98 => {
                     let context = DoStatementContext::__from_listener_node(context, None);
@@ -62623,39 +62623,39 @@ pub fn validate_tree_structure(
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_while_token().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_do_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 99 => {
                     let context = EmptyStatementContext::__from_listener_node(context, None);
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 100 => {
                     let context = ExpressionStatementContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 101 => {
                     let context = FixedStatementContext::__from_listener_node(context, None);
         let _ = context.variable_declaration().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.statement().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_fixed_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 102 => {
                     let context = ForStatementContext::__from_listener_node(context, None);
         let _ = context.statement().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_for_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
         {
-            let actual = context.op_168_tokens().count();
+            let actual = context.semicolon_tokens().count();
             if actual < 2 {
                 return Err(CSharpValidationError::InvalidChildCount {
                     context: "ForStatementContext",
-                    child: "OP_168",
+                    child: "SEMICOLON",
                     minimum: 2,
                     actual,
                 });
@@ -62665,15 +62665,15 @@ pub fn validate_tree_structure(
                 103 => {
                     let context = GotoStatementContext::__from_listener_node(context, None);
         let _ = context.kw_goto_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 104 => {
                     let context = IfStatementContext::__from_listener_node(context, None);
         let _ = context.statement().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_if_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 105 => {
                     let context = ElseClauseContext::__from_listener_node(context, None);
@@ -62689,7 +62689,7 @@ pub fn validate_tree_structure(
                 107 => {
                     let context = LocalDeclarationStatementContext::__from_listener_node(context, None);
         let _ = context.variable_declaration().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 108 => {
                     let context = LocalFunctionStatementContext::__from_listener_node(context, None);
@@ -62702,13 +62702,13 @@ pub fn validate_tree_structure(
         let _ = context.statement().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_lock_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 110 => {
                     let context = ReturnStatementContext::__from_listener_node(context, None);
         let _ = context.kw_return_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 111 => {
                     let context = SwitchStatementContext::__from_listener_node(context, None);
@@ -62769,8 +62769,8 @@ pub fn validate_tree_structure(
                 },
                 120 => {
                     let context = ParenthesizedVariableDesignationContext::__from_listener_node(context, None);
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 121 => {
                     let context = SingleVariableDesignationContext::__from_listener_node(context, None);
@@ -62782,21 +62782,21 @@ pub fn validate_tree_structure(
                 },
                 123 => {
                     let context = ListPatternContext::__from_listener_node(context, None);
-        let _ = context.op_173_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_174_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lbracket_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rbracket_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 124 => {
                     let context = ParenthesizedPatternContext::__from_listener_node(context, None);
         let _ = context.pattern().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 125 => {
                 },
                 126 => {
                     let context = PositionalPatternClauseContext::__from_listener_node(context, None);
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 127 => {
                     let context = SubpatternContext::__from_listener_node(context, None);
@@ -62820,7 +62820,7 @@ pub fn validate_tree_structure(
                 },
                 132 => {
                     let context = SlicePatternContext::__from_listener_node(context, None);
-        let _ = context.op_127_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.dot_dot_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 133 => {
                     let context = TypePatternContext::__from_listener_node(context, None);
@@ -62855,7 +62855,7 @@ pub fn validate_tree_structure(
                 139 => {
                     let context = ThrowStatementContext::__from_listener_node(context, None);
         let _ = context.kw_throw_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 140 => {
                     let context = TryStatementContext::__from_listener_node(context, None);
@@ -62870,15 +62870,15 @@ pub fn validate_tree_structure(
                 142 => {
                     let context = CatchDeclarationContext::__from_listener_node(context, None);
         let _ = context.r#type().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 143 => {
                     let context = CatchFilterClauseContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_when_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 144 => {
                     let context = FinallyClauseContext::__from_listener_node(context, None);
@@ -62894,21 +62894,21 @@ pub fn validate_tree_structure(
                     let context = UsingStatementContext::__from_listener_node(context, None);
         let _ = context.statement().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_using_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 147 => {
                     let context = WhileStatementContext::__from_listener_node(context, None);
         let _ = context.statement().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_while_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 148 => {
                     let context = YieldStatementContext::__from_listener_node(context, None);
         let _ = context.kw_yield_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_168_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.semicolon_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 149 => {
                 },
@@ -62924,12 +62924,12 @@ pub fn validate_tree_structure(
                 153 => {
                     let context = ParenthesizedLambdaExpressionContext::__from_listener_node(context, None);
         let _ = context.parameter_list().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_135_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.arrow_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 154 => {
                     let context = SimpleLambdaExpressionContext::__from_listener_node(context, None);
         let _ = context.parameter().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_135_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.arrow_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 155 => {
                     let context = AnonymousObjectCreationExpressionContext::__from_listener_node(context, None);
@@ -62972,19 +62972,19 @@ pub fn validate_tree_structure(
                     let context = CastExpressionContext::__from_listener_node(context, None);
         let _ = context.r#type().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 164 => {
                     let context = CheckedExpressionContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 165 => {
                     let context = CollectionExpressionContext::__from_listener_node(context, None);
-        let _ = context.op_173_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_174_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lbracket_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rbracket_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 166 => {
                 },
@@ -62995,7 +62995,7 @@ pub fn validate_tree_structure(
                 168 => {
                     let context = SpreadElementContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_127_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.dot_dot_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 169 => {
                     let context = WithElementContext::__from_listener_node(context, None);
@@ -63011,8 +63011,8 @@ pub fn validate_tree_structure(
                     let context = DefaultExpressionContext::__from_listener_node(context, None);
         let _ = context.r#type().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_default_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 172 => {
                     let context = ElementBindingExpressionContext::__from_listener_node(context, None);
@@ -63026,8 +63026,8 @@ pub fn validate_tree_structure(
                     let context = ImplicitArrayCreationExpressionContext::__from_listener_node(context, None);
         let _ = context.initializer_expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_new_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_173_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_174_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lbracket_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rbracket_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 175 => {
                     let context = ImplicitElementAccessContext::__from_listener_node(context, None);
@@ -63037,8 +63037,8 @@ pub fn validate_tree_structure(
                     let context = ImplicitStackAllocArrayCreationExpressionContext::__from_listener_node(context, None);
         let _ = context.initializer_expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_stackalloc_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_173_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_174_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lbracket_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rbracket_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 177 => {
                 },
@@ -63067,7 +63067,7 @@ pub fn validate_tree_structure(
                 184 => {
                     let context = InterpolationAlignmentClauseContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_163_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.comma_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 185 => {
                     let context = InterpolationFormatClauseContext::__from_listener_node(context, None);
@@ -63076,13 +63076,13 @@ pub fn validate_tree_structure(
                 },
                 186 => {
                     let context = InterpolatedMultiLineRawStringStartTokenContext::__from_listener_node(context, None);
-        let _ = context.op_101_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.triple_dquote_token().map_err(CSharpValidationError::MissingChild)?;
         {
-            let actual = context.op_156_tokens().count();
+            let actual = context.dollar_tokens().count();
             if actual < 1 {
                 return Err(CSharpValidationError::InvalidChildCount {
                     context: "InterpolatedMultiLineRawStringStartTokenContext",
-                    child: "OP_156",
+                    child: "DOLLAR",
                     minimum: 1,
                     actual,
                 });
@@ -63091,17 +63091,17 @@ pub fn validate_tree_structure(
                 },
                 187 => {
                     let context = InterpolatedRawStringEndTokenContext::__from_listener_node(context, None);
-        let _ = context.op_101_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.triple_dquote_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 188 => {
                     let context = InterpolatedSingleLineRawStringStartTokenContext::__from_listener_node(context, None);
-        let _ = context.op_101_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.triple_dquote_token().map_err(CSharpValidationError::MissingChild)?;
         {
-            let actual = context.op_156_tokens().count();
+            let actual = context.dollar_tokens().count();
             if actual < 1 {
                 return Err(CSharpValidationError::InvalidChildCount {
                     context: "InterpolatedSingleLineRawStringStartTokenContext",
-                    child: "OP_156",
+                    child: "DOLLAR",
                     minimum: 1,
                     actual,
                 });
@@ -63126,19 +63126,19 @@ pub fn validate_tree_structure(
                     let context = MakeRefExpressionContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_makeref_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 194 => {
                     let context = MemberBindingExpressionContext::__from_listener_node(context, None);
         let _ = context.simple_name().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_165_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.dot_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 195 => {
                     let context = ParenthesizedExpressionContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 196 => {
                     let context = PrefixUnaryExpressionContext::__from_listener_node(context, None);
@@ -63202,7 +63202,7 @@ pub fn validate_tree_structure(
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.identifier_token().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_let_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_170_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.eq_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 204 => {
                     let context = OrderByClauseContext::__from_listener_node(context, None);
@@ -63266,24 +63266,24 @@ pub fn validate_tree_structure(
                     let context = RefTypeExpressionContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_reftype_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 213 => {
                     let context = RefValueExpressionContext::__from_listener_node(context, None);
         let _ = context.r#type().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_refvalue_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_163_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.comma_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 214 => {
                     let context = SizeOfExpressionContext::__from_listener_node(context, None);
         let _ = context.r#type().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_sizeof_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 215 => {
                     let context = StackAllocArrayCreationExpressionContext::__from_listener_node(context, None);
@@ -63294,7 +63294,7 @@ pub fn validate_tree_structure(
                     let context = SwitchExpressionArmContext::__from_listener_node(context, None);
         let _ = context.pattern().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_135_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.arrow_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 217 => {
                     let context = ThrowExpressionContext::__from_listener_node(context, None);
@@ -63314,14 +63314,14 @@ pub fn validate_tree_structure(
                 });
             }
         }
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
         {
-            let actual = context.op_163_tokens().count();
+            let actual = context.comma_tokens().count();
             if actual < 1 {
                 return Err(CSharpValidationError::InvalidChildCount {
                     context: "TupleExpressionContext",
-                    child: "OP_163",
+                    child: "COMMA",
                     minimum: 1,
                     actual,
                 });
@@ -63332,15 +63332,15 @@ pub fn validate_tree_structure(
                     let context = TypeOfExpressionContext::__from_listener_node(context, None);
         let _ = context.r#type().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_typeof_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 220 => {
                     let context = UnsafeExpressionContext::__from_listener_node(context, None);
         let _ = context.expression().map_err(CSharpValidationError::MissingChild)?;
         let _ = context.kw_unsafe_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_159_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_160_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.lparen_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.rparen_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 221 => {
                 },
@@ -63401,11 +63401,11 @@ pub fn validate_tree_structure(
                 239 => {
                     let context = RightShiftContext::__from_listener_node(context, None);
         {
-            let actual = context.op_171_tokens().count();
+            let actual = context.gt_tokens().count();
             if actual < 2 {
                 return Err(CSharpValidationError::InvalidChildCount {
                     context: "RightShiftContext",
-                    child: "OP_171",
+                    child: "GT",
                     minimum: 2,
                     actual,
                 });
@@ -63415,11 +63415,11 @@ pub fn validate_tree_structure(
                 240 => {
                     let context = UnsignedRightShiftContext::__from_listener_node(context, None);
         {
-            let actual = context.op_171_tokens().count();
+            let actual = context.gt_tokens().count();
             if actual < 3 {
                 return Err(CSharpValidationError::InvalidChildCount {
                     context: "UnsignedRightShiftContext",
-                    child: "OP_171",
+                    child: "GT",
                     minimum: 3,
                     actual,
                 });
@@ -63428,18 +63428,18 @@ pub fn validate_tree_structure(
                 },
                 241 => {
                     let context = RightShiftAssignmentContext::__from_listener_node(context, None);
-        let _ = context.op_136_token().map_err(CSharpValidationError::MissingChild)?;
-        let _ = context.op_171_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.ge_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.gt_token().map_err(CSharpValidationError::MissingChild)?;
                 },
                 242 => {
                     let context = UnsignedRightShiftAssignmentContext::__from_listener_node(context, None);
-        let _ = context.op_136_token().map_err(CSharpValidationError::MissingChild)?;
+        let _ = context.ge_token().map_err(CSharpValidationError::MissingChild)?;
         {
-            let actual = context.op_171_tokens().count();
+            let actual = context.gt_tokens().count();
             if actual < 2 {
                 return Err(CSharpValidationError::InvalidChildCount {
                     context: "UnsignedRightShiftAssignmentContext",
-                    child: "OP_171",
+                    child: "GT",
                     minimum: 2,
                     actual,
                 });
