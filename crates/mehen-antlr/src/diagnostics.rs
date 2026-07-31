@@ -25,12 +25,12 @@ struct CollectedDiagnostic {
     line: usize,
     column: usize,
     message: String,
-    /// Byte range of the offending token, when the runtime supplied one.
+    /// Byte range of the offending source text, when the runtime resolved one.
     ///
-    /// Since the 0.19 runtime (upstream #196) `syntax_error` receives the
-    /// offending [`TokenView`], so a lexer/parser diagnostic can carry a real
-    /// source span instead of only a line/column in its message. Absent for a
-    /// lexer error reported before any token was produced.
+    /// Since the 0.23 runtime (upstream #257) `syntax_error` receives a
+    /// [`SyntaxErrorEvent`] carrying the resolved byte span directly, so this no
+    /// longer has to be reconstructed from the offending token. Absent for
+    /// custom streams that cannot resolve byte offsets.
     span: Option<(u32, u32)>,
 }
 
@@ -45,30 +45,21 @@ impl<R> ErrorListener<R> for DiagnosticCollector
 where
     R: Recognizer + ?Sized,
 {
-    fn syntax_error(
-        &mut self,
-        _recognizer: &R,
-        offending: Option<antlr4_runtime::token::TokenView<'_>>,
-        line: usize,
-        column: usize,
-        message: &str,
-        _error: Option<&antlr4_runtime::AntlrError>,
-    ) {
-        // `stop_byte` is inclusive in the runtime's token spans, so the
-        // exclusive end is one past it. A zero-width token (possible for a
-        // synthesized/missing token during recovery) yields `start == end`.
-        let span = offending.map(|token| {
-            let start = byte_offset_clamped(token.start_byte());
-            let end = byte_offset_clamped(token.stop_byte().saturating_add(1));
-            (start, end.max(start))
+    fn syntax_error(&mut self, _recognizer: &R, event: &antlr4_runtime::SyntaxErrorEvent<'_>) {
+        // The event's span is already a half-open byte range, so it only needs
+        // narrowing to mehen's `u32` offsets. `max` keeps the range well-formed
+        // if clamping collapsed the two ends.
+        let span = event.span.as_ref().map(|range| {
+            let start = byte_offset_clamped(range.start);
+            (start, byte_offset_clamped(range.end).max(start))
         });
         self.diagnostics
             .lock()
             .expect("ANTLR diagnostic collector lock poisoned")
             .push(CollectedDiagnostic {
-                line,
-                column,
-                message: message.to_owned(),
+                line: event.line,
+                column: event.column,
+                message: event.message.to_owned(),
                 span,
             });
     }
@@ -132,14 +123,23 @@ pub fn collect_errors(tree: Node<'_>, code: &str, max_diagnostics: usize) -> Vec
             // The error leaf owns the offending token, so the diagnostic can
             // carry its byte range. `stop_byte` is inclusive; a synthesized
             // (missing) recovery token can be zero-width, hence the `max`.
-            let start_byte = byte_offset_clamped(token.start_byte());
-            let end_byte = byte_offset_clamped(token.stop_byte().saturating_add(1)).max(start_byte);
-            out.span = Some(SourceSpan {
-                start_byte,
-                end_byte,
-                start_line: line.max(1) as u32,
-                end_line: line.max(1) as u32,
-            });
+            //
+            // Both offsets are optional since the 0.23 runtime: a token source
+            // that cannot resolve byte offsets reports `None`. Leave the span
+            // off in that case rather than inventing one — the line number in
+            // the message still locates the error.
+            out.span = token
+                .start_byte()
+                .zip(token.stop_byte())
+                .map(|(start, stop)| {
+                    let start_byte = byte_offset_clamped(start);
+                    SourceSpan {
+                        start_byte,
+                        end_byte: byte_offset_clamped(stop.saturating_add(1)).max(start_byte),
+                        start_line: line.max(1) as u32,
+                        end_line: line.max(1) as u32,
+                    }
+                });
             out
         })
         .collect()

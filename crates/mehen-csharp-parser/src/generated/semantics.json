@@ -3,37 +3,40 @@
   "policy": "error",
   "note": "unknown coordinates currently default to assume-true; a future minor release changes the default to error",
   "options": [
-    {"name": "superClass", "value": "CSharpLexerBase", "line": 20, "column": 4, "disposition": "hooked"},
-    {"name": "superClass", "value": "CSharpParserBase", "line": 15, "column": 4, "disposition": "hooked"},
-    {"name": "tokenVocab", "value": "CSharpLexer", "line": 14, "column": 4, "disposition": "metadata"}
+    {"name": "tokenVocab", "value": "CSharpLexer", "line": 5, "column": 10, "disposition": "metadata"}
   ],
   "grammars": [
     {
       "kind": "lexer",
       "name": "CSharpLexer",
       "coordinates": [
-        {"kind": "lexer-action", "rule": "INTERPOLATED_REGULAR_STRING_START", "rule_index": 122, "index": 0, "atn_state": null, "line": 161, "column": 9, "body": "this.OnInterpolatedRegularStringStart();", "disposition": "hooked", "template": null},
-        {"kind": "lexer-action", "rule": "INTERPOLATED_VERBATIUM_STRING_START", "rule_index": 123, "index": 1, "atn_state": null, "line": 164, "column": 10, "body": "this.OnInterpolatedVerbatiumStringStart();", "disposition": "hooked", "template": null},
-        {"kind": "lexer-action", "rule": "OPEN_BRACE", "rule_index": 124, "index": 2, "atn_state": null, "line": 168, "column": 31, "body": "this.OnOpenBrace();", "disposition": "hooked", "template": null},
-        {"kind": "lexer-action", "rule": "CLOSE_BRACE", "rule_index": 125, "index": 3, "atn_state": null, "line": 169, "column": 31, "body": "this.OnCloseBrace();", "disposition": "hooked", "template": null},
-        {"kind": "lexer-action", "rule": "COLON", "rule_index": 132, "index": 4, "atn_state": null, "line": 176, "column": 31, "body": "this.OnColon();", "disposition": "hooked", "template": null},
-        {"kind": "lexer-action", "rule": "OPEN_BRACE_INSIDE", "rule_index": 173, "index": 5, "atn_state": null, "line": 223, "column": 36, "body": "this.OpenBraceInside();", "disposition": "hooked", "template": null},
-        {"kind": "lexer-action", "rule": "DOUBLE_QUOTE_INSIDE", "rule_index": 176, "index": 6, "atn_state": null, "line": 226, "column": 36, "body": "this.OnDoubleQuoteInside();", "disposition": "hooked", "template": null},
-        {"kind": "lexer-action", "rule": "CLOSE_BRACE_INSIDE", "rule_index": 180, "index": 7, "atn_state": null, "line": 233, "column": 33, "body": "this.OnCloseBraceInside();", "disposition": "hooked", "template": null},
-        {"kind": "lexer-predicate", "rule": "REGULAR_CHAR_INSIDE", "rule_index": 174, "index": 0, "atn_state": null, "line": 224, "column": 36, "body": "this.IsRegularCharInside()", "disposition": "hooked", "template": "Hook"},
-        {"kind": "lexer-predicate", "rule": "VERBATIUM_DOUBLE_QUOTE_INSIDE", "rule_index": 175, "index": 1, "atn_state": null, "line": 225, "column": 36, "body": "this.IsVerbatiumDoubleQuoteInside()", "disposition": "hooked", "template": "Hook"},
-        {"kind": "lexer-predicate", "rule": "REGULAR_STRING_INSIDE", "rule_index": 177, "index": 2, "atn_state": null, "line": 227, "column": 36, "body": "this.IsRegularCharInside()", "disposition": "hooked", "template": "Hook"},
-        {"kind": "lexer-predicate", "rule": "VERBATIUM_INSIDE_STRING", "rule_index": 178, "index": 3, "atn_state": null, "line": 228, "column": 36, "body": "this.IsVerbatiumDoubleQuoteInside()", "disposition": "hooked", "template": "Hook"}
+        {"kind": "lexer-action", "rule": "INTERP_NESTED_CLOSE", "rule_index": 200, "index": 0, "atn_state": null, "line": 383, "column": 27, "body": "nestDepth--;", "disposition": "translated", "template": "MemberStmt(Add(0, Int(-1)))"},
+        {"kind": "lexer-action", "rule": "INTERP_HOLE_CLOSE", "rule_index": 201, "index": 1, "atn_state": null, "line": 390, "column": 33, "body": "nestDepth = holeStack.Pop();", "disposition": "translated", "template": "MemberStmt(Seq([Set(0, MemberTop(0)), Pop(0)]))"},
+        {"kind": "lexer-action", "rule": "INTERP_NESTED_OPEN", "rule_index": 202, "index": 2, "atn_state": null, "line": 395, "column": 33, "body": "nestDepth++;", "disposition": "translated", "template": "MemberStmt(Add(0, Int(1)))"},
+        {"kind": "lexer-action", "rule": "INTERP_HOLE_OPEN", "rule_index": 212, "index": 3, "atn_state": null, "line": 431, "column": 23, "body": "holeStack.Push(nestDepth); nestDepth = 0;", "disposition": "translated", "template": "MemberStmt(Seq([Push(0, Member(0)), Set(0, Int(0))]))"},
+        {"kind": "lexer-action", "rule": "INTERP_V_HOLE_OPEN", "rule_index": 218, "index": 4, "atn_state": null, "line": 451, "column": 25, "body": "holeStack.Push(nestDepth); nestDepth = 0;", "disposition": "translated", "template": "MemberStmt(Seq([Push(0, Member(0)), Set(0, Int(0))]))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_CLOSE", "rule_index": 200, "index": 0, "atn_state": null, "line": 383, "column": 6, "body": "nestDepth > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(Member(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_HOLE_CLOSE", "rule_index": 201, "index": 1, "atn_state": null, "line": 390, "column": 6, "body": "holeStack.Count > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberLen(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_OPEN", "rule_index": 202, "index": 2, "atn_state": null, "line": 395, "column": 6, "body": "holeStack.Count > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberLen(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_COLON", "rule_index": 203, "index": 3, "atn_state": null, "line": 403, "column": 6, "body": "nestDepth > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(Member(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_FORMAT_COLON", "rule_index": 204, "index": 4, "atn_state": null, "line": 407, "column": 6, "body": "holeStack.Count > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberLen(0))))"}
       ]
     },
     {
       "kind": "parser",
       "name": "CSharpParser",
       "coordinates": [
-        {"kind": "parser-predicate", "rule": "local_variable_declaration", "rule_index": 80, "index": 0, "atn_state": null, "line": 497, "column": 38, "body": "this.IsLocalVariableDeclaration()", "disposition": "translated", "template": "ContextChildRuleTextNotEquals { rule_name: \"local_variable_type\", text: \"var\" }"},
-        {"kind": "parser-predicate", "rule": "right_arrow", "rule_index": 185, "index": 1, "atn_state": null, "line": 1053, "column": 14, "body": "this.IsRightArrow()", "disposition": "translated", "template": "TokenPairAdjacent"},
-        {"kind": "parser-predicate", "rule": "right_shift", "rule_index": 186, "index": 2, "atn_state": null, "line": 1057, "column": 14, "body": "this.IsRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
-        {"kind": "parser-predicate", "rule": "right_shift_assignment", "rule_index": 187, "index": 3, "atn_state": null, "line": 1061, "column": 15, "body": "this.IsRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"}
+        {"kind": "parser-action", "rule": "name", "rule_index": 8, "index": null, "atn_state": 557, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-action", "rule": "type", "rule_index": 77, "index": null, "atn_state": 1627, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-action", "rule": "pattern", "rule_index": 115, "index": null, "atn_state": 2098, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-action", "rule": "expression", "rule_index": 149, "index": null, "atn_state": 2365, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-predicate", "rule": "record_keyword", "rule_index": 238, "index": 17, "atn_state": null, "line": 1517, "column": 4, "body": "this.IsRecordKeyword()", "disposition": "translated", "template": "LookaheadTextEquals { offset: 1, text: \"record\" }"},
+        {"kind": "parser-predicate", "rule": "right_shift", "rule_index": 239, "index": 18, "atn_state": null, "line": 1521, "column": 18, "body": "this.IsRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift", "rule_index": 240, "index": 19, "atn_state": null, "line": 1525, "column": 18, "body": "this.IsUnsignedRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift", "rule_index": 240, "index": 20, "atn_state": null, "line": 1525, "column": 56, "body": "this.IsUnsignedRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "right_shift_assignment", "rule_index": 241, "index": 21, "atn_state": null, "line": 1529, "column": 18, "body": "this.IsRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift_assignment", "rule_index": 242, "index": 22, "atn_state": null, "line": 1533, "column": 18, "body": "this.IsUnsignedRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift_assignment", "rule_index": 242, "index": 23, "atn_state": null, "line": 1533, "column": 66, "body": "this.IsUnsignedRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"}
       ]
     }
   ]

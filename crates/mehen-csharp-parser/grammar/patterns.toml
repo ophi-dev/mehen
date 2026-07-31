@@ -1,98 +1,25 @@
 version = 1
 
-# Semantic-helper lowerings for the grammars-v4 C# grammar (passed to
-# `antlr4-rust-gen --sem-patterns` by `cargo xtask antlr generate csharp`).
-# Mirrors `patterns/csharp.toml` in `ophi-dev/antlr-rust-runtime`, which the
-# runtime's Rust-vs-Go AST parity CI validates against real C# corpora.
-#
-# The grammar declares `superClass = CSharpLexerBase` / `CSharpParserBase`.
-# The LEXER base is genuinely stateful (interpolated-string nesting, `#if`
-# preprocessor evaluation and inactive-section skipping), so all of its
-# helpers lower to typed hooks implemented by this crate's `src/hooks.rs` —
-# a port of the runtime's parity-tested `csharp_lexer_base.rs`. The PARSER
-# base's four predicates are pure lookahead/context checks, so they lower to
-# inline SemIR patterns and need no hook object at all.
+# `record` is a contextual keyword. Roslyn declares
+# `<ContextualKind Name="RecordKeyword"/>` on
+# RecordDeclarationSyntax.Keyword, but its grammar generator reads only
+# `<Kind>`, so the published grammar spells the keyword as the catch-all
+# `syntax_token` — which makes `class` viable as a record declaration and
+# costs ~quadratic prediction time per type member. `prepare-roslyn-grammar.py`
+# restores the restriction as a text comparison on the lookahead token; it
+# lowers to a pure SemIR expression, so no typed hook is needed.
 
-# ── CSharpLexerBase (stateful → hooks) ──────────────────────────────────────
-
-[[helper]]
-kind = "lexer-action"
-name = "OnInterpolatedRegularStringStart"
-returns = "unit"
-lower = "hook"
-
-[[helper]]
-kind = "lexer-action"
-name = "OnInterpolatedVerbatiumStringStart"
-returns = "unit"
-lower = "hook"
-
-[[helper]]
-kind = "lexer-action"
-name = "OnOpenBrace"
-returns = "unit"
-lower = "hook"
-
-[[helper]]
-kind = "lexer-action"
-name = "OnCloseBrace"
-returns = "unit"
-lower = "hook"
-
-[[helper]]
-kind = "lexer-action"
-name = "OnColon"
-returns = "unit"
-lower = "hook"
-
-[[helper]]
-kind = "lexer-action"
-name = "OpenBraceInside"
-returns = "unit"
-lower = "hook"
-
-[[helper]]
-kind = "lexer-action"
-name = "OnDoubleQuoteInside"
-returns = "unit"
-lower = "hook"
-
-[[helper]]
-kind = "lexer-action"
-name = "OnCloseBraceInside"
-returns = "unit"
-lower = "hook"
-
-[[helper]]
-kind = "lexer-predicate"
-name = "IsRegularCharInside"
-returns = "bool"
-lower = "hook"
-
-[[helper]]
-kind = "lexer-predicate"
-name = "IsVerbatiumDoubleQuoteInside"
-returns = "bool"
-lower = "hook"
-
-# ── CSharpParserBase (pure → inline patterns) ───────────────────────────────
-
-# `local_variable_declaration` must not start with the contextual keyword
-# `var` used as a type name; compares the `local_variable_type` child's text.
 [[helper]]
 kind = "parser-predicate"
-name = "IsLocalVariableDeclaration"
+name = "IsRecordKeyword"
 returns = "bool"
-lower = "cmp(ne, ctx_rule_text(local_variable_type), str(\"var\"))"
+lower = "cmp(eq, token_text(1), str(\"record\"))"
 
-# `>` `>` (and `>` `>=`) are lexed as separate tokens; these predicates check
-# the two most recently consumed tokens were ADJACENT in the char stream so
-# `List<List<int>>` closes two generics while `a > > b` stays two operators.
-[[helper]]
-kind = "parser-predicate"
-name = "IsRightArrow"
-returns = "bool"
-lower = "token_index_adjacent"
+# `>>` / `>>>` (and their compound assignments) are spelled as adjacent
+# `>` tokens so a generic closer never lexes as a shift operator (see
+# SHIFT_TOKEN_RULES). Each predicate checks the pieces were adjacent in the
+# char stream, so `a >> b` shifts while `List<List<int>>` closes two
+# generics. Same lowering the vendored grammars-v4 grammar uses.
 
 [[helper]]
 kind = "parser-predicate"
@@ -102,6 +29,64 @@ lower = "token_index_adjacent"
 
 [[helper]]
 kind = "parser-predicate"
+name = "IsUnsignedRightShift"
+returns = "bool"
+lower = "token_index_adjacent"
+
+[[helper]]
+kind = "parser-predicate"
 name = "IsRightShiftAssignment"
 returns = "bool"
 lower = "token_index_adjacent"
+
+[[helper]]
+kind = "parser-predicate"
+name = "IsUnsignedRightShiftAssignment"
+returns = "bool"
+lower = "token_index_adjacent"
+
+# ── interpolated-string state (see lexer-tokens.g4.in) ──────────────────────
+#
+# `nestDepth` is brace nesting inside the innermost interpolation hole;
+# `holeStack` holds one saved depth per enclosing hole, so its own depth answers
+# "are we inside a hole at all". Stack-valued member state is runtime 0.20.1+
+# (upstream #206).
+
+[[member]]
+name = "nestDepth"
+kind = "int"
+scope = "lexer"
+
+[[member]]
+name = "holeStack"
+kind = "stack"
+scope = "lexer"
+
+# Truthiness only: nonzero means "deeper than the hole's own level".
+[[pattern]]
+match = "nestDepth > 0"
+lower = "not(not(member(nestDepth)))"
+
+# Likewise for the stack's depth: nonzero means a hole is open.
+[[pattern]]
+match = "holeStack.Count > 0"
+lower = "not(not(member_len(holeStack)))"
+
+[[pattern]]
+match = "nestDepth++"
+lower = "add_member(nestDepth, int(1))"
+
+[[pattern]]
+match = "nestDepth--"
+lower = "add_member(nestDepth, int(-1))"
+
+# A hole opens: save the enclosing hole's depth, then start this one at 0.
+[[pattern]]
+match = "holeStack.Push(nestDepth); nestDepth = 0;"
+lower = "seq(push_member(holeStack, member(nestDepth)), set_member(nestDepth, int(0)))"
+
+# A hole closes: restore the enclosing depth. `member_top` reads before the pop,
+# which is how an assignment-from-pop decomposes in this DSL.
+[[pattern]]
+match = "nestDepth = holeStack.Pop();"
+lower = "seq(set_member(nestDepth, member_top(holeStack)), pop_member(holeStack))"

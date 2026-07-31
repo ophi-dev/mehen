@@ -30,13 +30,20 @@ pub fn span_from_tokens(
     line_index: &LineIndex,
     source_len: usize,
 ) -> SourceSpan {
-    let start_byte = byte_offset_clamped(start_token.start_byte());
+    // Byte offsets are optional since the 0.23 runtime: a token source that
+    // cannot resolve them reports `None`. mehen's streams always can, so this is
+    // defensive — an unresolvable start yields an empty span rather than a
+    // fabricated one, keeping every downstream metric span truthful.
+    let Some(start) = start_token.start_byte() else {
+        return SourceSpan::empty();
+    };
+    let start_byte = byte_offset_clamped(start);
     let stop_byte = if stop_token.token_type() == TOKEN_EOF {
-        source_len
+        Some(source_len)
     } else {
         stop_token.stop_byte()
     };
-    let end_byte = byte_offset_clamped(stop_byte).max(start_byte);
+    let end_byte = stop_byte.map_or(start_byte, |stop| byte_offset_clamped(stop).max(start_byte));
     SourceSpan {
         start_byte,
         end_byte,
@@ -104,11 +111,11 @@ mod tests {
         fn source_name(&self) -> &str {
             "<test>"
         }
-        fn start_byte(&self) -> usize {
-            self.start_byte
+        fn start_byte(&self) -> Option<usize> {
+            Some(self.start_byte)
         }
-        fn stop_byte(&self) -> usize {
-            self.stop_byte
+        fn stop_byte(&self) -> Option<usize> {
+            Some(self.stop_byte)
         }
     }
 

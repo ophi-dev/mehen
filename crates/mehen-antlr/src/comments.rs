@@ -89,10 +89,17 @@ pub fn loc_tokens<'a>(
         // embedded newlines). Everything past this point works on plain
         // fields, so the classification is unit-testable without a
         // `TokenStore`.
+        // Byte offsets are optional since the 0.23 runtime (a token source that
+        // cannot resolve them reports `None`). A token with no position cannot
+        // be attributed to a source row, so it contributes no LOC — the same
+        // treatment absent text already gets above.
+        let (Some(start_byte), Some(stop_byte)) = (tok.start_byte(), tok.stop_byte()) else {
+            continue;
+        };
         push_loc_token(
             tok.token_type(),
-            tok.start_byte(),
-            tok.stop_byte(),
+            start_byte,
+            stop_byte,
             tok.line(),
             tok.text_or_empty(),
             comment_token_types,

@@ -27,7 +27,7 @@ use std::{env, fs};
 /// `antlr4-rust-gen` would fetch the latest crate, which after a runtime
 /// release can regenerate modules that no longer match the pinned runtime and
 /// silently drift. Bump this in lockstep with that pin.
-const GENERATOR_VERSION: &str = "0.21.0";
+const GENERATOR_VERSION: &str = "0.24.0";
 
 /// Askama model for a parser crate's generated `README.md`.
 ///
@@ -149,6 +149,36 @@ pub(crate) struct AntlrTarget {
     /// `<Lang>ParserBase` (e.g. `hooks::JavaParserBase`). `None` when every
     /// parser helper lowers to a pure pattern (or there are none).
     pub parser_hooks: Option<&'static str>,
+    /// Grammar-preparation script within `grammar_dir`, run before the
+    /// generator to derive [`Self::lexer_g4`] / [`Self::parser_g4`] (and any
+    /// `sem_patterns`) from a vendored upstream grammar that is not directly
+    /// generatable.
+    ///
+    /// `None` for grammars vendored in usable form (Kotlin, Java). C# vendors
+    /// Roslyn's `CSharp.Generated.g4`, a machine-generated *reference* grammar
+    /// that ANTLR rejects as-is, so its derived pair is a build artifact rather
+    /// than a checked-in source. The script is invoked as
+    ///
+    /// ```text
+    /// python3 <script> <prep_source> --out-dir . --generator <antlr4-rust-gen>
+    /// ```
+    ///
+    /// with `current_dir` set to `grammar_dir`.
+    pub prep_script: Option<&'static str>,
+    /// The vendored upstream grammar the [`Self::prep_script`] transforms.
+    /// `None` when there is no prep step.
+    pub prep_source: Option<&'static str>,
+    /// The entry rule's name *as spelled in the grammar*, passed as
+    /// `--entry-rule`. Distinct from [`Self::entry_rule`], which is the
+    /// generated Rust method name (`kotlinFile` vs `kotlin_file`).
+    ///
+    /// Without this flag the generator conservatively treats every top-level
+    /// rule reaching `EOF` as its own entry, so nothing is ever reported
+    /// unreachable. Naming the one rule mehen actually calls turns on the
+    /// `G4S078` unreachable-rule warning (runtime 0.24.0, upstream #262).
+    /// Declared rather than inferred because only the caller knows which public
+    /// rules matter — a grammar may legitimately ship alternative start rules.
+    pub grammar_entry_rule: &'static str,
 }
 
 impl AntlrTarget {
@@ -183,6 +213,9 @@ pub(crate) const TARGETS: &[AntlrTarget] = &[
         display_name: "Kotlin",
         upstream_name: "Kotlin/kotlin-spec",
         upstream_url: "https://github.com/Kotlin/kotlin-spec",
+        prep_script: None,
+        prep_source: None,
+        grammar_entry_rule: "kotlinFile",
         entry_rule: "kotlin_file",
         sample_source: "fun main() {}",
         sem_patterns: None,
@@ -199,6 +232,9 @@ pub(crate) const TARGETS: &[AntlrTarget] = &[
         display_name: "Java",
         upstream_name: "antlr/grammars-v4",
         upstream_url: "https://github.com/antlr/grammars-v4",
+        prep_script: None,
+        prep_source: None,
+        grammar_entry_rule: "compilationUnit",
         entry_rule: "compilation_unit",
         sample_source: "class C {}",
         // The grammar's two `this.…()` predicates come from the upstream
@@ -217,18 +253,23 @@ pub(crate) const TARGETS: &[AntlrTarget] = &[
         lexer_g4: "CSharpLexer.g4",
         parser_g4: "CSharpParser.g4",
         display_name: "C#",
-        upstream_name: "antlr/grammars-v4",
-        upstream_url: "https://github.com/antlr/grammars-v4",
+        upstream_name: "dotnet/roslyn",
+        upstream_url: "https://github.com/dotnet/roslyn",
+        prep_script: Some("prepare-grammar.py"),
+        prep_source: Some("CSharp.Generated.g4"),
+        grammar_entry_rule: "compilation_unit",
         entry_rule: "compilation_unit",
         sample_source: "class C {}",
-        // The LEXER base class is stateful (interpolated strings, `#if`
-        // preprocessor evaluation) → typed hooks ported in `hooks::
-        // CSharpLexerBase`. The PARSER base's four predicates are pure
-        // lookahead/context checks, fully lowered by `patterns.toml` —
-        // no parser hook object is needed.
+        // Roslyn's grammar declares no `superClass` and calls no host-language
+        // helpers, so there is nothing to acknowledge and no base class to port.
+        // The semantic surfaces the *derived* grammar uses — the restored
+        // `record` contextual keyword, the `>>` adjacency checks, and the
+        // interpolated-string brace state in `@lexer::members` — all lower to
+        // pure SemIR through the derived `patterns.toml`, so neither recognizer
+        // needs a hook object.
         sem_patterns: Some("patterns.toml"),
-        option_hooks: &["superClass=CSharpLexerBase", "superClass=CSharpParserBase"],
-        lexer_hooks: Some("hooks::CSharpLexerBase"),
+        option_hooks: &[],
+        lexer_hooks: None,
         parser_hooks: None,
     },
 ];
@@ -243,6 +284,11 @@ struct Toolchain {
     /// How to invoke `antlr4-rust-gen` (either a bare command on PATH or an
     /// explicit path).
     rust_gen: PathBuf,
+    /// Whether `uv` is available, needed only by targets with a
+    /// [`AntlrTarget::prep_script`]. `uv run --script` reads the script's PEP 723
+    /// block to provision a matching interpreter, so the prep does not depend on
+    /// whichever `python3` happens to be on `PATH`.
+    has_uv: bool,
 }
 
 /// Discover the external toolchain from the environment.
@@ -287,7 +333,12 @@ fn discover_toolchain() -> Result<Option<Toolchain>, String> {
         return Ok(None);
     }
 
-    Ok(Some(Toolchain { rust_gen }))
+    // Probed rather than required: only C# has a prep script, so a missing `uv`
+    // must not make Kotlin/Java generation unavailable. `run_prep` turns it into
+    // an actionable error for the targets that need it.
+    let has_uv = can_launch("uv", "--version");
+
+    Ok(Some(Toolchain { rust_gen, has_uv }))
 }
 
 /// Whether `program arg` can be launched and exits without an I/O error
@@ -301,6 +352,46 @@ fn can_launch(program: impl AsRef<std::ffi::OsStr>, arg: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok()
+}
+
+/// Derive a target's `.g4` pair by running its [`AntlrTarget::prep_script`].
+///
+/// A no-op for targets vendored in generatable form. C# vendors Roslyn's
+/// machine-generated *reference* grammar, which ANTLR rejects as-is, so its
+/// lexer/parser pair and `patterns.toml` are derived here and gitignored — the
+/// vendored `CSharp.Generated.g4` is the source of truth, exactly as the raw
+/// `.g4` is for Kotlin and Java.
+///
+/// The script is run through `uv run --script`, which reads its PEP 723 block to
+/// provision a matching interpreter rather than inheriting the ambient
+/// `python3`. It receives the resolved generator path because it delegates rule
+/// reachability to `antlr4-rust-gen` instead of reimplementing the analysis.
+fn run_prep(grammar_dir: &Path, target: &AntlrTarget, tools: &Toolchain) -> Result<(), String> {
+    let (Some(script), Some(source)) = (target.prep_script, target.prep_source) else {
+        return Ok(());
+    };
+    if !tools.has_uv {
+        return Err(format!(
+            "`{}` needs a grammar-preparation step ({script}), which runs via `uv`.\n\
+             Install it: https://docs.astral.sh/uv/getting-started/installation/",
+            target.slug
+        ));
+    }
+    let status = Command::new("uv")
+        .args(["run", "--script", script, source, "--out-dir", "."])
+        .arg("--generator")
+        .arg(&tools.rust_gen)
+        .current_dir(grammar_dir)
+        .status()
+        .map_err(|e| format!("failed to launch `uv run --script {script}`: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "grammar preparation failed for `{}` ({script} exited {})",
+            target.slug,
+            status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(())
 }
 
 /// A process-unique scratch directory under the system temp dir.
@@ -502,6 +593,7 @@ fn run_pipeline_into(
     out_dir: &Path,
 ) -> Result<(), String> {
     let grammar_dir = workspace.join(target.grammar_dir);
+    run_prep(&grammar_dir, target, tools)?;
     let mut cmd = Command::new(&tools.rust_gen);
     cmd.arg(target.lexer_g4)
         .arg(target.parser_g4)
@@ -509,7 +601,21 @@ fn run_pipeline_into(
         .arg(out_dir)
         .arg("--sem-unknown")
         .arg("error")
-        .arg("--require-full-semantics");
+        .arg("--require-full-semantics")
+        // Declaring the entry rule turns on the `G4S078` unreachable-rule
+        // analysis. Without it the generator treats every top-level rule that
+        // reaches `EOF` as its own entry, so nothing can be unreachable.
+        //
+        // Pruning is then enabled because mehen only ever calls the entry rule:
+        // an unreachable rule is pure generated weight (~9.6 KB of Rust each,
+        // measured), and dropping it shrinks the module, the binary, and compile
+        // time. It does remove the rule's context type and accessor from the
+        // generated API — acceptable here because these crates exist to serve
+        // mehen's walkers, and `check-generated` catches any drift the day a
+        // grammar update changes what is reachable.
+        .arg("--entry-rule")
+        .arg(target.grammar_entry_rule)
+        .arg("--prune-unreachable");
     if let Some(patterns) = target.sem_patterns {
         cmd.arg("--sem-patterns").arg(grammar_dir.join(patterns));
     }
@@ -528,10 +634,12 @@ fn run_pipeline_into(
 }
 
 /// Whether `path` is a generated artifact that participates in the checked-in
-/// snapshot and the drift comparison: the Rust lexer/parser modules (`.rs`)
-/// and the generator's `semantics.json` sidecar (emitted alongside them since
-/// the 0.13.0 runtime). Everything else in the dir (e.g. `README.md`) is
-/// hand-authored and excluded.
+/// snapshot and the drift comparison: the Rust lexer/parser modules (`.rs`) and
+/// the generator's JSON sidecars — `semantics.json` (since the 0.13.0 runtime)
+/// and `decisions.json` (the per-decision prediction-tier report, since 0.22.0).
+/// Matching on the extension rather than a name list means a new sidecar is
+/// drift-guarded the moment the generator starts emitting it. Everything else in
+/// the dir (e.g. `README.md`) is hand-authored and excluded.
 fn is_generated_artifact(path: &Path) -> bool {
     path.extension()
         .and_then(|x| x.to_str())

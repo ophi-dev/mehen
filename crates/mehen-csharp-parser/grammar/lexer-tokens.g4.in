@@ -47,14 +47,29 @@ fragment ExponentPart
     : [eE] [+-]? [0-9] [0-9_]*
     ;
 
-// §6.4.5.6 Character literals.
+// §6.4.5.6 Character literals. A char literal holds exactly one character, so
+// unlike STRING_LIT below it has no closure to absorb a mis-sized escape: the
+// escape forms have to be spelled out, or `'\ud800'` matches `\u` and then looks
+// for the closing quote at `d`.
 CHAR_LIT
-    : '\'' ( '\\' . | ~['\\\r\n] ) '\''
+    : '\'' ( Escape | ~['\\\r\n] ) '\''
     ;
 
-// §6.4.5.7 String literals.
+// §6.4.5.6 escape sequences: simple (`\n`, `\\`, `\'`), hex (`\xA` .. `\xABCD`),
+// and unicode — four hex digits after `u`, eight after `U`.
+fragment Escape
+    : '\\' ( 'u' HexQuad | 'U' HexQuad HexQuad | 'x' [0-9a-fA-F]+ | . )
+    ;
+
+fragment HexQuad
+    : [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]
+    ;
+
+// §6.4.5.7 String literals. The `*` closure means a mis-sized escape still lexes
+// (the remaining characters match the negated set), but spell the escapes anyway
+// so the token boundary is right for `"\\"` and friends.
 STRING_LIT
-    : '"' ( '\\' . | ~["\\\r\n] )* '"'
+    : '"' ( Escape | ~["\\\r\n] )* '"'
     ;
 
 VERBATIM_STRING_LIT
@@ -103,23 +118,85 @@ DIRECTIVE_LINE          : '#' ~[\r\n]*    -> channel(DIRECTIVE) ;
 // broad negated set would swallow ordinary code (an earlier flat-lexer attempt
 // lexed `class C ` as one token that way).
 //
-// The mode *transitions* are driven entirely by the typed hook in
-// `../src/hooks.rs`, not by grammar commands, because the interesting decision
-// is not expressible declaratively: the `}` that closes a hole is lexically
-// identical to the one closing a nested block —
+// The state and every mode transition live in the grammar. The one genuinely
+// hard decision is the `}` that closes a hole, which is lexically identical to
+// the one closing a nested block:
 //
 //     $"a{ new[]{ 1, 2 }.Length }b"
 //                ^^^^^^^^^  must NOT end the hole
 //
-// so it needs a brace depth per open hole and a *conditional* pop. Keeping the
-// grammar free of mode commands also keeps the two halves from fighting over
-// the mode stack. See `CSharpLexerHooks` for the state machine.
+// SemIR has no conditional and no mode-changing *action* (its statements only
+// touch member state), so this cannot be one rule with an `if`. Instead the two
+// meanings become two rules over the same character, each gated by a predicate
+// on the brace depth and each carrying its own *unconditional* command. The
+// lexer evaluates predicates during ATN simulation, so the rule choice does the
+// work the missing conditional would:
 //
-// `prepare-roslyn-grammar.py` rewrites the harvested `'$"'` / `'$@"'` literals
-// to the named tokens below (INTERP_TOKEN_LITERALS) so the hook can recognize
-// them by a stable name.
-INTERP_START          : '$"' ;
-INTERP_VERBATIM_START : '$@"' ;
+//     INTERP_NESTED_CLOSE : {nestDepth > 0}?      '}' { nestDepth--; }
+//     INTERP_HOLE_CLOSE   : {holeStack.Count > 0}? '}' -> popMode
+//
+// Stack-valued member state is runtime 0.20.1+ (upstream #206, filed for exactly
+// this shape).
+//
+// Regular vs. verbatim needs no state: `$"` and `$@"` push *different* text
+// modes, so the mode itself records the flavour.
+//
+// `prepare-grammar.py` rewrites the harvested `'$"'` / `'$@"'` literals to the
+// named tokens below (INTERP_TOKEN_LITERALS). `LBRACE` / `RBRACE` / `DQUOTE` /
+// `COLON` are harvested literals the script pins to those names
+// (STABLE_TOKEN_NAMES) so the `type(…)` commands here stay valid — the default
+// `OP_nnn` names are index-derived and shift whenever the literal set changes.
+INTERP_START          : '$"'  -> pushMode(INTERPOLATION) ;
+INTERP_VERBATIM_START : '$@"' -> pushMode(INTERPOLATION_VERBATIM) ;
+
+// ---- braces and `:` inside an interpolation hole -----------------------
+// `{`, `}` and `:` mean different things inside a hole, so this file defines them
+// rather than letting the script harvest them into the literals block: ANTLR
+// breaks an equal-length match by rule order, so the gated rules have to come
+// first and the plain fallbacks last. (HOLE_SENSITIVE_LITERALS in the script
+// keeps the harvester from emitting duplicates.)
+//
+// Order is load-bearing twice over. Between the gated rules, the DSL cannot
+// express `inHole && depth == 0`, so the deeper case goes first: if `nestDepth`
+// is nonzero we are certainly inside a hole, and reaching the next rule proves
+// `nestDepth == 0`. And all of them precede the unguarded fallbacks, which are
+// what ordinary code outside any hole matches.
+
+// Nested block/initializer brace — unwind one level, stay in the hole.
+INTERP_NESTED_CLOSE
+    : {nestDepth > 0}? '}' { nestDepth--; } -> type(RBRACE)
+    ;
+
+// `nestDepth` is 0 here, so a hole is open and this `}` closes it. Popping
+// `holeStack` restores the *enclosing* hole's depth, which matters for
+// `$"{ $"{x}" }"`: the inner hole's count must not clobber the outer one's.
+INTERP_HOLE_CLOSE
+    : {holeStack.Count > 0}? '}' { nestDepth = holeStack.Pop(); } -> type(RBRACE), popMode
+    ;
+
+// An opening brace inside a hole deepens the count.
+INTERP_NESTED_OPEN
+    : {holeStack.Count > 0}? '{' { nestDepth++; } -> type(LBRACE)
+    ;
+
+// `{x:D4}` — a `:` at depth 0 inside a hole starts the format specifier, so the
+// rest of the hole is literal text. Guarded by `nestDepth` first for the same
+// reason: a `:` at any deeper level belongs to a nested construct (a ternary, a
+// dictionary initializer, a label) and must stay an ordinary `COLON`.
+INTERP_NESTED_COLON
+    : {nestDepth > 0}? ':' -> type(COLON)
+    ;
+
+INTERP_FORMAT_COLON
+    : {holeStack.Count > 0}? ':' -> type(COLON), pushMode(INTERPOLATION_FORMAT)
+    ;
+
+// The unguarded fallbacks, reached only when every predicate above was false —
+// i.e. ordinary code outside any interpolation hole. Their names are pinned by
+// STABLE_TOKEN_NAMES so the `type(…)` commands above stay valid.
+LBRACE : '{' ;
+RBRACE : '}' ;
+COLON  : ':' ;
 
 mode INTERPOLATION;
 
@@ -128,24 +205,47 @@ mode INTERPOLATION;
 INTERP_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
 INTERP_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
 
-// Text between holes.
+// Text between holes. A backslash starts an escape sequence, so `\"` does not
+// end the string and must be consumed as a unit.
+INTERP_ESCAPE     : '\\' . -> type(INTERPOLATED_TEXT) ;
 INTERPOLATED_TEXT : ~[{}"\\]+ ;
 
-// A hole opens / the string ends. Both emit the token type the parser expects
-// (`{` and `"` respectively); the hook performs the mode change.
-INTERP_HOLE_OPEN : '{' -> type(@LBRACE@) ;
-INTERP_END       : '"' -> type(@DQUOTE@) ;
+// A hole opens: its expression is ordinary C#, so switch to the default mode and
+// start counting braces for this hole.
+INTERP_HOLE_OPEN : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+
+// The string ends: drop this string's entry and leave the text mode.
+INTERP_END : '"' -> type(DQUOTE), popMode ;
+
+// A *verbatim* interpolated string (`$@"…"`) has different lexical rules for the
+// same syntax: a backslash is an ordinary character (no escape sequences) and a
+// doubled `""` is the escaped quote. One text rule cannot serve both flavours,
+// so `$@"` pushes this mode instead. (The grammars-v4 C# lexer splits the same
+// two cases for the same reason.) Braces and holes behave identically, so these
+// rules mirror the ones above and emit the same token types.
+mode INTERPOLATION_VERBATIM;
+
+INTERP_V_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
+INTERP_V_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
+
+// `""` is a literal quote inside a verbatim string, so it must not end it.
+INTERP_V_ESCAPED_QUOTE : '""' -> type(INTERPOLATED_TEXT) ;
+INTERP_V_TEXT          : ~[{}"]+ -> type(INTERPOLATED_TEXT) ;
+
+INTERP_V_HOLE_OPEN : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+INTERP_V_END       : '"' -> type(DQUOTE), popMode ;
 
 // A format specifier (`{x:D4}`) is a third mode: after the `:` that ends a
 // hole's expression, the remaining text up to the closing `}` is literal format
 // text, not C# code — `D4` must not lex as an identifier. (The grammars-v4 C#
-// lexer has an INTERPOLATION_FORMAT mode for the same reason.) The hook enters
-// this mode on a `:` seen at brace depth 0 inside a hole.
+// lexer has an INTERPOLATION_FORMAT mode for the same reason.) Entered from the
+// default mode by the `:` rule below, at brace depth 0 inside a hole.
 mode INTERPOLATION_FORMAT;
 
 // The format text, emitted as the same token the grammar's
 // `interpolation_format_clause : ':' interpolated_string_text_token` expects.
 INTERP_FORMAT_TEXT : ~[}"]+ -> type(INTERPOLATED_TEXT) ;
 
-// The `}` that closes the hole; the hook restores the interpolation mode.
-INTERP_FORMAT_END : '}' -> type(@RBRACE@) ;
+// The `}` that closes the hole. Two pops: this mode, then the hole's own
+// DEFAULT_MODE, landing back in the enclosing interpolation text mode.
+INTERP_FORMAT_END : '}' -> type(RBRACE), popMode, popMode ;

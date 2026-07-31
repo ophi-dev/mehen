@@ -1,0 +1,9 @@
+# Derived by `prepare-grammar.py` during `cargo xtask antlr generate csharp`
+# from the vendored `CSharp.Generated.g4`. Build artifacts, not sources — see
+# PROVENANCE.md.
+/CSharpLexer.g4
+/CSharpParser.g4
+/patterns.toml
+
+# ANTLR IDE plugin scratch output.
+/.antlr/

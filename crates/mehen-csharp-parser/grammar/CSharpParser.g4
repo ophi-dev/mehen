@@ -1,1315 +1,1534 @@
-// EBNF following ECMA 334 Version 7 language specification.
-// MIT License.
-
-// Eclipse Public License - v 1.0, http://www.eclipse.org/legal/epl-v10.html
-// Copyright (c) 2013, Christian Wulf (chwchw@gmx.de)
-// Copyright (c) 2016-2017, Ivan Kochurkin (kvanttt@gmail.com), Positive Technologies.
-
-// $antlr-format alignTrailingComments true, columnLimit 150, minEmptyLines 1, maxEmptyLinesToKeep 1, reflowComments false, useTab false
-// $antlr-format allowShortRulesOnASingleLine false, allowShortBlocksOnASingleLine true, alignSemicolons hanging, alignColons hanging
-
+// @generated from Roslyn's CSharp.Generated.g4 by prepare-roslyn-grammar.py — do not hand-edit.
+// See PROVENANCE.md for the pinned upstream revision and the patch rationale.
 parser grammar CSharpParser;
 
-options {
-    tokenVocab = CSharpLexer;
-    superClass = CSharpParserBase;
-}
+options { tokenVocab=CSharpLexer; }
 
-// Insert here @header for parser.
-
-
-// entry point
 compilation_unit
-    : BYTE_ORDER_MARK? extern_alias_directives? using_directives? global_attribute_section* namespace_member_declarations? EOF
-    ;
-
-//B.2 Syntactic grammar
-
-//B.2.1 Basic concepts
-
-namespace_or_type_name
-    : (identifier type_argument_list? | qualified_alias_member) (
-        '.' identifier type_argument_list?
-    )*
-    ;
-
-//B.2.2 Types
-type_
-    : base_type ('?' | rank_specifier | '*')*
-    ;
-
-base_type
-    : simple_type
-    | class_type // represents types: enum, class, interface, delegate, type_parameter
-    | VOID '*'
-    | tuple_type
-    ;
-
-tuple_type
-    : '(' tuple_element (',' tuple_element)+ ')'
-    ;
-
-tuple_element
-    : type_ identifier?
-    ;
-
-simple_type
-    : numeric_type
-    | BOOL
-    ;
-
-numeric_type
-    : integral_type
-    | floating_point_type
-    | DECIMAL
-    ;
-
-integral_type
-    : SBYTE
-    | BYTE
-    | SHORT
-    | USHORT
-    | INT
-    | UINT
-    | LONG
-    | ULONG
-    | CHAR
-    ;
-
-floating_point_type
-    : FLOAT
-    | DOUBLE
-    ;
-
-/** namespace_or_type_name, OBJECT, STRING */
-class_type
-    : namespace_or_type_name
-    | OBJECT
-    | DYNAMIC
-    | STRING
-    ;
-
-type_argument_list
-    : '<' type_ (',' type_)* '>'
-    ;
-
-//B.2.4 Expressions
-argument_list
-    : argument (',' argument)*
-    ;
-
-argument
-    : (identifier ':')? refout = (REF | OUT | IN)? (expression | (VAR | type_) expression)
-    ;
-
-expression
-    : assignment
-    | non_assignment_expression
-    | REF non_assignment_expression
-    ;
-
-non_assignment_expression
-    : lambda_expression
-    | query_expression
-    | conditional_expression
-    ;
-
-assignment
-    : unary_expression assignment_operator expression
-    | unary_expression '??=' throwable_expression
-    ;
-
-assignment_operator
-    : '='
-    | '+='
-    | '-='
-    | '*='
-    | '/='
-    | '%='
-    | '&='
-    | '|='
-    | '^='
-    | '<<='
-    | right_shift_assignment
-    ;
-
-conditional_expression
-    : null_coalescing_expression ('?' throwable_expression ':' throwable_expression)?
-    ;
-
-null_coalescing_expression
-    : conditional_or_expression ('??' (null_coalescing_expression | throw_expression))?
-    ;
-
-conditional_or_expression
-    : conditional_and_expression (OP_OR conditional_and_expression)*
-    ;
-
-conditional_and_expression
-    : inclusive_or_expression (OP_AND inclusive_or_expression)*
-    ;
-
-inclusive_or_expression
-    : exclusive_or_expression ('|' exclusive_or_expression)*
-    ;
-
-exclusive_or_expression
-    : and_expression ('^' and_expression)*
-    ;
-
-and_expression
-    : equality_expression ('&' equality_expression)*
-    ;
-
-equality_expression
-    : relational_expression ((OP_EQ | OP_NE) relational_expression)*
-    ;
-
-relational_expression
-    : shift_expression (('<' | '>' | '<=' | '>=') shift_expression | IS pattern | AS type_)*
-    ;
-
-shift_expression
-    : additive_expression (('<<' | right_shift) additive_expression)*
-    ;
-
-additive_expression
-    : multiplicative_expression (('+' | '-') multiplicative_expression)*
-    ;
-
-multiplicative_expression
-    : unary_expression (('*' | '/' | '%') unary_expression)*
-    ;
-
-// https://msdn.microsoft.com/library/6a71f45d(v=vs.110).aspx
-unary_expression
-    : cast_expression
-    | primary_expression
-    | '+' unary_expression
-    | '-' unary_expression
-    | BANG unary_expression
-    | '~' unary_expression
-    | '++' unary_expression
-    | '--' unary_expression
-    | AWAIT unary_expression // C# 5
-    | '&' unary_expression
-    | '*' unary_expression
-    | '^' unary_expression // C# 8 ranges
-    ;
-
-cast_expression
-    : OPEN_PARENS type_ CLOSE_PARENS unary_expression
-    ;
-
-primary_expression // Null-conditional operators C# 6: https://msdn.microsoft.com/en-us/library/dn986595.aspx
-    : pe = primary_expression_start '!'? bracket_expression* '!'? (
-        (member_access | method_invocation | '++' | '--' | '->' identifier) '!'? bracket_expression* '!'?
-    )*
-    ;
-
-primary_expression_start
-    : literal                                                             # literalExpression
-    | identifier type_argument_list?                                      # simpleNameExpression
-    | OPEN_PARENS expression CLOSE_PARENS                                 # parenthesisExpressions
-    | predefined_type                                                     # memberAccessExpression
-    | qualified_alias_member                                              # memberAccessExpression
-    | LITERAL_ACCESS                                                      # literalAccessExpression
-    | THIS                                                                # thisReferenceExpression
-    | BASE ('.' identifier type_argument_list? | '[' expression_list ']') # baseAccessExpression
-    | NEW (
-        type_ (
-            object_creation_expression
-            | object_or_collection_initializer
-            | '[' expression_list ']' rank_specifier* array_initializer?
-            | rank_specifier+ array_initializer
-        )
-        | anonymous_object_initializer
-        | rank_specifier array_initializer
-    )                                                                                               # objectCreationExpression
-    | OPEN_PARENS argument ( ',' argument)+ CLOSE_PARENS                                            # tupleExpression
-    | TYPEOF OPEN_PARENS (unbound_type_name | type_ | VOID) CLOSE_PARENS                            # typeofExpression
-    | CHECKED OPEN_PARENS expression CLOSE_PARENS                                                   # checkedExpression
-    | UNCHECKED OPEN_PARENS expression CLOSE_PARENS                                                 # uncheckedExpression
-    | DEFAULT (OPEN_PARENS type_ CLOSE_PARENS)?                                                     # defaultValueExpression
-    | ASYNC? DELEGATE (OPEN_PARENS explicit_anonymous_function_parameter_list? CLOSE_PARENS)? block # anonymousMethodExpression
-    | SIZEOF OPEN_PARENS type_ CLOSE_PARENS                                                         # sizeofExpression
-    // C# 6: https://msdn.microsoft.com/en-us/library/dn986596.aspx
-    | NAMEOF OPEN_PARENS (identifier '.')* identifier CLOSE_PARENS # nameofExpression
-    // C# 7.2: stackalloc in general expression context
-    | stackalloc_initializer                                        # stackallocExpression
-    ;
-
-throwable_expression
-    : expression
-    | throw_expression
-    ;
-
-throw_expression
-    : THROW expression
-    ;
-
-member_access
-    : '?'? '.' identifier type_argument_list?
-    ;
-
-bracket_expression
-    : '?'? '[' indexer_argument (',' indexer_argument)* ']'
-    ;
-
-indexer_argument
-    : (identifier ':')? expression
-    ;
-
-predefined_type
-    : BOOL
-    | BYTE
-    | CHAR
-    | DECIMAL
-    | DOUBLE
-    | FLOAT
-    | INT
-    | LONG
-    | OBJECT
-    | SBYTE
-    | SHORT
-    | STRING
-    | UINT
-    | ULONG
-    | USHORT
-    ;
-
-expression_list
-    : expression (',' expression)*
-    ;
-
-object_or_collection_initializer
-    : object_initializer
-    | collection_initializer
-    ;
-
-object_initializer
-    : OPEN_BRACE (member_initializer_list ','?)? CLOSE_BRACE
-    ;
-
-member_initializer_list
-    : member_initializer (',' member_initializer)*
-    ;
-
-member_initializer
-    : (identifier | '[' expression ']') '=' initializer_value // C# 6
-    ;
-
-initializer_value
-    : expression
-    | object_or_collection_initializer
-    ;
-
-collection_initializer
-    : OPEN_BRACE element_initializer (',' element_initializer)* ','? CLOSE_BRACE
-    ;
-
-element_initializer
-    : non_assignment_expression
-    | OPEN_BRACE expression_list CLOSE_BRACE
-    ;
-
-anonymous_object_initializer
-    : OPEN_BRACE (member_declarator_list ','?)? CLOSE_BRACE
-    ;
-
-member_declarator_list
-    : member_declarator (',' member_declarator)*
-    ;
-
-member_declarator
-    : primary_expression
-    | identifier '=' expression
-    ;
-
-unbound_type_name
-    : identifier (generic_dimension_specifier? | '::' identifier generic_dimension_specifier?) (
-        '.' identifier generic_dimension_specifier?
-    )*
-    ;
-
-generic_dimension_specifier
-    : '<' ','* '>'
-    ;
-
-lambda_expression
-    : ASYNC? anonymous_function_signature right_arrow anonymous_function_body
-    ;
-
-anonymous_function_signature
-    : OPEN_PARENS CLOSE_PARENS
-    | OPEN_PARENS explicit_anonymous_function_parameter_list CLOSE_PARENS
-    | OPEN_PARENS implicit_anonymous_function_parameter_list CLOSE_PARENS
-    | identifier
-    ;
-
-explicit_anonymous_function_parameter_list
-    : explicit_anonymous_function_parameter (',' explicit_anonymous_function_parameter)*
-    ;
-
-explicit_anonymous_function_parameter
-    : refout = (REF | OUT | IN)? type_ identifier
-    ;
-
-implicit_anonymous_function_parameter_list
-    : identifier (',' identifier)*
-    ;
-
-anonymous_function_body
-    : throwable_expression
-    | REF non_assignment_expression
-    | block
-    ;
-
-query_expression
-    : from_clause query_body
-    ;
-
-from_clause
-    : FROM type_? identifier IN expression
-    ;
-
-query_body
-    : query_body_clause* select_or_group_clause query_continuation?
-    ;
-
-query_body_clause
-    : from_clause
-    | let_clause
-    | where_clause
-    | combined_join_clause
-    | orderby_clause
-    ;
-
-let_clause
-    : LET identifier '=' expression
-    ;
-
-where_clause
-    : WHERE expression
-    ;
-
-combined_join_clause
-    : JOIN type_? identifier IN expression ON expression EQUALS expression (INTO identifier)?
-    ;
-
-orderby_clause
-    : ORDERBY ordering (',' ordering)*
-    ;
-
-ordering
-    : expression dir = (ASCENDING | DESCENDING)?
-    ;
-
-select_or_group_clause
-    : SELECT expression
-    | GROUP expression BY expression
-    ;
-
-query_continuation
-    : INTO identifier query_body
-    ;
-
-//B.2.5 Statements
-statement
-    : labeled_Statement
-    | declarationStatement
-    | embedded_statement
-    ;
-
-declarationStatement
-    : local_variable_declaration ';'
-    | local_constant_declaration ';'
-    | local_function_declaration
-    ;
-
-local_function_declaration
-    : local_function_header local_function_body
-    ;
-
-local_function_header
-    : local_function_modifiers? return_type identifier type_parameter_list? OPEN_PARENS formal_parameter_list? CLOSE_PARENS
-        type_parameter_constraints_clauses?
-    ;
-
-local_function_modifiers
-    : (ASYNC | UNSAFE) STATIC?
-    | STATIC (ASYNC | UNSAFE)
-    ;
-
-local_function_body
-    : block
-    | right_arrow throwable_expression ';'
-    ;
-
-labeled_Statement
-    : identifier ':' statement
-    ;
-
-embedded_statement
-    : block
-    | simple_embedded_statement
-    ;
-
-simple_embedded_statement
-    : ';'            # theEmptyStatement
-    | expression ';' # expressionStatement
-
-    // selection statements
-    | IF OPEN_PARENS expression CLOSE_PARENS if_body (ELSE if_body)?                    # ifStatement
-    | SWITCH OPEN_PARENS expression CLOSE_PARENS OPEN_BRACE switch_section* CLOSE_BRACE # switchStatement
-
-    // iteration statements
-    | WHILE OPEN_PARENS expression CLOSE_PARENS embedded_statement                                            # whileStatement
-    | DO embedded_statement WHILE OPEN_PARENS expression CLOSE_PARENS ';'                                     # doStatement
-    | FOR OPEN_PARENS for_initializer? ';' expression? ';' for_iterator? CLOSE_PARENS embedded_statement      # forStatement
-    | FOREACH OPEN_PARENS (REF READONLY? | READONLY REF)? local_variable_type identifier IN expression CLOSE_PARENS embedded_statement # foreachStatement
-    | FOREACH OPEN_PARENS VAR parenthesized_variable_designation IN expression CLOSE_PARENS embedded_statement # foreachDeconstructStatement
-
-    // jump statements
-    | BREAK ';'                                                              # breakStatement
-    | CONTINUE ';'                                                           # continueStatement
-    | GOTO (identifier | CASE expression | DEFAULT) ';'                      # gotoStatement
-    | RETURN expression? ';'                                                 # returnStatement
-    | THROW expression? ';'                                                  # throwStatement
-    | TRY block (catch_clauses finally_clause? | finally_clause)             # tryStatement
-    | CHECKED block                                                          # checkedStatement
-    | UNCHECKED block                                                        # uncheckedStatement
-    | LOCK OPEN_PARENS expression CLOSE_PARENS embedded_statement            # lockStatement
-    | USING OPEN_PARENS resource_acquisition CLOSE_PARENS embedded_statement # usingStatement
-    | YIELD (RETURN expression | BREAK) ';'                                  # yieldStatement
-
-    // unsafe statements
-    | UNSAFE block                                                                             # unsafeStatement
-    | FIXED OPEN_PARENS pointer_type fixed_pointer_declarators CLOSE_PARENS embedded_statement # fixedStatement
-    ;
-
-block
-    : OPEN_BRACE statement_list? CLOSE_BRACE
-    ;
-
-local_variable_declaration
-    : (USING | REF | REF READONLY)? local_variable_type local_variable_declarator (
-        ',' local_variable_declarator {this.IsLocalVariableDeclaration()}?
-    )*
-    | FIXED pointer_type fixed_pointer_declarators
-    ;
-
-local_variable_type
-    : VAR
-    | type_
-    ;
-
-local_variable_declarator
-    : identifier ('=' REF? local_variable_initializer)?
-    ;
-
-local_variable_initializer
-    : expression
-    | array_initializer
-    | stackalloc_initializer
-    ;
-
-local_constant_declaration
-    : CONST type_ constant_declarators
-    ;
-
-if_body
-    : block
-    | simple_embedded_statement
-    ;
-
-switch_section
-    : switch_label+ statement_list
-    ;
-
-switch_label
-    : CASE pattern case_guard? ':'
-    | DEFAULT ':'
-    ;
-
-case_guard
-    : WHEN expression
-    ;
-
-// C# 7.0: pattern matching (ECMA-334 §11.20.4)
-pattern
-    : VAR variable_designation      // var_pattern
-    | type_ simple_designation      // declaration_pattern
-    | type_                         // type_pattern (old-style 'is Type' without name, e.g. 'is byte[]')
-    | expression                    // constant_pattern
-    ;
-
-variable_designation
-    : simple_designation
-    | parenthesized_variable_designation
-    ;
-
-parenthesized_variable_designation
-    : OPEN_PARENS variable_designation (',' variable_designation)+ CLOSE_PARENS
-    ;
-
-simple_designation
-    : identifier
-    ;
-
-statement_list
-    : statement+
-    ;
-
-for_initializer
-    : local_variable_declaration
-    | expression (',' expression)*
-    ;
-
-for_iterator
-    : expression (',' expression)*
-    ;
-
-catch_clauses
-    : specific_catch_clause specific_catch_clause* general_catch_clause?
-    | general_catch_clause
-    ;
-
-specific_catch_clause
-    : CATCH OPEN_PARENS class_type identifier? CLOSE_PARENS exception_filter? block
-    ;
-
-general_catch_clause
-    : CATCH exception_filter? block
-    ;
-
-exception_filter // C# 6
-    : WHEN OPEN_PARENS expression CLOSE_PARENS
-    ;
-
-finally_clause
-    : FINALLY block
-    ;
-
-resource_acquisition
-    : local_variable_declaration
-    | expression
-    ;
-
-//B.2.6 Namespaces;
-namespace_declaration
-    : NAMESPACE qi = qualified_identifier namespace_body ';'?
-    ;
-
-qualified_identifier
-    : identifier ('.' identifier)*
-    ;
-
-namespace_body
-    : OPEN_BRACE extern_alias_directives? using_directives? namespace_member_declarations? CLOSE_BRACE
-    ;
-
-extern_alias_directives
-    : extern_alias_directive+
-    ;
+  : extern_alias_directive* using_directive* attribute_list* member_declaration*
+  ;
 
 extern_alias_directive
-    : EXTERN ALIAS identifier ';'
-    ;
-
-using_directives
-    : using_directive+
-    ;
+  : KW_EXTERN KW_ALIAS identifier_token OP_168
+  ;
 
 using_directive
-    : USING identifier '=' namespace_or_type_name ';' # usingAliasDirective
-    | USING namespace_or_type_name ';'                # usingNamespaceDirective
-    // C# 6: https://msdn.microsoft.com/en-us/library/ms228593.aspx
-    | USING STATIC namespace_or_type_name ';' # usingStaticDirective
-    ;
-
-namespace_member_declarations
-    : namespace_member_declaration+
-    ;
-
-namespace_member_declaration
-    : namespace_declaration
-    | type_declaration
-    ;
-
-type_declaration
-    : attributes? all_member_modifiers? (
-        class_definition
-        | struct_definition
-        | interface_definition
-        | enum_definition
-        | delegate_definition
-    )
-    ;
-
-qualified_alias_member
-    : identifier '::' identifier type_argument_list?
-    ;
-
-//B.2.7 Classes;
-type_parameter_list
-    : '<' type_parameter (',' type_parameter)* '>'
-    ;
-
-type_parameter
-    : attributes? identifier
-    ;
-
-class_base
-    : ':' class_type (',' namespace_or_type_name)*
-    ;
-
-interface_type_list
-    : namespace_or_type_name (',' namespace_or_type_name)*
-    ;
-
-type_parameter_constraints_clauses
-    : type_parameter_constraints_clause+
-    ;
-
-type_parameter_constraints_clause
-    : WHERE identifier ':' type_parameter_constraints
-    ;
-
-type_parameter_constraints
-    : constructor_constraint
-    | primary_constraint (',' secondary_constraints)? (',' constructor_constraint)?
-    ;
-
-primary_constraint
-    : class_type
-    | CLASS '?'?
-    | STRUCT
-    | UNMANAGED
-    ;
-
-// namespace_or_type_name includes identifier
-secondary_constraints
-    : namespace_or_type_name (',' namespace_or_type_name)*
-    ;
-
-constructor_constraint
-    : NEW OPEN_PARENS CLOSE_PARENS
-    ;
-
-class_body
-    : OPEN_BRACE class_member_declarations? CLOSE_BRACE
-    ;
-
-class_member_declarations
-    : class_member_declaration+
-    ;
-
-class_member_declaration
-    : attributes? all_member_modifiers? (common_member_declaration | destructor_definition)
-    ;
-
-all_member_modifiers
-    : all_member_modifier+
-    ;
-
-all_member_modifier
-    : NEW
-    | PUBLIC
-    | PROTECTED
-    | INTERNAL
-    | PRIVATE
-    | READONLY
-    | VOLATILE
-    | VIRTUAL
-    | SEALED
-    | OVERRIDE
-    | ABSTRACT
-    | STATIC
-    | UNSAFE
-    | EXTERN
-    | PARTIAL
-    | ASYNC // C# 5
-    ;
-
-// represents the intersection of struct_member_declaration and class_member_declaration
-common_member_declaration
-    : constant_declaration
-    | typed_member_declaration
-    | event_declaration
-    | conversion_operator_declarator (body | right_arrow throwable_expression ';') // C# 6
-    | constructor_declaration
-    | VOID method_declaration
-    | class_definition
-    | struct_definition
-    | interface_definition
-    | enum_definition
-    | delegate_definition
-    ;
-
-typed_member_declaration
-    : (REF | READONLY REF | REF READONLY)? type_ (
-        namespace_or_type_name '.' indexer_declaration
-        | method_declaration
-        | property_declaration
-        | indexer_declaration
-        | operator_declaration
-        | field_declaration
-    )
-    ;
-
-constant_declarators
-    : constant_declarator (',' constant_declarator)*
-    ;
-
-constant_declarator
-    : identifier '=' expression
-    ;
-
-variable_declarators
-    : variable_declarator (',' variable_declarator)*
-    ;
-
-variable_declarator
-    : identifier ('=' variable_initializer)?
-    ;
-
-variable_initializer
-    : expression
-    | array_initializer
-    ;
-
-return_type
-    : type_
-    | VOID
-    ;
-
-member_name
-    : namespace_or_type_name
-    ;
-
-method_body
-    : block
-    | ';'
-    ;
-
-formal_parameter_list
-    : parameter_array
-    | fixed_parameters (',' parameter_array)?
-    ;
-
-fixed_parameters
-    : fixed_parameter (',' fixed_parameter)*
-    ;
-
-fixed_parameter
-    : attributes? parameter_modifier? arg_declaration
-    | ARGLIST
-    ;
-
-parameter_modifier
-    : REF
-    | OUT
-    | IN
-    | REF THIS
-    | IN THIS
-    | THIS
-    ;
-
-parameter_array
-    : attributes? PARAMS array_type identifier
-    ;
-
-accessor_declarations
-    : attrs = attributes? mods = accessor_modifier? (
-        GET accessor_body set_accessor_declaration?
-        | SET accessor_body get_accessor_declaration?
-    )
-    ;
-
-get_accessor_declaration
-    : attributes? accessor_modifier? GET accessor_body
-    ;
-
-set_accessor_declaration
-    : attributes? accessor_modifier? SET accessor_body
-    ;
-
-accessor_modifier
-    : PROTECTED
-    | INTERNAL
-    | PRIVATE
-    | PROTECTED INTERNAL
-    | INTERNAL PROTECTED
-    | PRIVATE PROTECTED
-    | PROTECTED PRIVATE
-    ;
-
-accessor_body
-    : block
-    | right_arrow throwable_expression ';'
-    | ';'
-    ;
-
-event_accessor_declarations
-    : attributes? (ADD block remove_accessor_declaration | REMOVE block add_accessor_declaration)
-    ;
-
-add_accessor_declaration
-    : attributes? ADD block
-    ;
-
-remove_accessor_declaration
-    : attributes? REMOVE block
-    ;
-
-overloadable_operator
-    : '+'
-    | '-'
-    | BANG
-    | '~'
-    | '++'
-    | '--'
-    | TRUE
-    | FALSE
-    | '*'
-    | '/'
-    | '%'
-    | '&'
-    | '|'
-    | '^'
-    | '<<'
-    | right_shift
-    | OP_EQ
-    | OP_NE
-    | '>'
-    | '<'
-    | '>='
-    | '<='
-    ;
-
-conversion_operator_declarator
-    : (IMPLICIT | EXPLICIT) OPERATOR type_ OPEN_PARENS arg_declaration CLOSE_PARENS
-    ;
-
-constructor_initializer
-    : ':' (BASE | THIS) OPEN_PARENS argument_list? CLOSE_PARENS
-    ;
-
-body
-    : block
-    | right_arrow throwable_expression ';'
-    | ';'
-    ;
-
-//B.2.8 Structs
-struct_interfaces
-    : ':' interface_type_list
-    ;
-
-struct_body
-    : OPEN_BRACE struct_member_declaration* CLOSE_BRACE
-    ;
-
-struct_member_declaration
-    : attributes? all_member_modifiers? (
-        common_member_declaration
-        | FIXED type_ fixed_size_buffer_declarator+ ';'
-    )
-    ;
-
-//B.2.9 Arrays
-array_type
-    : base_type (('*' | '?')* rank_specifier)+
-    ;
-
-rank_specifier
-    : '[' ','* ']'
-    ;
-
-array_initializer
-    : OPEN_BRACE (variable_initializer (',' variable_initializer)* ','?)? CLOSE_BRACE
-    ;
-
-//B.2.10 Interfaces
-variant_type_parameter_list
-    : '<' variant_type_parameter (',' variant_type_parameter)* '>'
-    ;
-
-variant_type_parameter
-    : attributes? variance_annotation? identifier
-    ;
-
-variance_annotation
-    : IN
-    | OUT
-    ;
-
-interface_base
-    : ':' interface_type_list
-    ;
-
-interface_body // ignored in csharp 8
-    : OPEN_BRACE interface_member_declaration* CLOSE_BRACE
-    ;
-
-interface_member_declaration
-    : attributes? NEW? (
-        UNSAFE? (REF | REF READONLY | READONLY REF)? type_ (
-            identifier type_parameter_list? OPEN_PARENS formal_parameter_list? CLOSE_PARENS type_parameter_constraints_clauses? ';'
-            | identifier OPEN_BRACE interface_accessors CLOSE_BRACE
-            | THIS '[' formal_parameter_list ']' OPEN_BRACE interface_accessors CLOSE_BRACE
-        )
-        | UNSAFE? VOID identifier type_parameter_list? OPEN_PARENS formal_parameter_list? CLOSE_PARENS type_parameter_constraints_clauses? ';'
-        | EVENT type_ identifier ';'
-    )
-    ;
-
-interface_accessors
-    : attributes? (GET ';' (attributes? SET ';')? | SET ';' (attributes? GET ';')?)
-    ;
-
-//B.2.11 Enums
-enum_base
-    : ':' type_
-    ;
-
-enum_body
-    : OPEN_BRACE (enum_member_declaration (',' enum_member_declaration)* ','?)? CLOSE_BRACE
-    ;
-
-enum_member_declaration
-    : attributes? identifier ('=' expression)?
-    ;
-
-//B.2.12 Delegates
-
-//B.2.13 Attributes
-global_attribute_section
-    : '[' global_attribute_target ':' attribute_list ','? ']'
-    ;
-
-global_attribute_target
-    : keyword
-    | identifier
-    ;
-
-attributes
-    : attribute_section+
-    ;
-
-attribute_section
-    : '[' (attribute_target ':')? attribute_list ','? ']'
-    ;
-
-attribute_target
-    : keyword
-    | identifier
-    ;
+  : KW_GLOBAL? KW_USING (KW_STATIC | (KW_UNSAFE? name_equals))? type OP_168
+  ;
+
+name_equals
+  : identifier_name OP_170
+  ;
+
+identifier_name
+  : KW_GLOBAL
+  | identifier_token
+  ;
 
 attribute_list
-    : attribute (',' attribute)*
-    ;
+  : OP_173 attribute_target_specifier? attribute (OP_163 attribute)* OP_174
+  ;
+
+attribute_target_specifier
+  : syntax_token COLON
+  ;
 
 attribute
-    : namespace_or_type_name (
-        OPEN_PARENS (attribute_argument (',' attribute_argument)*)? CLOSE_PARENS
-    )?
-    ;
+  : name attribute_argument_list?
+  ;
+
+name
+  : alias_qualified_name
+  | qualified_name
+  | simple_name
+  ;
+
+alias_qualified_name
+  : identifier_name OP_130 simple_name
+  ;
+
+simple_name
+  : generic_name
+  | identifier_name
+  ;
+
+generic_name
+  : identifier_token type_argument_list
+  ;
+
+type_argument_list
+  : OP_169 (type? (OP_163 type?)*)? OP_171
+  ;
+
+qualified_name
+  : name OP_165 simple_name
+  ;
+
+attribute_argument_list
+  : OP_159 (attribute_argument (OP_163 attribute_argument)*)? OP_160
+  ;
 
 attribute_argument
-    : (identifier ':')? expression
-    ;
+  : (name_equals? | name_colon?) expression
+  ;
 
-//B.3 Grammar extensions for unsafe code
-pointer_type
-    : (simple_type | class_type) (rank_specifier | '?')* '*'
-    | VOID '*'
-    ;
+name_colon
+  : identifier_name COLON
+  ;
 
-fixed_pointer_declarators
-    : fixed_pointer_declarator (',' fixed_pointer_declarator)*
-    ;
+member_declaration
+  : base_field_declaration
+  | base_method_declaration
+  | base_namespace_declaration
+  | base_property_declaration
+  | base_type_declaration
+  | delegate_declaration
+  | enum_member_declaration
+  | global_statement
+  | incomplete_member
+  ;
 
-fixed_pointer_declarator
-    : identifier '=' fixed_pointer_initializer
-    ;
+base_field_declaration
+  : event_field_declaration
+  | field_declaration
+  ;
 
-fixed_pointer_initializer
-    : '&'? expression
-    | stackalloc_initializer
-    ;
+event_field_declaration
+  : attribute_list* modifier* KW_EVENT variable_declaration OP_168
+  ;
 
-fixed_size_buffer_declarator
-    : identifier '[' expression ']'
-    ;
+modifier
+  : KW_ABSTRACT
+  | KW_ASYNC
+  | KW_CLOSED
+  | KW_CONST
+  | KW_EXTERN
+  | KW_FILE
+  | KW_FIXED
+  | KW_INTERNAL
+  | KW_NEW
+  | KW_OVERRIDE
+  | KW_PARTIAL
+  | KW_PRIVATE
+  | KW_PROTECTED
+  | KW_PUBLIC
+  | KW_READONLY
+  | KW_REF
+  | KW_REQUIRED
+  | KW_SAFE
+  | KW_SCOPED
+  | KW_SEALED
+  | KW_STATIC
+  | KW_UNSAFE
+  | KW_VIRTUAL
+  | KW_VOLATILE
+  ;
 
-stackalloc_initializer
-    : STACKALLOC type_ '[' expression ']'
-    | STACKALLOC type_? '[' expression? ']' OPEN_BRACE (expression (',' expression)* ','?)? CLOSE_BRACE
-    ;
+variable_declaration
+  : type variable_declarator (OP_163 variable_declarator)*
+  ;
 
-right_arrow
-    : '=' '>' {this.IsRightArrow()}? // Nothing between the tokens?
-    ;
+variable_declarator
+  : identifier_token bracketed_argument_list? equals_value_clause?
+  ;
 
-right_shift
-    : '>' '>' {this.IsRightShift()}? // Nothing between the tokens?
-    ;
+bracketed_argument_list
+  : OP_173 argument (OP_163 argument)* OP_174
+  ;
 
-right_shift_assignment
-    : '>' '>=' {this.IsRightShiftAssignment()}? // Nothing between the tokens?
-    ;
+argument
+  : name_colon? (KW_REF | KW_OUT | KW_IN)? expression
+  ;
 
-literal
-    : boolean_literal
-    | string_literal
-    | INTEGER_LITERAL
-    | HEX_INTEGER_LITERAL
-    | BIN_INTEGER_LITERAL
-    | REAL_LITERAL
-    | CHARACTER_LITERAL
-    | NULL_
-    ;
-
-boolean_literal
-    : TRUE
-    | FALSE
-    ;
-
-string_literal
-    : interpolated_regular_string
-    | interpolated_verbatium_string
-    | REGULAR_STRING
-    | VERBATIUM_STRING
-    ;
-
-interpolated_regular_string
-    : INTERPOLATED_REGULAR_STRING_START interpolated_regular_string_part* DOUBLE_QUOTE_INSIDE
-    ;
-
-interpolated_verbatium_string
-    : INTERPOLATED_VERBATIUM_STRING_START interpolated_verbatium_string_part* DOUBLE_QUOTE_INSIDE
-    ;
-
-interpolated_regular_string_part
-    : interpolated_string_expression
-    | DOUBLE_CURLY_INSIDE
-    | REGULAR_CHAR_INSIDE
-    | REGULAR_STRING_INSIDE
-    ;
-
-interpolated_verbatium_string_part
-    : interpolated_string_expression
-    | DOUBLE_CURLY_INSIDE
-    | VERBATIUM_DOUBLE_QUOTE_INSIDE
-    | VERBATIUM_INSIDE_STRING
-    ;
-
-interpolated_string_expression
-    : expression (',' expression)* (':' FORMAT_STRING+)?
-    ;
-
-//B.1.7 Keywords
-keyword
-    : ABSTRACT
-    | AS
-    | BASE
-    | BOOL
-    | BREAK
-    | BYTE
-    | CASE
-    | CATCH
-    | CHAR
-    | CHECKED
-    | CLASS
-    | CONST
-    | CONTINUE
-    | DECIMAL
-    | DEFAULT
-    | DELEGATE
-    | DO
-    | DOUBLE
-    | ELSE
-    | ENUM
-    | EVENT
-    | EXPLICIT
-    | EXTERN
-    | FALSE
-    | FINALLY
-    | FIXED
-    | FLOAT
-    | FOR
-    | FOREACH
-    | GOTO
-    | IF
-    | IMPLICIT
-    | IN
-    | INT
-    | INTERFACE
-    | INTERNAL
-    | IS
-    | LOCK
-    | LONG
-    | NAMESPACE
-    | NEW
-    | NULL_
-    | OBJECT
-    | OPERATOR
-    | OUT
-    | OVERRIDE
-    | PARAMS
-    | PRIVATE
-    | PROTECTED
-    | PUBLIC
-    | READONLY
-    | REF
-    | RETURN
-    | SBYTE
-    | SEALED
-    | SHORT
-    | SIZEOF
-    | STACKALLOC
-    | STATIC
-    | STRING
-    | STRUCT
-    | SWITCH
-    | THIS
-    | THROW
-    | TRUE
-    | TRY
-    | TYPEOF
-    | UINT
-    | ULONG
-    | UNCHECKED
-    | UNMANAGED
-    | UNSAFE
-    | USHORT
-    | USING
-    | VIRTUAL
-    | VOID
-    | VOLATILE
-    | WHILE
-    ;
-
-// -------------------- extra rules for modularization --------------------------------
-
-class_definition
-    : CLASS identifier type_parameter_list? class_base? type_parameter_constraints_clauses? class_body ';'?
-    ;
-
-struct_definition
-    : (READONLY | REF)? STRUCT identifier type_parameter_list? struct_interfaces? type_parameter_constraints_clauses? struct_body ';'?
-    ;
-
-interface_definition
-    : INTERFACE identifier variant_type_parameter_list? interface_base? type_parameter_constraints_clauses? class_body ';'?
-    ;
-
-enum_definition
-    : ENUM identifier enum_base? enum_body ';'?
-    ;
-
-delegate_definition
-    : DELEGATE return_type identifier variant_type_parameter_list? OPEN_PARENS formal_parameter_list? CLOSE_PARENS type_parameter_constraints_clauses?
-        ';'
-    ;
-
-event_declaration
-    : EVENT type_ (
-        variable_declarators ';'
-        | member_name OPEN_BRACE event_accessor_declarations CLOSE_BRACE
-    )
-    ;
+equals_value_clause
+  : OP_170 expression
+  ;
 
 field_declaration
-    : variable_declarators ';'
-    ;
+  : attribute_list* modifier* variable_declaration OP_168
+  ;
 
-property_declaration // Property initializer & lambda in properties C# 6
-    : member_name (
-        OPEN_BRACE accessor_declarations CLOSE_BRACE ('=' variable_initializer ';')?
-        | right_arrow throwable_expression ';'
-    )
-    ;
-
-constant_declaration
-    : CONST type_ constant_declarators ';'
-    ;
-
-indexer_declaration // lamdas from C# 6
-    : THIS '[' formal_parameter_list ']' (
-        OPEN_BRACE accessor_declarations CLOSE_BRACE
-        | right_arrow throwable_expression ';'
-    )
-    ;
-
-destructor_definition
-    : '~' identifier OPEN_PARENS CLOSE_PARENS body
-    ;
+base_method_declaration
+  : constructor_declaration
+  | conversion_operator_declaration
+  | destructor_declaration
+  | method_declaration
+  | operator_declaration
+  ;
 
 constructor_declaration
-    : identifier OPEN_PARENS formal_parameter_list? CLOSE_PARENS constructor_initializer? body
-    ;
+  : attribute_list* modifier* identifier_token parameter_list constructor_initializer? (block | (arrow_expression_clause OP_168))
+  ;
 
-method_declaration // lamdas from C# 6
-    : method_member_name type_parameter_list? OPEN_PARENS formal_parameter_list? CLOSE_PARENS type_parameter_constraints_clauses? (
-        method_body
-        | right_arrow throwable_expression ';'
-    )
-    ;
+parameter_list
+  : OP_159 (parameter (OP_163 parameter)*)? OP_160
+  ;
 
-method_member_name
-    : (identifier | identifier '::' identifier) (type_argument_list? '.' identifier)*
-    ;
+parameter
+  : attribute_list* (modifier | KW_OUT | KW_IN | KW_PARAMS | KW_THIS)* type? (identifier_token | KW___ARGLIST)? equals_value_clause?
+  ;
 
-operator_declaration // lamdas form C# 6
-    : OPERATOR overloadable_operator OPEN_PARENS IN? arg_declaration (',' IN? arg_declaration)? CLOSE_PARENS (
-        body
-        | right_arrow throwable_expression ';'
-    )
-    ;
+constructor_initializer
+  : COLON (KW_BASE | KW_THIS) argument_list
+  ;
 
-arg_declaration
-    : type_ identifier ('=' expression)?
-    ;
+argument_list
+  : OP_159 (argument (OP_163 argument)*)? OP_160
+  ;
 
-method_invocation
-    : OPEN_PARENS argument_list? CLOSE_PARENS
-    ;
+block
+  : attribute_list* LBRACE statement* RBRACE
+  ;
+
+arrow_expression_clause
+  : OP_135 expression
+  ;
+
+conversion_operator_declaration
+  : attribute_list* modifier* (KW_IMPLICIT | KW_EXPLICIT) explicit_interface_specifier? KW_OPERATOR KW_CHECKED? type parameter_list (block | (arrow_expression_clause OP_168))
+  ;
+
+explicit_interface_specifier
+  : name OP_165
+  ;
+
+destructor_declaration
+  : attribute_list* modifier* OP_180 identifier_token parameter_list (block | (arrow_expression_clause OP_168))
+  ;
+
+method_declaration
+  : attribute_list* modifier* type explicit_interface_specifier? identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause OP_168))
+  ;
+
+type_parameter_list
+  : OP_169 type_parameter (OP_163 type_parameter)* OP_171
+  ;
+
+type_parameter
+  : attribute_list* (KW_IN | KW_OUT)? identifier_token
+  ;
+
+type_parameter_constraint_clause
+  : KW_WHERE identifier_name COLON type_parameter_constraint (OP_163 type_parameter_constraint)*
+  ;
+
+type_parameter_constraint
+  : allows_constraint_clause
+  | class_or_struct_constraint
+  | constructor_constraint
+  | default_constraint
+  | type_constraint
+  ;
+
+allows_constraint_clause
+  : KW_ALLOWS allows_constraint (OP_163 allows_constraint)*
+  ;
+
+allows_constraint
+  : ref_struct_constraint
+  ;
+
+ref_struct_constraint
+  : KW_REF KW_STRUCT
+  ;
+
+class_or_struct_constraint
+  : KW_CLASS OP_172?
+  | KW_STRUCT OP_172?
+  ;
+
+constructor_constraint
+  : KW_NEW OP_159 OP_160
+  ;
+
+default_constraint
+  : KW_DEFAULT
+  ;
+
+type_constraint
+  : type
+  ;
+
+operator_declaration
+  : attribute_list* modifier* type explicit_interface_specifier? KW_OPERATOR KW_CHECKED? (OP_162 | OP_164 | OP_153 | OP_180 | OP_122 | OP_124 | OP_161 | OP_166 | OP_157 | OP_132 | right_shift | unsigned_right_shift | OP_178 | OP_158 | OP_175 | OP_134 | OP_117 | OP_169 | OP_133 | OP_171 | OP_136 | KW_FALSE | KW_TRUE | KW_IS | OP_123 | OP_125 | OP_121 | OP_128 | OP_118 | OP_120 | OP_151 | OP_141 | OP_102 | right_shift_assignment | unsigned_right_shift_assignment) parameter_list (block | (arrow_expression_clause OP_168))
+  ;
+
+base_namespace_declaration
+  : file_scoped_namespace_declaration
+  | namespace_declaration
+  ;
+
+file_scoped_namespace_declaration
+  : attribute_list* modifier* KW_NAMESPACE name OP_168 extern_alias_directive* using_directive* member_declaration*
+  ;
+
+namespace_declaration
+  : attribute_list* modifier* KW_NAMESPACE name LBRACE extern_alias_directive* using_directive* member_declaration* RBRACE OP_168?
+  ;
+
+base_property_declaration
+  : event_declaration
+  | indexer_declaration
+  | property_declaration
+  ;
+
+event_declaration
+  : attribute_list* modifier* KW_EVENT type explicit_interface_specifier? identifier_token (accessor_list | OP_168)
+  ;
+
+accessor_list
+  : LBRACE accessor_declaration* RBRACE
+  ;
+
+accessor_declaration
+  : attribute_list* modifier* (KW_GET | KW_SET | KW_INIT | KW_ADD | KW_REMOVE | identifier_token) (block | (arrow_expression_clause OP_168) | OP_168)
+  ;
+
+indexer_declaration
+  : attribute_list* modifier* type explicit_interface_specifier? KW_THIS bracketed_parameter_list (accessor_list | (arrow_expression_clause OP_168))
+  ;
+
+bracketed_parameter_list
+  : OP_173 parameter (OP_163 parameter)* OP_174
+  ;
+
+property_declaration
+  : attribute_list* modifier* type explicit_interface_specifier? identifier_token (accessor_list (equals_value_clause OP_168)? | ((arrow_expression_clause | equals_value_clause) OP_168))
+  ;
+
+base_type_declaration
+  : enum_declaration
+  | type_declaration
+  ;
+
+enum_declaration
+  : attribute_list* modifier* KW_ENUM identifier_token base_list? (LBRACE (enum_member_declaration (OP_163 enum_member_declaration)* OP_163?)? RBRACE)? OP_168?
+  ;
+
+base_list
+  : COLON base_type (OP_163 base_type)*
+  ;
+
+base_type
+  : primary_constructor_base_type
+  | simple_base_type
+  ;
+
+primary_constructor_base_type
+  : type argument_list
+  ;
+
+simple_base_type
+  : type
+  ;
+
+enum_member_declaration
+  : attribute_list* modifier* identifier_token equals_value_clause?
+  ;
+
+type_declaration
+  : class_declaration
+  | extension_block_declaration
+  | interface_declaration
+  | record_declaration
+  | struct_declaration
+  | union_declaration
+  ;
+
+class_declaration
+  : attribute_list* modifier* KW_CLASS identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  ;
+
+extension_block_declaration
+  : attribute_list* modifier* KW_EXTENSION type_parameter_list? parameter_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  ;
+
+interface_declaration
+  : attribute_list* modifier* KW_INTERFACE identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  ;
+
+record_declaration
+  : attribute_list* modifier* record_keyword (KW_CLASS | KW_STRUCT)? identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  ;
+
+struct_declaration
+  : attribute_list* modifier* KW_STRUCT identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  ;
+
+union_declaration
+  : attribute_list* modifier* KW_UNION identifier_token type_parameter_list? parameter_list? base_list? type_parameter_constraint_clause* (LBRACE member_declaration* RBRACE)? OP_168?
+  ;
+
+delegate_declaration
+  : attribute_list* modifier* KW_DELEGATE type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* OP_168
+  ;
+
+global_statement
+  : attribute_list* modifier* statement
+  ;
+
+incomplete_member
+  : attribute_list* modifier* type
+  ;
+
+type
+  : array_type
+  | function_pointer_type
+  | name
+  | nullable_type
+  | pointer_type
+  | predefined_type
+  | ref_type
+  | scoped_type
+  | tuple_type
+  ;
+
+array_type
+  : type array_rank_specifier+
+  ;
+
+array_rank_specifier
+  : OP_173 (expression? (OP_163 expression?)*)? OP_174
+  ;
+
+function_pointer_type
+  : KW_DELEGATE OP_161 function_pointer_calling_convention? function_pointer_parameter_list
+  ;
+
+function_pointer_calling_convention
+  : KW_MANAGED function_pointer_unmanaged_calling_convention_list?
+  | KW_UNMANAGED function_pointer_unmanaged_calling_convention_list?
+  ;
+
+function_pointer_unmanaged_calling_convention_list
+  : OP_173 function_pointer_unmanaged_calling_convention (OP_163 function_pointer_unmanaged_calling_convention)* OP_174
+  ;
+
+function_pointer_unmanaged_calling_convention
+  : identifier_token
+  ;
+
+function_pointer_parameter_list
+  : OP_169 function_pointer_parameter (OP_163 function_pointer_parameter)* OP_171
+  ;
+
+function_pointer_parameter
+  : attribute_list* modifier* type
+  ;
+
+nullable_type
+  : type OP_172
+  ;
+
+pointer_type
+  : type OP_161
+  ;
+
+predefined_type
+  : KW_BOOL
+  | KW_BYTE
+  | KW_CHAR
+  | KW_DECIMAL
+  | KW_DOUBLE
+  | KW_FLOAT
+  | KW_INT
+  | KW_LONG
+  | KW_OBJECT
+  | KW_SBYTE
+  | KW_SHORT
+  | KW_STRING
+  | KW_UINT
+  | KW_ULONG
+  | KW_USHORT
+  | KW_VOID
+  ;
+
+ref_type
+  : KW_REF KW_READONLY? type
+  ;
+
+scoped_type
+  : KW_SCOPED type
+  ;
+
+tuple_type
+  : OP_159 tuple_element (OP_163 tuple_element)+ OP_160
+  ;
+
+tuple_element
+  : type identifier_token?
+  ;
+
+statement
+  : block
+  | break_statement
+  | checked_statement
+  | common_for_each_statement
+  | continue_statement
+  | do_statement
+  | empty_statement
+  | expression_statement
+  | fixed_statement
+  | for_statement
+  | goto_statement
+  | if_statement
+  | labeled_statement
+  | local_declaration_statement
+  | local_function_statement
+  | lock_statement
+  | return_statement
+  | switch_statement
+  | throw_statement
+  | try_statement
+  | unsafe_statement
+  | using_statement
+  | while_statement
+  | yield_statement
+  ;
+
+break_statement
+  : attribute_list* KW_BREAK identifier_name? OP_168
+  ;
+
+checked_statement
+  : attribute_list* (KW_CHECKED | KW_UNCHECKED) block
+  ;
+
+common_for_each_statement
+  : for_each_statement
+  | for_each_variable_statement
+  ;
+
+for_each_statement
+  : attribute_list* KW_AWAIT? KW_FOREACH OP_159 type identifier_token KW_IN expression OP_160 statement
+  ;
+
+for_each_variable_statement
+  : attribute_list* KW_AWAIT? KW_FOREACH OP_159 expression KW_IN expression OP_160 statement
+  ;
+
+continue_statement
+  : attribute_list* KW_CONTINUE identifier_name? OP_168
+  ;
+
+do_statement
+  : attribute_list* KW_DO statement KW_WHILE OP_159 expression OP_160 OP_168
+  ;
+
+empty_statement
+  : attribute_list* OP_168
+  ;
+
+expression_statement
+  : attribute_list* expression OP_168
+  ;
+
+fixed_statement
+  : attribute_list* KW_FIXED OP_159 variable_declaration OP_160 statement
+  ;
+
+for_statement
+  : attribute_list* KW_FOR OP_159 (variable_declaration? | (expression (OP_163 expression)*)?) OP_168 expression? OP_168 (expression (OP_163 expression)*)? OP_160 statement
+  ;
+
+goto_statement
+  : attribute_list* KW_GOTO (KW_CASE | KW_DEFAULT)? expression? OP_168
+  ;
+
+if_statement
+  : attribute_list* KW_IF OP_159 expression OP_160 statement else_clause?
+  ;
+
+else_clause
+  : KW_ELSE statement
+  ;
+
+labeled_statement
+  : attribute_list* identifier_token COLON statement
+  ;
+
+local_declaration_statement
+  : attribute_list* KW_AWAIT? KW_USING? modifier* variable_declaration OP_168
+  ;
+
+local_function_statement
+  : attribute_list* modifier* type identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause OP_168))
+  ;
+
+lock_statement
+  : attribute_list* KW_LOCK OP_159 expression OP_160 statement
+  ;
+
+return_statement
+  : attribute_list* KW_RETURN expression? OP_168
+  ;
+
+switch_statement
+  : attribute_list* KW_SWITCH OP_159? expression OP_160? LBRACE switch_section* RBRACE
+  ;
+
+switch_section
+  : switch_label+ statement+
+  ;
+
+switch_label
+  : case_pattern_switch_label
+  | case_switch_label
+  | default_switch_label
+  ;
+
+case_pattern_switch_label
+  : KW_CASE pattern when_clause? COLON
+  ;
+
+pattern
+  : binary_pattern
+  | constant_pattern
+  | declaration_pattern
+  | discard_pattern
+  | list_pattern
+  | parenthesized_pattern
+  | recursive_pattern
+  | relational_pattern
+  | slice_pattern
+  | type_pattern
+  | unary_pattern
+  | var_pattern
+  ;
+
+binary_pattern
+  : pattern (KW_OR | KW_AND) pattern
+  ;
+
+constant_pattern
+  : expression
+  ;
+
+declaration_pattern
+  : type variable_designation
+  ;
+
+variable_designation
+  : discard_designation
+  | parenthesized_variable_designation
+  | single_variable_designation
+  ;
+
+discard_designation
+  : KW__
+  ;
+
+parenthesized_variable_designation
+  : OP_159 (variable_designation (OP_163 variable_designation)*)? OP_160
+  ;
+
+single_variable_designation
+  : identifier_token
+  ;
+
+discard_pattern
+  : KW__
+  ;
+
+list_pattern
+  : OP_173 (pattern (OP_163 pattern)* OP_163?)? OP_174 variable_designation?
+  ;
+
+parenthesized_pattern
+  : OP_159 pattern OP_160
+  ;
+
+recursive_pattern
+  : type? positional_pattern_clause? property_pattern_clause? variable_designation?
+  ;
+
+positional_pattern_clause
+  : OP_159 (subpattern (OP_163 subpattern)*)? OP_160
+  ;
+
+subpattern
+  : base_expression_colon? pattern
+  ;
+
+base_expression_colon
+  : expression_colon
+  | name_colon
+  ;
+
+expression_colon
+  : expression COLON
+  ;
+
+property_pattern_clause
+  : LBRACE (subpattern (OP_163 subpattern)* OP_163?)? RBRACE
+  ;
+
+relational_pattern
+  : OP_117 expression
+  | OP_169 expression
+  | OP_133 expression
+  | OP_134 expression
+  | OP_171 expression
+  | OP_136 expression
+  ;
+
+slice_pattern
+  : OP_127 pattern?
+  ;
+
+type_pattern
+  : type
+  ;
+
+unary_pattern
+  : KW_NOT pattern
+  ;
+
+var_pattern
+  : KW_VAR variable_designation
+  ;
+
+when_clause
+  : KW_WHEN expression
+  ;
+
+case_switch_label
+  : KW_CASE expression COLON
+  ;
+
+default_switch_label
+  : KW_DEFAULT COLON
+  ;
+
+throw_statement
+  : attribute_list* KW_THROW expression? OP_168
+  ;
+
+try_statement
+  : attribute_list* KW_TRY block catch_clause* finally_clause?
+  ;
+
+catch_clause
+  : KW_CATCH catch_declaration? catch_filter_clause? block
+  ;
+
+catch_declaration
+  : OP_159 type identifier_token? OP_160
+  ;
+
+catch_filter_clause
+  : KW_WHEN OP_159 expression OP_160
+  ;
+
+finally_clause
+  : KW_FINALLY block
+  ;
+
+unsafe_statement
+  : attribute_list* KW_UNSAFE block
+  ;
+
+using_statement
+  : attribute_list* KW_AWAIT? KW_USING OP_159 (variable_declaration | expression) OP_160 statement
+  ;
+
+while_statement
+  : attribute_list* KW_WHILE OP_159 expression OP_160 statement
+  ;
+
+yield_statement
+  : attribute_list* KW_YIELD (KW_RETURN | KW_BREAK) expression? OP_168
+  ;
+
+expression
+  : anonymous_function_expression
+  | anonymous_object_creation_expression
+  | array_creation_expression
+  | assignment_expression
+  | await_expression
+  | base_object_creation_expression
+  | binary_expression
+  | cast_expression
+  | checked_expression
+  | collection_expression
+  | conditional_access_expression
+  | conditional_expression
+  | declaration_expression
+  | default_expression
+  | element_access_expression
+  | element_binding_expression
+  | field_expression
+  | implicit_array_creation_expression
+  | implicit_element_access
+  | implicit_stack_alloc_array_creation_expression
+  | initializer_expression
+  | instance_expression
+  | interpolated_string_expression
+  | invocation_expression
+  | is_pattern_expression
+  | literal_expression
+  | make_ref_expression
+  | member_access_expression
+  | member_binding_expression
+  | parenthesized_expression
+  | postfix_unary_expression
+  | prefix_unary_expression
+  | query_expression
+  | range_expression
+  | ref_expression
+  | ref_type_expression
+  | ref_value_expression
+  | size_of_expression
+  | stack_alloc_array_creation_expression
+  | switch_expression
+  | throw_expression
+  | tuple_expression
+  | type
+  | type_of_expression
+  | unsafe_expression
+  | with_expression
+  ;
+
+anonymous_function_expression
+  : anonymous_method_expression
+  | lambda_expression
+  ;
+
+anonymous_method_expression
+  : modifier* KW_DELEGATE parameter_list? block expression?
+  ;
+
+lambda_expression
+  : parenthesized_lambda_expression
+  | simple_lambda_expression
+  ;
+
+parenthesized_lambda_expression
+  : attribute_list* modifier* type? parameter_list OP_135 (block | expression)
+  ;
+
+simple_lambda_expression
+  : attribute_list* modifier* parameter OP_135 (block | expression)
+  ;
+
+anonymous_object_creation_expression
+  : KW_NEW LBRACE (anonymous_object_member_declarator (OP_163 anonymous_object_member_declarator)* OP_163?)? RBRACE
+  ;
+
+anonymous_object_member_declarator
+  : name_equals? expression
+  ;
+
+array_creation_expression
+  : KW_NEW array_type initializer_expression?
+  ;
+
+initializer_expression
+  : LBRACE (expression (OP_163 expression)* OP_163?)? RBRACE
+  ;
+
+assignment_expression
+  : expression (OP_170 | OP_123 | OP_125 | OP_121 | OP_128 | OP_118 | OP_120 | OP_141 | OP_151 | OP_102 | right_shift_assignment | unsigned_right_shift_assignment | OP_103) expression
+  ;
+
+await_expression
+  : KW_AWAIT expression
+  ;
+
+base_object_creation_expression
+  : implicit_object_creation_expression
+  | object_creation_expression
+  ;
+
+implicit_object_creation_expression
+  : KW_NEW argument_list initializer_expression?
+  ;
 
 object_creation_expression
-    : OPEN_PARENS argument_list? CLOSE_PARENS object_or_collection_initializer?
-    ;
+  : KW_NEW type argument_list? initializer_expression?
+  ;
 
-identifier
-    : IDENTIFIER
-    | ADD
-    | ALIAS
-    | ARGLIST
-    | ASCENDING
-    | ASYNC
-    | AWAIT
-    | BY
-    | DESCENDING
-    | DYNAMIC
-    | EQUALS
-    | FROM
-    | GET
-    | GROUP
-    | INTO
-    | JOIN
-    | LET
-    | NAMEOF
-    | ON
-    | ORDERBY
-    | PARTIAL
-    | REMOVE
-    | SELECT
-    | SET
-    | UNMANAGED
-    | VAR
-    | WHEN
-    | WHERE
-    | YIELD
-    ;
+binary_expression
+  : expression (OP_162 | OP_164 | OP_161 | OP_166 | OP_157 | OP_132 | right_shift | unsigned_right_shift | OP_152 | OP_119 | OP_178 | OP_158 | OP_175 | OP_134 | OP_117 | OP_169 | OP_133 | OP_171 | OP_136 | KW_IS | KW_AS | OP_137) expression
+  ;
+
+cast_expression
+  : OP_159 type OP_160 expression
+  ;
+
+checked_expression
+  : KW_CHECKED OP_159 expression OP_160
+  | KW_UNCHECKED OP_159 expression OP_160
+  ;
+
+collection_expression
+  : OP_173 (collection_element (OP_163 collection_element)* OP_163?)? OP_174
+  ;
+
+collection_element
+  : expression_element
+  | spread_element
+  | with_element
+  ;
+
+expression_element
+  : expression
+  ;
+
+spread_element
+  : OP_127 expression
+  ;
+
+with_element
+  : KW_WITH argument_list
+  ;
+
+conditional_access_expression
+  : expression OP_172 expression
+  ;
+
+conditional_expression
+  : expression OP_172 expression COLON expression
+  ;
+
+declaration_expression
+  : type variable_designation
+  ;
+
+default_expression
+  : KW_DEFAULT OP_159 type OP_160
+  ;
+
+element_access_expression
+  : expression bracketed_argument_list
+  ;
+
+element_binding_expression
+  : bracketed_argument_list
+  ;
+
+field_expression
+  : KW_FIELD
+  ;
+
+implicit_array_creation_expression
+  : KW_NEW OP_173 OP_163* OP_174 initializer_expression
+  ;
+
+implicit_element_access
+  : bracketed_argument_list
+  ;
+
+implicit_stack_alloc_array_creation_expression
+  : KW_STACKALLOC OP_173 OP_174 initializer_expression
+  ;
+
+instance_expression
+  : base_expression
+  | this_expression
+  ;
+
+base_expression
+  : KW_BASE
+  ;
+
+this_expression
+  : KW_THIS
+  ;
+
+interpolated_string_expression
+  : INTERP_START interpolated_string_content* DQUOTE
+  | INTERP_VERBATIM_START interpolated_string_content* DQUOTE
+  | interpolated_multi_line_raw_string_start_token interpolated_string_content* interpolated_raw_string_end_token
+  | interpolated_single_line_raw_string_start_token interpolated_string_content* interpolated_raw_string_end_token
+  ;
+
+interpolated_string_content
+  : interpolated_string_text
+  | interpolation
+  ;
+
+interpolated_string_text
+  : interpolated_string_text_token
+  ;
+
+interpolation
+  : LBRACE expression interpolation_alignment_clause? interpolation_format_clause? RBRACE
+  ;
+
+interpolation_alignment_clause
+  : OP_163 expression
+  ;
+
+interpolation_format_clause
+  : COLON interpolated_string_text_token
+  ;
+
+interpolated_multi_line_raw_string_start_token
+  : OP_156+ OP_101 DQUOTE*
+  ;
+
+interpolated_raw_string_end_token
+  : OP_101 DQUOTE* /* must match number of quotes in raw_string_start_token */
+  ;
+
+interpolated_single_line_raw_string_start_token
+  : OP_156+ OP_101 DQUOTE*
+  ;
+
+invocation_expression
+  : expression argument_list
+  ;
+
+is_pattern_expression
+  : expression KW_IS pattern
+  ;
+
+literal_expression
+  : KW_DEFAULT
+  | KW_FALSE
+  | KW_NULL
+  | KW_TRUE
+  | KW___ARGLIST
+  | character_literal_token
+  | multi_line_raw_string_literal_token
+  | numeric_literal_token
+  | single_line_raw_string_literal_token
+  | string_literal_token
+  | utf8_multi_line_raw_string_literal_token
+  | utf8_single_line_raw_string_literal_token
+  | utf8_string_literal_token
+  ;
+
+utf8_multi_line_raw_string_literal_token
+  : multi_line_raw_string_literal_token (KW_U8 | KW_U8_150)
+  ;
+
+utf8_single_line_raw_string_literal_token
+  : single_line_raw_string_literal_token (KW_U8 | KW_U8_150)
+  ;
+
+utf8_string_literal_token
+  : string_literal_token (KW_U8 | KW_U8_150)
+  ;
+
+make_ref_expression
+  : KW___MAKEREF OP_159 expression OP_160
+  ;
+
+member_access_expression
+  : expression (OP_165 | OP_126) simple_name
+  ;
+
+member_binding_expression
+  : OP_165 simple_name
+  ;
+
+parenthesized_expression
+  : OP_159 expression OP_160
+  ;
+
+postfix_unary_expression
+  : expression (OP_122 | OP_124 | OP_153)
+  ;
+
+prefix_unary_expression
+  : OP_153 expression
+  | OP_158 expression
+  | OP_161 expression
+  | OP_162 expression
+  | OP_122 expression
+  | OP_164 expression
+  | OP_124 expression
+  | OP_175 expression
+  | OP_180 expression
+  ;
+
+query_expression
+  : from_clause query_body
+  ;
+
+from_clause
+  : KW_FROM type? identifier_token KW_IN expression
+  ;
+
+query_body
+  : query_clause+ select_or_group_clause query_continuation?
+  ;
+
+query_clause
+  : from_clause
+  | join_clause
+  | let_clause
+  | order_by_clause
+  | where_clause
+  ;
+
+join_clause
+  : KW_JOIN type? identifier_token KW_IN expression KW_ON expression KW_EQUALS expression join_into_clause?
+  ;
+
+join_into_clause
+  : KW_INTO identifier_token
+  ;
+
+let_clause
+  : KW_LET identifier_token OP_170 expression
+  ;
+
+order_by_clause
+  : KW_ORDERBY ordering (OP_163 ordering)*
+  ;
+
+ordering
+  : expression (KW_ASCENDING | KW_DESCENDING)?
+  ;
+
+where_clause
+  : KW_WHERE expression
+  ;
+
+select_or_group_clause
+  : group_clause
+  | select_clause
+  ;
+
+group_clause
+  : KW_GROUP expression KW_BY expression
+  ;
+
+select_clause
+  : KW_SELECT expression
+  ;
+
+query_continuation
+  : KW_INTO identifier_token query_body
+  ;
+
+range_expression
+  : expression? OP_127 expression?
+  ;
+
+ref_expression
+  : KW_REF expression
+  ;
+
+ref_type_expression
+  : KW___REFTYPE OP_159 expression OP_160
+  ;
+
+ref_value_expression
+  : KW___REFVALUE OP_159 expression OP_163 type OP_160
+  ;
+
+size_of_expression
+  : KW_SIZEOF OP_159 type OP_160
+  ;
+
+stack_alloc_array_creation_expression
+  : KW_STACKALLOC type initializer_expression?
+  ;
+
+switch_expression
+  : expression KW_SWITCH LBRACE (switch_expression_arm (OP_163 switch_expression_arm)* OP_163?)? RBRACE
+  ;
+
+switch_expression_arm
+  : pattern when_clause? OP_135 expression
+  ;
+
+throw_expression
+  : KW_THROW expression
+  ;
+
+tuple_expression
+  : OP_159 argument (OP_163 argument)+ OP_160
+  ;
+
+type_of_expression
+  : KW_TYPEOF OP_159 type OP_160
+  ;
+
+unsafe_expression
+  : KW_UNSAFE OP_159 expression OP_160
+  ;
+
+with_expression
+  : expression KW_WITH initializer_expression
+  ;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+syntax_token
+  : character_literal_token
+  | identifier_token
+  | keyword
+  | numeric_literal_token
+  | operator_token
+  | punctuation_token
+  | string_literal_token
+  ;
+
+// A C# *contextual* keyword is recognized only in the position where it has
+// meaning and is otherwise an ordinary name: `var`, `record`, `from`, `get`,
+// `and`, `required`, … Roslyn's grammar spells each as an inline literal, and
+// harvesting those literals into named tokens makes the lexer prefer the keyword
+// everywhere (ANTLR breaks an equal-length match by rule order, and the
+// harvested tokens precede IDENTIFIER). Widening `identifier_token` to accept
+// them back is the standard ANTLR remedy — the same shape `grammars-v4`'s C#
+// grammar uses for its `identifier` rule.
+//
+// Without this, `var x = 1;` fails to parse: `var` is absent from the expected
+// token set entirely. The damage is far wider than the keyword itself, because
+// `var` appears in most idiomatic modern C# — one wrong token classification
+// looks like broken support for raw strings, ranges, `using` declarations, and
+// unbound generics all at once.
+identifier_token
+  : IDENTIFIER
+  | KW__
+  | KW_ADD
+  | KW_ALIAS
+  | KW_ALLOWS
+  | KW_AND
+  | KW_ASCENDING
+  | KW_ASYNC
+  | KW_AWAIT
+  | KW_BY
+  | KW_CLOSED
+  | KW_DESCENDING
+  | KW_EQUALS
+  | KW_EXTENSION
+  | KW_FIELD
+  | KW_FILE
+  | KW_FROM
+  | KW_GET
+  | KW_GLOBAL
+  | KW_GROUP
+  | KW_INIT
+  | KW_INTO
+  | KW_JOIN
+  | KW_LET
+  | KW_MANAGED
+  | KW_NOT
+  | KW_ON
+  | KW_OR
+  | KW_ORDERBY
+  | KW_PARTIAL
+  | KW_REMOVE
+  | KW_REQUIRED
+  | KW_SAFE
+  | KW_SCOPED
+  | KW_SELECT
+  | KW_SET
+  | KW_UNION
+  | KW_UNMANAGED
+  | KW_VAR
+  | KW_WHEN
+  | KW_WHERE
+  | KW_WITH
+  | KW_YIELD
+  ;
+
+
+
+
+
+
+
+
+
+keyword
+  : KW_AS
+  | KW_BASE
+  | KW_BOOL
+  | KW_BREAK
+  | KW_BYTE
+  | KW_CASE
+  | KW_CATCH
+  | KW_CHAR
+  | KW_CHECKED
+  | KW_CLASS
+  | KW_CONTINUE
+  | KW_DECIMAL
+  | KW_DEFAULT
+  | KW_DELEGATE
+  | KW_DO
+  | KW_DOUBLE
+  | KW_ELSE
+  | KW_ENUM
+  | KW_EVENT
+  | KW_EXPLICIT
+  | KW_FALSE
+  | KW_FINALLY
+  | KW_FLOAT
+  | KW_FOR
+  | KW_FOREACH
+  | KW_GOTO
+  | KW_IF
+  | KW_IMPLICIT
+  | KW_IN
+  | KW_INT
+  | KW_INTERFACE
+  | KW_IS
+  | KW_LOCK
+  | KW_LONG
+  | KW_NAMESPACE
+  | KW_NULL
+  | KW_OBJECT
+  | KW_OPERATOR
+  | KW_OUT
+  | KW_PARAMS
+  | KW_RETURN
+  | KW_SBYTE
+  | KW_SHORT
+  | KW_SIZEOF
+  | KW_STACKALLOC
+  | KW_STRING
+  | KW_STRUCT
+  | KW_SWITCH
+  | KW_THIS
+  | KW_THROW
+  | KW_TRUE
+  | KW_TRY
+  | KW_TYPEOF
+  | KW_UINT
+  | KW_ULONG
+  | KW_UNCHECKED
+  | KW_USHORT
+  | KW_USING
+  | KW_VOID
+  | KW_WHILE
+  | KW___ARGLIST
+  | KW___MAKEREF
+  | KW___REFTYPE
+  | KW___REFVALUE
+  | modifier
+  ;
+
+numeric_literal_token
+  : integer_literal_token
+  | real_literal_token
+  ;
+
+integer_literal_token
+  : decimal_integer_literal_token
+  | hexadecimal_integer_literal_token
+  | BIN_INT_LIT
+  ;
+
+decimal_integer_literal_token
+  : DEC_INT_LIT
+  ;
+
+
+
+hexadecimal_integer_literal_token
+  : HEX_INT_LIT
+  ;
+
+
+real_literal_token
+  : REAL_LIT
+  ;
+
+
+
+character_literal_token
+  : CHAR_LIT
+  ;
+
+
+
+
+
+
+string_literal_token
+  : regular_string_literal_token
+  | verbatim_string_literal_token
+  ;
+
+regular_string_literal_token
+  : STRING_LIT
+  ;
+
+
+
+verbatim_string_literal_token
+  : VERBATIM_STRING_LIT
+  ;
+
+
+
+
+operator_token
+  : OP_153
+  | OP_117
+  | OP_157
+  | OP_118
+  | OP_119
+  | OP_158
+  | OP_120
+  | OP_161
+  | OP_121
+  | OP_162
+  | OP_122
+  | OP_123
+  | OP_164
+  | OP_124
+  | OP_125
+  | OP_166
+  | OP_128
+  | OP_169
+  | OP_132
+  | OP_102
+  | OP_133
+  | OP_170
+  | OP_134
+  | OP_171
+  | OP_136
+  | right_shift
+  | right_shift_assignment
+  | unsigned_right_shift
+  | unsigned_right_shift_assignment
+  | OP_137
+  | OP_103
+  | KW_AS
+  | KW_IS
+  | OP_175
+  | OP_141
+  | OP_178
+  | OP_151
+  | OP_152
+  | OP_180
+  ;
+
+punctuation_token
+  : DQUOTE
+  | OP_155
+  | OP_159
+  | OP_160
+  | OP_163
+  | OP_126
+  | OP_165
+  | OP_127
+  | OP_129
+  | COLON
+  | OP_130
+  | OP_168
+  | OP_131
+  | OP_135
+  | OP_172
+  | OP_173
+  | OP_139
+  | OP_140
+  | OP_174
+  | LBRACE
+  | RBRACE
+  ;
+
+
+
+
+
+
+interpolated_string_text_token
+  : INTERPOLATED_TEXT
+  ;
+
+multi_line_raw_string_literal_token
+  : ML_RAW_STRING_LIT
+  ;
+
+single_line_raw_string_literal_token
+  : SL_RAW_STRING_LIT
+  ;
+
+
+
+// Contextual keyword: `record` lexes as an ordinary IDENTIFIER (it is legal as a
+// name), so the declaration position is restricted by a predicate on the token
+// text. This restores Roslyn's <ContextualKind Name="RecordKeyword"/>, which its
+// grammar generator drops. Lowered by `patterns.toml` to a pure SemIR
+// comparison, so no hooks are needed.
+//
+// Deliberately `IDENTIFIER`, not `identifier_token`: the latter is widened to
+// accept every contextual keyword (see CONTEXTUAL_KEYWORD_NOTE), which would
+// make `record_declaration` viable at any modifier that is itself contextual.
+// `partial struct S { }` would then predict the record path — `record_keyword` =
+// `partial`, `struct`, `S` — and since the predicate cannot prune a path ANTLR
+// has already committed to, it surfaces as a hard error instead of a silent
+// rejection. `partial`, `async`, `required`, `file`, `scoped`, `closed`, and
+// `safe` all hit this. `record` itself always lexes as IDENTIFIER, so nothing is
+// lost.
+record_keyword
+  : {this.IsRecordKeyword()}? IDENTIFIER
+  ;
+
+right_shift
+  : OP_171 OP_171 {this.IsRightShift()}? // adjacent in the char stream?
+  ;
+
+unsigned_right_shift
+  : OP_171 OP_171 {this.IsUnsignedRightShift()}? OP_171 {this.IsUnsignedRightShift()}? // adjacent in the char stream?
+  ;
+
+right_shift_assignment
+  : OP_171 OP_136 {this.IsRightShiftAssignment()}? // adjacent in the char stream?
+  ;
+
+unsigned_right_shift_assignment
+  : OP_171 OP_171 {this.IsUnsignedRightShiftAssignment()}? OP_136 {this.IsUnsignedRightShiftAssignment()}? // adjacent in the char stream?
+  ;

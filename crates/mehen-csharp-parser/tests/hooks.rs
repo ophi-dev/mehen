@@ -1,22 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Konstantin Vyatkin <tino@vtkn.io>
 
-//! Behavioral tests for the `CSharpLexerBase` hook port (`src/hooks.rs`) and
-//! the pattern-lowered `CSharpParserBase` predicates.
+//! Behavioral tests for the derived grammar's semantic surfaces — the
+//! interpolated-string state in `@lexer::members` and the pattern-lowered
+//! parser predicates.
 //!
-//! Each test pins one observable consequence of a helper so a regression in
-//! the port (or a regenerate that stops routing a helper) fails here rather
-//! than silently skewing downstream metrics.
+//! Each test pins one observable consequence so a regression in the grammar — or
+//! a regenerate that stops routing a helper — fails here rather than silently
+//! skewing downstream metrics. The interpolation cases are the interesting ones:
+//! the `}` closing a hole is lexically identical to the one closing a nested
+//! block, so telling them apart needs a brace depth per open hole and a
+//! *conditional* mode pop. SemIR has no conditional action, so the grammar
+//! encodes it as two predicate-gated rules over the same character, ordered so
+//! rule selection supplies the conjunction (see `grammar/lexer-tokens.g4.in`).
 
 use antlr4_runtime::{CommonTokenStream, InputStream, Parser};
 use mehen_csharp_parser::c_sharp_lexer::CSharpLexer;
 use mehen_csharp_parser::c_sharp_parser::CSharpParser;
-use mehen_csharp_parser::hooks::CSharpLexerBase;
 
-/// Parse a compilation unit with the lexer hooks installed, returning the
-/// recovered syntax-error count.
+/// Parse a compilation unit, returning the recovered syntax-error count.
+///
+/// Plain `CSharpLexer::new`: the lexer needs no hooks at all. Its state lives in
+/// `@lexer::members` and every action and predicate lowers to pure SemIR through
+/// the derived `patterns.toml`, so there is no hand-written Rust to install.
 fn syntax_errors(source: &str) -> usize {
-    let lexer = CSharpLexer::with_typed_hooks(InputStream::new(source), CSharpLexerBase::default());
+    let lexer = CSharpLexer::new(InputStream::new(source));
     let tokens = CommonTokenStream::new(lexer);
     let mut parser = CSharpParser::new(tokens);
     parser.remove_error_listeners();
@@ -28,91 +36,120 @@ fn syntax_errors(source: &str) -> usize {
 
 #[test]
 fn plain_class_parses_cleanly() {
-    assert_eq!(syntax_errors("class C { void M() {} }\n"), 0);
+    assert_eq!(syntax_errors("class C { void M() { } }"), 0);
 }
 
 #[test]
 fn interpolated_string_parses_cleanly() {
-    // Exercises OnInterpolatedRegularStringStart/OnOpenBrace/OnCloseBrace:
-    // the `{x + 1}` hole re-enters expression lexing, `:D` is a format
-    // clause (OnColon), and lexing must pop back out at the closing quote.
-    let src = "class C { string M(int x) { return $\"a{x + 1:D}b\"; } }\n";
-    assert_eq!(syntax_errors(src), 0);
+    assert_eq!(
+        syntax_errors(r#"class C { void M() { var s = $"a{X}b"; } }"#),
+        0
+    );
+}
+
+#[test]
+fn interpolation_hole_tracks_nested_braces() {
+    // The `}` of the collection initializer must NOT end the hole; only the
+    // outer one does. This is the case a single unconditional mode command
+    // cannot express, and the reason the rules are split and ordered.
+    assert_eq!(
+        syntax_errors(r#"class C { void M() { var s = $"a{ new[]{1,2}.Length }b"; } }"#),
+        0
+    );
+}
+
+#[test]
+fn escaped_braces_are_literal_text() {
+    assert_eq!(
+        syntax_errors(r#"class C { void M() { var s = $"{{literal}}"; } }"#),
+        0
+    );
+}
+
+#[test]
+fn interpolation_format_clause_is_not_code() {
+    // `D4` after the `:` is format text, not an identifier, so it needs its own
+    // lexer mode — entered by the `:` rule gated on brace depth 0.
+    assert_eq!(
+        syntax_errors(r#"class C { void M() { var s = $"{v:D4}"; } }"#),
+        0
+    );
 }
 
 #[test]
 fn nested_interpolated_strings_parse_cleanly() {
-    // A hole containing another interpolated string exercises the
-    // level/verbatium stacks.
-    let src = "class C { string M(int x) { return $\"a{$\"inner{x}\"}b\"; } }\n";
-    assert_eq!(syntax_errors(src), 0);
+    assert_eq!(
+        syntax_errors(r#"class C { void M() { var s = $"outer {$"inner {x}"} end"; } }"#),
+        0
+    );
 }
 
 #[test]
-fn verbatim_interpolated_string_parses_cleanly() {
-    // `$@\"…\"` flips the verbatium flag (IsVerbatiumDoubleQuoteInside);
-    // doubled quotes inside are escapes, and `\` is a literal backslash.
-    let src = "class C { string M(int x) { return $@\"c:\\dir\\{x}\"\"q\"\"\"; } }\n";
-    assert_eq!(syntax_errors(src), 0);
+fn verbatim_interpolated_string_keeps_backslash_literal() {
+    // In `$@"…"` a backslash is an ordinary character, so it must not start an
+    // escape. Needs a text mode distinct from the regular-string one.
+    assert_eq!(
+        syntax_errors(r#"class C { void M() { var s = $@"a{X}\b"; } }"#),
+        0
+    );
 }
 
 #[test]
-fn preprocessor_inactive_section_is_skipped() {
-    // The `#if FOO` block is inactive (FOO undefined): its body — which is
-    // NOT valid C# — must be consumed by the directive state machine
-    // (skip_false_block) rather than tokenized.
-    let src = "#if FOO\nthis is ] not [ C# at all ;;\n#endif\nclass C {}\n";
-    assert_eq!(syntax_errors(src), 0);
+fn verbatim_interpolated_string_doubles_quotes() {
+    assert_eq!(
+        syntax_errors(r#"class C { void M() { var s = $@"a""b{X}"; } }"#),
+        0
+    );
 }
 
 #[test]
-fn preprocessor_define_activates_branch() {
-    // `#define FOO` then `#if FOO` keeps the branch active, `#else` inactive.
-    let src = "#define FOO\n#if FOO\nclass A {}\n#else\nnot C# ]][[\n#endif\nclass B {}\n";
-    assert_eq!(syntax_errors(src), 0);
+fn nested_generics_close_with_adjacent_angle_brackets() {
+    // `>>` is emitted as two `>` tokens and rejoined in the parser behind
+    // `token_index_adjacent`, so a generic closer never lexes as a shift.
+    assert_eq!(syntax_errors("class C { List<List<int>> F; }"), 0);
 }
 
 #[test]
-fn preprocessor_condition_operators_evaluate() {
-    // `!`, `&&`, `==` in `#if` expressions flow through the Expression
-    // evaluator in the hooks port.
-    let src = "#define A\n#if A && !B\nclass Kept {}\n#elif A == false\nnot C# ((\n#endif\n";
-    assert_eq!(syntax_errors(src), 0);
+fn right_shift_still_parses_as_an_operator() {
+    // The other side of the same predicate: adjacent `>` `>` in expression
+    // position is a shift.
+    assert_eq!(syntax_errors("class C { int M(int a, int b) => a >> b; }"), 0);
 }
 
 #[test]
-fn nested_generics_close_with_right_shift() {
-    // `List<List<int>>` ends in `>>` lexed as two `>` tokens; the
-    // IsRightShift/token-adjacency pattern must let the type close while
-    // still treating spaced `> >` in expressions as comparisons.
-    let src =
-        "class C { System.Collections.Generic.List<System.Collections.Generic.List<int>> f; }\n";
-    assert_eq!(syntax_errors(src), 0);
+fn record_is_a_contextual_keyword() {
+    // Roslyn declares the keyword as `<ContextualKind>`, which its grammar
+    // generator drops; the prep restores it as a text predicate. It must remain
+    // usable as an ordinary name.
+    assert_eq!(syntax_errors("record R(int X);"), 0);
+    assert_eq!(syntax_errors("class C { void M() { int record = 1; } }"), 0);
 }
 
 #[test]
-fn var_declaration_predicate_holds() {
-    // IsLocalVariableDeclaration (ctx_rule_text != "var"): both a `var`
-    // inferred local and an explicitly-typed local must parse cleanly.
-    let src = "class C { void M() { var x = 1; int y = 2; } }\n";
-    assert_eq!(syntax_errors(src), 0);
+fn var_is_a_contextual_keyword() {
+    // The widened `identifier_token` must accept `var` as a name while
+    // `var_pattern` still recognizes it positionally.
+    assert_eq!(syntax_errors("class C { void M() { var x = 1; } }"), 0);
+    assert_eq!(syntax_errors("class C { void M() { int var = 1; } }"), 0);
 }
 
 #[test]
-fn hookless_lexer_fails_loud_on_hooked_coordinate() {
-    // The generated modules carry `--sem-unknown error`: a lexer built
-    // without hooks must fail (not mis-lex) when input reaches a hooked
-    // action — here an interpolated string.
-    let lexer = CSharpLexer::new(InputStream::new(
-        "class C { string M(int x) { return $\"a{x}\"; } }\n",
-    ));
-    let tokens = CommonTokenStream::new(lexer);
-    let mut parser = CSharpParser::new(tokens);
-    parser.remove_error_listeners();
-    let hard_fail = parser.compilation_unit().is_err();
-    let recovered = parser.number_of_syntax_errors() > 0;
-    assert!(
-        hard_fail || recovered,
-        "hook-less lex of an interpolated string must fail loud, not mis-lex"
+fn discard_designation_parses() {
+    // `out _` was the one gap whose error recovery grew the runtime's
+    // diagnostic arena without bound; pinned so it cannot regress silently.
+    assert_eq!(
+        syntax_errors("class C { bool M(string p, out int n) => G(p, out n, out _); }"),
+        0
+    );
+}
+
+#[test]
+fn deeply_nested_holes_restore_the_enclosing_depth() {
+    // `holeStack` saves the enclosing hole's brace depth so an inner hole cannot
+    // clobber it. Without that, the outer `}` would be misread once the inner
+    // string had incremented the shared counter.
+    assert_eq!(
+        syntax_errors(r#"class C { void M() { var s = $"a{ $"b{ new[]{1}.Length }c" }d"; } }"#),
+        0
     );
 }

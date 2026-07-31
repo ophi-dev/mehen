@@ -564,10 +564,13 @@ impl Walker<'_> {
                 let public = visibility_from_modifiers(ctx).unwrap_or(default_public);
                 (true, container, Some(public))
             }
-            // An interface member carries no access modifiers at all (they are
-            // implicitly public) and holds its signature inline rather than in
-            // a nested declaration rule.
-            cp::RULE_INTERFACE_MEMBER_DECLARATION => (true, container_before_open, Some(true)),
+            // No arm for `interface_member_declaration`: the grammar marks that
+            // rule "ignored in csharp 8" and `interface_definition` uses
+            // `class_body`, so interface members arrive through the ordinary
+            // class-member rules and pick up their implicit `public` from
+            // `default_public`. The rule is unreachable and pruned out of the
+            // generated parser entirely.
+            //
             // An `enum` member is implicitly public; it is a direct child of
             // `enum_body` with no modifier wrapper.
             cp::RULE_ENUM_BODY => (true, container_before_open, Some(true)),
@@ -1174,7 +1177,6 @@ impl Walker<'_> {
                 | cp::RULE_INTERFACE_DEFINITION
                 | cp::RULE_ENUM_DEFINITION
                 | cp::RULE_DELEGATE_DEFINITION
-                | cp::RULE_INTERFACE_MEMBER_DECLARATION
                 | cp::RULE_NAMESPACE_DECLARATION
                 | cp::RULE_USING_DIRECTIVE
                 | cp::RULE_EXTERN_ALIAS_DIRECTIVE
@@ -1240,21 +1242,9 @@ impl Walker<'_> {
             | cp::RULE_INDEXER_DECLARATION => {
                 self.current().npm.record_method(container, public);
             }
-            // An interface member's signature is inline on the member rule
-            // (there is no nested declaration), so classify it here. Every
-            // interface member is implicitly public.
-            cp::RULE_INTERFACE_MEMBER_DECLARATION => {
-                if ctx.child_rule(cp::RULE_FORMAL_PARAMETER_LIST).is_some()
-                    || ctx.has_token(cl::OPEN_PARENS)
-                {
-                    self.current().npm.record_method(container, true);
-                } else if ctx.has_token(cl::EVENT) {
-                    self.current().npa.record_attribute(container, true);
-                } else {
-                    // A property/indexer signature (`int P { get; set; }`).
-                    self.current().npm.record_method(container, true);
-                }
-            }
+            // No arm for `interface_member_declaration` — see the note on the
+            // member-classification match above. Interface members reach the
+            // method/property arms here through the ordinary class-member rules.
             _ => {}
         }
     }
