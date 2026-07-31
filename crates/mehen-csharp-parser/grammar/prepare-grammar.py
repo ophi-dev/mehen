@@ -316,6 +316,23 @@ STABLE_TOKEN_NAMES = {
 #    parameter-only keywords cannot leak into type/member declarations.
 #
 # Applied on the pristine literal forms, before literal harvesting.
+# `declaration_expression : type variable_designation` is listed eleven
+# alternatives *before* `invocation_expression : expression argument_list`, and
+# both match `F(x)` — `F` as a type with `(x)` a parenthesized designation, or
+# `F` as an expression with `(x)` an argument list. ANTLR takes the first viable
+# alternative, so **every method call in every position** parsed as a declaration
+# expression, and with zero reported errors.
+#
+# Roslyn's own parser resolves this semantically (it knows whether `F` names a
+# type); a syntax-only grammar cannot, so alternative order has to carry it.
+# Moving the declaration form last makes the common case right while leaving it
+# to win where nothing else fits — `F(out int x)` still parses as a declaration,
+# because `out int x` is not argument-list shaped.
+#
+# Same family as the `record` <ContextualKind> loss: information the compiler
+# holds outside the grammar, which the published grammar therefore drops.
+DECLARATION_EXPRESSION_ALT = "  | declaration_expression\n"
+
 GENERATOR_GAP_FIXES = [
     # (1) allow a bare `;` accessor body.
     (
@@ -778,6 +795,22 @@ def main() -> int:
         print("error: integer_literal_token shape changed upstream", file=sys.stderr)
         return 1
     src = src.replace(old, new, 1)
+
+    # -- 2f. Deprioritize declaration_expression -----------------------------
+    # See DECLARATION_EXPRESSION_ALT: it shadows every invocation otherwise.
+    expression_rule = rule_span(src, "expression")
+    if not expression_rule:
+        print("error: expression rule not found", file=sys.stderr)
+        return 1
+    body = expression_rule.group(1)
+    if DECLARATION_EXPRESSION_ALT not in body:
+        print(
+            "error: declaration_expression is not an alternative of `expression`",
+            file=sys.stderr,
+        )
+        return 1
+    reordered = body.replace(DECLARATION_EXPRESSION_ALT, "") + DECLARATION_EXPRESSION_ALT
+    src = src.replace(expression_rule.group(0), f"expression\n{reordered}  ;\n", 1)
 
     # -- 3. Point character-level rules at real lexer tokens -----------------
     for rule, token in LEXER_TOKEN_RULES.items():

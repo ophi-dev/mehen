@@ -16,7 +16,7 @@
 
 use antlr4_runtime::{CommonTokenStream, InputStream, Parser};
 use mehen_csharp_parser::c_sharp_lexer::CSharpLexer;
-use mehen_csharp_parser::c_sharp_parser::CSharpParser;
+use mehen_csharp_parser::c_sharp_parser::{self as c_sharp_parser, CSharpParser};
 
 /// Parse a compilation unit, returning the recovered syntax-error count.
 ///
@@ -141,6 +141,56 @@ fn discard_designation_parses() {
         syntax_errors("class C { bool M(string p, out int n) => G(p, out n, out _); }"),
         0
     );
+}
+
+/// Whether any node in the tree is a `declaration_expression`.
+///
+/// `F(x)` fits both `declaration_expression : type variable_designation` and
+/// `invocation_expression : expression argument_list`, and the published grammar
+/// lists the declaration form first — so every method call parsed as a
+/// declaration, with zero reported errors. Error counts cannot catch that, hence
+/// a shape assertion.
+fn has_declaration_expression(source: &str) -> bool {
+    use antlr4_runtime::Node;
+    let lexer = CSharpLexer::new(InputStream::new(source));
+    let mut parser = CSharpParser::new(CommonTokenStream::new(lexer));
+    parser.remove_error_listeners();
+    let tree = parser.compilation_unit().expect("entry rule must not hard-fail");
+    let parsed = parser.into_parsed_file(tree);
+    fn walk(node: Node<'_>) -> bool {
+        if node
+            .as_rule()
+            .is_some_and(|rule| rule.rule_index() == c_sharp_parser::RULE_DECLARATION_EXPRESSION)
+        {
+            return true;
+        }
+        node.children().any(walk)
+    }
+    walk(parsed.tree())
+}
+
+#[test]
+fn invocations_are_not_declaration_expressions() {
+    for source in [
+        "class C { void M() { F(x); } }",
+        "class C { void M() { a.B(); } }",
+        "class C { void M() { a.B(x).C(y); } }",
+        "class C { int M() { return F(x); } }",
+    ] {
+        assert!(
+            !has_declaration_expression(source),
+            "method call mis-parsed as a declaration expression: {source}"
+        );
+    }
+}
+
+#[test]
+fn out_declarations_are_still_declaration_expressions() {
+    // The other side of the same reorder: where nothing else fits, the
+    // declaration form must still win.
+    assert!(has_declaration_expression(
+        "class C { void M() { F(out int x); } }"
+    ));
 }
 
 #[test]

@@ -303,7 +303,7 @@
         {"decision": 294, "rule": "while_statement", "state": 2343, "tier": "ll1"},
         {"decision": 295, "rule": "yield_statement", "state": 2355, "tier": "ll1"},
         {"decision": 296, "rule": "yield_statement", "state": 2361, "tier": "ll1"},
-        {"decision": 297, "rule": "expression", "state": 2392, "tier": "adaptive", "reason": "predicate", "probedLookahead": 1},
+        {"decision": 297, "rule": "expression", "state": 2391, "tier": "adaptive", "reason": "predicate", "probedLookahead": 1},
         {"decision": 298, "rule": "expression", "state": 2404, "tier": "adaptive", "reason": "not-disjoint", "probedLookahead": 1},
         {"decision": 299, "rule": "expression", "state": 2420, "tier": "adaptive", "reason": "not-disjoint", "probedLookahead": 1},
         {"decision": 300, "rule": "expression", "state": 2446, "tier": "adaptive", "reason": "not-disjoint", "probedLookahead": 1},

@@ -753,7 +753,6 @@ expression
   | collection_expression
   | conditional_access_expression
   | conditional_expression
-  | declaration_expression
   | default_expression
   | element_access_expression
   | element_binding_expression
@@ -787,6 +786,7 @@ expression
   | type_of_expression
   | unsafe_expression
   | with_expression
+  | declaration_expression
   ;
 
 anonymous_function_expression
