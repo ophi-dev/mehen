@@ -49,7 +49,6 @@ use mehen_core::{
 
 use mehen_csharp_parser::c_sharp_lexer::CSharpLexer;
 use mehen_csharp_parser::c_sharp_parser::CSharpParser;
-use mehen_csharp_parser::hooks::CSharpLexerBase;
 
 pub struct CSharpAnalyzer;
 
@@ -82,8 +81,9 @@ impl CSharpAnalyzer {
     /// Replaces the runtime's default lexer console listener with a structured
     /// diagnostic collector and removes the parser console listener.
     fn parse(&self, source: &str) -> Option<ParsedCSharp> {
-        let mut lexer =
-            CSharpLexer::with_typed_hooks(InputStream::new(source), CSharpLexerBase::default());
+        // No hooks: the derived grammar keeps its interpolated-string state in
+        // `@lexer::members`, lowered to pure SemIR via `patterns.toml`.
+        let mut lexer = CSharpLexer::new(InputStream::new(source));
         lexer.remove_error_listeners();
         let lexer_diagnostics = DiagnosticCollector::default();
         lexer.add_error_listener(lexer_diagnostics.clone());
@@ -192,9 +192,8 @@ impl LanguageAnalyzer for CSharpAnalyzer {
 /// through EOF, so every token (all channels) is present.
 fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
     use mehen_csharp_parser::c_sharp_lexer::{
-        BYTE_ORDER_MARK, DELIMITED_COMMENT, DELIMITED_DOC_COMMENT, DIRECTIVE_WHITESPACES,
-        EMPTY_DELIMITED_DOC_COMMENT, SINGLE_LINE_COMMENT, SINGLE_LINE_DOC_COMMENT, SKIPPED_SECTION,
-        WHITESPACES,
+        BYTE_ORDER_MARK, DELIMITED_COMMENT, DELIMITED_DOC_COMMENT, DIRECTIVE_LINE,
+        SINGLE_LINE_COMMENT, SINGLE_LINE_DOC_COMMENT, WHITESPACES,
     };
 
     mehen_antlr::loc_tokens(
@@ -204,14 +203,11 @@ fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
             DELIMITED_COMMENT,
             SINGLE_LINE_DOC_COMMENT,
             DELIMITED_DOC_COMMENT,
-            EMPTY_DELIMITED_DOC_COMMENT,
         ],
-        &[
-            WHITESPACES,
-            DIRECTIVE_WHITESPACES,
-            BYTE_ORDER_MARK,
-            SKIPPED_SECTION,
-        ],
+        // A preprocessor directive line is neither code nor comment for LOC:
+        // mehen routes directives to their own channel rather than evaluating
+        // them, so an inactive `#if` region is still parsed as ordinary code.
+        &[WHITESPACES, BYTE_ORDER_MARK, DIRECTIVE_LINE],
         &[],
     )
 }

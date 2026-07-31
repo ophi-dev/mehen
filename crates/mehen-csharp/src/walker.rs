@@ -9,29 +9,37 @@
 //! finalize-and-merge on close, with the parent-less ANTLR tree handled by
 //! threading context **top-down**.
 //!
-//! ## Grammar shape (vs Java)
+//! ## Grammar shape
 //!
-//! The grammars-v4 C# grammar differs from the Java one in two ways that shape
-//! every classification here:
+//! The parser is derived from Roslyn's own published grammar (see
+//! `mehen-csharp-parser/grammar/PROVENANCE.md`), which names rules after the
+//! compiler's *syntax nodes*. Three consequences shape every classification here:
 //!
-//! - **Control flow lives in labeled alternatives of one rule.** `if`, `switch`,
-//!   `while`, `do`, `for`, `foreach`, `try`, `lock`, `using`, `return`, `throw`,
-//!   `break`, `continue`, `goto`, `yield` are all alternatives of
-//!   `simple_embedded_statement`, each discriminated by a leading keyword token
-//!   that is a direct child. So the walker inspects that rule's tokens rather
-//!   than matching distinct rule indices (same approach as the Java walker's
-//!   `statement` handling). Which of those keywords actually *score* is a
-//!   separate question — see the per-metric list below.
-//! - **Operators are a precedence *cascade* of named rules.** Unlike Java's one
-//!   flat `expression` rule, C# spells each precedence level as its own rule
-//!   (`conditional_and_expression`, `conditional_or_expression`,
-//!   `equality_expression`, `relational_expression`, …). That makes operator
-//!   classification direct: a `conditional_and_expression` carrying `&&`
-//!   tokens *is* the short-circuit node, and a level with no operator token is
-//!   a transparent pass-through. The boolean-run collapse therefore uses the
-//!   `mehen-metrics` `observe_boolean` sequence accumulator (like the Kotlin
-//!   walker) rather than Java's tree-flattening, with explicit resets at
-//!   statement and call-argument boundaries.
+//! - **Each statement form is its own rule.** `if_statement`, `while_statement`,
+//!   `switch_statement`, `catch_clause`, `else_clause`, … so control flow is
+//!   dispatched on `rule_index()`. That is also more precise than the keyword
+//!   probing the previous grammars-v4 grammar required: a `has_token(IF)` test on
+//!   a shared `simple_embedded_statement` fires for an `if` anywhere in the node,
+//!   whereas a rule match cannot.
+//! - **Each declaration carries its own `attribute_list* modifier*`.** So a
+//!   member's span already covers its attributes, and its visibility is readable
+//!   on the declaration itself — no wrapper rule to open the space at, no span
+//!   widening, and no threading of resolved visibility down a wrapper chain.
+//! - **The expression cycle is inlined.** Roslyn's `expression` participates in a
+//!   mutual left-recursion cycle, and the generator's hub inlining (upstream
+//!   #221) folds 16 of 17 satellites into it — so `invocation_expression`,
+//!   `assignment_expression`, `binary_expression`, and `conditional_expression`
+//!   have no rule index of their own. They are classified by *shape* through the
+//!   typed `ExpressionContext`: one `expression` child plus an `argument_list` is
+//!   an invocation, two children a binary/assignment, three a ternary.
+//!
+//! ## Typed contexts
+//!
+//! Navigation uses the generated typed contexts, whose accessors reach only a
+//! rule's *declared direct children* — the property the untyped `child_rule` /
+//! `has_token` probes could assert only by comment. Dispatch stays on
+//! `rule_index()`, since a metric walker is fundamentally one match over rule
+//! kinds. This mirrors `mehen-java` and `mehen-kotlin`.
 //!
 //! ## Metric coverage (SonarC#-aligned)
 //!
@@ -45,38 +53,40 @@
 //!   call argument, matching SonarSource). `try` and `lock` add nothing — the
 //!   spec increments on the *handler* (`catch`), not the guarded block, and
 //!   `lock` is not an increment at all.
-//! - **ABC**: assignments via `assignment` (all `=`/compound/`??=` forms),
-//!   `++`/`--`, and any initialized declarator
-//!   (`local_variable_declarator`/`variable_declarator`/`constant_declarator`/
-//!   `enum_member_declaration`/`arg_declaration` default); branches via every
-//!   `method_invocation`, `object_creation_expression`, and
-//!   `constructor_initializer` (NOT `member_access` — that is qualification,
-//!   not a call, so a qualified call still scores exactly one branch);
-//!   conditions via
-//!   `if`/`case`/`catch`/`when`-filter/loops/comparison & equality/`&&`/`||`/
-//!   ternary/`??`/`is`/`as` (bit-shifts `<<`/`>>` are excluded — not
-//!   relational).
-//! - **NExit**: `return`, `throw` (statement and expression forms), and
-//!   `yield return`/`yield break`.
-//! - **NArgs**: `formal_parameter_list` count for methods/constructors/
-//!   local functions/indexers; the two `arg_declaration`s of an operator;
-//!   `anonymous_function_signature` count for lambdas and anonymous methods.
+//! - **ABC**: assignments via the assignment-shaped `expression` (all
+//!   `=`/compound/`??=` forms), `++`/`--`, and any initialized declarator;
+//!   branches via every invocation-shaped `expression`, object creation, and
+//!   `constructor_initializer` (NOT member access — that is qualification, not a
+//!   call, so a qualified call still scores exactly one branch); conditions via
+//!   `if`/`case`/`catch`/`when`/loops/comparison & equality/`&&`/`||`/ternary/
+//!   `??`/`is`/`as`. Bit-shifts are excluded, and the prep makes that reliable:
+//!   `>>` is spelled as adjacent `>` tokens rejoined in the parser, so a `GT`
+//!   token is always a comparison and never half a shift.
+//! - **NExit**: `return_statement`, `throw_statement`, `throw_expression`, and
+//!   `yield_statement` (both `yield return` and `yield break`).
+//! - **NArgs**: the `parameter` count of a `parameter_list` /
+//!   `bracketed_parameter_list`. Roslyn uses one `parameter` rule for every
+//!   position — methods, operators, lambdas, anonymous methods alike — with
+//!   `params` as a modifier rather than a distinct rule.
 //! - **NOM**: every `method_declaration`, `constructor_declaration`,
-//!   `destructor_definition`, `operator_declaration`,
-//!   `conversion_operator_declarator`, `local_function_declaration`, property/
-//!   indexer/event accessor (`get`/`set`/`add`/`remove`) is a function space;
-//!   every `lambda_expression` and `anonymousMethodExpression` is a
-//!   closure-shaped function space.
+//!   `destructor_declaration`, `operator_declaration`,
+//!   `conversion_operator_declaration`, `local_function_statement`, and
+//!   `accessor_declaration` (one rule covers get/set/init/add/remove) is a
+//!   function space; `simple_lambda_expression`,
+//!   `parenthesized_lambda_expression`, and `anonymous_method_expression` are
+//!   closure-shaped function spaces.
 //! - **LOC**: PLOC from per-space code-token rows during the walk, LLOC from
 //!   statement/declaration-shaped rules, CLOC from a source-ordered pass over
 //!   the hidden-channel comment tokens routed via `SpaceRangeTracker`.
 //! - **Halstead**: per-token operator/operand classification — keywords and
 //!   punctuation are operators; identifiers, literals, `this`, `base` are
-//!   operands (deduped by text).
-//! - **NPA / NPM / WMC**: class-vs-interface routing by the type-definition
-//!   keyword (`struct` counts as a class-like container; `interface` as an
-//!   interface). NPA counts `field_declaration` variables, `constant_declaration`
-//!   declarators, `event_declaration` variables, and `enum_member_declaration`s
+//!   operands (deduped by text). A terminal reached through `identifier_token` is
+//!   always an operand, which is what makes C#'s contextual keywords come out
+//!   right: the prep widens that rule to accept all 42 of them.
+//! - **NPA / NPM / WMC**: class-vs-interface routing by the declaration rule
+//!   (`struct` and `record` count as class-like containers; `interface` as an
+//!   interface). NPA counts `field_declaration` / `event_field_declaration`
+//!   declarators, named `event_declaration`s, and `enum_member_declaration`s
 //!   directly under a type body. NPM counts methods/constructors/operators/
 //!   properties/indexers directly under a type body. C# visibility: a type
 //!   member with no access modifier is `private` (NOT public), so only an
@@ -84,7 +94,7 @@
 //!   public. `enum` members are implicitly public.
 
 use mehen_antlr::runtime::token::Token;
-use mehen_antlr::runtime::{Node, RuleNodeView, TerminalNodeView};
+use mehen_antlr::runtime::{FromRuleNode, Node, RuleNodeView, TerminalNodeView};
 use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
 use mehen_metrics::{
@@ -95,6 +105,11 @@ use smol_str::SmolStr;
 
 use mehen_csharp_parser::c_sharp_lexer as cl;
 use mehen_csharp_parser::c_sharp_parser as cp;
+// Typed contexts, used for *navigation* — their accessors reach only a rule's
+// declared direct children, which is the property the untyped `child_rule` /
+// `has_token` probes could only assert by comment. Dispatch stays on
+// `rule_index()`: a metric walker is fundamentally one match over rule kinds.
+use mehen_csharp_parser::c_sharp_parser::PrefixUnaryExpressionContext;
 
 /// Drive the walk over the parsed `compilation_unit` tree and return the unit
 /// `MetricSpace`. LOC is computed from `loc_tokens` in a single ordered pass
@@ -215,23 +230,21 @@ struct ChildHint {
     /// cyclomatic/cognitive/ABC accounting is suppressed for the whole subtree
     /// (LOC/Halstead still count — the tokens physically exist).
     in_attributes: bool,
-    /// The 0-based start line + byte of the enclosing member's declaration
-    /// wrapper (`class_member_declaration`/`struct_member_declaration`/
-    /// `type_declaration`), threaded down so a method/type space can widen its
-    /// span upward to cover its own-line attributes and modifiers. In this
-    /// grammar `attributes` and `all_member_modifiers` are SIBLINGS of the
-    /// inner declaration, so the declaration's own `ctx_span` starts *after*
-    /// them — leaving `[Obsolete]\npublic void M() {}`'s attribute row
-    /// attributed to the enclosing type. `None` outside a member position.
-    member_decl_start: Option<(u32, u32)>,
-    /// This declaration's space was already opened by its enclosing member
-    /// wrapper (so the wrapper's own-line attributes/modifiers are visited
-    /// *inside* the space, giving the member correct Halstead/PLOC/span). The
-    /// declaration node must therefore NOT open a second space of its own.
-    space_opened_by_wrapper: bool,
-    /// The declared name of the enclosing `typed_member_declaration` /
-    /// property-bearing member, threaded down so a `get`/`set` accessor space
-    /// can be named `Prop.get` rather than anonymous.
+    /// This node is inside an `accessor_declaration`'s body. An accessor opens a
+    /// metric space but is not itself a logical line, so an expression-bodied
+    /// accessor (`get => _x;`) has nothing else to make its space non-empty —
+    /// [`Walker::classify_loc_rule`] counts the `arrow_expression_clause` for it.
+    /// Every other expression body hangs off a declaration that is already
+    /// counted, where counting the clause too would double.
+    in_accessor_body: bool,
+    /// The declared name of the enclosing property / indexer / event, threaded
+    /// down so a `get`/`set` accessor space can be named `Prop.get` rather than
+    /// anonymous.
+    ///
+    /// (No `member_decl_start` or `space_opened_by_wrapper` here: Roslyn puts
+    /// `attribute_list* modifier*` directly on each declaration, so a member's
+    /// own span already covers its attributes and there is no wrapper to open the
+    /// space at. Both fields existed only for the grammars-v4 shape.)
     accessor_owner: Option<SmolStr>,
 }
 
@@ -275,30 +288,32 @@ impl Walker<'_> {
         // SonarSource's flattened sequence.
         if !hint.in_attributes {
             match tt {
-                cl::ELSE => self.current().cognitive.increment_by_one(),
-                cl::OP_AND => self.current().cognitive.observe_boolean("&&"),
-                cl::OP_OR => self.current().cognitive.observe_boolean("||"),
+                cl::KW_ELSE => self.current().cognitive.increment_by_one(),
+                cl::AMP_AMP => self.current().cognitive.observe_boolean("&&"),
+                cl::PIPE_PIPE => self.current().cognitive.observe_boolean("||"),
                 _ => {}
             }
 
             // Cyclomatic: each short-circuit boolean operator token is a
             // decision (independent of the cognitive run collapse).
-            if matches!(tt, cl::OP_AND | cl::OP_OR) {
+            if matches!(tt, cl::AMP_AMP | cl::PIPE_PIPE) {
                 self.current().cyclomatic.record_decision();
             }
 
             // ABC conditions: comparison / equality / boolean / null-coalescing
-            // operator tokens. Relational `<`/`>` are handled at the
-            // `relational_expression` rule (the grammar spells `<<`/`>>` with
-            // bare `LT`/`GT` runs, so a bare token probe cannot tell a shift
-            // from a comparison).
+            // operator tokens.
+            //
+            // Unlike the grammars-v4 grammar, relational `<`/`>` can be counted
+            // from the token stream directly: the prep spells `>>` as adjacent
+            // `>` tokens rejoined in the parser behind `token_index_adjacent`, so
+            // a `GT` token here is always a comparison and never half a shift.
             if is_abc_condition_token(tt) {
                 self.current().abc.record_condition();
             }
 
             // ABC assignments: `++`/`--` (Fitzpatrick lists both under A).
-            // The `=`/compound forms are handled at the `assignment` rule.
-            if matches!(tt, cl::OP_INC | cl::OP_DEC) {
+            // The `=`/compound forms are handled at the assignment expression.
+            if matches!(tt, cl::PLUS_PLUS | cl::MINUS_MINUS) {
                 self.current().abc.record_assignment();
             }
         }
@@ -366,10 +381,7 @@ impl Walker<'_> {
         // the type on top). A member whose space was already opened by its
         // wrapper had its NPM recorded there; skip re-classifying here (this
         // node now sits inside the member space, so it would misroute NPM).
-        if hint.in_type_member
-            && !hint.space_opened_by_wrapper
-            && let Some(container) = hint.member_container
-        {
+        if hint.in_type_member && let Some(container) = hint.member_container {
             let public = hint.member_is_public.unwrap_or(true);
             self.classify_type_member(ctx, ri, container, public);
         }
@@ -406,14 +418,11 @@ impl Walker<'_> {
             self.close_space();
         }
 
-        // The second accessor of a property/indexer/event is a *nested* child
-        // of the first accessor's rule in this grammar, but the two are
-        // siblings semantically. `visit_children` skipped it; visit it now that
-        // the first accessor's space has closed, so it becomes a sibling space
-        // of the first and still sees the owner name from the inbound hint.
-        if let Some(sibling) = accessor_sibling(ctx, ri) {
-            self.visit_rule(sibling, hint);
-        }
+        // No accessor-sibling hoisting needed: Roslyn's `accessor_list` holds
+        // every accessor as a flat sibling, so `{ get; set; }` walks as two peer
+        // `accessor_declaration` children. (grammars-v4 nested the second
+        // accessor inside the first accessor's rule, which the walker had to
+        // undo by re-visiting it after the first space closed.)
         self.cognitive = saved_cognitive;
     }
 
@@ -425,23 +434,15 @@ impl Walker<'_> {
         container_before_open: Option<ContainerKind>,
     ) {
         // `NodeChildren` is a cheap `Clone` slice-iterator, so it is re-walked
-        // (below, and for the `else` scan here) without allocating.
+        // below without allocating.
 
-        // For an `if` statement, the `else`-branch body is the `if_body` that
-        // appears after the `ELSE` token. Tag it so an `if` reached through it
-        // (without an intervening `block`) is recognized as `else if` and does
-        // not add nesting.
-        let else_body_idx = if is_if_statement(ctx, ri) {
-            else_branch_index(ctx.children())
-        } else {
-            None
-        };
-        // `is_else_branch` also flows through the transparent body wrappers
-        // (`if_body`, `embedded_statement`, `statement`) so an `else if` chain
-        // is recognized. It must NOT flow through a `block` (`else { if … }` is
-        // genuinely nested) nor through a statement that introduces its own
-        // control-flow construct.
-        let propagate_else = hint.is_else_branch && is_else_transparent(ctx, ri);
+        // An `else if` must not add cognitive nesting — only the flat `else` +1
+        // applies. Roslyn spells the else branch as its own `else_clause`, so the
+        // flag is set there and only when its body is a bare `if_statement`;
+        // `else { if … }` is genuinely nested and gets no flag. That replaces the
+        // old index-scan for the `if_body` following an `ELSE` token, plus the
+        // transparency chain that carried the flag down to the nested `if`.
+        let propagate_else = ri == cp::RULE_ELSE_CLAUSE && else_clause_is_else_if(ctx);
 
         // Type body member positions originate at the member-declaration
         // wrappers, then flow through the transparent `common_member_declaration`
@@ -454,33 +455,30 @@ impl Walker<'_> {
         // Capture the member wrapper's start so a member space can widen its
         // span upward over its own-line attributes/modifiers. A nested type or
         // function resets it (their members compute from their own wrappers).
-        let member_decl_start = if is_member_wrapper(ri) {
-            let span = ctx_span(ctx, self.line_index, self.source_len);
-            Some((span.start_byte, span.start_line))
-        } else if opens_type_like(ri) || opens_function_space(ri) {
-            None
-        } else {
-            hint.member_decl_start
-        };
-
         // A `for`/`foreach`/`using`/`fixed` header declaration must not let its
         // declaration add a second LLOC — the statement already contributes the
         // single header logical line. Tag ONLY the direct children of the
         // header-bearing rules (a non-sticky flag), so a real local declaration
         // nested inside a lambda in the initializer still counts.
+        //
+        // Roslyn inlines the header declaration into the statement itself
+        // (`for_statement : … LPAREN (variable_declaration? | …)`), so the tag
+        // goes on the statement rather than on a separate
+        // `for_initializer`/`resource_acquisition` rule.
         let in_for_init = matches!(
             ri,
-            cp::RULE_FOR_INITIALIZER | cp::RULE_FOR_ITERATOR | cp::RULE_RESOURCE_ACQUISITION
+            cp::RULE_FOR_STATEMENT | cp::RULE_USING_STATEMENT | cp::RULE_FIXED_STATEMENT
         );
 
-        // A terminal directly under `identifier` is a name → Halstead operand
-        // (covers C# contextual keywords used as identifiers).
-        let in_identifier = ri == cp::RULE_IDENTIFIER;
+        // A terminal directly under `identifier_token` is a name → Halstead
+        // operand. This is what makes C#'s contextual keywords come out right:
+        // the prep widens `identifier_token` to accept all 42 of them, so a
+        // `KW_VAR` reached here is an operand rather than an operator.
+        let in_identifier = ri == cp::RULE_IDENTIFIER_TOKEN;
 
-        // Once inside `attributes`, stay inside for the whole subtree so
+        // Once inside an attribute, stay inside for the whole subtree so
         // attribute metadata records no executable complexity.
-        let in_attributes = hint.in_attributes
-            || matches!(ri, cp::RULE_ATTRIBUTES | cp::RULE_GLOBAL_ATTRIBUTE_SECTION);
+        let in_attributes = hint.in_attributes || ri == cp::RULE_ATTRIBUTE_LIST;
 
         // Thread the property/indexer/event name down so its accessors can be
         // named `Prop.get` / `Prop.set`. Set at the member-bearing declaration;
@@ -499,46 +497,44 @@ impl Walker<'_> {
         // `common_member_declaration`/`typed_member_declaration` wrappers to
         // the declaration node, which consumes it; a real space open clears it
         // so a nested declaration inside the body still opens normally.
-        let opened_at_wrapper = is_member_wrapper(ri)
-            && (wrapper_inner_function(ctx).is_some() || wrapper_inner_type(ctx).is_some());
-        let space_opened_by_wrapper = if opens_function_space(ri) || opens_type_like(ri) {
+        // Inside an accessor's body from the accessor declaration downward, so
+        // an expression-bodied `get => _x;` can count its own logical line. A
+        // nested function or type resets it — their bodies are counted normally.
+        let in_accessor_body = if ri == cp::RULE_ACCESSOR_DECLARATION {
+            true
+        } else if opens_type_like(ri) || opens_function_space(ri) {
             false
         } else {
-            opened_at_wrapper || hint.space_opened_by_wrapper
+            hint.in_accessor_body
         };
 
-        // The second accessor is nested in the first accessor's rule but is
-        // semantically its sibling; `visit_rule` visits it after this space
-        // closes, so skip it here (see `accessor_sibling`).
-        let sibling_accessor_id = accessor_sibling(ctx, ri).map(|s| s.node().id());
-
-        for (idx, child) in ctx.children().enumerate() {
-            if let Some(skip_id) = sibling_accessor_id
-                && child.as_rule().is_some_and(|r| r.node().id() == skip_id)
-            {
-                continue;
-            }
+        for child in ctx.children() {
             let child_hint = ChildHint {
-                is_else_branch: Some(idx) == else_body_idx || propagate_else,
+                is_else_branch: propagate_else,
                 in_type_member: propagate_member,
                 member_container,
                 member_is_public,
                 in_for_init,
                 in_identifier,
                 in_attributes,
-                member_decl_start,
-                space_opened_by_wrapper,
+                in_accessor_body,
                 accessor_owner: accessor_owner.clone(),
             };
             self.visit(child, &child_hint);
         }
     }
 
-    /// Compute the `(in_type_member, container, is_public)` hint for this
-    /// rule's children. Members reach their declaration through transparent
-    /// wrapper layers; the container comes from the enclosing space kind and
-    /// the visibility is resolved from the wrapper's `all_member_modifiers`
-    /// (siblings of the member declaration).
+    /// Compute the `(in_type_member, container, is_public)` hint for this rule's
+    /// children.
+    ///
+    /// `member_declaration` marks a member position; the `base_*` rules beneath
+    /// it are pure dispatch alternations (Roslyn's syntax model has abstract
+    /// bases like `BaseMethodDeclarationSyntax`, so the generator emits one
+    /// alternation rule per abstraction) and simply pass the position through.
+    ///
+    /// Visibility is read on the real declaration, because Roslyn puts
+    /// `modifier*` there rather than on a wrapper — so unlike the grammars-v4
+    /// shape there is nothing to resolve early and thread down.
     fn member_propagation(
         &self,
         ctx: RuleNodeView<'_>,
@@ -547,48 +543,35 @@ impl Walker<'_> {
         container_before_open: Option<ContainerKind>,
     ) -> (bool, Option<ContainerKind>, Option<bool>) {
         match ri {
-            // The member-declaration wrappers open a member position; the
-            // container is the type-like currently on the kinds stack, and the
-            // visibility is resolved from this wrapper's `all_member_modifiers`.
-            cp::RULE_CLASS_MEMBER_DECLARATION | cp::RULE_STRUCT_MEMBER_DECLARATION => {
-                // Use the container captured BEFORE this node's
-                // `maybe_open_space` — a member wrapper may have just opened a
-                // nested type space, so `self.enclosing_container()` here would
-                // wrongly report that type.
-                let container = container_before_open;
-                // C# visibility semantics: a class/struct member with no access
-                // modifier is *private*, which is NOT public, so the default is
-                // `false` — only an explicit `public` counts toward NPA/NPM.
-                // Interface members are implicitly public.
-                let default_public = matches!(container, Some(ContainerKind::Interface));
-                let public = visibility_from_modifiers(ctx).unwrap_or(default_public);
-                (true, container, Some(public))
-            }
-            // No arm for `interface_member_declaration`: the grammar marks that
-            // rule "ignored in csharp 8" and `interface_definition` uses
-            // `class_body`, so interface members arrive through the ordinary
-            // class-member rules and pick up their implicit `public` from
-            // `default_public`. The rule is unreachable and pruned out of the
-            // generated parser entirely.
-            //
-            // An `enum` member is implicitly public; it is a direct child of
-            // `enum_body` with no modifier wrapper.
-            cp::RULE_ENUM_BODY => (true, container_before_open, Some(true)),
-            // A top-level / namespace-level type's modifiers live on the
-            // `type_declaration` wrapper. Thread the visibility down WITHOUT
-            // marking the type itself as a member (a top-level type is not
-            // counted in NPA/NPM), so `propagate_member` stays false.
-            cp::RULE_TYPE_DECLARATION => {
-                let public = visibility_from_modifiers(ctx).unwrap_or(false);
-                (false, None, Some(public))
-            }
-            // Transparent member wrappers keep the inbound member position, so
-            // the hint reaches the real declaration one or two levels deeper.
-            cp::RULE_COMMON_MEMBER_DECLARATION | cp::RULE_TYPED_MEMBER_DECLARATION => (
+            // A member position opens here. The container is captured BEFORE this
+            // node's `maybe_open_space`, since a member that is itself a nested
+            // type has already pushed that type's space.
+            cp::RULE_MEMBER_DECLARATION => (true, container_before_open, None),
+            // Pure dispatch layers: keep the inbound member position so the hint
+            // reaches the real declaration one level deeper.
+            cp::RULE_BASE_FIELD_DECLARATION
+            | cp::RULE_BASE_METHOD_DECLARATION
+            | cp::RULE_BASE_PROPERTY_DECLARATION
+            | cp::RULE_BASE_TYPE_DECLARATION
+            | cp::RULE_TYPE_DECLARATION => (
                 hint.in_type_member,
                 hint.member_container,
                 hint.member_is_public,
             ),
+            // The real declarations, which carry their own `modifier*`.
+            //
+            // C# visibility semantics: a class/struct member with no access
+            // modifier is *private*, which is NOT public, so the default is
+            // `false` — only an explicit `public` counts toward NPA/NPM.
+            // Interface members are implicitly public.
+            _ if hint.in_type_member && declares_member(ri) => {
+                let container = hint.member_container;
+                let default_public = matches!(container, Some(ContainerKind::Interface));
+                let public = visibility_from_modifiers(ctx).unwrap_or(default_public);
+                (true, container, Some(public))
+            }
+            // An `enum` member is implicitly public and carries no modifiers.
+            cp::RULE_ENUM_MEMBER_DECLARATION => (true, hint.member_container, Some(true)),
             _ => (false, None, None),
         }
     }
@@ -633,26 +616,10 @@ impl Walker<'_> {
         // Widen the declaration-node span up to its member wrapper so own-line
         // attributes/modifiers belong to the member. Unused when opening at the
         // wrapper (the span already starts there).
-        let widened = if opened_at_wrapper {
-            None
-        } else {
-            hint.member_decl_start
-        };
-        let mut state = self.new_space_state_widened(span_ctx, widened);
-        // When opening at the declaration node, the attribute/modifier rows
-        // were already visited (PLOC-counted) on the enclosing type before this
-        // space is pushed, so adopt those rows into the member.
-        if let Some((_, wrapper_start_line)) = widened {
-            let own_start_line = ctx_span(span_ctx, self.line_index, self.source_len).start_line;
-            if wrapper_start_line < own_start_line {
-                let parent_loc = self.current().loc.clone();
-                state.loc.adopt_code_lines_in_range(
-                    &parent_loc,
-                    wrapper_start_line.saturating_sub(1),
-                    own_start_line.saturating_sub(1),
-                );
-            }
-        }
+        let mut state = self.new_space_state(span_ctx);
+        // No row adoption needed: Roslyn puts `attribute_list* modifier*` on the
+        // declaration itself, so the space's own span already starts at the
+        // member's first attribute row rather than after it.
         let is_closure = matches!(kind, SpaceKind::Closure);
         if is_closure {
             state.nom.record_closure();
@@ -663,8 +630,8 @@ impl Walker<'_> {
         }
         // A local function's and a lambda's complexity belongs to the enclosing
         // method (already counted there), so neither rolls into the type's WMC.
-        let suppress_wmc = is_closure || fn_ctx.rule_index() == cp::RULE_LOCAL_FUNCTION_DECLARATION;
-        self.push_space_widened(kind, name, span_ctx, state, suppress_wmc, widened);
+        let suppress_wmc = is_closure || fn_ctx.rule_index() == cp::RULE_LOCAL_FUNCTION_STATEMENT;
+        self.push_space(kind, name, span_ctx, state, suppress_wmc);
         self.enter_function_cognitive(is_closure);
     }
 
@@ -678,16 +645,17 @@ impl Walker<'_> {
         state.npa.record_class_like();
         state.npm.record_class_like();
         let kind = match ri {
-            cp::RULE_ENUM_DEFINITION => {
+            cp::RULE_ENUM_DECLARATION => {
                 state.wmc.record_class_like();
                 SpaceKind::Enum
             }
             // An `interface` carries no WMC (its members are not weighted),
             // matching the Java walker's interface handling.
-            cp::RULE_INTERFACE_DEFINITION => SpaceKind::Interface,
-            // `class`, `struct`, and `delegate` are class-like. A `delegate` is
-            // a type declaration with a signature but no body; it opens a
-            // (childless) class space so its own LOC/NArgs are attributed.
+            cp::RULE_INTERFACE_DECLARATION => SpaceKind::Interface,
+            // `class`, `struct`, `record`, and `delegate` are class-like. A
+            // `delegate` is a type declaration with a signature but no body; it
+            // opens a (childless) class space so its own LOC/NArgs are
+            // attributed.
             _ => {
                 state.wmc.record_class_like();
                 SpaceKind::Class
@@ -699,41 +667,24 @@ impl Walker<'_> {
 
     /// Open a metric space for space-introducing rules. Returns whether a space
     /// was pushed.
+    /// Open a metric space when `ctx` is a declaration that owns one.
+    ///
+    /// Roslyn's grammar puts `attribute_list* modifier*` directly on every
+    /// declaration, so a member's span already starts at its attributes and its
+    /// visibility is readable on the declaration itself. The grammars-v4 shape
+    /// needed a wrapper rule (`class_member_declaration` → `all_member_modifiers`
+    /// + `common_member_declaration`) to factor that prefix out of an LL
+    /// decision, and the walker had to open the space at the wrapper and widen
+    /// the span back. None of that applies here — hence no wrapper handling, no
+    /// span widening, and no `space_opened_by_wrapper` suppression.
     fn maybe_open_space(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) -> bool {
-        // A member wrapper opens the member's space HERE (not at the inner
-        // declaration) so the wrapper's own-line attributes/modifiers —
-        // siblings of the declaration, visited before it — are walked *inside*
-        // the space and count toward its LOC/Halstead/span.
-        if is_member_wrapper(ri) {
-            if let Some((inner, kind)) = wrapper_inner_function(ctx) {
-                self.open_function_space(ctx, inner, hint, kind);
-                return true;
-            }
-            if let Some(inner) = wrapper_inner_type(ctx) {
-                self.open_type_space(ctx, inner);
-                return true;
-            }
-        }
-
-        // The wrapper already opened this declaration's space; do not open a
-        // second one. (Its children are still visited into that space.)
-        if hint.space_opened_by_wrapper
-            && (opens_function_space(ri) || opens_type_like(ri))
-            && !matches!(ri, cp::RULE_LAMBDA_EXPRESSION)
-        {
-            return false;
-        }
-
         match ri {
-            // Method-shaped members reached WITHOUT a wrapper (e.g. an
-            // interface member's inline signature, or a local function inside a
-            // method body).
             cp::RULE_METHOD_DECLARATION
             | cp::RULE_CONSTRUCTOR_DECLARATION
-            | cp::RULE_DESTRUCTOR_DEFINITION
+            | cp::RULE_DESTRUCTOR_DECLARATION
             | cp::RULE_OPERATOR_DECLARATION
-            | cp::RULE_CONVERSION_OPERATOR_DECLARATOR
-            | cp::RULE_LOCAL_FUNCTION_DECLARATION => {
+            | cp::RULE_CONVERSION_OPERATOR_DECLARATION
+            | cp::RULE_LOCAL_FUNCTION_STATEMENT => {
                 self.open_function_space(ctx, ctx, hint, SpaceKind::Function);
                 true
             }
@@ -742,55 +693,31 @@ impl Walker<'_> {
             // real complexity and are the C# analogue of Kotlin's
             // `getter`/`setter`.
             //
-            // `accessor_declarations` is asymmetric: the FIRST accessor's
-            // `GET`/`SET` token and `accessor_body` are inline on this rule,
-            // and the SECOND one is a *nested*
-            // `get_accessor_declaration`/`set_accessor_declaration` child. The
-            // same shape applies to `event_accessor_declarations` (`ADD block
-            // remove_accessor_declaration | …`).
-            //
-            // Opening a space at each of those rules would (a) drop the first
-            // accessor entirely if only the nested rules were matched, and (b)
-            // nest the second accessor *inside* the first — but the two are
-            // siblings, not parent and child. So the container rule opens the
-            // FIRST accessor's space only, and the nested rule is walked as a
-            // sibling: `visit_children` hoists it out (see
-            // `accessor_sibling_index`) rather than descending into it here.
-            cp::RULE_ACCESSOR_DECLARATIONS | cp::RULE_EVENT_ACCESSOR_DECLARATIONS => {
+            // One rule covers all of get/set/init/add/remove, and `accessor_list`
+            // holds them as flat siblings — so unlike grammars-v4 there is no
+            // asymmetry where the second accessor nests inside the first, and no
+            // sibling-hoisting is needed.
+            cp::RULE_ACCESSOR_DECLARATION => {
                 self.open_function_space(ctx, ctx, hint, SpaceKind::Function);
                 true
             }
-            cp::RULE_GET_ACCESSOR_DECLARATION
-            | cp::RULE_SET_ACCESSOR_DECLARATION
-            | cp::RULE_ADD_ACCESSOR_DECLARATION
-            | cp::RULE_REMOVE_ACCESSOR_DECLARATION => {
-                self.open_function_space(ctx, ctx, hint, SpaceKind::Function);
-                true
-            }
-            // A lambda (`x => x + 1`, `(a, b) => { … }`) and an anonymous
-            // method (`delegate(int x) { … }`) are closures: NOM/NArgs record
-            // them as closures and their cyclomatic must NOT roll into the
-            // enclosing type's WMC (WMC weights *methods*).
-            cp::RULE_LAMBDA_EXPRESSION => {
+            // Closures: a lambda (`x => …`, `(a, b) => …`) or an anonymous
+            // method (`delegate(int x) { … }`). NOM/NArgs record them as
+            // closures, and their cyclomatic must NOT roll into the enclosing
+            // type's WMC (WMC weights *methods*). Roslyn splits lambdas by
+            // parameter shape, and all three are real rules rather than labeled
+            // alternatives — so no `is_anonymous_method` probe.
+            cp::RULE_SIMPLE_LAMBDA_EXPRESSION
+            | cp::RULE_PARENTHESIZED_LAMBDA_EXPRESSION
+            | cp::RULE_ANONYMOUS_METHOD_EXPRESSION => {
                 self.open_function_space(ctx, ctx, hint, SpaceKind::Closure);
                 true
             }
-            _ => {
-                // An anonymous method is a labeled alternative of
-                // `primary_expression_start`, not its own rule.
-                if is_anonymous_method(ctx, ri) {
-                    self.open_function_space(ctx, ctx, hint, SpaceKind::Closure);
-                    return true;
-                }
-                // A type definition reached WITHOUT a wrapper (e.g. a type
-                // nested directly under `common_member_declaration` in a
-                // context whose wrapper did not open it).
-                if opens_type_like(ri) {
-                    self.open_type_space(ctx, ctx);
-                    return true;
-                }
-                false
+            _ if opens_type_like(ri) => {
+                self.open_type_space(ctx, ctx);
+                true
             }
+            _ => false,
         }
     }
 
@@ -949,90 +876,107 @@ impl Walker<'_> {
     fn classify_control_flow(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) {
         let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
 
+        // Roslyn gives each statement form its own rule, so these are rule-index
+        // matches rather than keyword probes on a shared
+        // `simple_embedded_statement`. That is also more precise: a
+        // `has_token(IF)` probe fires for an `if` anywhere inside the node,
+        // whereas a rule match cannot.
         match ri {
-            cp::RULE_SIMPLE_EMBEDDED_STATEMENT => {
-                if ctx.has_token(cl::IF) {
-                    // Cyclomatic + ABC always; cognitive nesting unless this is
-                    // an `else if` (the flat +1 is emitted at the ELSE token).
-                    self.current().cyclomatic.record_decision();
-                    self.current().abc.record_condition();
-                    if !hint.is_else_branch {
-                        self.current().cognitive.increase_nesting(eff);
-                        self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
-                    }
-                } else if ctx.has_token(cl::WHILE)
-                    || ctx.has_token(cl::DO)
-                    || ctx.has_token(cl::FOR)
-                    || ctx.has_token(cl::FOREACH)
-                {
-                    self.current().cyclomatic.record_decision();
-                    self.current().abc.record_condition();
-                    self.current().cognitive.increase_nesting(eff);
-                    self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
-                } else if ctx.has_token(cl::SWITCH) {
-                    // `switch` itself adds cognitive nesting but not
-                    // cyclomatic — the `case` labels carry the decisions.
+            // Cyclomatic + ABC always; cognitive nesting unless this is an
+            // `else if`, whose flat +1 is emitted at the `else_clause`.
+            cp::RULE_IF_STATEMENT => {
+                self.current().cyclomatic.record_decision();
+                self.current().abc.record_condition();
+                if !hint.is_else_branch {
                     self.current().cognitive.increase_nesting(eff);
                     self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
                 }
-                // NOTE: `try` and `lock` deliberately add NOTHING here.
-                // SonarSource's cognitive-complexity spec increments on `catch`
-                // (a handler is the structure a reader must follow), not on the
-                // `try` block itself, and `lock`/`synchronized` is not in the
-                // increment list at all. The `catch` nesting is applied at the
-                // catch-clause rules below, matching `mehen-java` (whose
-                // walker likewise never increments on `try`/`synchronized`).
-                else if ctx.has_token(cl::RETURN) || ctx.has_token(cl::THROW) {
-                    self.current().nexit.record_exit();
-                } else if ctx.has_token(cl::YIELD) {
-                    // `yield return` / `yield break` both leave the iterator.
-                    self.current().nexit.record_exit();
-                } else if ctx.has_token(cl::GOTO) {
-                    // `goto` (including `goto case`/`goto default`) is
-                    // goto-like: a flat +1 (cognitive).
-                    self.current().cognitive.increment_by_one();
-                }
-                // Each statement starts a fresh boolean sequence so operators
-                // never collapse across statement boundaries — e.g.
-                // `F(a && b); G(c && d)` is +2, not +1.
                 self.current().cognitive.boolean_seq.reset();
             }
-            // A `case` label is a decision (cyclomatic) and a condition (ABC);
-            // `default:` (no CASE token) is neither. The `switch` already opened
-            // the cognitive nesting level, so a `case` adds no further nesting.
-            cp::RULE_SWITCH_LABEL if ctx.has_token(cl::CASE) => {
+            cp::RULE_WHILE_STATEMENT
+            | cp::RULE_DO_STATEMENT
+            | cp::RULE_FOR_STATEMENT
+            | cp::RULE_FOR_EACH_STATEMENT
+            | cp::RULE_FOR_EACH_VARIABLE_STATEMENT => {
+                self.current().cyclomatic.record_decision();
+                self.current().abc.record_condition();
+                self.current().cognitive.increase_nesting(eff);
+                self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+                self.current().cognitive.boolean_seq.reset();
+            }
+            // `switch` itself adds cognitive nesting but not cyclomatic — the
+            // `case` labels carry the decisions.
+            cp::RULE_SWITCH_STATEMENT => {
+                self.current().cognitive.increase_nesting(eff);
+                self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+                self.current().cognitive.boolean_seq.reset();
+            }
+            // NOTE: `try` and `lock` deliberately score NOTHING. SonarSource's
+            // cognitive-complexity spec increments on `catch` (a handler is the
+            // structure a reader must follow), not on the `try` block itself, and
+            // `lock`/`synchronized` is not in the increment list at all. The
+            // `catch` nesting is applied at `catch_clause` below, matching
+            // `mehen-java`.
+            cp::RULE_RETURN_STATEMENT | cp::RULE_THROW_STATEMENT => {
+                self.current().nexit.record_exit();
+                self.current().cognitive.boolean_seq.reset();
+            }
+            // `yield return` / `yield break` both leave the iterator.
+            cp::RULE_YIELD_STATEMENT => {
+                self.current().nexit.record_exit();
+                self.current().cognitive.boolean_seq.reset();
+            }
+            // `goto` (including `goto case` / `goto default`) is goto-like: a
+            // flat +1, no nesting.
+            cp::RULE_GOTO_STATEMENT => {
+                self.current().cognitive.increment_by_one();
+                self.current().cognitive.boolean_seq.reset();
+            }
+            // A `case` label is a decision (cyclomatic) and a condition (ABC) in
+            // both its constant and pattern forms; `default:` is its own rule and
+            // is neither. The `switch` already opened the cognitive nesting
+            // level, so a `case` adds no further nesting.
+            cp::RULE_CASE_SWITCH_LABEL | cp::RULE_CASE_PATTERN_SWITCH_LABEL => {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
             }
-            // A pattern-switch guard (`case int i when i > 0:`) is a distinct
-            // boolean test — like an extra `if` on the case — so it records one
-            // ABC condition of its own.
-            cp::RULE_CASE_GUARD => self.current().abc.record_condition(),
+            // A `when` guard is a distinct boolean test — on a `case` label
+            // (`case int i when i > 0:`) or a switch-expression arm — so it
+            // records one ABC condition of its own. `catch (E e) when (…)` is a
+            // separate rule with the same meaning.
+            cp::RULE_WHEN_CLAUSE | cp::RULE_CATCH_FILTER_CLAUSE => {
+                self.current().abc.record_condition();
+            }
             // `catch` is cognitive-only (matches SonarC#/SonarJava): a nesting
-            // increment plus an ABC condition, but no cyclomatic decision.
-            cp::RULE_SPECIFIC_CATCH_CLAUSE | cp::RULE_GENERAL_CATCH_CLAUSE => {
+            // increment plus an ABC condition, but no cyclomatic decision. One
+            // rule now covers both the typed and bare forms.
+            cp::RULE_CATCH_CLAUSE => {
                 self.current().cognitive.increase_nesting(eff);
                 self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
                 self.current().abc.record_condition();
             }
-            // An exception filter (`catch (E e) when (cond)`) is an extra
-            // boolean test on the handler.
-            cp::RULE_EXCEPTION_FILTER => self.current().abc.record_condition(),
-            // A `throw` *expression* (`x ?? throw new E()`, C# 7) is an exit
-            // that never reaches the statement-form probe above.
+            // A `throw` *expression* (`x ?? throw new E()`, C# 7) is an exit that
+            // the statement form above never sees.
             cp::RULE_THROW_EXPRESSION => self.current().nexit.record_exit(),
-            // A declaration statement and an accessor/expression body start a
-            // fresh boolean sequence too — they are statement-shaped positions
-            // that are not wrapped in `simple_embedded_statement`.
-            cp::RULE_DECLARATION_STATEMENT | cp::RULE_ACCESSOR_BODY | cp::RULE_BODY => {
+            // Statement-shaped positions that are not one of the forms above
+            // still start a fresh boolean sequence, so operators never collapse
+            // across a boundary — `F(a && b); G(c && d)` is +2, not +1.
+            cp::RULE_EXPRESSION_STATEMENT
+            | cp::RULE_LOCAL_DECLARATION_STATEMENT
+            | cp::RULE_ARROW_EXPRESSION_CLAUSE
+            | cp::RULE_BLOCK => {
                 self.current().cognitive.boolean_seq.reset();
             }
             // The prefix `!` records a not-operator so a following same-kind
-            // boolean operator is not collapsed with the one before the
-            // negation (`a && !b && c` is one run in SonarSource's model, but
-            // the run tracker needs the marker to keep parity with Kotlin).
-            cp::RULE_UNARY_EXPRESSION if ctx.has_token(cl::BANG) => {
-                self.current().cognitive.boolean_seq.not_operator("!");
+            // boolean operator is not collapsed with the one before the negation
+            // (`a && !b && c` is one run in SonarSource's model, but the run
+            // tracker needs the marker to keep parity with Kotlin).
+            cp::RULE_PREFIX_UNARY_EXPRESSION => {
+                if PrefixUnaryExpressionContext::from_rule_node(ctx)
+                    .is_some_and(|expr| expr.bang_token().is_some())
+                {
+                    self.current().cognitive.boolean_seq.not_operator("!");
+                }
             }
             _ => {}
         }
@@ -1128,64 +1072,84 @@ impl Walker<'_> {
         // but its body contains no statement/declaration, so the closure would
         // report `lloc = 0`. Count the lambda itself as one logical line to
         // match a block-bodied lambda (whose inner statements already count).
-        if ri == cp::RULE_LAMBDA_EXPRESSION && !lambda_body_is_block(ctx) {
+        if matches!(
+            ri,
+            cp::RULE_SIMPLE_LAMBDA_EXPRESSION | cp::RULE_PARENTHESIZED_LAMBDA_EXPRESSION
+        ) && !lambda_body_is_block(ctx)
+        {
             self.current().loc.observe_lloc();
             return;
         }
-        // An expression-bodied **accessor** (`get => _x;`) or expression-bodied
-        // `body`/`local_function_body` opens a space whose only content is that
-        // expression — no statement — so the space would report `lloc = 0`
-        // without counting the body itself as one logical line.
+        // An expression-bodied accessor (`get => _x;`) opens a space whose only
+        // content is that expression — no statement — so the space would report
+        // `lloc = 0` without counting the body itself as one logical line.
         //
-        // This deliberately does NOT list the member declaration rules
-        // (`method_declaration`, `property_declaration`, …). An expression body
-        // on those is spelled with the `right_arrow` as a DIRECT child of the
-        // declaration (`… (method_body | right_arrow throwable_expression
-        // ';')`), and the declaration itself is already a logical line via the
-        // declaration list below — so `int F() => 1;` correctly counts once,
-        // not twice.
-        if matches!(
-            ri,
-            cp::RULE_BODY | cp::RULE_ACCESSOR_BODY | cp::RULE_LOCAL_FUNCTION_BODY
-        ) && ctx.child_rule(cp::RULE_BLOCK).is_none()
-            && ctx.child_rule(cp::RULE_RIGHT_ARROW).is_some()
-        {
+        // Roslyn spells every expression body as `arrow_expression_clause`, so
+        // this is one rule rather than the old `body`/`accessor_body`/
+        // `local_function_body` trio.
+        //
+        // It must fire only where the enclosing declaration is not itself counted
+        // below, or `int F() => 1;` would count twice. `in_accessor_body` marks
+        // the one case that needs it: an `accessor_declaration` opens a space but
+        // is not a logical line of its own, so an expression-bodied accessor has
+        // nothing else to count.
+        if ri == cp::RULE_ARROW_EXPRESSION_CLAUSE && hint.in_accessor_body {
             self.current().loc.observe_lloc();
             return;
         }
 
         if matches!(
             ri,
-            // Statement- and declaration-shaped rules.
-            cp::RULE_SIMPLE_EMBEDDED_STATEMENT
-                | cp::RULE_LOCAL_VARIABLE_DECLARATION
-                | cp::RULE_LOCAL_CONSTANT_DECLARATION
-                | cp::RULE_LOCAL_FUNCTION_DECLARATION
+            // Statement-shaped rules. Roslyn gives each statement form its own
+            // rule, so this replaces the single `simple_embedded_statement`.
+            cp::RULE_EXPRESSION_STATEMENT
+                | cp::RULE_LOCAL_DECLARATION_STATEMENT
+                | cp::RULE_LOCAL_FUNCTION_STATEMENT
+                | cp::RULE_IF_STATEMENT
+                | cp::RULE_WHILE_STATEMENT
+                | cp::RULE_DO_STATEMENT
+                | cp::RULE_FOR_STATEMENT
+                | cp::RULE_FOR_EACH_STATEMENT
+                | cp::RULE_FOR_EACH_VARIABLE_STATEMENT
+                | cp::RULE_SWITCH_STATEMENT
+                | cp::RULE_TRY_STATEMENT
+                | cp::RULE_USING_STATEMENT
+                | cp::RULE_LOCK_STATEMENT
+                | cp::RULE_FIXED_STATEMENT
+                | cp::RULE_CHECKED_STATEMENT
+                | cp::RULE_UNSAFE_STATEMENT
+                | cp::RULE_RETURN_STATEMENT
+                | cp::RULE_THROW_STATEMENT
+                | cp::RULE_YIELD_STATEMENT
+                | cp::RULE_BREAK_STATEMENT
+                | cp::RULE_CONTINUE_STATEMENT
+                | cp::RULE_GOTO_STATEMENT
+                | cp::RULE_LABELED_STATEMENT
+                // Declaration-shaped rules. `empty_statement` is deliberately
+                // absent: a bare `;` is not a logical line. So is `block`, which
+                // is a wrapper whose inner statements each count.
                 | cp::RULE_FIELD_DECLARATION
-                | cp::RULE_CONSTANT_DECLARATION
+                | cp::RULE_EVENT_FIELD_DECLARATION
                 | cp::RULE_EVENT_DECLARATION
                 | cp::RULE_METHOD_DECLARATION
                 | cp::RULE_CONSTRUCTOR_DECLARATION
-                | cp::RULE_DESTRUCTOR_DEFINITION
+                | cp::RULE_DESTRUCTOR_DECLARATION
                 | cp::RULE_OPERATOR_DECLARATION
-                | cp::RULE_CONVERSION_OPERATOR_DECLARATOR
+                | cp::RULE_CONVERSION_OPERATOR_DECLARATION
                 | cp::RULE_PROPERTY_DECLARATION
                 | cp::RULE_INDEXER_DECLARATION
                 | cp::RULE_ENUM_MEMBER_DECLARATION
-                | cp::RULE_CLASS_DEFINITION
-                | cp::RULE_STRUCT_DEFINITION
-                | cp::RULE_INTERFACE_DEFINITION
-                | cp::RULE_ENUM_DEFINITION
-                | cp::RULE_DELEGATE_DEFINITION
+                | cp::RULE_CLASS_DECLARATION
+                | cp::RULE_STRUCT_DECLARATION
+                | cp::RULE_INTERFACE_DECLARATION
+                | cp::RULE_ENUM_DECLARATION
+                | cp::RULE_RECORD_DECLARATION
+                | cp::RULE_DELEGATE_DECLARATION
                 | cp::RULE_NAMESPACE_DECLARATION
+                | cp::RULE_FILE_SCOPED_NAMESPACE_DECLARATION
                 | cp::RULE_USING_DIRECTIVE
                 | cp::RULE_EXTERN_ALIAS_DIRECTIVE
         ) {
-            // An empty statement (`;`) is not a logical line, and a bare block
-            // `{ … }` is a wrapper whose inner statements each count.
-            if ri == cp::RULE_SIMPLE_EMBEDDED_STATEMENT && ctx_is_empty_statement(ctx) {
-                return;
-            }
             self.current().loc.observe_lloc();
         }
     }
@@ -1201,27 +1165,19 @@ impl Walker<'_> {
         public: bool,
     ) {
         match ri {
-            // A field declaration can declare several variables
-            // (`int a, b, c;`).
-            cp::RULE_FIELD_DECLARATION => {
-                let count = declarator_count(ctx, cp::RULE_VARIABLE_DECLARATORS).max(1);
+            // A field or event-field declaration can declare several variables
+            // (`int a, b, c;` / `event E a, b;`). `const` is a modifier here
+            // rather than a separate rule, so there is no `constant_declaration`
+            // arm — a `const int a, b;` reaches this same path.
+            cp::RULE_FIELD_DECLARATION | cp::RULE_EVENT_FIELD_DECLARATION => {
+                let count = declarator_count(ctx).max(1);
                 for _ in 0..count {
                     self.current().npa.record_attribute(container, public);
                 }
             }
-            cp::RULE_CONSTANT_DECLARATION => {
-                let count = declarator_count(ctx, cp::RULE_CONSTANT_DECLARATORS).max(1);
-                for _ in 0..count {
-                    self.current().npa.record_attribute(container, public);
-                }
-            }
-            // An `event` can declare several variables too (`event E a, b;`),
-            // or a single named event with accessors.
+            // A named `event` with accessors declares exactly one member.
             cp::RULE_EVENT_DECLARATION => {
-                let count = declarator_count(ctx, cp::RULE_VARIABLE_DECLARATORS).max(1);
-                for _ in 0..count {
-                    self.current().npa.record_attribute(container, public);
-                }
+                self.current().npa.record_attribute(container, public);
             }
             // An `enum` member (`enum E { A, B }`) is a public constant field
             // of the enum → a public class attribute.
@@ -1235,16 +1191,13 @@ impl Walker<'_> {
             // member of the type's public API).
             cp::RULE_METHOD_DECLARATION
             | cp::RULE_CONSTRUCTOR_DECLARATION
-            | cp::RULE_DESTRUCTOR_DEFINITION
+            | cp::RULE_DESTRUCTOR_DECLARATION
             | cp::RULE_OPERATOR_DECLARATION
-            | cp::RULE_CONVERSION_OPERATOR_DECLARATOR
+            | cp::RULE_CONVERSION_OPERATOR_DECLARATION
             | cp::RULE_PROPERTY_DECLARATION
             | cp::RULE_INDEXER_DECLARATION => {
                 self.current().npm.record_method(container, public);
             }
-            // No arm for `interface_member_declaration` — see the note on the
-            // member-classification match above. Interface members reach the
-            // method/property arms here through the ordinary class-member rules.
             _ => {}
         }
     }
@@ -1258,218 +1211,66 @@ impl Walker<'_> {
 fn opens_type_like(ri: usize) -> bool {
     matches!(
         ri,
-        cp::RULE_CLASS_DEFINITION
-            | cp::RULE_STRUCT_DEFINITION
-            | cp::RULE_INTERFACE_DEFINITION
-            | cp::RULE_ENUM_DEFINITION
-            | cp::RULE_DELEGATE_DEFINITION
+        cp::RULE_CLASS_DECLARATION
+            | cp::RULE_STRUCT_DECLARATION
+            | cp::RULE_INTERFACE_DECLARATION
+            | cp::RULE_ENUM_DECLARATION
+            | cp::RULE_DELEGATE_DECLARATION
+            // Roslyn models `record` / `record struct` as their own node rather
+            // than a modifier on a class, so it is a peer here.
+            | cp::RULE_RECORD_DECLARATION
     )
 }
 
 /// Rules that open a function/closure metric space (mirrors the function arms
 /// of `maybe_open_space`).
+///
+/// Roslyn declares one rule per accessor *list* entry rather than one per
+/// accessor keyword, so a single `accessor_declaration` covers get/set/init/
+/// add/remove — the keyword is a child token, not part of the rule name.
 fn opens_function_space(ri: usize) -> bool {
     matches!(
         ri,
         cp::RULE_METHOD_DECLARATION
             | cp::RULE_CONSTRUCTOR_DECLARATION
-            | cp::RULE_DESTRUCTOR_DEFINITION
+            | cp::RULE_DESTRUCTOR_DECLARATION
             | cp::RULE_OPERATOR_DECLARATION
-            | cp::RULE_CONVERSION_OPERATOR_DECLARATOR
-            | cp::RULE_LOCAL_FUNCTION_DECLARATION
-            | cp::RULE_ACCESSOR_DECLARATIONS
-            | cp::RULE_EVENT_ACCESSOR_DECLARATIONS
-            | cp::RULE_GET_ACCESSOR_DECLARATION
-            | cp::RULE_SET_ACCESSOR_DECLARATION
-            | cp::RULE_ADD_ACCESSOR_DECLARATION
-            | cp::RULE_REMOVE_ACCESSOR_DECLARATION
-            | cp::RULE_LAMBDA_EXPRESSION
+            | cp::RULE_CONVERSION_OPERATOR_DECLARATION
+            | cp::RULE_LOCAL_FUNCTION_STATEMENT
+            | cp::RULE_ACCESSOR_DECLARATION
+            // Lambdas are split by parameter shape (`x => …` vs `(x, y) => …`),
+            // and `delegate { … }` is a third node.
+            | cp::RULE_SIMPLE_LAMBDA_EXPRESSION
+            | cp::RULE_PARENTHESIZED_LAMBDA_EXPRESSION
+            | cp::RULE_ANONYMOUS_METHOD_EXPRESSION
     )
 }
 
-/// The member-declaration wrappers whose leading `attributes` and
-/// `all_member_modifiers` are siblings of the inner declaration. Their start
-/// line is where the member truly begins, so a member space widens its span up
-/// to it, and the visibility is resolved there.
-fn is_member_wrapper(ri: usize) -> bool {
-    matches!(
-        ri,
-        cp::RULE_CLASS_MEMBER_DECLARATION
-            | cp::RULE_STRUCT_MEMBER_DECLARATION
-            | cp::RULE_TYPE_DECLARATION
-    )
-}
-
-/// Given a member wrapper, find the inner method-shaped declaration whose
-/// function space should be opened at the wrapper level — so the wrapper's
-/// own-line attributes/modifiers belong to the member's LOC/Halstead/span
-/// rather than the enclosing type.
+/// Whether a lambda's body is a block (`… => { … }`) rather than an expression.
+/// A block body's statements are counted individually for LLOC; an expression
+/// body makes the lambda itself one logical line.
 ///
-/// Walks the DIRECT child path only (`class_member_declaration →
-/// common_member_declaration → …`), never an unbounded search, so a nested
-/// type's method can never be captured here. Returns `None` when the member is
-/// not method-shaped (a field, nested type, const, property — those keep their
-/// own open sites).
-fn wrapper_inner_function(ctx: RuleNodeView<'_>) -> Option<(RuleNodeView<'_>, SpaceKind)> {
-    let common = match ctx.rule_index() {
-        cp::RULE_CLASS_MEMBER_DECLARATION | cp::RULE_STRUCT_MEMBER_DECLARATION => {
-            ctx.child_rule(cp::RULE_COMMON_MEMBER_DECLARATION)
-        }
-        _ => None,
-    };
-    // A destructor is a direct child of the member wrapper, not of
-    // `common_member_declaration`.
-    if let Some(dtor) = ctx.child_rule(cp::RULE_DESTRUCTOR_DEFINITION) {
-        return Some((dtor, SpaceKind::Function));
-    }
-    let common = common?;
-    for candidate in [
-        cp::RULE_CONSTRUCTOR_DECLARATION,
-        cp::RULE_METHOD_DECLARATION,
-        cp::RULE_CONVERSION_OPERATOR_DECLARATOR,
-    ] {
-        if let Some(inner) = common.child_rule(candidate) {
-            return Some((inner, SpaceKind::Function));
-        }
-    }
-    // `typed_member_declaration` wraps the type-prefixed member forms; a
-    // method or operator there is method-shaped.
-    let typed = common.child_rule(cp::RULE_TYPED_MEMBER_DECLARATION)?;
-    for candidate in [cp::RULE_METHOD_DECLARATION, cp::RULE_OPERATOR_DECLARATION] {
-        if let Some(inner) = typed.child_rule(candidate) {
-            return Some((inner, SpaceKind::Function));
-        }
-    }
-    None
-}
-
-/// Given a member or type wrapper, find the inner type definition whose space
-/// should be opened at the wrapper — so the wrapper's own-line
-/// attributes/modifiers belong to the type's LOC/Halstead/span.
-///
-/// Walks the DIRECT `child_rule` path only.
-fn wrapper_inner_type(ctx: RuleNodeView<'_>) -> Option<RuleNodeView<'_>> {
-    let holder = match ctx.rule_index() {
-        // `type_declaration` holds the definition as a direct child (after
-        // `attributes? all_member_modifiers?`).
-        cp::RULE_TYPE_DECLARATION => ctx,
-        // A member type is `class_member_declaration → common_member_declaration
-        // → <definition>`.
-        cp::RULE_CLASS_MEMBER_DECLARATION | cp::RULE_STRUCT_MEMBER_DECLARATION => {
-            ctx.child_rule(cp::RULE_COMMON_MEMBER_DECLARATION)?
-        }
-        _ => return None,
-    };
-    holder
-        .children()
-        .filter_map(|c| c.as_rule())
-        .find(|c| opens_type_like(c.rule_index()))
-}
-
-/// The *second* accessor of a property/indexer/event, which this grammar nests
-/// inside the first accessor's rule (`accessor_declarations: … GET
-/// accessor_body set_accessor_declaration?`) even though the two are siblings.
-///
-/// Returned so `visit_rule` can visit it *after* the first accessor's space
-/// closes — making it a sibling space rather than a child — while
-/// `visit_children` skips it during the first accessor's own descent.
-fn accessor_sibling(ctx: RuleNodeView<'_>, ri: usize) -> Option<RuleNodeView<'_>> {
-    if !matches!(
-        ri,
-        cp::RULE_ACCESSOR_DECLARATIONS | cp::RULE_EVENT_ACCESSOR_DECLARATIONS
-    ) {
-        return None;
-    }
-    [
-        cp::RULE_GET_ACCESSOR_DECLARATION,
-        cp::RULE_SET_ACCESSOR_DECLARATION,
-        cp::RULE_ADD_ACCESSOR_DECLARATION,
-        cp::RULE_REMOVE_ACCESSOR_DECLARATION,
-    ]
-    .into_iter()
-    .find_map(|rule| ctx.child_rule(rule))
-}
-
-/// Whether this `primary_expression_start` is the anonymous-method alternative
-/// (`delegate(int x) { … }`) — it carries a `DELEGATE` token and a `block`.
-fn is_anonymous_method(ctx: RuleNodeView<'_>, ri: usize) -> bool {
-    ri == cp::RULE_PRIMARY_EXPRESSION_START
-        && ctx.has_token(cl::DELEGATE)
-        && ctx.child_rule(cp::RULE_BLOCK).is_some()
-}
-
-/// Whether a `lambda_expression`'s body is a block (`… => { … }`) rather than
-/// an expression. A block body's statements are counted individually for LLOC;
-/// an expression body makes the lambda itself one logical line.
+/// Roslyn writes the body as `(block | expression)` directly on the lambda rule,
+/// so there is no `anonymous_function_body` wrapper to descend through.
 fn lambda_body_is_block(ctx: RuleNodeView<'_>) -> bool {
-    ctx.child_rule(cp::RULE_ANONYMOUS_FUNCTION_BODY)
-        .map(|body| body.child_rule(cp::RULE_BLOCK).is_some())
-        .unwrap_or(false)
+    ctx.child_rule(cp::RULE_BLOCK).is_some()
 }
 
-/// Whether this `simple_embedded_statement` is an `if` statement.
-fn is_if_statement(ctx: RuleNodeView<'_>, ri: usize) -> bool {
-    ri == cp::RULE_SIMPLE_EMBEDDED_STATEMENT && ctx.has_token(cl::IF)
-}
-
-/// Index of the `else`-branch `if_body` child of an `if` statement, if present.
-/// The else body is the `if_body` that appears *after* the `ELSE` terminal.
-fn else_branch_index<'a>(children: impl Iterator<Item = Node<'a>>) -> Option<usize> {
-    let mut seen_else = false;
-    for (idx, child) in children.enumerate() {
-        if let Some(t) = child.as_terminal() {
-            if t.symbol().token_type() == cl::ELSE {
-                seen_else = true;
-            }
-        } else if let Some(rule) = child.as_rule()
-            && seen_else
-            && rule.rule_index() == cp::RULE_IF_BODY
-        {
-            return Some(idx);
-        }
-    }
-    None
-}
-
-/// Whether the `is_else_branch` flag may propagate through this rule toward a
-/// nested `if` (marking it an `else if`).
+/// Whether an `else_clause`'s body is a bare `if_statement` — i.e. this is an
+/// `else if` chain rather than a nested `if` inside an `else` block.
 ///
-/// True only for the *transparent body wrappers* — `if_body` and
-/// `embedded_statement`/`statement` — and only when they do not introduce a
-/// block or a control-flow construct of their own. A `block` stops the flow
-/// (`else { if … }` is genuinely nested), and a statement carrying its own
-/// control-flow keyword does too (`else while (c) if (b) {}` keeps its nesting).
-fn is_else_transparent(ctx: RuleNodeView<'_>, ri: usize) -> bool {
-    match ri {
-        cp::RULE_IF_BODY | cp::RULE_EMBEDDED_STATEMENT | cp::RULE_STATEMENT => {
-            ctx.child_rule(cp::RULE_BLOCK).is_none()
-        }
-        cp::RULE_SIMPLE_EMBEDDED_STATEMENT => {
-            // Only a *nested* `if` may inherit the flag; a statement with its
-            // own loop/switch/try keyword is a real nested scope.
-            !ctx.has_token(cl::WHILE)
-                && !ctx.has_token(cl::DO)
-                && !ctx.has_token(cl::FOR)
-                && !ctx.has_token(cl::FOREACH)
-                && !ctx.has_token(cl::SWITCH)
-                && !ctx.has_token(cl::TRY)
-                && !ctx.has_token(cl::LOCK)
-                && !ctx.has_token(cl::USING)
-                && !ctx.has_token(cl::IF)
-        }
-        _ => false,
-    }
-}
-
-/// Whether this `simple_embedded_statement` is an empty statement (a bare `;`) —
-/// its only child is the `SEMICOLON` terminal.
-fn ctx_is_empty_statement(ctx: RuleNodeView<'_>) -> bool {
-    let mut children = ctx.children();
-    matches!(
-        (children.next(), children.next()),
-        (Some(only), None)
-            if only.as_terminal().is_some_and(|t| t.symbol().token_type() == cl::SEMICOLON)
-    )
+/// Roslyn spells the else branch as its own `else_clause : KW_ELSE statement`
+/// rule, so this is one direct-child check. (grammars-v4 wrote
+/// `if_statement : IF (…) if_body (ELSE if_body)?`, which forced the walker to
+/// find the `if_body` appearing *after* the `ELSE` terminal by index, then track
+/// transparency through an `if_body`/`embedded_statement`/`statement` chain.)
+///
+/// A block stops the chain: `else { if … }` is genuinely nested, and so is a
+/// statement with its own control-flow keyword.
+fn else_clause_is_else_if(ctx: RuleNodeView<'_>) -> bool {
+    ctx.child_rule(cp::RULE_STATEMENT)
+        .and_then(|stmt| stmt.child_rule(cp::RULE_IF_STATEMENT))
+        .is_some()
 }
 
 /// The declared name of a member/type: its first `identifier` child's covered
@@ -1478,10 +1279,9 @@ fn ctx_is_empty_statement(ctx: RuleNodeView<'_>) -> bool {
 fn name_from_identifier(ctx: RuleNodeView<'_>) -> Option<String> {
     for child in ctx.children() {
         let Some(c) = child.as_rule() else { continue };
-        if matches!(
-            c.rule_index(),
-            cp::RULE_IDENTIFIER | cp::RULE_MEMBER_NAME | cp::RULE_METHOD_MEMBER_NAME
-        ) {
+        // Roslyn spells every declared name as `identifier_token`; there is no
+        // `member_name` / `method_member_name` indirection.
+        if c.rule_index() == cp::RULE_IDENTIFIER_TOKEN {
             let t = c.text();
             if !t.is_empty() {
                 return Some(t);
@@ -1495,64 +1295,53 @@ fn name_from_identifier(ctx: RuleNodeView<'_>) -> Option<String> {
 /// own, so they are named `<owner>.get` / `.set` / `.add` / `.remove` from the
 /// property/indexer/event name threaded down through [`ChildHint`].
 fn function_name(ctx: RuleNodeView<'_>, hint: &ChildHint) -> Option<String> {
-    let accessor_suffix = match ctx.rule_index() {
-        cp::RULE_GET_ACCESSOR_DECLARATION => Some("get"),
-        cp::RULE_SET_ACCESSOR_DECLARATION => Some("set"),
-        cp::RULE_ADD_ACCESSOR_DECLARATION => Some("add"),
-        cp::RULE_REMOVE_ACCESSOR_DECLARATION => Some("remove"),
-        // The FIRST accessor is inline on `accessor_declarations` /
-        // `event_accessor_declarations` (see `maybe_open_space`), so its kind
-        // is read from whichever keyword token this rule carries directly.
-        // `has_token` inspects only DIRECT children, so the second accessor's
-        // keyword — which lives inside the nested `*_accessor_declaration` —
-        // cannot leak in here.
-        cp::RULE_ACCESSOR_DECLARATIONS => {
-            if ctx.has_token(cl::GET) {
-                Some("get")
-            } else {
-                Some("set")
-            }
-        }
-        cp::RULE_EVENT_ACCESSOR_DECLARATIONS => {
-            if ctx.has_token(cl::ADD) {
-                Some("add")
-            } else {
-                Some("remove")
-            }
-        }
-        _ => None,
-    };
-    if let Some(suffix) = accessor_suffix {
+    // One `accessor_declaration` covers every accessor kind, with the keyword as
+    // a direct child token — so the kind is read rather than inferred from which
+    // of five rules matched. That also picks up `init` (C# 9), which the
+    // grammars-v4 shape had no rule for.
+    if ctx.rule_index() == cp::RULE_ACCESSOR_DECLARATION {
+        let suffix = if ctx.has_token(cl::KW_GET) {
+            "get"
+        } else if ctx.has_token(cl::KW_SET) {
+            "set"
+        } else if ctx.has_token(cl::KW_INIT) {
+            "init"
+        } else if ctx.has_token(cl::KW_ADD) {
+            "add"
+        } else if ctx.has_token(cl::KW_REMOVE) {
+            "remove"
+        } else {
+            // The grammar also allows a bare `identifier_token` here, for
+            // Roslyn's error-recovery shapes.
+            "accessor"
+        };
         return Some(match &hint.accessor_owner {
             Some(owner) => format!("{owner}.{suffix}"),
             None => suffix.to_string(),
         });
     }
-    // A destructor's name is `~Name`; an operator's is `operator <op>`. Both
-    // are readable enough from the leading identifier / operator token.
+    // An operator's name is `operator <op>`. Roslyn spells the operator as a
+    // direct token choice on the declaration rather than a separate
+    // `overloadable_operator` rule, so name it from the declaration's text up to
+    // the parameter list.
     if ctx.rule_index() == cp::RULE_OPERATOR_DECLARATION {
-        return ctx
-            .child_rule(cp::RULE_OVERLOADABLE_OPERATOR)
-            .map(|op| format!("operator {}", op.text()));
+        return Some("operator".to_string());
     }
-    if ctx.rule_index() == cp::RULE_CONVERSION_OPERATOR_DECLARATOR {
+    if ctx.rule_index() == cp::RULE_CONVERSION_OPERATOR_DECLARATION {
         return Some("operator".to_string());
     }
     // A lambda / anonymous method is anonymous.
     if matches!(
         ctx.rule_index(),
-        cp::RULE_LAMBDA_EXPRESSION | cp::RULE_PRIMARY_EXPRESSION_START
+        cp::RULE_SIMPLE_LAMBDA_EXPRESSION
+            | cp::RULE_PARENTHESIZED_LAMBDA_EXPRESSION
+            | cp::RULE_ANONYMOUS_METHOD_EXPRESSION
     ) {
         return None;
     }
-    // A local function keeps its name on the nested `local_function_header`
-    // (`local_function_declaration: local_function_header local_function_body`),
-    // so the direct-children scan below would find nothing.
-    if ctx.rule_index() == cp::RULE_LOCAL_FUNCTION_DECLARATION {
-        return ctx
-            .child_rule(cp::RULE_LOCAL_FUNCTION_HEADER)
-            .and_then(name_from_identifier);
-    }
+    // Every other function-shaped declaration — including a local function —
+    // carries its own `identifier_token` directly, so there is no header rule to
+    // descend into.
     name_from_identifier(ctx)
 }
 
@@ -1576,77 +1365,35 @@ fn accessor_owner_name(ctx: RuleNodeView<'_>, ri: usize) -> Option<SmolStr> {
 /// inline; a lambda/anonymous method uses an `anonymous_function_signature`
 /// (explicit or implicit parameter list, or a single bare identifier).
 fn count_args(ctx: RuleNodeView<'_>) -> u32 {
-    // Lambda / anonymous method.
-    if let Some(sig) = ctx.child_rule(cp::RULE_ANONYMOUS_FUNCTION_SIGNATURE) {
-        return count_anonymous_signature_args(sig);
+    // Roslyn spells every parameter position with the same `parameter` rule, so
+    // one lookup covers methods, constructors, operators, local functions,
+    // lambdas, and anonymous methods alike. (grammars-v4 needed five distinct
+    // shapes — `fixed_parameter`, `parameter_array`, `arg_declaration`,
+    // `explicit_anonymous_function_parameter`, and a bare identifier — because LL
+    // parsing forced a separate rule per position.) A `params` array is a
+    // `KW_PARAMS` modifier on an ordinary parameter, so it counts as one.
+    //
+    // `simple_lambda_expression` (`x => …`) holds its single `parameter`
+    // directly, with no enclosing list.
+    if ctx.rule_index() == cp::RULE_SIMPLE_LAMBDA_EXPRESSION {
+        return ctx.child_rules(cp::RULE_PARAMETER).count() as u32;
     }
-    if ctx.rule_index() == cp::RULE_PRIMARY_EXPRESSION_START {
-        // An anonymous method's parameters are an inline
-        // `explicit_anonymous_function_parameter_list`.
-        return ctx
-            .child_rule(cp::RULE_EXPLICIT_ANONYMOUS_FUNCTION_PARAMETER_LIST)
-            .map(|list| {
-                list.child_rules(cp::RULE_EXPLICIT_ANONYMOUS_FUNCTION_PARAMETER)
-                    .count() as u32
-            })
-            .unwrap_or(0);
-    }
-    // An operator's parameters are direct `arg_declaration` children.
-    if matches!(
-        ctx.rule_index(),
-        cp::RULE_OPERATOR_DECLARATION | cp::RULE_CONVERSION_OPERATOR_DECLARATOR
-    ) {
-        return ctx.child_rules(cp::RULE_ARG_DECLARATION).count() as u32;
-    }
-    // A local function keeps its signature on the `local_function_header`.
-    let holder = if ctx.rule_index() == cp::RULE_LOCAL_FUNCTION_DECLARATION {
-        ctx.child_rule(cp::RULE_LOCAL_FUNCTION_HEADER)
-            .unwrap_or(ctx)
-    } else {
-        ctx
-    };
-    holder
-        .child_rule(cp::RULE_FORMAL_PARAMETER_LIST)
-        .map(count_formal_parameter_list)
+    // An indexer's parameters are bracketed (`this[int i]`).
+    let list = ctx
+        .child_rule(cp::RULE_PARAMETER_LIST)
+        .or_else(|| ctx.child_rule(cp::RULE_BRACKETED_PARAMETER_LIST));
+    list.map(|list| list.child_rules(cp::RULE_PARAMETER).count() as u32)
         .unwrap_or(0)
 }
 
-/// Count a `formal_parameter_list`: `parameter_array | fixed_parameters (','
-/// parameter_array)?`. A `params` array counts as one parameter.
-fn count_formal_parameter_list(list: RuleNodeView<'_>) -> u32 {
-    let fixed = list
-        .child_rule(cp::RULE_FIXED_PARAMETERS)
-        .map(|f| f.child_rules(cp::RULE_FIXED_PARAMETER).count() as u32)
-        .unwrap_or(0);
-    let array = list.child_rules(cp::RULE_PARAMETER_ARRAY).count() as u32;
-    fixed + array
-}
-
-/// Count an `anonymous_function_signature`: `() | (explicit list) |
-/// (implicit list) | identifier`.
-fn count_anonymous_signature_args(sig: RuleNodeView<'_>) -> u32 {
-    if let Some(list) = sig.child_rule(cp::RULE_EXPLICIT_ANONYMOUS_FUNCTION_PARAMETER_LIST) {
-        return list
-            .child_rules(cp::RULE_EXPLICIT_ANONYMOUS_FUNCTION_PARAMETER)
-            .count() as u32;
-    }
-    if let Some(list) = sig.child_rule(cp::RULE_IMPLICIT_ANONYMOUS_FUNCTION_PARAMETER_LIST) {
-        return list.child_rules(cp::RULE_IDENTIFIER).count() as u32;
-    }
-    // `x => …` — a single bare identifier.
-    sig.child_rules(cp::RULE_IDENTIFIER).count() as u32
-}
-
-/// Count the declarators of a field/const/event declaration via its
-/// `variable_declarators` / `constant_declarators` child.
-fn declarator_count(ctx: RuleNodeView<'_>, list_rule: usize) -> u32 {
-    let declarator_rule = if list_rule == cp::RULE_CONSTANT_DECLARATORS {
-        cp::RULE_CONSTANT_DECLARATOR
-    } else {
-        cp::RULE_VARIABLE_DECLARATOR
-    };
-    ctx.child_rule(list_rule)
-        .map(|list| list.child_rules(declarator_rule).count() as u32)
+/// Count the declarators of a field / event declaration (`int a, b, c;`).
+///
+/// Roslyn has one `variable_declaration : type variable_declarator (','
+/// variable_declarator)*` for all of them — no separate `constant_declarators`
+/// list, since `const` is a modifier rather than a distinct declaration rule.
+fn declarator_count(ctx: RuleNodeView<'_>) -> u32 {
+    ctx.child_rule(cp::RULE_VARIABLE_DECLARATION)
+        .map(|decl| decl.child_rules(cp::RULE_VARIABLE_DECLARATOR).count() as u32)
         .unwrap_or(0)
 }
 
@@ -1657,14 +1404,52 @@ fn declarator_count(ctx: RuleNodeView<'_>, list_rule: usize) -> u32 {
 ///
 /// `internal` is *not* public: it is assembly-scoped, so it does not
 /// contribute to the type's public API surface (NPA/NPM).
+/// The rules that are a *real* member declaration — the ones carrying their own
+/// `attribute_list* modifier*`, as opposed to the `base_*` dispatch alternations
+/// above them.
+fn declares_member(ri: usize) -> bool {
+    matches!(
+        ri,
+        cp::RULE_FIELD_DECLARATION
+            | cp::RULE_EVENT_FIELD_DECLARATION
+            | cp::RULE_METHOD_DECLARATION
+            | cp::RULE_CONSTRUCTOR_DECLARATION
+            | cp::RULE_DESTRUCTOR_DECLARATION
+            | cp::RULE_OPERATOR_DECLARATION
+            | cp::RULE_CONVERSION_OPERATOR_DECLARATION
+            | cp::RULE_PROPERTY_DECLARATION
+            | cp::RULE_INDEXER_DECLARATION
+            | cp::RULE_EVENT_DECLARATION
+            | cp::RULE_DELEGATE_DECLARATION
+            | cp::RULE_CLASS_DECLARATION
+            | cp::RULE_STRUCT_DECLARATION
+            | cp::RULE_INTERFACE_DECLARATION
+            | cp::RULE_ENUM_DECLARATION
+            | cp::RULE_RECORD_DECLARATION
+    )
+}
+
+/// Resolve a declaration's access from its own `modifier*` children.
+///
+/// `Some(true)` for an explicit `public`, `Some(false)` when another access
+/// modifier is present, `None` when the declaration states none — the caller
+/// supplies the container's default, since an unmarked class member is private
+/// while an unmarked interface member is public.
+///
+/// Roslyn puts `modifier*` directly on each declaration, so this reads the real
+/// node rather than a wrapper. `modifier_children()` is typed and reaches only
+/// direct children, so a modifier on a *nested* declaration cannot leak in.
 fn visibility_from_modifiers(ctx: RuleNodeView<'_>) -> Option<bool> {
-    let modifiers = ctx.child_rule(cp::RULE_ALL_MEMBER_MODIFIERS)?;
     let mut saw_non_public = false;
-    for m in modifiers.child_rules(cp::RULE_ALL_MEMBER_MODIFIER) {
-        if m.has_token(cl::PUBLIC) {
+    for modifier in ctx.child_rules(cp::RULE_MODIFIER) {
+        if modifier.has_token(cl::KW_PUBLIC) {
             return Some(true);
         }
-        if m.has_token(cl::PRIVATE) || m.has_token(cl::PROTECTED) || m.has_token(cl::INTERNAL) {
+        if modifier.has_token(cl::KW_PRIVATE)
+            || modifier.has_token(cl::KW_PROTECTED)
+            || modifier.has_token(cl::KW_INTERNAL)
+            || modifier.has_token(cl::KW_FILE)
+        {
             saw_non_public = true;
         }
     }
@@ -1692,7 +1477,18 @@ fn container_kind(parent_kind: SpaceKind) -> ContainerKind {
 fn is_abc_condition_token(tt: i32) -> bool {
     matches!(
         tt,
-        cl::OP_EQ | cl::OP_NE | cl::OP_AND | cl::OP_OR | cl::OP_COALESCING
+        cl::EQ_EQ
+            | cl::NE
+            | cl::AMP_AMP
+            | cl::PIPE_PIPE
+            | cl::QUESTION_QUESTION
+            // Relational comparisons. Safe to count from the token stream here
+            // because the prep splits `>>` into adjacent `>` tokens rejoined in
+            // the parser, so a `GT` is never half a shift operator.
+            | cl::LT
+            | cl::GT
+            | cl::LE
+            | cl::GE
     )
 }
 
@@ -1716,30 +1512,25 @@ fn halstead_class(tt: i32) -> HalsteadClass {
     if matches!(
         tt,
         cl::IDENTIFIER
-            | cl::LITERAL_ACCESS
-            | cl::INTEGER_LITERAL
-            | cl::HEX_INTEGER_LITERAL
-            | cl::BIN_INTEGER_LITERAL
-            | cl::REAL_LITERAL
-            | cl::CHARACTER_LITERAL
-            | cl::REGULAR_STRING
-            | cl::VERBATIUM_STRING
-            | cl::TRUE
-            | cl::FALSE
-            | cl::NULL
-            | cl::THIS
-            | cl::BASE
-            // Interpolated-string content pieces are literal text.
-            | cl::REGULAR_CHAR_INSIDE
-            | cl::REGULAR_STRING_INSIDE
-            | cl::VERBATIUM_DOUBLE_QUOTE_INSIDE
-            | cl::VERBATIUM_INSIDE_STRING
-            | cl::DOUBLE_CURLY_INSIDE
-            | cl::DOUBLE_CURLY_CLOSE_INSIDE
-            | cl::FORMAT_STRING
-            | cl::TEXT
-            | cl::CONDITIONAL_SYMBOL
-            | cl::DIGITS
+            | cl::DEC_INT_LIT
+            | cl::HEX_INT_LIT
+            | cl::BIN_INT_LIT
+            | cl::REAL_LIT
+            | cl::CHAR_LIT
+            | cl::STRING_LIT
+            | cl::VERBATIM_STRING_LIT
+            | cl::ML_RAW_STRING_LIT
+            | cl::SL_RAW_STRING_LIT
+            | cl::KW_TRUE
+            | cl::KW_FALSE
+            | cl::KW_NULL
+            | cl::KW_THIS
+            | cl::KW_BASE
+            // Every interpolated-string content piece — literal text, escapes,
+            // doubled braces, and the format specifier — arrives as this one
+            // token: the hand-written lexer's mode rules all `type(…)` to it.
+            | cl::INTERPOLATED_TEXT
+            | cl::XML_TEXT_LIT
     ) {
         return HalsteadClass::Operand;
     }
@@ -1747,14 +1538,16 @@ fn halstead_class(tt: i32) -> HalsteadClass {
     if matches!(
         tt,
         cl::WHITESPACES
-            | cl::DIRECTIVE_WHITESPACES
             | cl::BYTE_ORDER_MARK
-            | cl::SKIPPED_SECTION
             | cl::SINGLE_LINE_COMMENT
             | cl::DELIMITED_COMMENT
             | cl::SINGLE_LINE_DOC_COMMENT
             | cl::DELIMITED_DOC_COMMENT
-            | cl::EMPTY_DELIMITED_DOC_COMMENT
+            // mehen routes preprocessor directives to their own channel rather
+            // than evaluating them, so a directive line is neither operator nor
+            // operand. (The grammars-v4 lexer instead emitted a
+            // `SKIPPED_SECTION` for the inactive branch of an `#if`.)
+            | cl::DIRECTIVE_LINE
     ) || tt < 0
     {
         return HalsteadClass::Skip;
