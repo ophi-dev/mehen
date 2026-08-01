@@ -175,25 +175,38 @@ RECORD_KEYWORD_REPLACEMENT = (
 )
 RECORD_KEYWORD_RULE = """
 
-// Contextual keyword: `record` lexes as an ordinary IDENTIFIER (it is legal as a
-// name), so the declaration position is restricted by a predicate on the token
-// text. This restores Roslyn's <ContextualKind Name="RecordKeyword"/>, which its
-// grammar generator drops. Lowered by `patterns.toml` to a pure SemIR
-// comparison, so no hooks are needed.
+// Contextual keyword. Roslyn's grammar never spells `record` as a literal at all —
+// it carries the information in <ContextualKind Name="RecordKeyword"/>, which its
+// grammar generator drops — so the prep mints a dedicated `KW_RECORD` token
+// (RECORD_TOKEN_RULE) and `identifier_token` is widened with it, exactly as it is
+// with every other contextual keyword. `record` therefore remains a legal name
+// while the declaration position predicts on a token of its own.
 //
-// Deliberately `IDENTIFIER`, not `identifier_token`: the latter is widened to
-// accept every contextual keyword (see CONTEXTUAL_KEYWORD_NOTE), which would
-// make `record_declaration` viable at any modifier that is itself contextual.
-// `partial struct S { }` would then predict the record path — `record_keyword` =
-// `partial`, `struct`, `S` — and since the predicate cannot prune a path ANTLR
-// has already committed to, it surfaces as a hard error instead of a silent
-// rejection. `partial`, `async`, `required`, `file`, `scoped`, `closed`, and
-// `safe` all hit this. `record` itself always lexes as IDENTIFIER, so nothing is
-// lost.
+// A dedicated token rather than `{IsRecordKeyword()}? IDENTIFIER`, which was the
+// first approach and does work in isolation: a predicate cannot prune a path ANTLR
+// has already *committed* to, and this rule sits at a position where several
+// member forms overlap. With the predicate form, `record_declaration` had to stay
+// after `base_method_declaration` among `member_declaration`'s alternatives — so
+// `record R(int X);` matched `method_declaration` with `record` as the return type
+// and parsed as a phantom method. Hoisting it instead put the record path on the
+// committed path for an ordinary property (`T P { get => 1; set { } }` predicts
+// `record_keyword` = `T`), and the predicate could not reject that either: it
+// surfaced as a hard error on 29 corpus files. A real token removes the ambiguity
+// at its source, so alternative order stops mattering.
 record_keyword
-  : {this.IsRecordKeyword()}? IDENTIFIER
+  : KW_RECORD
   ;
 """
+
+# The lexer rule for the minted token, appended to the harvested keyword block so it
+# precedes `IDENTIFIER` (ANTLR breaks an equal-length match by rule order, and the
+# keyword tokens are emitted before the hand-written rules).
+RECORD_TOKEN_RULE = "KW_RECORD : 'record' ;"
+
+# `record` must stay usable as an ordinary name, so the minted token joins the
+# contextual set that widens `identifier_token`. Kept separate from the harvested
+# literals because it is not one — nothing in Roslyn's grammar spells it.
+RECORD_TOKEN_NAME = "KW_RECORD"
 
 # Interpolated strings need lexer modes, so the tokens that delimit them cannot
 # be plain harvested literals. These literals are therefore NOT harvested; the
@@ -345,6 +358,39 @@ STABLE_TOKEN_NAMES = {
 # Same family as the `record` <ContextualKind> loss: information the compiler
 # holds outside the grammar, which the published grammar therefore drops.
 DECLARATION_EXPRESSION_ALT = "  | declaration_expression\n"
+
+# The same ordering hazard one level up, in `member_declaration`. Its alternatives
+# are alphabetical, so `base_method_declaration` precedes `base_type_declaration` —
+# and `record` is a contextual keyword, hence a legal `type`. So
+#
+#     record R(int X);
+#
+# the single most common record spelling, matches
+# `method_declaration : … type … identifier_token … parameter_list … ';'` with
+# `record` as the RETURN TYPE and `R` as the method name. ANTLR takes the first
+# viable alternative, so every positional record parsed as a method — reported as a
+# function space rather than a class, with no NPA/NPM/WMC container and no
+# diagnostic. (`record class R { }` parsed correctly, which is why this survived: the
+# explicit-kind form cannot match `method_declaration`.)
+#
+# This one needs BOTH halves, and each is useless alone:
+#
+# 1. A dedicated `KW_RECORD` token (RECORD_KEYWORD_RULE), so the record path is
+#    selected by a token rather than by a predicate over `IDENTIFIER`. Reordering
+#    alone does not work: with the predicate form, hoisting `record_declaration`
+#    ahead of `base_method_declaration` put the record path on the *committed* path
+#    for an ordinary property (`T P { get => 1; set { } }` predicts `record_keyword`
+#    = `T`), and a predicate cannot prune a committed path — 29 corpus files failed
+#    with hard errors.
+# 2. Hoisting `record_declaration` ahead of `base_method_declaration`. The token
+#    alone does not work either, because `record` must stay a legal identifier and
+#    is therefore widened back into `identifier_token` — so it is still a viable
+#    `type`, and `method_declaration` still matches first.
+#
+# With the real token in place the hoist is safe: `T P { … }` no longer predicts the
+# record path at all, because `T` is not `KW_RECORD`.
+RECORD_DECL_ALT = "  | record_declaration\n"
+MEMBER_METHOD_ALT = "  | base_method_declaration\n"
 
 # The pattern-combinator keywords (C# 9 `and` / `or` / `not`). Contextual, so
 # widening `identifier_token` makes each a legal name — which is correct in general
@@ -911,6 +957,37 @@ def main() -> int:
     reordered = body.replace(DECLARATION_EXPRESSION_ALT, "") + DECLARATION_EXPRESSION_ALT
     src = src.replace(expression_rule.group(0), f"expression\n{reordered}  ;\n", 1)
 
+    # -- 2g. Prioritize record_declaration in member position ----------------
+    # See RECORD_DECL_ALT: `record R(int X);` parses as a phantom *method* otherwise,
+    # because `record` is widened back into `identifier_token` and so is a viable
+    # return type. Safe only because `record_keyword` is a real KW_RECORD token now.
+    member_rule = rule_span(src, "member_declaration")
+    if not member_rule:
+        print("error: member_declaration rule not found", file=sys.stderr)
+        return 1
+    body = member_rule.group(1)
+    if MEMBER_METHOD_ALT not in body:
+        print(
+            "error: base_method_declaration is not an alternative of `member_declaration`",
+            file=sys.stderr,
+        )
+        return 1
+    if RECORD_DECL_ALT in body:
+        print(
+            "error: record_declaration is already a member_declaration alternative",
+            file=sys.stderr,
+        )
+        return 1
+    src = src.replace(
+        member_rule.group(0),
+        "member_declaration\n"
+        + body.replace(MEMBER_METHOD_ALT, RECORD_DECL_ALT + MEMBER_METHOD_ALT, 1)
+        + "  ;\n",
+        1,
+    )
+    print("hoisted record_declaration ahead of base_method_declaration")
+
+
     # -- 3. Point character-level rules at real lexer tokens -----------------
     lexer_bound = dict(LEXER_TOKEN_RULES)
     lexer_bound.update(
@@ -1007,7 +1084,10 @@ def main() -> int:
     if not contextual:
         print("error: no contextual keywords found to widen", file=sys.stderr)
         return 1
-    identifier_alts = "\n".join(f"  | {names[lit]}" for lit in contextual)
+    # The minted `KW_RECORD` is contextual too, and it is not among the harvested
+    # literals (Roslyn's grammar never spells it), so it is added by name.
+    contextual_tokens = [names[lit] for lit in contextual] + [RECORD_TOKEN_NAME]
+    identifier_alts = "\n".join(f"  | {token}" for token in contextual_tokens)
     old_identifier = f"identifier_token\n  : {LEXER_TOKEN_RULES['identifier_token']}\n  ;"
     if old_identifier not in src:
         print("error: identifier_token not in expected tokenized form", file=sys.stderr)
@@ -1018,7 +1098,7 @@ def main() -> int:
         f"  : {LEXER_TOKEN_RULES['identifier_token']}\n{identifier_alts}\n  ;",
         1,
     )
-    print(f"widened identifier_token with {len(contextual)} contextual keywords")
+    print(f"widened identifier_token with {len(contextual_tokens)} contextual keywords")
 
     # -- 4b2. Keep a pattern combinator out of a variable designation ---------
     # See COMBINATOR_KEYWORDS. Spelled as the full contextual set minus the three
@@ -1038,8 +1118,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    excluded = {names[kw] for kw in COMBINATOR_KEYWORDS}
     designation_alts = "\n".join(
-        f"  | {names[lit]}" for lit in contextual if lit not in COMBINATOR_KEYWORDS
+        f"  | {token}" for token in contextual_tokens if token not in excluded
     )
     src = src.replace(
         DESIGNATION_RULE,
@@ -1129,6 +1210,11 @@ def main() -> int:
             for lit in literals
             if lit not in HOLE_SENSITIVE_LITERALS
         ]
+        # `record` is the one keyword Roslyn's grammar never spells as a literal, so
+        # it cannot be harvested; it is minted here instead. Placed with the
+        # harvested keywords so it precedes IDENTIFIER, and widened back into
+        # `identifier_token` above so it stays a legal name.
+        + [RECORD_TOKEN_RULE]
         + [
             "",
             # No substitution needed: the tokens `lexer-tokens.g4.in` refers to
@@ -1149,20 +1235,15 @@ def main() -> int:
     )
     (args.out_dir / "patterns.toml").write_text(
         "version = 1\n\n"
-        "# `record` is a contextual keyword. Roslyn declares\n"
+        "# `record` needs no helper here: Roslyn declares\n"
         "# `<ContextualKind Name=\"RecordKeyword\"/>` on\n"
         "# RecordDeclarationSyntax.Keyword, but its grammar generator reads only\n"
         "# `<Kind>`, so the published grammar spells the keyword as the catch-all\n"
-        "# `syntax_token` — which makes `class` viable as a record declaration and\n"
-        "# costs ~quadratic prediction time per type member. `prepare-roslyn-grammar.py`\n"
-        "# restores the restriction as a text comparison on the lookahead token; it\n"
-        "# lowers to a pure SemIR expression, so no typed hook is needed.\n\n"
-        "[[helper]]\n"
-        'kind = "parser-predicate"\n'
-        'name = "IsRecordKeyword"\n'
-        'returns = "bool"\n'
-        'lower = "cmp(eq, token_text(1), str(\\"record\\"))"\n'
-        "\n# `>>` / `>>>` (and their compound assignments) are spelled as adjacent\n"
+        "# `syntax_token`. `prepare-grammar.py` restores the restriction by minting a\n"
+        "# real `KW_RECORD` token (see RECORD_KEYWORD_RULE) rather than by predicating\n"
+        "# over `IDENTIFIER` — a predicate cannot prune a path ANTLR has already\n"
+        "# committed to, and this position overlaps several member forms.\n\n"
+        "# `>>` / `>>>` (and their compound assignments) are spelled as adjacent\n"
         "# `>` tokens so a generic closer never lexes as a shift operator (see\n"
         "# SHIFT_TOKEN_RULES). Each predicate checks the pieces were adjacent in the\n"
         "# char stream, so `a >> b` shifts while `List<List<int>>` closes two\n"

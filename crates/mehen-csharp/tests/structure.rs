@@ -262,3 +262,97 @@ fn an_extension_block_is_its_own_container() {
         ]
     );
 }
+
+#[test]
+fn a_positional_record_is_a_type_not_a_method() {
+    // REGRESSION, and the most consequential silent misparse yet: `record R(int X);`
+    // — the single most common record spelling — parsed as a *method* named `R`
+    // returning a type called `record`, because `record` is a contextual keyword and
+    // `member_declaration` tries `base_method_declaration` before the type forms.
+    // The record was reported as a function space with no NPA/NPM/WMC container, with
+    // zero diagnostics. Only `record class R { }` parsed correctly, which is how it
+    // survived: the explicit-kind form cannot match `method_declaration`.
+    for source in [
+        "record R(int X);",
+        "record R(int X) { }",
+        "record class R { }",
+        "record struct R(int X);",
+    ] {
+        let a = analyze_clean(source);
+        assert_eq!(
+            a.root.spaces[0].kind,
+            SpaceKind::Class,
+            "`{source}` must open a type space"
+        );
+        assert_eq!(a.root.spaces[0].name.as_deref(), Some("R"));
+    }
+}
+
+#[test]
+fn record_is_still_a_legal_identifier() {
+    // Minting a real `KW_RECORD` token must not make `record` reserved: it is
+    // contextual, so it is widened back into `identifier_token` and remains usable as
+    // an ordinary name.
+    let a = analyze_clean(
+        "class C {
+             void M() { int record = 1; var x = record; }
+         }",
+    );
+    assert_eq!(a.root.spaces[0].spaces.len(), 1);
+}
+
+#[test]
+fn a_property_with_both_accessors_is_not_a_record() {
+    // The `record` fix needed a real token precisely because reordering alone put the
+    // record path on the *committed* path here: `T P { get => …; set { … } }` predicted
+    // `record_keyword` = `T`, and a predicate cannot prune a committed path — it
+    // surfaced as a hard error on 29 corpus files. Pinned as a parse-clean assertion
+    // plus the accessor shape.
+    let a = analyze_clean("struct S { public T P { readonly get => 1; set { } } }");
+    let functions: Vec<_> = shape(&a.root)
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "function")
+        .map(|(_, _, name)| name)
+        .collect();
+    assert_eq!(
+        functions,
+        vec![Some("P.get".to_string()), Some("P.set".to_string())]
+    );
+}
+
+#[test]
+fn a_primary_constructor_is_a_function_space() {
+    // A primary constructor's parameters live on the *type* declaration and no
+    // `constructor_declaration` node exists anywhere, so `class C(int x)` reported
+    // NOM 0 / NArgs 0 where the identical explicit form reported 1 / 1. Pinned
+    // against the explicit form, since the point is the equivalence.
+    let primary = analyze_clean("class C(int x) { }");
+    let explicit = analyze_clean("class C { public C(int x) { } }");
+    let names = |a: &mehen_core::LanguageAnalysis| {
+        shape(&a.root)
+            .into_iter()
+            .filter(|(_, kind, _)| kind == "function")
+            .map(|(_, _, name)| name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&primary), vec![Some("C".to_string())]);
+    assert_eq!(names(&primary), names(&explicit));
+}
+
+#[test]
+fn an_extension_receiver_is_not_a_primary_constructor() {
+    // `extension(string s)` carries the same `parameter_list?` a primary constructor
+    // does, but it is the extension *receiver*: nothing is constructed, and the block
+    // has no name. Only the member inside it is a function.
+    let a = analyze_clean(
+        "static class E {
+             extension(string s) { public int Length => s.Length; }
+         }",
+    );
+    let functions: Vec<_> = shape(&a.root)
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "function")
+        .map(|(_, _, name)| name)
+        .collect();
+    assert_eq!(functions, vec![Some("Length.get".to_string())]);
+}

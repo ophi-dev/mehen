@@ -110,22 +110,46 @@ fn nested_generics_close_with_adjacent_angle_brackets() {
 }
 
 #[test]
-fn right_shift_still_parses_as_an_operator() {
-    // The other side of the same predicate: adjacent `>` `>` in expression
-    // position is a shift.
-    assert_eq!(
-        syntax_errors("class C { int M(int a, int b) => a >> b; }"),
-        0
-    );
+fn every_split_shift_operator_still_parses() {
+    // The other side of the same predicate: adjacent `>` `>` in expression position
+    // is a shift. All four spellings are split by the prep and rejoined behind
+    // `token_index_adjacent`, so each junction's predicate is exercised — `>>>=`
+    // carries two.
+    for expression in ["a >> b", "a >>> b", "a >>= b", "a >>>= b"] {
+        assert_eq!(
+            syntax_errors(&format!(
+                "class C {{ int M(int a, int b) {{ return {expression}; }} }}"
+            )),
+            0,
+            "`{expression}` must parse"
+        );
+    }
 }
 
 #[test]
 fn record_is_a_contextual_keyword() {
-    // Roslyn declares the keyword as `<ContextualKind>`, which its grammar
-    // generator drops; the prep restores it as a text predicate. It must remain
-    // usable as an ordinary name.
+    // Roslyn declares the keyword as `<ContextualKind>`, which its grammar generator
+    // drops; the prep restores it by minting a real `KW_RECORD` token and widening
+    // `identifier_token` with it, so `record` stays usable as an ordinary name.
     assert_eq!(syntax_errors("record R(int X);"), 0);
     assert_eq!(syntax_errors("class C { void M() { int record = 1; } }"), 0);
+    // An error count is NOT enough here: `record R(int X);` parsed with zero errors
+    // for a long time while producing a *method* named `R`. The tree shape is pinned
+    // in `mehen-csharp/tests/structure.rs`, which is where the space kinds are
+    // visible; this file can only assert parseability.
+}
+
+#[test]
+fn a_property_with_both_accessors_is_not_a_record() {
+    // The counterpart to the record fix: `record_declaration` sits ahead of
+    // `base_method_declaration` among `member_declaration`'s alternatives, so the
+    // record path must not be viable for an ordinary property. It is not, because
+    // `record_keyword` is a real token — with the earlier predicate form this shape
+    // was a hard error on 29 corpus files.
+    assert_eq!(
+        syntax_errors("struct S { public T P { readonly get => 1; set { } } }"),
+        0
+    );
 }
 
 #[test]

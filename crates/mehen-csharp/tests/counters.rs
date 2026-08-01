@@ -236,3 +236,73 @@ fn struct_members_route_to_the_class_buckets() {
     assert_eq!(npm.class_methods, 1.0);
     assert_eq!(npa.interface_attributes, 0.0);
 }
+
+#[test]
+fn nargs_counts_a_simple_lambda_parameter() {
+    // REGRESSION. `x => …` puts its single parameter in a bare `identifier_token`, not
+    // a `parameter` child, so the count came back 0 — while the equivalent `(x) => …`
+    // (a `parenthesized_lambda_expression`, which does have a `parameter_list`)
+    // returned 1. Same arity, two different numbers depending on whether the author
+    // wrote the parentheses.
+    let bare = analyze_clean(
+        "class C {
+             void F() { System.Func<int, int> f = x => x + 1; }
+         }",
+    );
+    let parenthesized = analyze_clean(
+        "class C {
+             void F() { System.Func<int, int> f = (x) => x + 1; }
+         }",
+    );
+    assert_eq!(
+        metrics_json::nargs(&bare.root.metrics).total_closures,
+        1.0,
+        "`x => …` takes one argument"
+    );
+    assert_eq!(
+        metrics_json::nargs(&bare.root.metrics).total_closures,
+        metrics_json::nargs(&parenthesized.root.metrics).total_closures,
+        "the parentheses must not change the arity"
+    );
+}
+
+#[test]
+fn nargs_of_an_indexer_accessor_does_not_depend_on_body_syntax() {
+    // REGRESSION. An accessor's space opens at `accessor_declaration`, which carries no
+    // parameter list — the indexer's `bracketed_parameter_list` is on the *owner*. So
+    // the block-bodied form reported 0 while the expression-bodied form, whose space
+    // opens at `indexer_declaration`, reported 1. The count is now threaded down.
+    let block = analyze_clean("class C { int this[int i] { get { return i; } } }");
+    let expression = analyze_clean("class C { int this[int i] => i; }");
+    assert_eq!(
+        metrics_json::nargs(&block.root.metrics).total_functions,
+        1.0,
+        "an indexer's getter takes the indexer's one argument"
+    );
+    assert_eq!(
+        metrics_json::nargs(&block.root.metrics).total_functions,
+        metrics_json::nargs(&expression.root.metrics).total_functions,
+    );
+}
+
+#[test]
+fn nargs_of_a_property_accessor_is_zero() {
+    // A property's accessors take nothing — `set`'s `value` is implicit, not declared.
+    // Pinned alongside the indexer case: the same threading must not leak a count into
+    // a property.
+    let a = analyze_clean("class C { int P { get => 1; set { } } }");
+    assert_eq!(metrics_json::nargs(&a.root.metrics).total_functions, 0.0);
+}
+
+#[test]
+fn nom_and_nargs_count_a_primary_constructor() {
+    // REGRESSION. A primary constructor's parameters live on the type declaration and
+    // no `constructor_declaration` node exists, so `class C(int x)` was absent from NOM
+    // and NArgs entirely. Pinned against the explicit form.
+    let primary = analyze_clean("class C(int x) { }");
+    let explicit = analyze_clean("class C { public C(int x) { } }");
+    for a in [&primary, &explicit] {
+        assert_eq!(metrics_json::nom(&a.root.metrics).functions, 1.0);
+        assert_eq!(metrics_json::nargs(&a.root.metrics).total_functions, 1.0);
+    }
+}

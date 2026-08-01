@@ -73,7 +73,7 @@ Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
 corpus. All 4 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **seven** distinct silent misparses: structurally wrong
+grammar has now produced **eight** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -86,11 +86,20 @@ dump, never by an error count.
 | `SL_RAW_STRING_LIT` fenced with `""` | `var a = ""; f(); var b = "";` was ONE string token |
 | `identifier_token` widened with `and`/`or`/`not` | `o is int and > 5` declared a variable named `and` |
 | `constant_pattern` listed before `discard_pattern` | a `_ =>` arm is an expression, not the discard |
+| `base_method_declaration` listed before the type forms | `record R(int X);` was a *method* named `R` |
 
-The first five *delete* code from the tree; the last two *relabel* it. Both shapes
+The first five *delete* code from the tree; the last three *relabel* it. Both shapes
 are invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
+
+Three of the eight share one root cause: **an alternative that is viable for the
+wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
+each semantically — it knows whether `F` names a type, whether `and` resolves to a
+declared name, whether `record` is a keyword here — and a syntax-only grammar has
+only alternative order and token identity to work with. Which of those two tools
+applies is not a matter of taste; see the `record` section below for a case where
+order alone provably cannot do it.
 
 **No runtime capability is missing.** Every failure traced to either the prep or
 an upstream-generator blind spot, and each was fixable declaratively — every one of
@@ -340,13 +349,36 @@ library timed out past 600 s. Restoring the keyword brought that to
 ~3 m 50 s, and the balanced-brace fix above took it the rest of the way to the
 ~208 s / 5.1 s-worst-file figures at the top of this section.
 
-The prep restores it as a *contextual* keyword, not a reserved token — `record`
-is legal as an ordinary name (`int record = 1;`), and reserving it silently
-mis-parses `record R(int X);` as two enum members plus a parenthesized
-expression with zero reported errors. `patterns.toml` lowers the restriction to
-a pure SemIR comparison, so no typed hook is needed.
+The prep restores it as a *contextual* keyword: the prep mints a real `KW_RECORD`
+token so the lexer distinguishes the word, and then widens `identifier_token` with
+it so `record` stays legal as an ordinary name (`int record = 1;`).
 
-Diagnosed by the antlr-rust-runtime team on
+Getting there took three attempts, and the two that failed are instructive because
+each looked sufficient:
+
+1. **`record_keyword : {IsRecordKeyword()}? IDENTIFIER`** — a predicate on the token
+   text, lowered to a pure SemIR comparison. Fixes the performance collapse above and
+   is what shipped first. But `member_declaration`'s alternatives are alphabetical, so
+   `base_method_declaration` precedes the type forms, and `record` is a legal `type` —
+   so `record R(int X);` matched `method_declaration` with `record` as the return type
+   and `R` as the method name. Every positional record was a phantom method.
+2. **Predicate + hoist `record_declaration` first.** Fixes records; breaks 29 corpus
+   files. Hoisting puts the record path on the *committed* path for an ordinary
+   property, so `T P { get => 1; set { } }` predicts `record_keyword` = `T` — and **a
+   predicate cannot prune a path ANTLR has already committed to**, so it surfaces as a
+   hard error rather than a silent rejection. This is the same wall the note in
+   `RECORD_KEYWORD_RULE` describes for `partial struct S { }`.
+3. **A real token + the hoist.** Both halves are required and neither suffices:
+   without the token the hoist breaks properties; without the hoist `record` is still a
+   viable `type` (it has to be, to stay a legal name) and the phantom method returns.
+   With a real token, `T P { … }` cannot predict the record path at all, so the hoist
+   is safe.
+
+The residual trade is a method whose return type is a class *literally named*
+`record`, which now reads as a record declaration. That is the only shape affected,
+and `record` as a type name is vanishingly rare in real C#.
+
+The performance half was diagnosed by the antlr-rust-runtime team on
 [`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runtime/issues/248);
 `repro/roslyn-csharp-perf/` at the repo root reproduces both variants.
 
@@ -358,15 +390,17 @@ The vendored grammar is **unmodified** — every repair above is applied by
 
 Roslyn's grammar declares no `superClass` and calls no host-language helpers (it
 is generated from a syntax model, not hand-written for a parser generator), so
-unlike the `grammars-v4` grammar there is no base class to port. The two semantic
-surfaces the derived grammar does use are both introduced by the transform, and
-both lower to **pure SemIR patterns** in the derived `patterns.toml` — no parser
-hook object exists:
+unlike the `grammars-v4` grammar there is no base class to port. The one semantic
+surface the derived *parser* uses is introduced by the transform and lowers to
+**pure SemIR patterns** in the derived `patterns.toml` — no parser hook object
+exists:
 
-- `IsRecordKeyword` — restores the `<ContextualKind>` the upstream generator
-  drops, as a `token_text` comparison.
 - `IsRightShift` and friends — the angle-bracket adjacency checks
   (`token_index_adjacent`).
+
+(The `record` contextual keyword was a second one, `IsRecordKeyword`, until the
+predicate proved unable to carry it; see the section above. It is now a real
+`KW_RECORD` token, so the helper is gone.)
 
 The **lexer** is hand-written, because Roslyn publishes none — but its state
 lives in the grammar too, in `@lexer::members`, and lowers through the same

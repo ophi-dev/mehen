@@ -285,6 +285,16 @@ struct ChildHint {
     /// own span already covers its attributes and there is no wrapper to open the
     /// space at. Both fields existed only for the grammars-v4 shape.)
     accessor_owner: Option<SmolStr>,
+    /// The NArgs an accessor of the enclosing member takes: the *indexer*'s
+    /// parameter count (`this[int i]`'s getter is a one-argument function), or 0 for
+    /// a property or event.
+    ///
+    /// `accessor_declaration` carries no parameter list of its own, so the count has
+    /// to come from the owner. Without it, NArgs for the same indexer depended on
+    /// body syntax — the expression-bodied form opens its space at
+    /// `indexer_declaration`, where the list is present, and reported 1 where the
+    /// block-bodied form reported 0.
+    accessor_args: u32,
 }
 
 struct Walker<'a> {
@@ -574,6 +584,20 @@ impl Walker<'_> {
             hint.accessor_owner.clone()
         };
 
+        // The accessors' arity travels with the owner's name, for the same reason:
+        // `accessor_declaration` has no parameter list, so only the owning
+        // `indexer_declaration` knows it. A property or event resets it to 0 — its
+        // accessors take no arguments even though `set`'s `value` is implicit.
+        let accessor_args = if accessor_owner_name(ctx, ri).is_some() {
+            ctx.child_rule(cp::RULE_BRACKETED_PARAMETER_LIST)
+                .map(count_parameters)
+                .unwrap_or(0)
+        } else if opens_type_like(ri) || opens_function_space(ri) {
+            0
+        } else {
+            hint.accessor_args
+        };
+
         // When this wrapper opened the member OR type space itself (to capture
         // own-line attributes/modifiers), tell the inner declaration to skip
         // its own open. The flag flows through the transparent
@@ -631,6 +655,7 @@ impl Walker<'_> {
                 in_type_delimiter,
                 in_accessor_body,
                 accessor_owner: accessor_owner.clone(),
+                accessor_args,
             };
             self.visit(child, &child_hint);
         }
@@ -732,10 +757,10 @@ impl Walker<'_> {
         let is_closure = matches!(kind, SpaceKind::Closure);
         if is_closure {
             state.nom.record_closure();
-            state.nargs.record_closure_args(count_args(fn_ctx));
+            state.nargs.record_closure_args(count_args(fn_ctx, hint));
         } else {
             state.nom.record_function();
-            state.nargs.record_function_args(count_args(fn_ctx));
+            state.nargs.record_function_args(count_args(fn_ctx, hint));
         }
         // A local function's and a lambda's complexity belongs to the enclosing
         // method (already counted there), so neither rolls into the type's WMC.
@@ -770,8 +795,36 @@ impl Walker<'_> {
                 SpaceKind::Class
             }
         };
-        self.push_space(kind, name, span_ctx, state, false);
+        self.push_space(kind, name.clone(), span_ctx, state, false);
         self.enter_class_cognitive();
+
+        // A primary constructor (`class C(int x)`, `record R(int X)`) puts its
+        // parameters on the *type* declaration, and no `constructor_declaration` node
+        // exists anywhere in the tree. Without this the constructor is absent from
+        // NOM entirely and its parameters from NArgs — so `class C(int x)` reported
+        // NOM 0 where the identical `class C { public C(int x) { } }` reported 1.
+        //
+        // Opened as a named function space rather than folded into the type's own
+        // counters so it appears in the per-space tree the way an explicit
+        // constructor does, and is named after the type for the same reason. It is
+        // opened immediately after the type space and closed here: the parameter list
+        // is the whole of it, since a primary constructor has no body of its own.
+        //
+        // `extension_block_declaration` is excluded even though it carries the same
+        // `parameter_list?`: that list is the extension *receiver* (`extension(string
+        // s)`), not a constructor — nothing is constructed, and the block has no name
+        // to give the space.
+        if ri != cp::RULE_EXTENSION_BLOCK_DECLARATION
+            && let Some(params) = type_ctx.child_rule(cp::RULE_PARAMETER_LIST)
+        {
+            let args = count_parameters(params);
+            let mut ctor = self.new_space_state(params);
+            ctor.nom.record_function();
+            ctor.nargs.record_function_args(args);
+            self.push_space(SpaceKind::Function, name, params, ctor, false);
+            self.enter_function_cognitive(false);
+            self.close_space();
+        }
     }
 
     /// Open a metric space for space-introducing rules. Returns whether a space
@@ -1642,30 +1695,41 @@ fn accessor_owner_name(ctx: RuleNodeView<'_>, ri: usize) -> Option<SmolStr> {
 
 /// Count the declared parameters of a function-shaped node.
 ///
-/// Methods/constructors/local functions/indexers spell their parameters in a
-/// `formal_parameter_list` (`fixed_parameters (',' parameter_array)?` or a bare
-/// `parameter_array`); an operator declares its one-or-two `arg_declaration`s
-/// inline; a lambda/anonymous method uses an `anonymous_function_signature`
-/// (explicit or implicit parameter list, or a single bare identifier).
-fn count_args(ctx: RuleNodeView<'_>) -> u32 {
-    // Roslyn spells every parameter position with the same `parameter` rule, so
-    // one lookup covers methods, constructors, operators, local functions,
-    // lambdas, and anonymous methods alike. (grammars-v4 needed five distinct
-    // shapes — `fixed_parameter`, `parameter_array`, `arg_declaration`,
-    // `explicit_anonymous_function_parameter`, and a bare identifier — because LL
-    // parsing forced a separate rule per position.) A `params` array is a
-    // `KW_PARAMS` modifier on an ordinary parameter, so it counts as one.
-    //
-    // `simple_lambda_expression` (`x => …`) holds its single `parameter`
-    // directly, with no enclosing list.
-    if ctx.rule_index() == cp::RULE_SIMPLE_LAMBDA_EXPRESSION {
-        return count_parameters(ctx);
+/// Roslyn spells every parameter position with the same `parameter` rule, so one
+/// lookup covers methods, constructors, operators, local functions, parenthesized
+/// lambdas, and anonymous methods alike. (grammars-v4 needed five distinct shapes —
+/// `fixed_parameter`, `parameter_array`, `arg_declaration`,
+/// `explicit_anonymous_function_parameter`, and a bare identifier — because LL
+/// parsing forced a separate rule per position.) A `params` array is a `KW_PARAMS`
+/// modifier on an ordinary parameter, so it counts as one.
+///
+/// Two positions are not a `parameter_list` and need naming:
+/// - `simple_lambda_expression : … identifier_token ARROW …` — the one parameter is
+///   a bare identifier, with no `parameter` node at all.
+/// - `accessor_declaration` — an accessor's arity is its owning *indexer*'s, which
+///   lives on `indexer_declaration`, not on the accessor. Threaded down through
+///   [`ChildHint::accessor_args`].
+fn count_args(ctx: RuleNodeView<'_>, hint: &ChildHint) -> u32 {
+    match ctx.rule_index() {
+        // `x => …`: the single parameter is a bare `identifier_token`, so there is no
+        // `parameter` child to count. Its arity is always exactly one — the grammar
+        // has no zero- or multi-parameter form of this rule (`() => …` and
+        // `(a, b) => …` are both `parenthesized_lambda_expression`).
+        cp::RULE_SIMPLE_LAMBDA_EXPRESSION => 1,
+        // An accessor of an indexer takes the indexer's parameters (`this[int i]`'s
+        // getter is a one-argument function); a property's accessor takes none.
+        // Either way the count comes from the owner, since `accessor_declaration`
+        // carries no parameter list of its own — without this, NArgs for the *same*
+        // indexer differed by body syntax, because the expression-bodied form opens
+        // its space at `indexer_declaration` where the list IS present.
+        cp::RULE_ACCESSOR_DECLARATION => hint.accessor_args,
+        // An indexer's parameters are bracketed (`this[int i]`).
+        _ => ctx
+            .child_rule(cp::RULE_PARAMETER_LIST)
+            .or_else(|| ctx.child_rule(cp::RULE_BRACKETED_PARAMETER_LIST))
+            .map(count_parameters)
+            .unwrap_or(0),
     }
-    // An indexer's parameters are bracketed (`this[int i]`).
-    let list = ctx
-        .child_rule(cp::RULE_PARAMETER_LIST)
-        .or_else(|| ctx.child_rule(cp::RULE_BRACKETED_PARAMETER_LIST));
-    list.map(count_parameters).unwrap_or(0)
 }
 
 /// Count the non-empty `parameter` children of `ctx`.
