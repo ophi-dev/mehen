@@ -113,7 +113,10 @@ fn nested_generics_close_with_adjacent_angle_brackets() {
 fn right_shift_still_parses_as_an_operator() {
     // The other side of the same predicate: adjacent `>` `>` in expression
     // position is a shift.
-    assert_eq!(syntax_errors("class C { int M(int a, int b) => a >> b; }"), 0);
+    assert_eq!(
+        syntax_errors("class C { int M(int a, int b) => a >> b; }"),
+        0
+    );
 }
 
 #[test]
@@ -155,7 +158,9 @@ fn has_declaration_expression(source: &str) -> bool {
     let lexer = CSharpLexer::new(InputStream::new(source));
     let mut parser = CSharpParser::new(CommonTokenStream::new(lexer));
     parser.remove_error_listeners();
-    let tree = parser.compilation_unit().expect("entry rule must not hard-fail");
+    let tree = parser
+        .compilation_unit()
+        .expect("entry rule must not hard-fail");
     let parsed = parser.into_parsed_file(tree);
     fn walk(node: Node<'_>) -> bool {
         if node

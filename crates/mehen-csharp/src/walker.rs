@@ -396,7 +396,9 @@ impl Walker<'_> {
         // itself, so by the time the walk reaches `field_declaration` the inbound
         // hint (set at `member_declaration`) has nothing to carry — inheriting it
         // would fall back to "public" for every member.
-        if hint.in_type_member && let Some(container) = hint.member_container {
+        if hint.in_type_member
+            && let Some(container) = hint.member_container
+        {
             // An unmarked class/struct member is private; an unmarked interface
             // member is implicitly public.
             let default_public = matches!(container, ContainerKind::Interface);
@@ -604,9 +606,7 @@ impl Walker<'_> {
             // read from the declaration's own `modifier*` at the point of
             // classification (see `visit_rule`), because Roslyn puts the
             // modifiers on the declaration rather than on a wrapper above it.
-            _ if hint.in_type_member && declares_member(ri) => {
-                (true, hint.member_container, None)
-            }
+            _ if hint.in_type_member && declares_member(ri) => (true, hint.member_container, None),
             _ => (false, None, None),
         }
     }
@@ -1079,8 +1079,7 @@ impl Walker<'_> {
                 // cognitive nesting structure (SonarSource scores it like an
                 // `if`). Keyed on `?` so the `:` does not score a second time.
                 cl::QUESTION => {
-                    let eff =
-                        self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
+                    let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                     self.current().cyclomatic.record_decision();
                     self.current().cognitive.increase_nesting(eff);
                     self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
