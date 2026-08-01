@@ -44,26 +44,38 @@
 //! ## Metric coverage (SonarC#-aligned)
 //!
 //! - **Cyclomatic**: `if`, every loop (`while`/`do`/`for`/`foreach`), each
-//!   `case` label, the ternary `?:`, and each short-circuit `&&`/`||`. `catch`,
-//!   `switch` itself, and `default:` are not decisions (matches SonarC#, which
-//!   follows the same rule as SonarJava; `catch` counts only in cognitive).
-//! - **Cognitive**: nesting on `if`, loops, `switch`, `catch`, and the ternary;
-//!   flat `+1` on `else`/`else if` and on `goto`; a sequence-collapsing boolean
-//!   run on `&&`/`||` (+1 per operator-kind change, reset per statement and per
-//!   call argument, matching SonarSource). `try` and `lock` add nothing — the
-//!   spec increments on the *handler* (`catch`), not the guarded block, and
-//!   `lock` is not an increment at all.
+//!   `case` label, each switch-*expression* arm, the ternary `?:`, each
+//!   short-circuit `&&`/`||`, and each `and`/`or` pattern combinator. `catch`,
+//!   `switch` itself, `default:`, and a `_` arm are not decisions (matches SonarC#,
+//!   which follows the same rule as SonarJava; `catch` counts only in cognitive).
+//!   A switch expression scores exactly like the equivalent switch statement —
+//!   rewriting one into the other must not move the number.
+//! - **Cognitive**: nesting on `if`, loops, `switch` (statement *and* expression),
+//!   `catch`, and the ternary; flat `+1` on `else`/`else if` and on `goto`; a
+//!   sequence-collapsing boolean run on `&&`/`||` and on the `and`/`or` pattern
+//!   combinators (+1 per operator-kind change, reset per statement and per call
+//!   argument, matching SonarSource). `try` and `lock` add nothing — the spec
+//!   increments on the *handler* (`catch`), not the guarded block, and `lock` is not
+//!   an increment at all.
 //! - **ABC**: assignments via the assignment-shaped `expression` (all
 //!   `=`/compound/`??=` forms), `++`/`--`, and any initialized declarator;
 //!   branches via every invocation-shaped `expression`, object creation, and
 //!   `constructor_initializer` (NOT member access — that is qualification, not a
-//!   call, so a qualified call still scores exactly one branch); conditions via
+//!   call, so a qualified call still scores exactly one branch; and NOT `nameof`,
+//!   which only has the invocation *shape*); conditions via
 //!   `if`/`case`/`catch`/`when`/loops/comparison & equality/`&&`/`||`/ternary/
-//!   `??`/`is`/`as`. Bit-shifts are excluded, which needs care: the prep spells
-//!   `>>` as adjacent `>` tokens rejoined in the parser (so a generic closer is
-//!   never mis-lexed as a shift), which means a *shift* reaches the token scan as
-//!   two bare `GT` tokens. The enclosing `right_shift` rule is the only signal,
-//!   so the walker tags that subtree via `ChildHint::in_shift_operator`.
+//!   `??`/`is`/`as`/`and`/`or`.
+//!
+//!   `<` and `>` need care, because C# spells three unrelated things with them and
+//!   only the enclosing rule tells them apart. A comparison counts; the other two
+//!   do not, and each has its own hint:
+//!   - a **shift** — the prep spells `>>` as adjacent `>` tokens rejoined in the
+//!     parser (so a generic closer is never mis-lexed as a shift), which means a
+//!     shift reaches the token scan as two bare `GT` tokens
+//!     (`ChildHint::in_shift_operator`);
+//!   - a **generic or function-pointer delimiter** — `List<int>` would otherwise
+//!     score two conditions, and `Dictionary<string, List<int>>` four
+//!     (`ChildHint::in_type_delimiter`).
 //! - **NExit**: `return_statement`, `throw_statement`, `throw_expression`, and
 //!   `yield_statement` (both `yield return` and `yield break`).
 //! - **NArgs**: the `parameter` count of a `parameter_list` /
@@ -112,7 +124,8 @@ use mehen_csharp_parser::c_sharp_parser as cp;
 // `has_token` probes could only assert by comment. Dispatch stays on
 // `rule_index()`: a metric walker is fundamentally one match over rule kinds.
 use mehen_csharp_parser::c_sharp_parser::{
-    ExpressionContext, OperatorDeclarationContext, PrefixUnaryExpressionContext,
+    ExpressionContext, OperatorDeclarationContext, PatternContext, PrefixUnaryExpressionContext,
+    SwitchExpressionArmContext,
 };
 
 /// Drive the walk over the parsed `compilation_unit` tree and return the unit
@@ -242,6 +255,20 @@ struct ChildHint {
     /// presents to the token scan as two `GT` tokens. Only the enclosing rule
     /// tells them apart.
     in_shift_operator: bool,
+    /// This terminal is a `<`/`>` used as a *delimiter* — a generic argument or
+    /// parameter list, or a function-pointer signature — not a comparison.
+    ///
+    /// C# spells all three with the same `LT`/`GT` tokens it uses for relational
+    /// operators, so `List<int> f;` would otherwise score two ABC conditions and
+    /// two Halstead comparison operators. `Dictionary<string, List<int>>` would
+    /// score four. Only the enclosing rule distinguishes them, exactly as for
+    /// [`ChildHint::in_shift_operator`].
+    ///
+    /// This is deliberately NOT merged with `in_shift_operator`: a shift's `>`
+    /// tokens are suppressed at the token scan and the operator is recorded once
+    /// at its rule, whereas a delimiter is not an operator at all and is dropped
+    /// outright.
+    in_type_delimiter: bool,
     /// This node is inside an `accessor_declaration`'s body. An accessor opens a
     /// metric space but is not itself a logical line, so an expression-bodied
     /// accessor (`get => _x;`) has nothing else to make its space non-empty —
@@ -315,10 +342,14 @@ impl Walker<'_> {
             // ABC conditions: comparison / equality / boolean / null-coalescing
             // operator tokens.
             //
-            // Relational `<`/`>` are counted here, but a shift must not be: the
-            // prep spells `>>` as adjacent `>` tokens, so `a >> b` would otherwise
-            // read as two comparisons. `in_shift_operator` marks that subtree.
-            if is_abc_condition_token(tt) && !hint.in_shift_operator {
+            // Relational `<`/`>` are counted here, but the two constructs that
+            // reuse those tokens for something else must not be:
+            // - a shift — the prep spells `>>` as adjacent `>` tokens, so `a >> b`
+            //   would read as two comparisons (`in_shift_operator`);
+            // - a generic argument/parameter list or function-pointer signature,
+            //   where they are delimiters — `List<int> f;` would read as two
+            //   comparisons (`in_type_delimiter`).
+            if is_abc_condition_token(tt) && !hint.in_shift_operator && !hint.in_type_delimiter {
                 self.current().abc.record_condition();
             }
 
@@ -349,6 +380,21 @@ impl Walker<'_> {
                 if hint.in_shift_operator {
                     return;
                 }
+                // A generic/function-pointer `<`…`>` is a delimiter, not a
+                // comparison. It stays an operator (Halstead counts bracket pairs,
+                // just as `(`/`)` are counted), but under its own name so the
+                // distinct-operator count does not conflate `List<int>` with
+                // `a < b`. Halstead pairs a bracket as one operator, so only the
+                // opener is recorded.
+                if hint.in_type_delimiter {
+                    if tt == cl::LT {
+                        self.current().halstead.observe_operator(HalsteadOperator {
+                            kind: SmolStr::new("<>"),
+                            text: None,
+                        });
+                    }
+                    return;
+                }
                 self.current().halstead.observe_operator(HalsteadOperator {
                     kind: SmolStr::new(kp_token_name(tt)),
                     text: None,
@@ -369,10 +415,11 @@ impl Walker<'_> {
         // (routed after the walk), and EOF (`tt < 0`) is not code.
         //
         // A single visible token can span multiple physical lines — a verbatim
-        // string (`@"…"`, `VERBATIUM_STRING`) or an interpolated-string content
-        // token is one token covering several rows. Record *every* row it
-        // covers as code, or the interior rows sit inside the enclosing span
-        // with no PLOC observation and are reported as phantom blank lines
+        // string (`@"…"`, `VERBATIM_STRING_LIT`), a raw string
+        // (`"""…"""`, `ML_RAW_STRING_LIT`), or an interpolated-string content token
+        // is one token covering several rows. Record *every* row it covers as code,
+        // or the interior rows sit inside the enclosing span with no PLOC
+        // observation and are reported as phantom blank lines
         // (`blank = sloc - ploc - only_comment`).
         if tt >= 0 {
             let start_row = (term.symbol().line() as u32).saturating_sub(1);
@@ -543,6 +590,23 @@ impl Walker<'_> {
                 | cp::RULE_UNSIGNED_RIGHT_SHIFT_ASSIGNMENT
         );
 
+        // A generic argument/parameter list and a function-pointer signature
+        // delimit with the same `<`/`>` tokens as a comparison. Only the enclosing
+        // rule tells them apart, so tag the subtree.
+        //
+        // The flag does NOT propagate into children: a type argument can contain a
+        // real comparison (`Func<bool>` holding a lambda body, or the `expression`
+        // inside `relational_pattern`), and a nested `List<List<int>>` re-enters
+        // the delimiter rule for its own angle brackets anyway. Only each list's
+        // *own* `<`/`>` terminals need suppressing, which is exactly the extent of
+        // a non-propagating flag.
+        let in_type_delimiter = matches!(
+            ri,
+            cp::RULE_TYPE_ARGUMENT_LIST
+                | cp::RULE_TYPE_PARAMETER_LIST
+                | cp::RULE_FUNCTION_POINTER_PARAMETER_LIST
+        );
+
         // Inside an accessor's body from the accessor declaration downward, so
         // an expression-bodied `get => _x;` can count its own logical line. A
         // nested function or type resets it — their bodies are counted normally.
@@ -564,6 +628,7 @@ impl Walker<'_> {
                 in_identifier,
                 in_attributes,
                 in_shift_operator,
+                in_type_delimiter,
                 in_accessor_body,
                 accessor_owner: accessor_owner.clone(),
             };
@@ -983,6 +1048,24 @@ impl Walker<'_> {
                 self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
                 self.current().cognitive.boolean_seq.reset();
             }
+            // A switch *expression* arm (`v switch { 1 => …, _ => … }`) is the same
+            // decision as a `case` label and must score identically: rewriting a
+            // switch statement into the expression form does not make the code
+            // simpler, so it must not lower the score.
+            //
+            // The nesting increment belongs to the whole switch expression, not to
+            // each arm — but hub inlining folds `switch_expression` into
+            // `expression`, so it has no rule index and is handled by shape in
+            // `classify_expression`. Only the per-arm decision lives here.
+            //
+            // A discard arm (`_ => …`) is excluded for the same reason `default:` is
+            // not a decision: it is the fall-through, not a test.
+            cp::RULE_SWITCH_EXPRESSION_ARM => {
+                if !is_discard_arm(ctx) {
+                    self.current().cyclomatic.record_decision();
+                    self.current().abc.record_condition();
+                }
+            }
             // NOTE: `try` and `lock` deliberately score NOTHING. SonarSource's
             // cognitive-complexity spec increments on `catch` (a handler is the
             // structure a reader must follow), not on the `try` block itself, and
@@ -1018,6 +1101,43 @@ impl Walker<'_> {
             // separate rule with the same meaning.
             cp::RULE_WHEN_CLAUSE | cp::RULE_CATCH_FILTER_CLAUSE => {
                 self.current().abc.record_condition();
+            }
+            // A pattern combinator (`o is int and > 5`, `is not null`) is a boolean
+            // decision, the same as the `&&`/`||`/`!` it replaces. C# 9 spells these
+            // with the contextual keywords `and`/`or`/`not` rather than the operator
+            // tokens `visit_terminal` scans, so without this a pattern-heavy method
+            // reports the complexity of a straight-line one.
+            //
+            // Hub inlining folds `binary_pattern` into `pattern` (as it does
+            // `binary_expression` into `expression`), so the combinator is read from
+            // the typed context's own `and`/`or` token rather than from a rule index.
+            // The run tracker is fed the actual keyword because SonarSource collapses
+            // a run of the *same* operator into one increment, so `a and b or c` must
+            // stay two.
+            //
+            // `not` is handled like the prefix `!`: it marks the run so a following
+            // same-kind combinator is not collapsed across the negation, but is not
+            // itself a decision. A relational pattern (`is > 5`) needs nothing here —
+            // its operator token is an ordinary `GT`/`LE`/… that `visit_terminal`
+            // already counts as an ABC condition.
+            cp::RULE_PATTERN => {
+                if let Some(pattern) = PatternContext::from_rule_node(ctx) {
+                    let combinator = if pattern.kw_or_token().is_some() {
+                        Some("or")
+                    } else if pattern.kw_and_token().is_some() {
+                        Some("and")
+                    } else {
+                        None
+                    };
+                    if let Some(op) = combinator {
+                        self.current().cyclomatic.record_decision();
+                        self.current().abc.record_condition();
+                        self.current().cognitive.observe_boolean(op);
+                    }
+                }
+            }
+            cp::RULE_UNARY_PATTERN => {
+                self.current().cognitive.boolean_seq.not_operator("not");
             }
             // `catch` is cognitive-only (matches SonarC#/SonarJava): a nesting
             // increment plus an ABC condition, but no cyclomatic decision. One
@@ -1088,8 +1208,39 @@ impl Walker<'_> {
         // the invocation. Counting only the invocation keeps one branch per call
         // regardless of qualification depth, matching `mehen-java` (which counts
         // `methodCall`/`creator`, never field access).
-        if expr.argument_list().is_some() {
+        //
+        // `nameof(x)` is excluded: it has the invocation shape but is a
+        // compile-time operator that evaluates to a string constant — no call is
+        // made, nothing is dispatched, and the argument is never evaluated. Scoring
+        // it as a branch would rank `throw new ArgumentNullException(nameof(arg))`
+        // above the same throw with a literal. (`typeof`/`sizeof`/`default` are
+        // dedicated rules and so never reach here at all; `nameof` is only a
+        // contextual keyword, so it parses as an ordinary invocation and has to be
+        // filtered by name.)
+        if expr.argument_list().is_some() && !is_nameof_callee(&expr) {
             self.current().abc.record_branch();
+        }
+
+        // `>>=` and `>>>=` are the only assignment operators the prep splits into
+        // separate tokens (`GT GE` / `GT GT GE`), so they reach this node as child
+        // *rules* rather than as an operator terminal and the token match below
+        // never sees them. Without this, `a >>= 2` scores no assignment while the
+        // otherwise-identical `a <<= 2` scores one.
+        if expr.right_shift_assignment().is_some()
+            || expr.unsigned_right_shift_assignment().is_some()
+        {
+            self.current().abc.record_assignment();
+        }
+
+        // A switch expression nests exactly like a switch statement (SonarSource
+        // scores both the same way). Recognised by its `switch` keyword, since hub
+        // inlining leaves it without a rule index of its own. Its arms carry the
+        // decisions, recorded at `switch_expression_arm`.
+        if expr.kw_switch_token().is_some() {
+            let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
+            self.current().cognitive.increase_nesting(eff);
+            self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+            self.current().cognitive.boolean_seq.reset();
         }
 
         for terminal in expr.direct_terminals() {
@@ -1313,6 +1464,12 @@ fn opens_type_like(ri: usize) -> bool {
             // Roslyn models `record` / `record struct` as their own node rather
             // than a modifier on a class, so it is a peer here.
             | cp::RULE_RECORD_DECLARATION
+            // A C# 14 `extension(T x) { … }` block is a member container in its own
+            // right: it holds `member_declaration*` exactly as a class body does. It
+            // has no name of its own, so the space is anonymous — but it must open
+            // one, or its members would attach to the enclosing static class and
+            // report as that class's methods.
+            | cp::RULE_EXTENSION_BLOCK_DECLARATION
     )
 }
 
@@ -1602,16 +1759,60 @@ fn container_kind(parent_kind: SpaceKind) -> ContainerKind {
     }
 }
 
-/// Equality / boolean / null-coalescing operator tokens that count as an ABC
-/// "condition".
+/// Is this switch-expression arm the discard (`_ => …`) catch-all?
 ///
-/// Every operator the `relational_expression` rule owns — `<`, `>`, `<=`, `>=`,
-/// `is`, `as` — is deliberately EXCLUDED here and counted at that rule instead
-/// (`classify_expression`). The rule-level scan is required for `<`/`>`, whose
-/// bare `LT`/`GT` tokens this grammar reuses for shifts (`<<` is `LT LT`), and
-/// `<=`/`>=` must follow the same path or they would be counted twice — once
-/// here and once at the rule. Equality (`==`/`!=`) has dedicated tokens that
-/// appear nowhere else, so it stays on this cheap token scan.
+/// The discard is the fall-through, not a test, so it is not a decision — the same
+/// treatment `default:` gets in a switch statement.
+///
+/// Roslyn does give the discard its own `discard_pattern : '_'` rule, but it cannot
+/// be reached here: `constant_pattern : expression` is listed *before* it among
+/// `pattern`'s alternatives and `_` is a legal identifier expression, so ANTLR takes
+/// the constant form first. (Reordering is not an option — `discard_pattern` first
+/// would be right for `_` yet the two rules are otherwise unrelated, and Roslyn's own
+/// parser distinguishes them semantically, by knowing whether `_` resolves to a
+/// declared name.) So the arm's pattern is matched on its text, which is exactly `_`
+/// for the discard and cannot be anything else for a one-token pattern.
+fn is_discard_arm(ctx: RuleNodeView<'_>) -> bool {
+    SwitchExpressionArmContext::from_rule_node(ctx)
+        .and_then(|arm| arm.pattern().ok())
+        .is_some_and(|pattern| pattern.discard_pattern().is_some() || pattern.text() == "_")
+}
+
+/// Is this invocation-shaped `expression` the `nameof` pseudo-call?
+///
+/// `nameof` is a *contextual* keyword: the grammar has no rule for it, so
+/// `nameof(x)` parses as an ordinary invocation over the identifier `nameof`. It is
+/// nonetheless a compile-time operator — it yields a string constant, calls nothing,
+/// and never evaluates its argument — so it must not count as an ABC branch.
+///
+/// The callee is the invocation's first `expression` child. Hub inlining collapses a
+/// bare identifier callee all the way down (no `simple_name` layer survives on it),
+/// so the check is on that child's own text. That is exact rather than a substring
+/// probe: the child spans the callee and nothing else, so it equals `"nameof"` only
+/// when the callee IS the bare identifier. A qualified `X.nameof(y)` has a `.` in the
+/// child's text and a local variable named `nameof` is never in callee position, so
+/// neither is mistaken for the operator.
+///
+/// Only ever consulted for a node that already has an `argument_list`, so the first
+/// `expression` child is the callee by construction.
+fn is_nameof_callee(expr: &ExpressionContext<'_>) -> bool {
+    expr.expression_children()
+        .next()
+        .is_some_and(|callee| callee.text() == "nameof")
+}
+
+/// Equality / relational / boolean / null-coalescing operator tokens that count as
+/// an ABC "condition".
+///
+/// Equality (`==`/`!=`), `&&`/`||` and `??` have dedicated tokens that appear
+/// nowhere else, so they are safe on this cheap token scan. Relational `<`/`>` are
+/// counted here too, but the caller must first exclude the two constructs that
+/// reuse those tokens for something other than a comparison — a split shift
+/// operator and a generic/function-pointer delimiter (see
+/// [`ChildHint::in_shift_operator`] and [`ChildHint::in_type_delimiter`]).
+///
+/// `is`/`as` are NOT here: they are counted at the `expression` rule, where the
+/// typed context distinguishes them from the `is`-pattern forms.
 fn is_abc_condition_token(tt: i32) -> bool {
     matches!(
         tt,

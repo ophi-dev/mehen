@@ -238,3 +238,27 @@ fn nested_types_nest_their_spaces() {
         ]
     );
 }
+
+#[test]
+fn an_extension_block_is_its_own_container() {
+    // A C# 14 `extension(T x) { … }` block holds `member_declaration*` exactly as a
+    // class body does, so it must open its own space — otherwise its members attach
+    // to the enclosing static class and report as that class's own methods.
+    // Anonymous, since the block declares no name.
+    let a = analyze_clean(
+        "static class E {
+             extension(string s) {
+                 public int Length => s.Length;
+             }
+         }",
+    );
+    assert_eq!(
+        shape(&a.root),
+        vec![
+            (0, "unit".to_string(), None),
+            (1, "class".to_string(), Some("E".to_string())),
+            (2, "class".to_string(), None),
+            (3, "function".to_string(), Some("Length.get".to_string())),
+        ]
+    );
+}

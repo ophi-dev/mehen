@@ -233,3 +233,62 @@ fn a_method_in_a_nested_type_starts_fresh() {
     );
     assert_eq!(sum(&a), 2.0);
 }
+
+#[test]
+fn a_switch_expression_nests_like_a_switch_statement() {
+    // REGRESSION. A switch *expression* added no cognitive nesting, so the modern
+    // spelling of the same branching scored 0 where the statement form scored 1.
+    let expression = analyze_clean(
+        "class C {
+             int F(int v) {
+                 return v switch { 1 => 1, _ => 0 };
+             }
+         }",
+    );
+    let statement = analyze_clean(
+        "class C {
+             int F(int v) {
+                 switch (v) { case 1: return 1; default: return 0; }
+             }
+         }",
+    );
+    assert_eq!(sum(&expression), sum(&statement));
+    assert_eq!(sum(&expression), 1.0);
+}
+
+#[test]
+fn a_switch_expression_nested_in_an_if_costs_its_depth() {
+    // The nesting increment must be a real level, not a flat +1: the inner switch
+    // expression sits one level deep, so it costs 2 on top of the `if`'s 1.
+    let a = analyze_clean(
+        "class C {
+             int F(int v, bool flag) {
+                 if (flag) {
+                     return v switch { 1 => 1, _ => 0 };
+                 }
+                 return 0;
+             }
+         }",
+    );
+    assert_eq!(sum(&a), 3.0);
+}
+
+#[test]
+fn pattern_combinators_score_as_boolean_operators() {
+    // `and`/`or` are C# 9's pattern-position spelling of `&&`/`||`, so they feed the
+    // same run-collapsing tracker. A run of the SAME combinator is one increment.
+    let one_run = analyze_clean(
+        "class C {
+             bool F(object o) { return o is int and long and short; }
+         }",
+    );
+    assert_eq!(sum(&one_run), 1.0, "a same-operator run collapses to +1");
+
+    // Mixing them breaks the run, exactly as `a && b || c` does.
+    let mixed = analyze_clean(
+        "class C {
+             bool F(object o) { return o is (int and long) or string; }
+         }",
+    );
+    assert_eq!(sum(&mixed), 2.0);
+}

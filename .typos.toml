@@ -42,16 +42,6 @@ typs2 = "typs2"
 inh = "inh"
 
 [default.extend-words]
-# The vendored grammars-v4 C# grammar misspells "verbatim" as "verbatium"
-# throughout its token and helper names (`VERBATIUM_STRING`,
-# `IsVerbatiumDoubleQuoteInside`, `OnInterpolatedVerbatiumStringStart`, …).
-# The `.g4` files and generated modules are already excluded above, but the
-# hand-written `mehen-csharp-parser` hooks port and the `mehen-csharp` walker
-# must *reference* those exact identifiers, so the spelling cannot be
-# corrected on our side without breaking the build.
-verbatium = "verbatium"
-Verbatium = "Verbatium"
-VERBATIUM = "VERBATIUM"
 # Intentional misspellings in negative-path tests for the `--fail-on`
 # value parser (`src/diff.rs` rejects unknown names via clap).
 borken = "borken"

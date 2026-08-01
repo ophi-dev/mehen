@@ -76,17 +76,31 @@ VERBATIM_STRING_LIT
     : '@"' ( '""' | ~'"' )* '"'
     ;
 
-// C# 11 raw string literals. The real rule requires the closing fence to be at
-// least as long as the opening one, which a context-free lexer rule cannot
-// express; a non-greedy match is sufficient here because every metric that
-// touches a string literal (LOC rows, Halstead operand) only needs the token's
-// extent, not its internal structure.
-ML_RAW_STRING_LIT
-    : '"""' '"'* .*? '"""' '"'*
+// C# 11 raw string literals (§6.4.5.7). BOTH forms are fenced by *at least*
+// three quotes — the single-/multi-line distinction is whether the content
+// contains a newline, not a shorter fence. The real rule also requires the
+// closing fence to be at least as long as the opening one, which a context-free
+// lexer rule cannot express; a non-greedy match is sufficient here because every
+// metric that touches a string literal (LOC rows, Halstead operand) only needs
+// the token's extent, not its internal structure.
+//
+// Order is load-bearing: ANTLR breaks an equal-length match by rule order, so
+// the single-line form must come first. A one-line raw string matches both rules
+// over the same extent and has to lex as SL_RAW_STRING_LIT (the parser reaches it
+// through `single_line_raw_string_literal_token`); a multi-line one cannot match
+// SL at all — `~[\r\n]` blocks the newline — so it falls through to ML.
+//
+// Do NOT relax the opening fence to `'""'`. An empty string is `""`, so a
+// two-quote fence makes `var a = ""; f(); var b = "";` lex as ONE token spanning
+// both empty strings: the intervening statements vanish from every metric with no
+// diagnostic to show for it (a silently wrong tree, the failure mode
+// PROVENANCE.md warns about).
+SL_RAW_STRING_LIT
+    : '"""' '"'* ~[\r\n]*? '"""' '"'*
     ;
 
-SL_RAW_STRING_LIT
-    : '""' ~[\r\n]*? '""'
+ML_RAW_STRING_LIT
+    : '"""' '"'* .*? '"""' '"'*
     ;
 
 // ---- trivia -------------------------------------------------------------
@@ -146,8 +160,21 @@ DIRECTIVE_LINE          : '#' ~[\r\n]*    -> channel(DIRECTIVE) ;
 // `COLON` are harvested literals the script pins to those names
 // (STABLE_TOKEN_NAMES) so the `type(…)` commands here stay valid — the default
 // `OP_nnn` names are index-derived and shift whenever the literal set changes.
+// The prefixes are order-insensitive in C# 11+: `$@"…"` and `@$"…"` are the same
+// string, so both spellings push the verbatim text mode. (Roslyn's grammar spells
+// only `'$@"'`, which is why the `@$` form needs an explicit alternative here.)
 INTERP_START          : '$"'  -> pushMode(INTERPOLATION) ;
-INTERP_VERBATIM_START : '$@"' -> pushMode(INTERPOLATION_VERBATIM) ;
+INTERP_VERBATIM_START : ( '$@"' | '@$"' ) -> pushMode(INTERPOLATION_VERBATIM) ;
+
+// C# 11 interpolated *raw* string (`$"""a{x}b"""`). Roslyn spells the opening
+// fence as three parser tokens (`DOLLAR+ TRIPLE_DQUOTE DQUOTE*`), but the text
+// between holes cannot be lexed in the default mode — `a` would come back as an
+// IDENTIFIER — so this is one token that pushes a third text mode, and
+// `prepare-grammar.py` retargets both Roslyn start-token rules at it.
+//
+// `$"""` is a longer match than `$"`, so it wins over INTERP_START regardless of
+// rule order; it is placed here for readability.
+INTERP_RAW_START : '$'+ '"""' '"'* -> pushMode(INTERPOLATION_RAW) ;
 
 // ---- braces and `:` inside an interpolation hole -----------------------
 // `{`, `}` and `:` mean different things inside a hole, so this file defines them
@@ -235,7 +262,29 @@ INTERP_V_TEXT          : ~[{}"]+ -> type(INTERPOLATED_TEXT) ;
 INTERP_V_HOLE_OPEN : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
 INTERP_V_END       : '"' -> type(DQUOTE), popMode ;
 
-// A format specifier (`{x:D4}`) is a third mode: after the `:` that ends a
+// An interpolated *raw* string (`$"""…"""`) is a third flavour: a lone `"` is
+// ordinary text (only a `"""` run closes the string) and there are no backslash
+// escapes. Text and hole handling otherwise mirror the two modes above.
+//
+// The closing fence emits TRIPLE_DQUOTE because the parser spells the end as
+// `interpolated_raw_string_end_token : TRIPLE_DQUOTE DQUOTE*`.
+mode INTERPOLATION_RAW;
+
+INTERP_R_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
+INTERP_R_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
+
+// The fence first, so a `"""` run is never split into text quotes.
+INTERP_R_END : '"""' '"'* -> type(TRIPLE_DQUOTE), popMode ;
+
+// One or two quotes are literal content inside a raw string; only a run of three
+// closes it. Kept as its own rule so the negated text set can exclude `"`
+// entirely and leave fence detection to the rule above.
+INTERP_R_QUOTE : '"' '"'? -> type(INTERPOLATED_TEXT) ;
+INTERP_R_TEXT  : ~[{}"]+  -> type(INTERPOLATED_TEXT) ;
+
+INTERP_R_HOLE_OPEN : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+
+// A format specifier (`{x:D4}`) is a further mode: after the `:` that ends a
 // hole's expression, the remaining text up to the closing `}` is literal format
 // text, not C# code — `D4` must not lex as an identifier. (The grammars-v4 C#
 // lexer has an INTERPOLATION_FORMAT mode for the same reason.) Entered from the

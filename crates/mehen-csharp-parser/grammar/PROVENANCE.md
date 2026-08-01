@@ -40,8 +40,8 @@ This crate previously vendored `csharp/v7/{CSharpLexer,CSharpParser}.g4` from
 `antlr/grammars-v4`. It is a genuine C# 7-era grammar, so mainstream post-7
 syntax simply does not parse — `switch` expressions, `is not`, `and`/`or`
 patterns, and `record` declarations all fail, and C# 9 pattern syntax appears
-throughout modern .NET. On the 321-file `System.Text.Json` corpus it parsed 93
-files cleanly versus 308 for the derived Roslyn grammar.
+throughout modern .NET. On the 322-file `System.Text.Json` corpus it parsed 93
+files cleanly versus 318 for the derived Roslyn grammar.
 
 Upstream's `csharp/v8-spec` is not the answer either: it stops at C# 8, so it
 still lacks the C# 9 patterns that cause most failures, and its `superClass`
@@ -61,29 +61,44 @@ mehen's token-level metrics, but both would matter for a validating parser.
 
 Roslyn's grammar needs mutual (indirect) left recursion, which ANTLR rejects and
 runtime 0.21.0 accepts via hub inlining (upstream #221). Beyond that, measured on
-321 files of `dotnet/runtime`'s `System.Text.Json`:
+322 files of `dotnet/runtime`'s `System.Text.Json` (`src/`, `main` branch):
 
 | | clean | notes |
 |---|---|---|
 | `grammars-v4` C# 7 (previous) | 93 | C# 8+ syntax unsupported |
 | Roslyn, first working prep | 115 | interpolated strings failed |
-| Roslyn, current prep | **317** | 4 with diagnostics, no crashes or timeouts |
+| Roslyn, current prep | **318 / 322** | 4 with diagnostics, no crashes or timeouts |
 
 Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
-321 files. All 4 remaining files are the directive-split-expression case below.
+corpus. All 4 remaining files are the directive-split-expression case below.
 
-Note that a "clean" corpus count measures *parseability*, not correctness — four
-separate faults in this grammar produced structurally wrong trees with zero
-reported errors (`declaration_expression` shadowing every invocation, bodiless
-members falling through to `global_statement`, `(a, b) => …` parsing as the simple
-lambda form, and `parameter` matching the empty string). Each was caught by a
-metric test or a parse-tree dump, never by an error count.
+Note that a "clean" corpus count measures *parseability*, not correctness — this
+grammar has now produced **seven** distinct silent misparses: structurally wrong
+trees with zero reported errors. Each was caught by a metric test or a parse-tree
+dump, never by an error count.
+
+| silent misparse | what the tree said instead |
+|---|---|
+| `declaration_expression` listed before `invocation_expression` | every method call was a declaration |
+| bodiless members required a body | `void M();` fell through to `global_statement` |
+| `parameter`'s elements all optional | `Zero()` had one empty parameter |
+| `parameter`'s `type?` matches a tuple | `(a, b) => …` was a *simple* lambda |
+| `SL_RAW_STRING_LIT` fenced with `""` | `var a = ""; f(); var b = "";` was ONE string token |
+| `identifier_token` widened with `and`/`or`/`not` | `o is int and > 5` declared a variable named `and` |
+| `constant_pattern` listed before `discard_pattern` | a `_ =>` arm is an expression, not the discard |
+
+The first five *delete* code from the tree; the last two *relabel* it. Both shapes
+are invisible to an error count, which is why the metric tests carry the load here
+— see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
+token span eat the statements after it".
 
 **No runtime capability is missing.** Every failure traced to either the prep or
-an upstream-generator blind spot, and each was fixable declaratively — SemIR
-patterns via the derived `patterns.toml` plus one lexer lifecycle hook for
-interpolated strings. The gaps are catalogued below; `prepare-grammar.py` is the
-single source of the transform, so each is reproducible rather than hand-patched.
+an upstream-generator blind spot, and each was fixable declaratively — every one of
+the 21 semantic coordinates lowers to a SemIR pattern via the derived
+`patterns.toml`, with **no hooks at all** (the parser crate has no `src/hooks.rs`;
+even the interpolated-string brace bookkeeping lives in the grammar's own lexer
+actions). The gaps are catalogued below; `prepare-grammar.py` is the single source
+of the transform, so each is reproducible rather than hand-patched.
 
 Two of these were expensive to find, and both share a shape worth stating up
 front: **the grammar generated cleanly and mis-parsed anyway.** Neither the
@@ -144,6 +159,28 @@ Two second-order lessons came out of this:
   path ANTLR has already committed to — it surfaces as a hard error. It uses bare
   `IDENTIFIER` instead; `record` always lexes that way, so nothing is lost.
 
+And a third, found later: **widening has a blast radius of its own.** Making
+`and`/`or`/`not` legal identifiers is right in general and wrong in exactly one
+position. `single_variable_designation : identifier_token` sits inside
+`declaration_pattern : type variable_designation`, so
+
+```csharp
+o is int and > 5
+```
+
+binds `and` as a *variable named `and`, of type `int`* — and the `> 5` is orphaned
+along with the combinator. `binary_pattern` is listed first among `pattern`'s
+alternatives and still loses, because by the time the ATN reaches that choice the
+designation alternative is already viable. The prep therefore narrows that one rule
+to the contextual set *minus* the three combinators (`COMBINATOR_KEYWORDS`). They
+stay legal names everywhere else, and `o is int and` — a designation genuinely
+named `and` — is not valid C# anyway, since the compiler reads it as a combinator
+too.
+
+This is the mirror image of the `out _` gap below: there, a token that should have
+been an identifier was not; here, tokens that should *not* be identifiers in one
+position were. Both were invisible in the grammar text.
+
 ### `out _` and unbounded error recovery
 
 `_` was initially excluded from the widening on the mistaken belief that it still
@@ -168,6 +205,23 @@ The prep emits only `'>'` and rebuilds the operators in the *parser* behind
 `token_index_adjacent` adjacency predicates, exactly as the vendored C#7 grammar
 does. `token_index_adjacent` compares only the last two consumed tokens, so a
 three-piece operator carries the predicate at each junction.
+
+The cost lands on the *consumer*: C# now spells three unrelated things with `<`/`>`
+and `mehen-csharp`'s walker has to tell them apart from the enclosing rule alone,
+because the token stream cannot.
+
+| what it is | reaches the token scan as | how the walker knows |
+|---|---|---|
+| comparison `a < b` | `LT` / `GT` | default — counts |
+| shift `a >> b` | two bare `GT` | `ChildHint::in_shift_operator` |
+| generic `List<int>` | `LT` … `GT` | `ChildHint::in_type_delimiter` |
+
+Both non-comparison cases were live bugs: a shift scored two ABC comparisons, and
+every generic type scored two (`Dictionary<string, List<int>>` scored four). The
+generic case is the more damaging of the two, since generics appear in essentially
+every real C# file. `mehen-csharp/tests/abc.rs` pins each direction, including that
+a comparison *beside* a generic type still counts and that a type argument may still
+contain a real comparison.
 
 ### Optional type-body braces (performance)
 
@@ -206,12 +260,32 @@ behaviour-identical on the brace-less forms and on nested types.
   escape forms spelled out.
 - **Verbatim interpolated strings.** `$@"…"` needs its own lexer mode: a
   backslash is literal there and `""` is the escaped quote, so one text rule
-  cannot serve both flavours.
+  cannot serve both flavours. Both prefix orders are legal (`$@"` and `@$"`) and
+  Roslyn spells only the first, so the second needs an explicit alternative.
+- **Raw string fences are three quotes, in *both* forms.** The single- vs
+  multi-line distinction is whether the content holds a newline, not a shorter
+  fence — a `""` fence collides with the empty string literal and eats code (see
+  the silent-misparse table above). Rule order carries what a context-free rule
+  cannot express: the single-line form first, since both match a one-liner over the
+  same extent, while `~[\r\n]` structurally keeps it from claiming a multi-line one.
+- **Interpolated raw strings** (`$"""a{x}b"""`) need a *third* text mode. Roslyn
+  spells the opening fence as three parser tokens (`DOLLAR+ TRIPLE_DQUOTE DQUOTE*`),
+  but the text between holes cannot be lexed in the default mode — the `a` comes
+  back as an `IDENTIFIER` — so both Roslyn start-token rules are retargeted at one
+  mode-pushing token. Quotes are literal content inside; only a run of three closes
+  the string.
+- **Token names must not be index-derived.** The prep rejects the generator's
+  `OP_nnn` fallback because a literal's position shifts when any other literal is
+  added or removed, silently rebinding tokens that hand-written code names. The
+  same reasoning applies to *collision* suffixes: `U8` and `u8` both want `KW_U8`,
+  and disambiguating by index reintroduces exactly the instability the check exists
+  to prevent. The suffix is derived from the literal's own spelling instead
+  (`KW_U8` / `KW_U8_LOWER`).
 
 ### Known remaining limitation: directive-split expressions
 
-Of the 14 files still reporting errors, the clearest class is a preprocessor
-directive splitting a single expression:
+All 4 files still reporting errors are the same class: a preprocessor directive
+splitting a single expression.
 
 ```csharp
 if (
@@ -262,7 +336,7 @@ path across every member boundary:
 | 24 | 12 160 ms | **423 ms** |
 
 One real 953-line file (`JsonDocument.Parse.cs`) took **272 s**; the whole
-321-file library timed out past 600 s. Restoring the keyword brought that to
+library timed out past 600 s. Restoring the keyword brought that to
 ~3 m 50 s, and the balanced-brace fix above took it the rest of the way to the
 ~208 s / 5.1 s-worst-file figures at the top of this section.
 

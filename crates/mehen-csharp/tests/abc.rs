@@ -176,6 +176,129 @@ fn attribute_arguments_record_no_executable_complexity() {
 }
 
 #[test]
+fn generic_delimiters_are_not_conditions() {
+    // REGRESSION. C# spells generic argument lists with the same `<`/`>` tokens as
+    // a comparison, so `List<int>` scored two ABC conditions and
+    // `Dictionary<string, List<int>>` scored four — inflating the score of any file
+    // that mentions a generic type, which in practice is all of them.
+    let (_, _, c) = abc("class C {
+             System.Collections.Generic.Dictionary<string,
+                 System.Collections.Generic.List<int>> Map;
+         }");
+    assert_eq!(c, 0);
+}
+
+#[test]
+fn a_generic_type_does_not_mask_a_real_comparison_beside_it() {
+    // The delimiter exclusion must be positional, not a blanket `<`/`>` mute: a
+    // comparison in the same expression as a generic type still counts.
+    let (_, _, c) = abc("class C {
+             bool F(System.Collections.Generic.List<int> items, int limit) {
+                 return items.Count < limit;
+             }
+         }");
+    assert_eq!(c, 1);
+}
+
+#[test]
+fn a_generic_type_argument_may_still_contain_a_comparison() {
+    // The hint deliberately does not propagate into children, so a comparison
+    // *inside* a type argument's lambda still counts.
+    let (_, _, c) = abc("class C {
+             System.Func<int, bool> F() {
+                 return x => x > 0;
+             }
+         }");
+    assert_eq!(c, 1);
+}
+
+#[test]
+fn every_shift_assignment_form_counts_one_assignment() {
+    // REGRESSION. `>>=` and `>>>=` are the only assignment operators the prep
+    // splits into separate tokens (`GT GE` / `GT GT GE`), so they arrive as child
+    // *rules* rather than as an operator terminal. `a >>= 2` scored no assignment
+    // at all while the otherwise-identical `a <<= 2` scored one.
+    for op in ["<<=", ">>=", ">>>=", "+=", "&="] {
+        let (a, _, _) = abc(&format!("class C {{ void F(int v) {{ v {op} 2; }} }}"));
+        assert_eq!(a, 1, "`{op}` must count exactly one assignment");
+    }
+}
+
+#[test]
+fn nameof_is_not_a_branch() {
+    // REGRESSION. `nameof` is a contextual keyword with no grammar rule of its
+    // own, so `nameof(x)` has the invocation shape — but it is a compile-time
+    // operator that yields a string constant, calls nothing, and never evaluates
+    // its argument. Counting it ranked
+    // `throw new ArgumentNullException(nameof(arg))` above the same throw with a
+    // literal.
+    let (_, b, _) = abc("class C { string F() { return nameof(F); } }");
+    assert_eq!(b, 0);
+}
+
+#[test]
+fn a_real_call_is_still_a_branch_beside_nameof() {
+    // The `nameof` exclusion is by callee, so an ordinary call in the same method
+    // still counts — including a *method* named `nameof`, which is legal.
+    let (_, b, _) = abc("class C {
+             void G() { }
+             string F() { G(); return nameof(F); }
+         }");
+    assert_eq!(b, 1);
+}
+
+#[test]
+fn pattern_combinators_are_conditions() {
+    // REGRESSION, twice over. C# 9 spells pattern combinators with the contextual
+    // keywords `and`/`or`/`not` rather than the `&&`/`||`/`!` operator tokens the
+    // token scan sees, so a pattern-heavy method scored as straight-line code.
+    //
+    // The grammar had to be fixed too: widening `identifier_token` with the
+    // contextual keywords made `o is int and > 5` bind `and` as a *variable name*
+    // of type `int` via `declaration_pattern`, silently dropping the combinator and
+    // the `> 5` with it — with zero diagnostics.
+    let (_, _, c) = abc("class C { bool F(object o) { return o is int and long; } }");
+    assert_eq!(c, 2, "the `is` test plus the `and` combinator");
+}
+
+#[test]
+fn a_relational_pattern_counts_its_comparison_once() {
+    // `is > 5` is the `is` test plus one comparison — the pattern rule must not
+    // record a second condition on top of the operator token.
+    let (_, _, c) = abc("class C { bool F(int v) { return v is > 5; } }");
+    assert_eq!(c, 2);
+}
+
+#[test]
+fn a_combinator_keyword_is_still_a_legal_name_elsewhere() {
+    // Excluding `and`/`or`/`not` from `single_variable_designation` must not make
+    // them reserved: each is still a valid field, parameter, and local name.
+    // One assignment — the `int not = or;` initializer; the uninitialized field
+    // declarator is not one.
+    assert_eq!(
+        abc("class C {
+                 int and;
+                 int F(int or) { int not = or; return and + not; }
+             }"),
+        (1, 0, 0)
+    );
+}
+
+#[test]
+fn switch_expression_arms_are_conditions_but_the_discard_is_not() {
+    // REGRESSION. A switch *expression* scored nothing: no decision per arm and no
+    // cognitive nesting, so rewriting a switch statement into the expression form
+    // silently lowered the score. The discard arm (`_ =>`) is the fall-through
+    // rather than a test, so it counts no more than `default:` does.
+    let (_, _, c) = abc("class C {
+             int F(int v) {
+                 return v switch { 1 => 1, 2 => 2, _ => 0 };
+             }
+         }");
+    assert_eq!(c, 2);
+}
+
+#[test]
 fn a_split_shift_operator_is_one_halstead_operator() {
     // `>>` is spelled as two adjacent `>` tokens so a generic closer is never
     // mis-lexed as a shift (see the parser crate's PROVENANCE). Recording each

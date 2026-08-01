@@ -200,15 +200,28 @@ record_keyword
 # parser is rewritten to reference the named, mode-switching tokens that
 # `lexer-tokens.g4.in` defines instead.
 #
-# `'{'` and `'}'` stay ordinary harvested literals — they are ordinary C# braces
-# almost everywhere. The interpolation-hole bookkeeping is done by the typed
-# hook in `src/hooks.rs`, which watches accepted tokens rather than by giving
-# the brace tokens grammar actions (a `}` cannot know from the grammar alone
-# whether it closes a hole or a nested block).
+# `'{'`, `'}'` and `':'` are NOT harvested as plain literals: each has a
+# hole-sensitive meaning, so `lexer-tokens.g4.in` defines predicate-gated rules
+# for them ahead of the plain fallbacks (see HOLE_SENSITIVE_LITERALS). All the
+# brace-depth bookkeeping lives in the grammar's own lexer actions, so the parser
+# crate needs no hooks at all.
 INTERP_TOKEN_LITERALS = {
     '$"': "INTERP_START",
     '$@"': "INTERP_VERBATIM_START",
 }
+
+# The two Roslyn rules for an interpolated *raw* string's opening fence. Roslyn
+# spells each as three parser tokens (`DOLLAR+ TRIPLE_DQUOTE DQUOTE*`), but the
+# text between holes needs its own lexer mode — in the default mode the `a` of
+# `$"""a{x}"""` lexes as an IDENTIFIER — so both are retargeted at the single
+# mode-pushing INTERP_RAW_START token. The single- and multi-line spellings are
+# character-identical (they differ only in whether the content holds a newline),
+# so one token serves both.
+INTERP_RAW_START_RULES = (
+    "interpolated_multi_line_raw_string_start_token",
+    "interpolated_single_line_raw_string_start_token",
+)
+INTERP_RAW_START_TOKEN = "INTERP_RAW_START"
 
 # Meaningful names for every operator and punctuation literal, replacing the
 # index-based `OP_nnn` fallback.
@@ -332,6 +345,29 @@ STABLE_TOKEN_NAMES = {
 # Same family as the `record` <ContextualKind> loss: information the compiler
 # holds outside the grammar, which the published grammar therefore drops.
 DECLARATION_EXPRESSION_ALT = "  | declaration_expression\n"
+
+# The pattern-combinator keywords (C# 9 `and` / `or` / `not`). Contextual, so
+# widening `identifier_token` makes each a legal name — which is correct in general
+# but wrong in one position: `single_variable_designation : identifier_token` sits
+# inside `declaration_pattern : type variable_designation`, so `o is int and > 5`
+# binds `and` as a *variable* named `and` declared of type `int`. The `> 5` is then
+# orphaned and the combinator vanishes from the tree — the same silent-misparse shape
+# as the `declaration_expression` ordering bug, and with zero reported errors.
+#
+# `binary_pattern` is listed FIRST among `pattern`'s alternatives, so ANTLR does try
+# it before the declaration form. It loses anyway: the combinator only survives if
+# `and` is not consumed as the designation, and by the time the ATN reaches that
+# choice the designation alternative is already viable.
+#
+# Excluding the three from *this one rule* is the narrow fix. They stay legal
+# identifiers everywhere else (a field or parameter named `and` still parses), and a
+# variable genuinely named `and` in a declaration pattern — `o is int and` — is not
+# valid C# anyway, since the compiler reads that as a combinator too.
+COMBINATOR_KEYWORDS = ("and", "or", "not")
+
+# `single_variable_designation` in its post-harvest tokenized form, and the
+# replacement that keeps every contextual keyword EXCEPT the combinators.
+DESIGNATION_RULE = "single_variable_designation\n  : identifier_token\n  ;"
 
 # `Syntax.xml` wraps a member's body in a <Choice> of Body / ExpressionBody /
 # SemicolonToken, which the generator renders as `(block | (arrow_expression_clause
@@ -876,7 +912,11 @@ def main() -> int:
     src = src.replace(expression_rule.group(0), f"expression\n{reordered}  ;\n", 1)
 
     # -- 3. Point character-level rules at real lexer tokens -----------------
-    for rule, token in LEXER_TOKEN_RULES.items():
+    lexer_bound = dict(LEXER_TOKEN_RULES)
+    lexer_bound.update(
+        (rule, INTERP_RAW_START_TOKEN) for rule in INTERP_RAW_START_RULES
+    )
+    for rule, token in lexer_bound.items():
         m = rule_span(src, rule)
         if not m:
             print(f"error: lexer-bound rule not found: {rule}", file=sys.stderr)
@@ -930,12 +970,21 @@ def main() -> int:
         )
         return 1
     # Keyword names can collide when the grammar spells the same word in two
-    # cases (`U8`/`u8`); disambiguate deterministically by index.
+    # cases (`U8` and `u8` both want `KW_U8`). Disambiguate from the literal's own
+    # spelling, NOT from its index: an index suffix is exactly the position-derived
+    # naming rejected above, so `KW_U8_150` would rebind to a different literal the
+    # moment upstream adds or removes one. `KW_U8` / `KW_U8_LOWER` are stable as
+    # long as the two spellings are.
+    #
+    # The uppercase spelling keeps the bare name (it is what `KW_{lit.upper()}`
+    # already produces), so only the lowercase variant is suffixed; a collision
+    # between anything other than a pure case difference is a real ambiguity and
+    # fails the assertion below.
     seen: dict[str, str] = {}
     for lit in literals:
         name = names[lit]
         if name in seen:
-            names[lit] = f"{name}_{literals.index(lit)}"
+            names[lit] = f"{name}_LOWER" if lit.islower() else f"{name}_UPPER"
         seen[names[lit]] = lit
     assert len(set(names.values())) == len(literals), "token-name collision"
 
@@ -970,6 +1019,39 @@ def main() -> int:
         1,
     )
     print(f"widened identifier_token with {len(contextual)} contextual keywords")
+
+    # -- 4b2. Keep a pattern combinator out of a variable designation ---------
+    # See COMBINATOR_KEYWORDS. Spelled as the full contextual set minus the three
+    # combinators, rather than as `identifier_token` with exclusions, because ANTLR
+    # has no rule-level token subtraction.
+    if DESIGNATION_RULE not in src:
+        print(
+            "error: single_variable_designation not in expected tokenized form",
+            file=sys.stderr,
+        )
+        return 1
+    missing = [kw for kw in COMBINATOR_KEYWORDS if kw not in names]
+    if missing:
+        print(
+            "error: pattern combinators absent from the harvested literals: "
+            + ", ".join(missing),
+            file=sys.stderr,
+        )
+        return 1
+    designation_alts = "\n".join(
+        f"  | {names[lit]}" for lit in contextual if lit not in COMBINATOR_KEYWORDS
+    )
+    src = src.replace(
+        DESIGNATION_RULE,
+        "// A pattern combinator (`and`/`or`/`not`) is excluded: it is a contextual\n"
+        "// keyword, so widening `identifier_token` would let `o is int and > 5` bind\n"
+        "// `and` as a variable name and silently drop the combinator. See\n"
+        "// COMBINATOR_KEYWORDS in prepare-grammar.py.\n"
+        "single_variable_designation\n"
+        f"  : {LEXER_TOKEN_RULES['identifier_token']}\n{designation_alts}\n  ;",
+        1,
+    )
+    print(f"narrowed single_variable_designation (excluded {', '.join(COMBINATOR_KEYWORDS)})")
 
     # -- 4c. Pair up the type-body braces ------------------------------------
     # After harvesting, so the brace tokens have their STABLE_TOKEN_NAMES names.
