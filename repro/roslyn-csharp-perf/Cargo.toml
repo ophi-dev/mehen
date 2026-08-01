@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 # The generated modules import the runtime as `antlr4_runtime`.
-antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.21.0" }
+antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.25.0" }
 
 # Standalone: this repro is deliberately NOT a workspace member, so it can be
 # copied out of the mehen tree and built on its own.
