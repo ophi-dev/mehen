@@ -174,3 +174,21 @@ fn attribute_arguments_record_no_executable_complexity() {
         (0, 0, 0)
     );
 }
+
+#[test]
+fn a_split_shift_operator_is_one_halstead_operator() {
+    // `>>` is spelled as two adjacent `>` tokens so a generic closer is never
+    // mis-lexed as a shift (see the parser crate's PROVENANCE). Recording each
+    // `>` would inflate Halstead length and conflate the shift with the `>`
+    // comparison in the distinct-operator set, so the shift is recorded once at
+    // its enclosing rule. Pinned against an equivalent single-token operator.
+    let length = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics).length
+    };
+    assert_eq!(
+        length("class C { int M(int a) => a >> 1; }"),
+        length("class C { int M(int a) => a * 1; }"),
+        "a shift must cost the same Halstead length as any other binary operator"
+    );
+}

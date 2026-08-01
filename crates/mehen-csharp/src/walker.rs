@@ -340,6 +340,15 @@ impl Walker<'_> {
         };
         match class {
             HalsteadClass::Operator => {
+                // `>>` and `>>>` are spelled as two or three adjacent `>` tokens
+                // (so a generic closer is never mis-lexed as a shift), but they
+                // are ONE Halstead operator. Recording each `>` would inflate
+                // length/volume and would conflate the shift with the `>`
+                // comparison in the distinct-operator set, so the whole operator
+                // is recorded once at its enclosing rule instead.
+                if hint.in_shift_operator {
+                    return;
+                }
                 self.current().halstead.observe_operator(HalsteadOperator {
                     kind: SmolStr::new(kp_token_name(tt)),
                     text: None,
@@ -736,6 +745,19 @@ impl Walker<'_> {
                 self.open_function_space(ctx, ctx, hint, SpaceKind::Function);
                 true
             }
+            // An expression-bodied property or indexer (`int P => 1;`) is
+            // semantically a getter, but has no `accessor_list` for the arm above
+            // to fire on — Roslyn spells it as an `arrow_expression_clause`
+            // directly on the declaration. Without this, two identical getters
+            // would produce different NOM / NArgs / WMC depending only on which
+            // syntax the author chose. SonarC# counts both as methods.
+            cp::RULE_PROPERTY_DECLARATION | cp::RULE_INDEXER_DECLARATION
+                if ctx.child_rule(cp::RULE_ACCESSOR_LIST).is_none()
+                    && ctx.child_rule(cp::RULE_ARROW_EXPRESSION_CLAUSE).is_some() =>
+            {
+                self.open_function_space(ctx, ctx, hint, SpaceKind::Function);
+                true
+            }
             // Closures: a lambda (`x => …`, `(a, b) => …`) or an anonymous
             // method (`delegate(int x) { … }`). NOM/NArgs record them as
             // closures, and their cyclomatic must NOT roll into the enclosing
@@ -902,12 +924,27 @@ impl Walker<'_> {
             self.classify_expression(ctx, ri);
             self.classify_abc_rule(ctx, ri);
         }
+        // A split shift operator is one Halstead operator, recorded here because
+        // `visit_terminal` skips its individual `>` tokens (see the
+        // `in_shift_operator` branch there). Keyed by the rule so `>>` and `>>>`
+        // stay distinct from each other and from the `>` comparison.
+        if matches!(
+            ri,
+            cp::RULE_RIGHT_SHIFT
+                | cp::RULE_UNSIGNED_RIGHT_SHIFT
+                | cp::RULE_RIGHT_SHIFT_ASSIGNMENT
+                | cp::RULE_UNSIGNED_RIGHT_SHIFT_ASSIGNMENT
+        ) {
+            self.current().halstead.observe_operator(HalsteadOperator {
+                kind: SmolStr::new(format!("shift{ri}")),
+                text: None,
+            });
+        }
         self.classify_loc_rule(ctx, ri, hint);
     }
 
-    /// Classify the control-flow constructs. C# spells them as labeled
-    /// alternatives of `simple_embedded_statement`, each with a leading keyword
-    /// token as a direct child, so they are discriminated by token probe.
+    /// Classify the control-flow constructs. Roslyn gives each its own rule, so
+    /// these are rule-index matches rather than keyword probes.
     fn classify_control_flow(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) {
         let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
 
@@ -1353,6 +1390,23 @@ fn name_from_identifier(ctx: RuleNodeView<'_>) -> Option<String> {
 /// own, so they are named `<owner>.get` / `.set` / `.add` / `.remove` from the
 /// property/indexer/event name threaded down through [`ChildHint`].
 fn function_name(ctx: RuleNodeView<'_>, hint: &ChildHint) -> Option<String> {
+    // An expression-bodied property / indexer is its own implicit getter, named
+    // to match the block form so `int P => 1;` and `int P { get { … } }` report
+    // the same space name.
+    if matches!(
+        ctx.rule_index(),
+        cp::RULE_PROPERTY_DECLARATION | cp::RULE_INDEXER_DECLARATION
+    ) {
+        let owner = if ctx.rule_index() == cp::RULE_INDEXER_DECLARATION {
+            Some(SmolStr::new("this[]"))
+        } else {
+            name_from_identifier(ctx).map(SmolStr::new)
+        };
+        return Some(match owner {
+            Some(name) => format!("{name}.get"),
+            None => "get".to_string(),
+        });
+    }
     // One `accessor_declaration` covers every accessor kind, with the keyword as
     // a direct child token — so the kind is read rather than inferred from which
     // of five rules matched. That also picks up `init` (C# 9), which the

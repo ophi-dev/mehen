@@ -131,13 +131,15 @@ fn expression_bodied_property_opens_one_accessor() {
              public int P => 1;
          }",
     );
-    let functions = shape(&a.root)
+    let functions: Vec<_> = shape(&a.root)
         .into_iter()
         .filter(|(_, kind, _)| kind == "function")
-        .count();
-    // The expression-bodied form carries no `accessor_declarations`, so no
-    // accessor space opens; the property is counted via NPM instead.
-    assert_eq!(functions, 0);
+        .map(|(_, _, name)| name)
+        .collect();
+    // Exactly one getter, named as the block form would be — two properties that
+    // are semantically the same getter must not report different NOM / NArgs /
+    // WMC just because one uses `=> …` and the other `{ get { … } }`.
+    assert_eq!(functions, vec![Some("P.get".to_string())]);
 }
 
 #[test]
