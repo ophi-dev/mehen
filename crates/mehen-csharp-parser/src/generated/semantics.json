@@ -27,9 +27,9 @@
       "name": "CSharpParser",
       "coordinates": [
         {"kind": "parser-action", "rule": "name", "rule_index": 8, "index": null, "atn_state": 557, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
-        {"kind": "parser-action", "rule": "type", "rule_index": 77, "index": null, "atn_state": 1627, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
-        {"kind": "parser-action", "rule": "pattern", "rule_index": 115, "index": null, "atn_state": 2098, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
-        {"kind": "parser-action", "rule": "expression", "rule_index": 149, "index": null, "atn_state": 2365, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-action", "rule": "type", "rule_index": 77, "index": null, "atn_state": 1632, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-action", "rule": "pattern", "rule_index": 115, "index": null, "atn_state": 2103, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-action", "rule": "expression", "rule_index": 149, "index": null, "atn_state": 2370, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
         {"kind": "parser-predicate", "rule": "record_keyword", "rule_index": 238, "index": 17, "atn_state": null, "line": 1517, "column": 4, "body": "this.IsRecordKeyword()", "disposition": "translated", "template": "LookaheadTextEquals { offset: 1, text: \"record\" }"},
         {"kind": "parser-predicate", "rule": "right_shift", "rule_index": 239, "index": 18, "atn_state": null, "line": 1521, "column": 10, "body": "this.IsRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
         {"kind": "parser-predicate", "rule": "unsigned_right_shift", "rule_index": 240, "index": 19, "atn_state": null, "line": 1525, "column": 10, "body": "this.IsUnsignedRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},

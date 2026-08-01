@@ -59,9 +59,11 @@
 //!   `constructor_initializer` (NOT member access — that is qualification, not a
 //!   call, so a qualified call still scores exactly one branch); conditions via
 //!   `if`/`case`/`catch`/`when`/loops/comparison & equality/`&&`/`||`/ternary/
-//!   `??`/`is`/`as`. Bit-shifts are excluded, and the prep makes that reliable:
-//!   `>>` is spelled as adjacent `>` tokens rejoined in the parser, so a `GT`
-//!   token is always a comparison and never half a shift.
+//!   `??`/`is`/`as`. Bit-shifts are excluded, which needs care: the prep spells
+//!   `>>` as adjacent `>` tokens rejoined in the parser (so a generic closer is
+//!   never mis-lexed as a shift), which means a *shift* reaches the token scan as
+//!   two bare `GT` tokens. The enclosing `right_shift` rule is the only signal,
+//!   so the walker tags that subtree via `ChildHint::in_shift_operator`.
 //! - **NExit**: `return_statement`, `throw_statement`, `throw_expression`, and
 //!   `yield_statement` (both `yield return` and `yield break`).
 //! - **NArgs**: the `parameter` count of a `parameter_list` /
@@ -109,7 +111,7 @@ use mehen_csharp_parser::c_sharp_parser as cp;
 // declared direct children, which is the property the untyped `child_rule` /
 // `has_token` probes could only assert by comment. Dispatch stays on
 // `rule_index()`: a metric walker is fundamentally one match over rule kinds.
-use mehen_csharp_parser::c_sharp_parser::PrefixUnaryExpressionContext;
+use mehen_csharp_parser::c_sharp_parser::{ExpressionContext, PrefixUnaryExpressionContext};
 
 /// Drive the walk over the parsed `compilation_unit` tree and return the unit
 /// `MetricSpace`. LOC is computed from `loc_tokens` in a single ordered pass
@@ -230,6 +232,14 @@ struct ChildHint {
     /// cyclomatic/cognitive/ABC accounting is suppressed for the whole subtree
     /// (LOC/Halstead still count — the tokens physically exist).
     in_attributes: bool,
+    /// This terminal belongs to a `right_shift` / `unsigned_right_shift` rule, so
+    /// its bare `>` tokens are half a shift operator rather than comparisons.
+    ///
+    /// The prep spells `>>` as adjacent `>` tokens rejoined in the parser (so a
+    /// generic closer is never mis-lexed as a shift), which means a *shift* now
+    /// presents to the token scan as two `GT` tokens. Only the enclosing rule
+    /// tells them apart.
+    in_shift_operator: bool,
     /// This node is inside an `accessor_declaration`'s body. An accessor opens a
     /// metric space but is not itself a logical line, so an expression-bodied
     /// accessor (`get => _x;`) has nothing else to make its space non-empty —
@@ -303,11 +313,10 @@ impl Walker<'_> {
             // ABC conditions: comparison / equality / boolean / null-coalescing
             // operator tokens.
             //
-            // Unlike the grammars-v4 grammar, relational `<`/`>` can be counted
-            // from the token stream directly: the prep spells `>>` as adjacent
-            // `>` tokens rejoined in the parser behind `token_index_adjacent`, so
-            // a `GT` token here is always a comparison and never half a shift.
-            if is_abc_condition_token(tt) {
+            // Relational `<`/`>` are counted here, but a shift must not be: the
+            // prep spells `>>` as adjacent `>` tokens, so `a >> b` would otherwise
+            // read as two comparisons. `in_shift_operator` marks that subtree.
+            if is_abc_condition_token(tt) && !hint.in_shift_operator {
                 self.current().abc.record_condition();
             }
 
@@ -376,13 +385,20 @@ impl Walker<'_> {
         // function spaces.
         let saved_cognitive = self.cognitive;
 
-        // NPA / NPM: classify a direct member of the enclosing type body
-        // before opening any space for this node (so the kinds stack still has
-        // the type on top). A member whose space was already opened by its
-        // wrapper had its NPM recorded there; skip re-classifying here (this
-        // node now sits inside the member space, so it would misroute NPM).
+        // NPA / NPM: classify a direct member of the enclosing type body before
+        // opening any space for this node, so the kinds stack still has the type
+        // on top.
+        //
+        // Visibility is resolved from THIS node's own `modifier*` children, not
+        // inherited from the hint. Roslyn puts the modifiers on the declaration
+        // itself, so by the time the walk reaches `field_declaration` the inbound
+        // hint (set at `member_declaration`) has nothing to carry — inheriting it
+        // would fall back to "public" for every member.
         if hint.in_type_member && let Some(container) = hint.member_container {
-            let public = hint.member_is_public.unwrap_or(true);
+            // An unmarked class/struct member is private; an unmarked interface
+            // member is implicitly public.
+            let default_public = matches!(container, ContainerKind::Interface);
+            let public = visibility_from_modifiers(ctx).unwrap_or(default_public);
             self.classify_type_member(ctx, ri, container, public);
         }
 
@@ -442,7 +458,14 @@ impl Walker<'_> {
         // `else { if … }` is genuinely nested and gets no flag. That replaces the
         // old index-scan for the `if_body` following an `ELSE` token, plus the
         // transparency chain that carried the flag down to the nested `if`.
-        let propagate_else = ri == cp::RULE_ELSE_CLAUSE && else_clause_is_else_if(ctx);
+        // Set at the `else_clause`, then carried through the intervening
+        // `statement` dispatch layer so it reaches the nested `if_statement`.
+        // `else { if … }` is genuinely nested, so a `block` child stops it.
+        let propagate_else = match ri {
+            cp::RULE_ELSE_CLAUSE => else_clause_is_else_if(ctx),
+            cp::RULE_STATEMENT => hint.is_else_branch,
+            _ => false,
+        };
 
         // Type body member positions originate at the member-declaration
         // wrappers, then flow through the transparent `common_member_declaration`
@@ -497,6 +520,16 @@ impl Walker<'_> {
         // `common_member_declaration`/`typed_member_declaration` wrappers to
         // the declaration node, which consumes it; a real space open clears it
         // so a nested declaration inside the body still opens normally.
+        // `>>` and `>>>` are spelled as adjacent `>` tokens; tag them so the
+        // token-level ABC scan does not read a shift as two comparisons.
+        let in_shift_operator = matches!(
+            ri,
+            cp::RULE_RIGHT_SHIFT
+                | cp::RULE_UNSIGNED_RIGHT_SHIFT
+                | cp::RULE_RIGHT_SHIFT_ASSIGNMENT
+                | cp::RULE_UNSIGNED_RIGHT_SHIFT_ASSIGNMENT
+        );
+
         // Inside an accessor's body from the accessor declaration downward, so
         // an expression-bodied `get => _x;` can count its own logical line. A
         // nested function or type resets it — their bodies are counted normally.
@@ -517,6 +550,7 @@ impl Walker<'_> {
                 in_for_init,
                 in_identifier,
                 in_attributes,
+                in_shift_operator,
                 in_accessor_body,
                 accessor_owner: accessor_owner.clone(),
             };
@@ -537,7 +571,7 @@ impl Walker<'_> {
     /// shape there is nothing to resolve early and thread down.
     fn member_propagation(
         &self,
-        ctx: RuleNodeView<'_>,
+        _ctx: RuleNodeView<'_>,
         ri: usize,
         hint: &ChildHint,
         container_before_open: Option<ContainerKind>,
@@ -558,20 +592,14 @@ impl Walker<'_> {
                 hint.member_container,
                 hint.member_is_public,
             ),
-            // The real declarations, which carry their own `modifier*`.
-            //
-            // C# visibility semantics: a class/struct member with no access
-            // modifier is *private*, which is NOT public, so the default is
-            // `false` — only an explicit `public` counts toward NPA/NPM.
-            // Interface members are implicitly public.
+            // The real declarations keep the member position so nested spaces
+            // still know their container. Visibility is NOT computed here: it is
+            // read from the declaration's own `modifier*` at the point of
+            // classification (see `visit_rule`), because Roslyn puts the
+            // modifiers on the declaration rather than on a wrapper above it.
             _ if hint.in_type_member && declares_member(ri) => {
-                let container = hint.member_container;
-                let default_public = matches!(container, Some(ContainerKind::Interface));
-                let public = visibility_from_modifiers(ctx).unwrap_or(default_public);
-                (true, container, Some(public))
+                (true, hint.member_container, None)
             }
-            // An `enum` member is implicitly public and carries no modifiers.
-            cp::RULE_ENUM_MEMBER_DECLARATION => (true, hint.member_container, Some(true)),
             _ => (false, None, None),
         }
     }
@@ -982,75 +1010,103 @@ impl Walker<'_> {
         }
     }
 
-    /// Classify operator-bearing expression rules: the ternary (cyclomatic +
-    /// cognitive + ABC), null-coalescing (ABC), and the relational level (ABC,
-    /// distinguishing a comparison from a shift).
+    /// Classify the inlined `expression` rule.
+    ///
+    /// Hub inlining (upstream #221) folds `invocation_expression`,
+    /// `assignment_expression`, `binary_expression`, and `conditional_expression`
+    /// into `expression`, so none has a rule index of its own. Classification is
+    /// therefore by *shape*, read entirely through the typed context:
+    ///
+    /// | form                | `expression_children` | distinguishing feature |
+    /// |---------------------|-----------------------|------------------------|
+    /// | invocation `F(x)`   | 1                     | has an `argument_list` |
+    /// | binary `a + b`      | 2                     | the operator terminal  |
+    /// | assignment `y = 1`  | 2                     | the operator terminal  |
+    /// | ternary `a ? b : c` | 3                     | a `?` terminal         |
+    ///
+    /// `direct_terminals()` (upstream #271) is what makes the operator readable
+    /// without dropping to untyped scanning: it yields only the node's *own*
+    /// terminals, so an operator from a nested subexpression cannot leak in.
     fn classify_expression(&mut self, ctx: RuleNodeView<'_>, ri: usize) {
-        match ri {
-            // Ternary `? :` — a decision, an ABC condition, and a cognitive
-            // nesting structure (SonarSource scores it like an `if`). The
-            // grammar makes the `?`/`:` optional on `conditional_expression`, so
-            // a bare pass-through node must not score.
-            cp::RULE_CONDITIONAL_EXPRESSION if ctx.has_token(cl::INTERR) => {
-                let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
-                self.current().cyclomatic.record_decision();
-                self.current().cognitive.increase_nesting(eff);
-                self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
-                self.current().abc.record_condition();
+        if ri != cp::RULE_EXPRESSION {
+            return;
+        }
+        let Some(expr) = ExpressionContext::from_rule_node(ctx) else {
+            return;
+        };
+
+        // A call or object creation is a branch (ABC's B counts function calls,
+        // method calls, and message sends).
+        //
+        // Member access (`a.B`) is deliberately NOT counted: it is the
+        // qualification `.B`, not a call. Counting it would (a) score a plain
+        // field/property *read* as a branch, which ABC does not, and (b) score a
+        // qualified call twice, since `o.Helper()` nests a member access inside
+        // the invocation. Counting only the invocation keeps one branch per call
+        // regardless of qualification depth, matching `mehen-java` (which counts
+        // `methodCall`/`creator`, never field access).
+        if expr.argument_list().is_some() {
+            self.current().abc.record_branch();
+        }
+
+        for terminal in expr.direct_terminals() {
+            // A recovery-inserted token is not in the source, so scoring it would
+            // invent a metric the file never contained.
+            if terminal.is_error() {
+                continue;
             }
-            // `??` null-coalescing is a condition (an implicit null test). Its
-            // token is `OP_COALESCING`, already caught by the token-level ABC
-            // scan, so nothing to add here — kept as documentation of intent.
-            cp::RULE_NULL_COALESCING_EXPRESSION => {}
-            // The relational level spells `<`/`>` with bare `LT`/`GT` tokens
-            // that the shift level ALSO uses (`<<` is `LT LT`, `>>` is the
-            // `right_shift` rule). Count a condition only for the genuine
-            // comparison operators on this rule: `<`, `>`, `<=`, `>=`, plus the
-            // type tests `is` and `as`. Equality (`==`/`!=`) is caught by the
-            // token-level scan on `OP_EQ`/`OP_NE`.
-            cp::RULE_RELATIONAL_EXPRESSION => {
-                let comparisons = ctx.child_tokens(cl::LT).count()
-                    + ctx.child_tokens(cl::GT).count()
-                    + ctx.child_tokens(cl::OP_LE).count()
-                    + ctx.child_tokens(cl::OP_GE).count()
-                    + ctx.child_tokens(cl::IS).count()
-                    + ctx.child_tokens(cl::AS).count();
-                for _ in 0..comparisons {
+            match terminal.symbol().token_type() {
+                // Every assignment form (`=`, compound, `??=`) is one A.
+                cl::EQ
+                | cl::PLUS_EQ
+                | cl::MINUS_EQ
+                | cl::STAR_EQ
+                | cl::SLASH_EQ
+                | cl::PERCENT_EQ
+                | cl::AMP_EQ
+                | cl::CARET_EQ
+                | cl::PIPE_EQ
+                | cl::LT_LT_EQ
+                | cl::QUESTION_QUESTION_EQ => self.current().abc.record_assignment(),
+                // The ternary `?:` — a decision, an ABC condition, and a
+                // cognitive nesting structure (SonarSource scores it like an
+                // `if`). Keyed on `?` so the `:` does not score a second time.
+                cl::QUESTION => {
+                    let eff =
+                        self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
+                    self.current().cyclomatic.record_decision();
+                    self.current().cognitive.increase_nesting(eff);
+                    self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
                     self.current().abc.record_condition();
                 }
+                // The type tests. Equality, relational, `&&`/`||`, and `??` are
+                // counted by the token-level scan in `visit_terminal`, which sees
+                // every token exactly once — so they must not be counted again
+                // here.
+                cl::KW_IS | cl::KW_AS => self.current().abc.record_condition(),
+                _ => {}
             }
-            _ => {}
         }
     }
 
+    /// ABC accounting for the non-`expression` rules that carry an assignment or
+    /// a branch.
     fn classify_abc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize) {
         match ri {
-            // Every assignment form (`=`, compound, `??=`) is one A.
-            cp::RULE_ASSIGNMENT => self.current().abc.record_assignment(),
-            // A call or object creation is a branch (ABC's B counts function
-            // calls, method calls, and message sends).
-            //
-            // `member_access` (`a.B`) is deliberately NOT counted: it is the
-            // qualification `.B`, not a call. Counting it would (a) score a
-            // plain field/property *read* as a branch, which ABC does not, and
-            // (b) score a qualified call twice — the grammar spells
-            // `o.Helper()` as `member_access` + `method_invocation`, and
-            // `System.Console.WriteLine(x)` as two `member_access` plus one
-            // `method_invocation`. Counting only the invocation keeps one
-            // branch per call regardless of qualification depth, matching
-            // `mehen-java` (which counts `methodCall`/`creator`, never field
-            // access).
-            cp::RULE_METHOD_INVOCATION
-            | cp::RULE_OBJECT_CREATION_EXPRESSION
+            // Object creation is its own rule rather than part of the inlined
+            // expression cycle, so its branch is recorded here.
+            cp::RULE_OBJECT_CREATION_EXPRESSION
+            | cp::RULE_IMPLICIT_OBJECT_CREATION_EXPRESSION
+            | cp::RULE_ARRAY_CREATION_EXPRESSION
+            | cp::RULE_IMPLICIT_ARRAY_CREATION_EXPRESSION
             | cp::RULE_CONSTRUCTOR_INITIALIZER => self.current().abc.record_branch(),
-            // An initialized declarator is an assignment. Each declarator rule
-            // carries its own `=` token when initialized.
-            cp::RULE_LOCAL_VARIABLE_DECLARATOR
-            | cp::RULE_VARIABLE_DECLARATOR
-            | cp::RULE_CONSTANT_DECLARATOR
+            // An initialized declarator is an assignment. Roslyn spells the
+            // initializer as an `equals_value_clause` child rather than a bare
+            // `=` token, so the presence of that child *is* the initialization.
+            cp::RULE_VARIABLE_DECLARATOR
+            | cp::RULE_PARAMETER
             | cp::RULE_ENUM_MEMBER_DECLARATION
-            | cp::RULE_ARG_DECLARATION
-                if ctx.has_token(cl::ASSIGNMENT) =>
+                if ctx.child_rule(cp::RULE_EQUALS_VALUE_CLAUSE).is_some() =>
             {
                 self.current().abc.record_assignment();
             }
@@ -1061,11 +1117,7 @@ impl Walker<'_> {
     fn classify_loc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) {
         // A `for`/`foreach`/`using` header's declaration is part of the
         // statement's single logical line — not its own LLOC.
-        if matches!(
-            ri,
-            cp::RULE_LOCAL_VARIABLE_DECLARATION | cp::RULE_LOCAL_CONSTANT_DECLARATION
-        ) && hint.in_for_init
-        {
+        if ri == cp::RULE_VARIABLE_DECLARATION && hint.in_for_init {
             return;
         }
         // An *expression-bodied* lambda (`x => x + 1`) opens a closure space
@@ -1376,14 +1428,26 @@ fn count_args(ctx: RuleNodeView<'_>) -> u32 {
     // `simple_lambda_expression` (`x => …`) holds its single `parameter`
     // directly, with no enclosing list.
     if ctx.rule_index() == cp::RULE_SIMPLE_LAMBDA_EXPRESSION {
-        return ctx.child_rules(cp::RULE_PARAMETER).count() as u32;
+        return count_parameters(ctx);
     }
     // An indexer's parameters are bracketed (`this[int i]`).
     let list = ctx
         .child_rule(cp::RULE_PARAMETER_LIST)
         .or_else(|| ctx.child_rule(cp::RULE_BRACKETED_PARAMETER_LIST));
-    list.map(|list| list.child_rules(cp::RULE_PARAMETER).count() as u32)
-        .unwrap_or(0)
+    list.map(count_parameters).unwrap_or(0)
+}
+
+/// Count the non-empty `parameter` children of `ctx`.
+///
+/// Every element of Roslyn's `parameter` rule is optional, so it matches the
+/// empty string — `Zero()` parses as a `parameter_list` containing one *empty*
+/// `parameter`. (The generator flags this as `G4A004`.) That is deliberate in
+/// Roslyn's model, which has a node for every slot including absent ones, so the
+/// walker filters rather than the grammar being changed.
+fn count_parameters(ctx: RuleNodeView<'_>) -> u32 {
+    ctx.child_rules(cp::RULE_PARAMETER)
+        .filter(|parameter| parameter.child_count() > 0)
+        .count() as u32
 }
 
 /// Count the declarators of a field / event declaration (`int a, b, c;`).
@@ -1482,9 +1546,8 @@ fn is_abc_condition_token(tt: i32) -> bool {
             | cl::AMP_AMP
             | cl::PIPE_PIPE
             | cl::QUESTION_QUESTION
-            // Relational comparisons. Safe to count from the token stream here
-            // because the prep splits `>>` into adjacent `>` tokens rejoined in
-            // the parser, so a `GT` is never half a shift operator.
+            // Relational comparisons. `>` is also half of a split `>>`, so the
+            // caller must exclude tokens inside a `right_shift` rule.
             | cl::LT
             | cl::GT
             | cl::LE

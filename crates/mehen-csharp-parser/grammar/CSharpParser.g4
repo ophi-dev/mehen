@@ -157,7 +157,7 @@ base_method_declaration
   ;
 
 constructor_declaration
-  : attribute_list* modifier* identifier_token parameter_list constructor_initializer? (block | (arrow_expression_clause SEMICOLON))
+  : attribute_list* modifier* identifier_token parameter_list constructor_initializer? (block | (arrow_expression_clause SEMICOLON) | SEMICOLON)
   ;
 
 parameter_list
@@ -185,7 +185,7 @@ arrow_expression_clause
   ;
 
 conversion_operator_declaration
-  : attribute_list* modifier* (KW_IMPLICIT | KW_EXPLICIT) explicit_interface_specifier? KW_OPERATOR KW_CHECKED? type parameter_list (block | (arrow_expression_clause SEMICOLON))
+  : attribute_list* modifier* (KW_IMPLICIT | KW_EXPLICIT) explicit_interface_specifier? KW_OPERATOR KW_CHECKED? type parameter_list (block | (arrow_expression_clause SEMICOLON) | SEMICOLON)
   ;
 
 explicit_interface_specifier
@@ -193,11 +193,11 @@ explicit_interface_specifier
   ;
 
 destructor_declaration
-  : attribute_list* modifier* TILDE identifier_token parameter_list (block | (arrow_expression_clause SEMICOLON))
+  : attribute_list* modifier* TILDE identifier_token parameter_list (block | (arrow_expression_clause SEMICOLON) | SEMICOLON)
   ;
 
 method_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause SEMICOLON))
+  : attribute_list* modifier* type explicit_interface_specifier? identifier_token type_parameter_list? parameter_list type_parameter_constraint_clause* (block | (arrow_expression_clause SEMICOLON) | SEMICOLON)
   ;
 
 type_parameter_list
@@ -250,7 +250,7 @@ type_constraint
   ;
 
 operator_declaration
-  : attribute_list* modifier* type explicit_interface_specifier? KW_OPERATOR KW_CHECKED? (PLUS | MINUS | BANG | TILDE | PLUS_PLUS | MINUS_MINUS | STAR | SLASH | PERCENT | LT_LT | right_shift | unsigned_right_shift | PIPE | AMP | CARET | EQ_EQ | NE | LT | LE | GT | GE | KW_FALSE | KW_TRUE | KW_IS | PLUS_EQ | MINUS_EQ | STAR_EQ | SLASH_EQ | PERCENT_EQ | AMP_EQ | PIPE_EQ | CARET_EQ | LT_LT_EQ | right_shift_assignment | unsigned_right_shift_assignment) parameter_list (block | (arrow_expression_clause SEMICOLON))
+  : attribute_list* modifier* type explicit_interface_specifier? KW_OPERATOR KW_CHECKED? (PLUS | MINUS | BANG | TILDE | PLUS_PLUS | MINUS_MINUS | STAR | SLASH | PERCENT | LT_LT | right_shift | unsigned_right_shift | PIPE | AMP | CARET | EQ_EQ | NE | LT | LE | GT | GE | KW_FALSE | KW_TRUE | KW_IS | PLUS_EQ | MINUS_EQ | STAR_EQ | SLASH_EQ | PERCENT_EQ | AMP_EQ | PIPE_EQ | CARET_EQ | LT_LT_EQ | right_shift_assignment | unsigned_right_shift_assignment) parameter_list (block | (arrow_expression_clause SEMICOLON) | SEMICOLON)
   ;
 
 base_namespace_declaration
@@ -808,7 +808,7 @@ parenthesized_lambda_expression
   ;
 
 simple_lambda_expression
-  : attribute_list* modifier* parameter ARROW (block | expression)
+  : attribute_list* modifier* identifier_token ARROW (block | expression)
   ;
 
 anonymous_object_creation_expression

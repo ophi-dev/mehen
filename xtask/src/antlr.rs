@@ -27,7 +27,7 @@ use std::{env, fs};
 /// `antlr4-rust-gen` would fetch the latest crate, which after a runtime
 /// release can regenerate modules that no longer match the pinned runtime and
 /// silently drift. Bump this in lockstep with that pin.
-const GENERATOR_VERSION: &str = "0.24.0";
+const GENERATOR_VERSION: &str = "0.25.0";
 
 /// Askama model for a parser crate's generated `README.md`.
 ///

@@ -333,7 +333,48 @@ STABLE_TOKEN_NAMES = {
 # holds outside the grammar, which the published grammar therefore drops.
 DECLARATION_EXPRESSION_ALT = "  | declaration_expression\n"
 
+# `Syntax.xml` wraps a member's body in a <Choice> of Body / ExpressionBody /
+# SemicolonToken, which the generator renders as `(block | (arrow_expression_clause
+# ';'))` — *requiring* one of the two. But <Choice> drives the SyntaxFactory
+# overload set and doc comments, not the hand-written parser: an abstract,
+# `extern`, `partial`, or interface member legitimately has **no** body, just a
+# semicolon.
+#
+# Without the bodiless alternative those members cannot match their own rule and
+# fall through to `global_statement` (Roslyn's C# 9 top-level-statement node),
+# which happily accepts `void Scale(double f);` as an expression statement — so an
+# interface method silently became a call expression, with zero reported errors.
+#
+# Same shape as the accessor and property-initializer gaps below: information the
+# real parser holds outside the syntax model.
+BODY_REQUIRING_RULES = (
+    "method_declaration",
+    "operator_declaration",
+    "conversion_operator_declaration",
+    "constructor_declaration",
+    "destructor_declaration",
+)
+
+REQUIRED_BODY = "(block | (arrow_expression_clause ';'))"
+OPTIONAL_BODY = "(block | (arrow_expression_clause ';') | ';')"
+
 GENERATOR_GAP_FIXES = [
+    # (0) `x => …` must take a bare identifier, not a whole `parameter`.
+    #
+    # `SimpleLambdaExpressionSyntax.Parameter` really is a `ParameterSyntax` in
+    # Roslyn's model, so the grammar is faithful — but every element of `parameter`
+    # is optional, including `type?`, which can match a parenthesized tuple type.
+    # So `(a, b) => a + b` parses as the *simple* form with `(a, b)` as one
+    # parameter's type, instead of the parenthesized form with two parameters.
+    # Roslyn's parser distinguishes them lexically (a leading `(` picks the
+    # parenthesized form); the grammar cannot, so the simple form is narrowed to
+    # what "simple" means.
+    (
+        "simple_lambda_expression\n"
+        "  : attribute_list* modifier* parameter '=>' (block | expression)\n  ;",
+        "simple_lambda_expression\n"
+        "  : attribute_list* modifier* identifier_token '=>' (block | expression)\n  ;",
+    ),
     # (1) allow a bare `;` accessor body.
     (
         "accessor_declaration\n"
@@ -795,6 +836,28 @@ def main() -> int:
         print("error: integer_literal_token shape changed upstream", file=sys.stderr)
         return 1
     src = src.replace(old, new, 1)
+
+    # -- 2e2. Let members be bodiless ----------------------------------------
+    # See BODY_REQUIRING_RULES: an abstract / interface / extern / partial member
+    # has only a semicolon, and without this it falls through to
+    # `global_statement` and parses as a call expression.
+    for rule in BODY_REQUIRING_RULES:
+        match = rule_span(src, rule)
+        if not match:
+            print(f"error: {rule} not found", file=sys.stderr)
+            return 1
+        body = match.group(1)
+        if REQUIRED_BODY not in body:
+            print(
+                f"error: {rule} body shape changed upstream (no {REQUIRED_BODY!r})",
+                file=sys.stderr,
+            )
+            return 1
+        src = src.replace(
+            match.group(0),
+            f"{rule}\n{body.replace(REQUIRED_BODY, OPTIONAL_BODY, 1)}  ;\n",
+            1,
+        )
 
     # -- 2f. Deprioritize declaration_expression -----------------------------
     # See DECLARATION_EXPRESSION_ALT: it shadows every invocation otherwise.
