@@ -336,7 +336,7 @@ backslashes, and nested interpolated strings restoring the enclosing depth.
 
 | Tool | Version | Why |
 |---|---|---|
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.24.0` | Codegen; also computes rule reachability for the transform |
+| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.25.0` | Codegen; also computes rule reachability for the transform |
 | [`uv`](https://docs.astral.sh/uv/) | any recent | Runs `prepare-grammar.py`; the script's PEP 723 block pins the interpreter |
 
 Unlike the other ANTLR targets, C# needs `uv`: its grammar is derived rather than
@@ -346,6 +346,6 @@ missing `uv` does not block Kotlin/Java regeneration.
 Regenerate with:
 
 ```bash
-cargo install antlr-rust-runtime --version 0.24.0 --features codegen --bin antlr4-rust-gen --force
+cargo install antlr-rust-runtime --version 0.25.0 --features codegen --bin antlr4-rust-gen --force
 cargo run -p xtask -- antlr generate csharp
 ```
