@@ -232,3 +232,38 @@ fn deeply_nested_holes_restore_the_enclosing_depth() {
         0
     );
 }
+
+#[test]
+fn the_entry_rule_consumes_the_whole_file() {
+    // REGRESSION. Roslyn's `compilation_unit` does not end in `EOF`, so the parser
+    // stopped at the first token it could not continue with and reported success on
+    // whatever it had consumed: `class C { } } } }` parsed with ZERO diagnostics and
+    // the stray braces were never looked at. For a metrics tool "parsed cleanly" has
+    // to mean the whole file was accounted for, so the prep anchors the entry rule.
+    assert!(
+        syntax_errors("class C { }\n} } }\n") > 0,
+        "an unconsumed tail must be a syntax error"
+    );
+    assert!(
+        syntax_errors("class C { }\nelse { }\n") > 0,
+        "a dangling `else` is not a legal top-level member"
+    );
+    // The tail has to be *lexable* and *not a legal member*. `syntax_errors` reports
+    // the PARSER's count, so unrecognizable characters (`@@@`) are dropped by the
+    // lexer before the parser sees them; and C# 9 top-level statements mean
+    // `return 1;` IS a legal `global_statement`, so it is no test of the anchor.
+}
+
+#[test]
+fn anchoring_does_not_reject_valid_files() {
+    // The counterpart: every legal top-level shape must still reach EOF cleanly,
+    // including the two that are not a plain sequence of type declarations.
+    for source in [
+        "class C { void M() { } }\n",
+        "namespace N;\nclass C { }\n",
+        "using System;\nnamespace N { class C { } }\n",
+        "var x = 1;\n",
+    ] {
+        assert_eq!(syntax_errors(source), 0, "must parse: {source:?}");
+    }
+}

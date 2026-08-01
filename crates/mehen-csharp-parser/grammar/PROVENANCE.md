@@ -74,7 +74,7 @@ Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
 corpus. All 4 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **eight** distinct silent misparses: structurally wrong
+grammar has now produced **nine** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -88,13 +88,15 @@ dump, never by an error count.
 | `identifier_token` widened with `and`/`or`/`not` | `o is int and > 5` declared a variable named `and` |
 | `constant_pattern` listed before `discard_pattern` | a `_ =>` arm is an expression, not the discard |
 | `base_method_declaration` listed before the type forms | `record R(int X);` was a *method* named `R` |
+| `compilation_unit` did not end in `EOF` | `class C { } } } }` was a clean parse; the tail was never read |
 
-The first five *delete* code from the tree; the last three *relabel* it. Both shapes
+The first five *delete* code from the tree, the next three *relabel* it, and the
+last stops reading it early. Both shapes
 are invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
 
-Three of the eight share one root cause: **an alternative that is viable for the
+Three of the nine share one root cause: **an alternative that is viable for the
 wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
 each semantically — it knows whether `F` names a type, whether `and` resolves to a
 declared name, whether `record` is a keyword here — and a syntax-only grammar has
@@ -268,6 +270,14 @@ behaviour-identical on the brace-less forms and on nested types.
 - **Char-literal escapes.** A char literal holds exactly one character, so unlike
   a string it has no closure to absorb a mis-sized escape — `'\ud800'` needs the
   escape forms spelled out.
+- **The entry rule did not end in `EOF`.** Roslyn's parser reads a compilation unit
+  and leaves the caller to check the stream position, so its grammar does not anchor
+  `compilation_unit`. A syntax-only parser therefore stopped at the first token it
+  could not continue with and reported success on the prefix: `class C { } } } }`
+  was a clean parse with the stray braces never read. Anchoring makes the unconsumed
+  tail a syntax error. It has to run **after** pruning — the generator treats every
+  rule reaching `EOF` as an entry point, so anchoring first makes nothing
+  unreachable and the 84 orphaned helpers survive.
 - **Verbatim interpolated strings.** `$@"…"` needs its own lexer mode: a
   backslash is literal there and `""` is the escaped quote, so one text rule
   cannot serve both flavours. Both prefix orders are legal (`$@"` and `@$"`) and

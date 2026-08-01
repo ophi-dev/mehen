@@ -730,6 +730,27 @@ def rule_span(src: str, name: str) -> re.Match[str] | None:
 # nothing can be unreachable.
 ENTRY_RULE = "compilation_unit"
 
+# Roslyn's `compilation_unit` does not end in `EOF`, so the parser stops at the
+# first thing it cannot continue with and reports success on whatever it consumed.
+# `class C { } } } }` parsed with **zero diagnostics** — the stray braces were
+# simply never looked at.
+#
+# That is right for Roslyn's model (its parser reads a compilation unit and the
+# caller checks the position) and wrong for a metrics tool, where "parsed cleanly"
+# has to mean the whole file was accounted for. Anchoring the entry rule makes the
+# unconsumed tail a syntax error, which the diagnostic contract turns into a
+# non-zero exit. Both the Java and Kotlin grammars anchor theirs the same way.
+ENTRY_RULE_ANCHOR = (
+    f"{ENTRY_RULE}\n"
+    "  : extern_alias_directive* using_directive* attribute_list* member_declaration*\n"
+    "  ;\n"
+)
+ENTRY_RULE_ANCHORED = (
+    f"{ENTRY_RULE}\n"
+    "  : extern_alias_directive* using_directive* attribute_list* member_declaration* EOF\n"
+    "  ;\n"
+)
+
 # Matches the generator's `G4S078` warning line, e.g.
 #     warning[G4S078]: CSharpParser.g4:1160:0: parser rule xml_node is
 #     unreachable from entry rule compilation_unit
@@ -1008,6 +1029,19 @@ def main() -> int:
         return 1
     if pruned:
         print(f"pruned {len(pruned)} unreachable rules: {', '.join(sorted(pruned))}")
+
+    # -- 3c. Anchor the entry rule at EOF ------------------------------------
+    # See ENTRY_RULE_ANCHOR. Deliberately AFTER pruning: the generator treats every
+    # top-level rule that reaches `EOF` as an entry point, so anchoring first would
+    # make nothing unreachable and the 84 orphaned helpers would survive.
+    if ENTRY_RULE_ANCHOR not in src:
+        print(
+            f"error: {ENTRY_RULE} not in the expected unanchored form",
+            file=sys.stderr,
+        )
+        return 1
+    src = src.replace(ENTRY_RULE_ANCHOR, ENTRY_RULE_ANCHORED, 1)
+    print(f"anchored {ENTRY_RULE} at EOF")
 
     # -- 4. Harvest the remaining inline literals into named tokens ----------
     # A combined grammar would let ANTLR synthesize implicit tokens for these,
