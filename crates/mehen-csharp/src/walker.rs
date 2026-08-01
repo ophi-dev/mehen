@@ -716,11 +716,11 @@ impl Walker<'_> {
     /// Roslyn's grammar puts `attribute_list* modifier*` directly on every
     /// declaration, so a member's span already starts at its attributes and its
     /// visibility is readable on the declaration itself. The grammars-v4 shape
-    /// needed a wrapper rule (`class_member_declaration` → `all_member_modifiers`
-    /// + `common_member_declaration`) to factor that prefix out of an LL
-    /// decision, and the walker had to open the space at the wrapper and widen
-    /// the span back. None of that applies here — hence no wrapper handling, no
-    /// span widening, and no `space_opened_by_wrapper` suppression.
+    /// needed a wrapper rule (`class_member_declaration`, holding
+    /// `all_member_modifiers` alongside `common_member_declaration`) to factor
+    /// that prefix out of an LL decision, and the walker had to open the space at
+    /// the wrapper and widen the span back. None of that applies here — hence no
+    /// wrapper handling and no span widening.
     fn maybe_open_space(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) -> bool {
         match ri {
             cp::RULE_METHOD_DECLARATION
@@ -1043,12 +1043,11 @@ impl Walker<'_> {
             // boolean operator is not collapsed with the one before the negation
             // (`a && !b && c` is one run in SonarSource's model, but the run
             // tracker needs the marker to keep parity with Kotlin).
-            cp::RULE_PREFIX_UNARY_EXPRESSION => {
+            cp::RULE_PREFIX_UNARY_EXPRESSION
                 if PrefixUnaryExpressionContext::from_rule_node(ctx)
-                    .is_some_and(|expr| expr.bang_token().is_some())
-                {
-                    self.current().cognitive.boolean_seq.not_operator("!");
-                }
+                    .is_some_and(|expr| expr.bang_token().is_some()) =>
+            {
+                self.current().cognitive.boolean_seq.not_operator("!");
             }
             _ => {}
         }
