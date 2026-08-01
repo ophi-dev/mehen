@@ -1292,12 +1292,11 @@ impl Walker<'_> {
             // `mehen-java`'s `negation_does_not_break_boolean_run` cites *both* Sonar
             // implementations, SonarKotlin's included, for the correct behaviour.
             //
-            // `mehen-kotlin` is deliberately left alone here. Its
-            // `kotlin_negation_breaks_boolean_sequence` test asserts the opposite, so
-            // the two walkers now disagree on identical logic and one of the two tests
-            // is wrong about its own citation. Reconciling that is a Kotlin-scoped
-            // change with its own snapshot churn, not something to fold into the C#
-            // PR — filed as a follow-up rather than settled by fiat here.
+            // `mehen-kotlin` still has this bug and is deliberately left alone here:
+            // its `kotlin_negation_breaks_boolean_sequence` test asserts the opposite,
+            // so reconciling it means inverting a documented assertion in another
+            // language's suite. Tracked in issue #217, which measures the blast radius
+            // (exactly one failing test, no snapshots).
             _ => {}
         }
     }
