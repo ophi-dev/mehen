@@ -186,3 +186,28 @@ fn an_interpolation_format_specifier_is_not_code() {
         5.0
     );
 }
+
+#[test]
+fn a_diagnostic_span_covers_exactly_the_offending_token() {
+    // REGRESSION. The error-node span added 1 to the runtime's `stop_byte`, but that
+    // offset is already **exclusive** — `Token::byte_span` is
+    // `start_byte()..stop_byte()`. Every diagnostic span was therefore one byte too
+    // long, so a `(` was reported as `"( "`, swallowing the following character. This
+    // is also the only place in `mehen-antlr` that did so: `span.rs` and `comments.rs`
+    // already used the offset directly.
+    let source = "class C { void M( }\n";
+    let a = common::analyze(source);
+    assert!(!a.diagnostics.is_empty(), "this input must not parse");
+    for diagnostic in &a.diagnostics {
+        let Some(span) = diagnostic.span else {
+            continue;
+        };
+        let text = &source[span.start_byte as usize..span.end_byte as usize];
+        assert!(
+            !text.ends_with(' '),
+            "span {}..{} = {text:?} runs past its token",
+            span.start_byte,
+            span.end_byte
+        );
+    }
+}

@@ -152,9 +152,16 @@ pub fn collect_errors(
                 code.to_string(),
                 format!("ANTLR error node at line {line}"),
             );
-            // The error leaf owns the offending token, so the diagnostic can
-            // carry its byte range. `stop_byte` is inclusive; a synthesized
-            // (missing) recovery token can be zero-width, hence the `max`.
+            // The error leaf owns the offending token, so the diagnostic can carry
+            // its byte range. `stop_byte` is **exclusive** — the runtime's own
+            // `Token::byte_span` is `start_byte()..stop_byte()` — so it is used
+            // directly. This used to add 1, which made every diagnostic span one
+            // byte too long: a `(` reported as `"( "`, swallowing the next
+            // character. `span.rs` and `comments.rs` already used it directly, so
+            // the `+1` was also inconsistent within this crate.
+            //
+            // `max` keeps the range well-formed if clamping collapsed the two ends
+            // (a synthesized recovery token can be zero-width).
             //
             // Both offsets are optional since the 0.23 runtime: a token source
             // that cannot resolve byte offsets reports `None`. Leave the span
@@ -168,7 +175,7 @@ pub fn collect_errors(
                 .zip(token.stop_byte())
                 .map(|(start, stop)| {
                     let start_byte = byte_offset_clamped(start);
-                    let end_byte = byte_offset_clamped(stop.saturating_add(1)).max(start_byte);
+                    let end_byte = byte_offset_clamped(stop).max(start_byte);
                     let start_line = line.max(1) as u32;
                     SourceSpan {
                         start_byte,
