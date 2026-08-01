@@ -125,54 +125,6 @@ impl DiagnosticCollector {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mehen_core::LineIndex;
-
-    /// A diagnostic whose byte range covers several rows must report an `end_line`
-    /// that matches — a single token CAN span rows (a verbatim or raw string
-    /// literal), and forcing `end_line` to the start line yields a `SourceSpan`
-    /// whose byte range and line range describe different regions.
-    ///
-    /// Driven through the collector directly rather than through a real parse: the
-    /// ANTLR recovery strategy consistently attributes the error to a short token
-    /// beside the multi-row literal rather than to the literal itself, so no C#
-    /// input reaches this path. The span arithmetic is still wrong if it assumes a
-    /// single row, and this pins it.
-    #[test]
-    fn a_multi_row_span_reports_its_real_end_line() {
-        let source = "let s = @\"row1\nrow2\nrow3\";\n";
-        let line_index = LineIndex::new(source);
-        // The literal starts on row 1 and ends on row 3.
-        let start = source.find('@').expect("literal present") as u32;
-        let end = source.find(';').expect("terminator present") as u32;
-
-        let collector = DiagnosticCollector::default();
-        collector.push_for_test(1, 8, Some((start, end)));
-        let diagnostics = collector.diagnostics("test.syntax_error", 16, &line_index);
-
-        let span = diagnostics[0].span.expect("span present");
-        assert_eq!(span.start_line, 1);
-        assert_eq!(span.end_line, 3, "the literal covers three rows");
-    }
-
-    /// `end_line` is clamped to at least `start_line`, so a zero-width or
-    /// already-clamped range can never produce an inverted span.
-    #[test]
-    fn an_end_line_never_precedes_the_start_line() {
-        let line_index = LineIndex::new("one\ntwo\nthree\n");
-        let collector = DiagnosticCollector::default();
-        // A start line the byte range does not support (row 3 claimed, byte 0).
-        collector.push_for_test(3, 0, Some((0, 0)));
-        let diagnostics = collector.diagnostics("test.syntax_error", 16, &line_index);
-
-        let span = diagnostics[0].span.expect("span present");
-        assert_eq!(span.start_line, 3);
-        assert_eq!(span.end_line, 3);
-    }
-}
-
 /// Walk `tree` and emit one `error`-severity [`ParseDiagnostic`] per recovered
 /// error leaf ([`NodeKind::Error`](antlr4_runtime::NodeKind::Error)), capped at
 /// `max_diagnostics` to bound noise on heavily corrupted input.
@@ -228,4 +180,52 @@ pub fn collect_errors(
             out
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mehen_core::LineIndex;
+
+    /// A diagnostic whose byte range covers several rows must report an `end_line`
+    /// that matches — a single token CAN span rows (a verbatim or raw string
+    /// literal), and forcing `end_line` to the start line yields a `SourceSpan`
+    /// whose byte range and line range describe different regions.
+    ///
+    /// Driven through the collector directly rather than through a real parse: the
+    /// ANTLR recovery strategy consistently attributes the error to a short token
+    /// beside the multi-row literal rather than to the literal itself, so no C#
+    /// input reaches this path. The span arithmetic is still wrong if it assumes a
+    /// single row, and this pins it.
+    #[test]
+    fn a_multi_row_span_reports_its_real_end_line() {
+        let source = "let s = @\"row1\nrow2\nrow3\";\n";
+        let line_index = LineIndex::new(source);
+        // The literal starts on row 1 and ends on row 3.
+        let start = source.find('@').expect("literal present") as u32;
+        let end = source.find(';').expect("terminator present") as u32;
+
+        let collector = DiagnosticCollector::default();
+        collector.push_for_test(1, 8, Some((start, end)));
+        let diagnostics = collector.diagnostics("test.syntax_error", 16, &line_index);
+
+        let span = diagnostics[0].span.expect("span present");
+        assert_eq!(span.start_line, 1);
+        assert_eq!(span.end_line, 3, "the literal covers three rows");
+    }
+
+    /// `end_line` is clamped to at least `start_line`, so a zero-width or
+    /// already-clamped range can never produce an inverted span.
+    #[test]
+    fn an_end_line_never_precedes_the_start_line() {
+        let line_index = LineIndex::new("one\ntwo\nthree\n");
+        let collector = DiagnosticCollector::default();
+        // A start line the byte range does not support (row 3 claimed, byte 0).
+        collector.push_for_test(3, 0, Some((0, 0)));
+        let diagnostics = collector.diagnostics("test.syntax_error", 16, &line_index);
+
+        let span = diagnostics[0].span.expect("span present");
+        assert_eq!(span.start_line, 3);
+        assert_eq!(span.end_line, 3);
+    }
 }
