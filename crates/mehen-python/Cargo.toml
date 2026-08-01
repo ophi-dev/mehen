@@ -18,7 +18,7 @@ mehen-metrics = { workspace = true }
 # unpublished upstream (`publish = false`), so we pin a tagged git
 # revision. All three crates must stay in lockstep so derive macros
 # and AST types align — bump them together.
-ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.22" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.16.1" }
 ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.15.22" }
 ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.15.22" }
 smol_str = { workspace = true }
