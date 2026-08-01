@@ -67,9 +67,17 @@ runtime 0.21.0 accepts via hub inlining (upstream #221). Beyond that, measured o
 |---|---|---|
 | `grammars-v4` C# 7 (previous) | 93 | C# 8+ syntax unsupported |
 | Roslyn, first working prep | 115 | interpolated strings failed |
-| Roslyn, current prep | **308** | 13 with errors, no crashes or timeouts |
+| Roslyn, current prep | **317** | 4 with diagnostics, no crashes or timeouts |
 
-Whole-corpus parse time is ~203 s (p50 0.48 s, p95 1.9 s, slowest file 4.9 s).
+Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
+321 files. All 4 remaining files are the directive-split-expression case below.
+
+Note that a "clean" corpus count measures *parseability*, not correctness — four
+separate faults in this grammar produced structurally wrong trees with zero
+reported errors (`declaration_expression` shadowing every invocation, bodiless
+members falling through to `global_statement`, `(a, b) => …` parsing as the simple
+lambda form, and `parameter` matching the empty string). Each was caught by a
+metric test or a parse-tree dump, never by an error count.
 
 **No runtime capability is missing.** Every failure traced to either the prep or
 an upstream-generator blind spot, and each was fixable declaratively — SemIR
