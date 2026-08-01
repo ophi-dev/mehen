@@ -466,7 +466,7 @@ RESERVED_KEYWORDS = frozenset(
 # `_` is deliberately NOT excluded here. It is genuinely both the discard
 # designation and a legal identifier, and harvesting mints `KW__`, which wins the
 # equal-length lexer match over `IDENTIFIER` — so leaving it out made `F(out _)`
-# unparseable. That single gap was expensive: the seed error at one `out _` put
+# unparsable. That single gap was expensive: the seed error at one `out _` put
 # the parser into error recovery, and recovery then accumulated diagnostics
 # without bound (>4.29e9 links, 15.5 GB RSS) until it either overflowed the
 # runtime's u32 diagnostic arena or the stack. See PROVENANCE.md.

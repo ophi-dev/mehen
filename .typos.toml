@@ -13,7 +13,12 @@ extend-exclude = [
     # (`ND` -> `AND`). Same rationale as the generated-snapshot exclude
     # above; regenerate via `cargo xtask antlr generate <lang>`.
     "**/src/generated/**",
+    # Hand-written `.g4.in` fragments spliced into the generated grammar carry
+    # the same Unicode class names, and the standalone `repro/` grammars are
+    # generated copies of the C# pair.
     "crates/mehen-*/grammar/*.g4",
+    "crates/mehen-*/grammar/*.g4.in",
+    "repro/**/*.g4",
     # Prose-metric dictionaries intentionally contain non-words, cliches,
     # hedges, and weasel phrases for the analyzer to flag. Excluding them
     # from typo checking keeps the analyzer lists authoritative.

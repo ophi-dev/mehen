@@ -159,7 +159,7 @@ corpus crashes.
 ### Angle brackets vs. shift operators
 
 The harvester minted `>>`, `>>>`, `>>=`, and `>>>=` as single tokens from
-`binary_expression`, which made `List<List<int>>` unparseable — the final `>>`
+`binary_expression`, which made `List<List<int>>` unparsable — the final `>>`
 lexed as one right-shift token that `type_argument_list`'s `'>'` can never match.
 Roslyn has no such problem because its published grammar encodes no operator
 precedence at all (that lives in the hand-written parser).
