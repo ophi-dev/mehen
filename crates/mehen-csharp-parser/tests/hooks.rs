@@ -267,3 +267,34 @@ fn anchoring_does_not_reject_valid_files() {
         assert_eq!(syntax_errors(source), 0, "must parse: {source:?}");
     }
 }
+
+#[test]
+fn an_incomplete_member_is_a_syntax_error() {
+    // REGRESSION. `incomplete_member : attribute_list* modifier* type` is Roslyn's
+    // error-*recovery* node: it exists so the compiler can build a tree for source
+    // being typed, where `public int` is a member the author has not finished. Roslyn
+    // emits a diagnostic beside it; the published grammar carries only the node. So a
+    // syntax-only parser accepted `class C { int }` as a complete, error-free unit —
+    // which contradicts mehen's contract, where a clean parse is what tells
+    // `mehen metrics` to exit 0. The prep drops the alternative.
+    assert!(syntax_errors("class C { int }\n") > 0);
+    assert!(syntax_errors("class C { public int }\n") > 0);
+}
+
+#[test]
+fn dropping_incomplete_member_keeps_every_real_member_form() {
+    // Nothing legal may be lost: each real member form has its own rule, and the
+    // dropped alternative matched only a type with no declarator after it.
+    for source in [
+        "class C { int x; }\n",
+        "abstract class C { public abstract void M(); }\n",
+        "interface I { void M(); }\n",
+        "class C { public int P { get; set; } }\n",
+        "class C { public int P { get; set; } = 5; }\n",
+        "class C { [System.Obsolete] public static readonly int X = 1; }\n",
+        "unsafe struct S { public fixed int data[4]; }\n",
+        "class C { public event System.EventHandler E; }\n",
+    ] {
+        assert_eq!(syntax_errors(source), 0, "must parse: {source:?}");
+    }
+}

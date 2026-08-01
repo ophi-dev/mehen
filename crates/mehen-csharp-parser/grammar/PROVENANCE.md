@@ -68,13 +68,13 @@ runtime 0.21.0 accepts via hub inlining (upstream #221). Beyond that, measured o
 |---|---|---|
 | `grammars-v4` C# 7 (previous) | 93 | C# 8+ syntax unsupported |
 | Roslyn, first working prep | 115 | interpolated strings failed |
-| Roslyn, current prep | **318 / 322** | 4 with diagnostics, no crashes or timeouts |
+| Roslyn, current prep | **317 / 322** | 5 with diagnostics, no crashes or timeouts |
 
 Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
-corpus. All 4 remaining files are the directive-split-expression case below.
+corpus. All 5 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **nine** distinct silent misparses: structurally wrong
+grammar has now produced **ten** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -89,14 +89,15 @@ dump, never by an error count.
 | `constant_pattern` listed before `discard_pattern` | a `_ =>` arm is an expression, not the discard |
 | `base_method_declaration` listed before the type forms | `record R(int X);` was a *method* named `R` |
 | `compilation_unit` did not end in `EOF` | `class C { } } } }` was a clean parse; the tail was never read |
+| `incomplete_member` was reachable | `class C { int }` was a complete, error-free unit |
 
-The first five *delete* code from the tree, the next three *relabel* it, and the
-last stops reading it early. Both shapes
-are invisible to an error count, which is why the metric tests carry the load here
+The first five *delete* code from the tree, the next three *relabel* it, and the last
+two accept source that is not valid C# at all. Every shape is
+invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
 
-Three of the nine share one root cause: **an alternative that is viable for the
+Three of the ten share one root cause: **an alternative that is viable for the
 wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
 each semantically — it knows whether `F` names a type, whether `and` resolves to a
 declared name, whether `record` is a keyword here — and a syntax-only grammar has
@@ -270,6 +271,13 @@ behaviour-identical on the brace-less forms and on nested types.
 - **Char-literal escapes.** A char literal holds exactly one character, so unlike
   a string it has no closure to absorb a mis-sized escape — `'\ud800'` needs the
   escape forms spelled out.
+- **`incomplete_member` was reachable.** Roslyn's error-*recovery* node exists so the
+  compiler can build a tree for source being typed, where `public int` is a member the
+  author has not finished; Roslyn emits a diagnostic beside it, and the published
+  grammar carries only the node. So `class C { int }` parsed as a complete, error-free
+  compilation unit — which contradicts mehen's contract, where a clean parse is what
+  tells `mehen metrics` to exit 0. Dropping the alternative makes it a syntax error and
+  loses nothing legal: every real member form has its own rule.
 - **The entry rule did not end in `EOF`.** Roslyn's parser reads a compilation unit
   and leaves the caller to check the stream position, so its grammar does not anchor
   `compilation_unit`. A syntax-only parser therefore stopped at the first token it
@@ -304,8 +312,14 @@ behaviour-identical on the brace-less forms and on nested types.
 
 ### Known remaining limitation: directive-split expressions
 
-All 4 files still reporting errors are the same class: a preprocessor directive
+All 5 files still reporting errors are the same class: a preprocessor directive
 splitting a single expression.
+
+The fifth (`JsonDocument.Parse.cs`) only *became* visible when `incomplete_member`
+was dropped: the directive splits a method's return type across `#if` branches, so
+the parser sees two types where one belongs, and the first of them used to match as
+an incomplete member. It was always this same limitation — the recovery node was
+hiding it behind a clean parse.
 
 ```csharp
 if (

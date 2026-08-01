@@ -53,11 +53,12 @@ grammar stays the single source of truth exactly as the raw `.g4` does for Kotli
 and Java. See `PROVENANCE.md` for the pinned revision and the full catalogue of
 what the transform repairs and why.
 
-Interpolation additionally needs three lexer modes plus the hand-written hook in
-`../src/hooks.rs`, because the `}` closing a hole is lexically identical to one
-closing a nested block. That is deliberate: mehen is the demonstrative consumer of
-antlr-rust-runtime, so using its hook and `--sem-patterns` surfaces to express
-real grammar power is the point, not a cost.
+Interpolation additionally needs three lexer modes and brace-depth state, because
+the `}` closing a hole is lexically identical to one closing a nested block. All of
+it lives in the *grammar* — `@lexer::members` plus predicate-gated rules over the
+same character — so the parser crate needs **no hooks at all**. That is deliberate:
+mehen is the demonstrative consumer of antlr-rust-runtime, so pushing its
+`--sem-patterns` lowering as far as it goes is the point, not a cost.
 
 Reachability is delegated, not reimplemented: the generator's `G4S078` analysis
 walks the real grammar AST, so it distinguishes a rule reference from a word
@@ -121,14 +122,14 @@ LEXER_MEMBERS_FILE = "lexer-members.g4.in"
 MODE_SCOPED_RULES = ("interpolated_string_text_token", "xml_text_literal_token")
 
 # Rules that are all-optional and so make their closure-using callers nullable.
-# Each is tightened to require at least one element. `incomplete_member` is
-# Roslyn's error-recovery node (it exists to model broken source) and the XML
-# wrappers are `x*` over a nullable element.
+# Each is tightened to require at least one element; the XML wrappers are `x*` over a
+# nullable element.
+#
+# `incomplete_member` used to be listed here too — it is all-optional, so it matched
+# the empty string. It is now removed from `member_declaration` outright (see
+# INCOMPLETE_MEMBER_ALT) and pruned as unreachable, so there is nothing left to
+# tighten.
 NULLABILITY_FIXES = [
-    (
-        "incomplete_member\n  : attribute_list* modifier* type?\n  ;",
-        "incomplete_member\n  : attribute_list* modifier* type\n  ;",
-    ),
     (
         "xml_text\n  : xml_text_literal_token*\n  ;",
         "xml_text\n  : xml_text_literal_token+\n  ;",
@@ -358,6 +359,21 @@ STABLE_TOKEN_NAMES = {
 # Same family as the `record` <ContextualKind> loss: information the compiler
 # holds outside the grammar, which the published grammar therefore drops.
 DECLARATION_EXPRESSION_ALT = "  | declaration_expression\n"
+
+# `incomplete_member : attribute_list* modifier* type` is Roslyn's error-*recovery*
+# node: it exists so the compiler can build a syntax tree for source that is being
+# typed, where `public int` is a member the author has not finished. Roslyn'"'"'s parser
+# emits a diagnostic alongside it; the published grammar carries only the node.
+#
+# So a syntax-only parser accepts `class C { int }` as a complete, error-free
+# compilation unit. That directly contradicts mehen'"'"'s diagnostic contract, where a
+# clean parse is what tells `mehen metrics` to exit 0 and `mehen diff` to trust the
+# numbers — broken source has to be *visible*.
+#
+# Dropping the alternative makes the same input a syntax error, which is the honest
+# answer. Nothing legal is lost: every real member form has its own rule, and this one
+# matches only a type with no declarator after it.
+INCOMPLETE_MEMBER_ALT = "  | incomplete_member\n"
 
 # The same ordering hazard one level up, in `member_declaration`. Its alternatives
 # are alphabetical, so `base_method_declaration` precedes `base_type_declaration` —
@@ -1008,6 +1024,23 @@ def main() -> int:
     )
     print("hoisted record_declaration ahead of base_method_declaration")
 
+    # -- 2h. Drop the error-recovery member alternative ----------------------
+    # See INCOMPLETE_MEMBER_ALT: it makes `class C { int }` an error-free parse.
+    member_rule = rule_span(src, "member_declaration")
+    if not member_rule or INCOMPLETE_MEMBER_ALT not in member_rule.group(1):
+        print(
+            "error: incomplete_member is not an alternative of `member_declaration`",
+            file=sys.stderr,
+        )
+        return 1
+    src = src.replace(
+        member_rule.group(0),
+        "member_declaration\n"
+        + member_rule.group(1).replace(INCOMPLETE_MEMBER_ALT, "", 1)
+        + "  ;\n",
+        1,
+    )
+    print("dropped the incomplete_member recovery alternative")
 
     # -- 3. Point character-level rules at real lexer tokens -----------------
     lexer_bound = dict(LEXER_TOKEN_RULES)
