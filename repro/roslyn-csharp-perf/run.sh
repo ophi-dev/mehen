@@ -4,8 +4,10 @@
 #   ./run.sh slow    # as-published: record keyword is the catch-all `syntax_token`
 #   ./run.sh fixed   # record contextual keyword restored (default)
 #
-# Needs `antlr4-rust-gen` 0.21.0 on PATH:
-#   cargo install antlr-rust-runtime --version 0.21.0 \
+# Needs `antlr4-rust-gen` 0.25.0 on PATH — it must MATCH the runtime version
+# pinned in Cargo.toml, or the generated modules call a different API than the
+# crate they link against (e.g. the 0.23 `SyntaxErrorEvent` change):
+#   cargo install antlr-rust-runtime --version 0.25.0 \
 #       --features codegen --bin antlr4-rust-gen --force
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -44,7 +46,10 @@ printf '%s\n' "  (elapsed ms / recovered errors / fixture)"
 ./target/release/time-parse target/fixtures/members-*.cs
 
 echo "== regression: omitted-node syntax must parse with 0 errors =="
-./target/release/time-parse fixtures/omitted-nodes.cs
+# `--require-clean` makes a nonzero error count exit 1, so `set -e` actually
+# enforces the assertion this step advertises. Without it `time-parse` printed
+# the count and exited 0, so a broken grammar passed silently.
+./target/release/time-parse --require-clean fixtures/omitted-nodes.cs
 
 if [ "$#" -gt 1 ]; then
   shift

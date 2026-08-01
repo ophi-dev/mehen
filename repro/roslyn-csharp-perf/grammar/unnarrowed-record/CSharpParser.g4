@@ -1446,6 +1446,13 @@ single_line_raw_string_literal_token
 // text. This restores Roslyn's <ContextualKind Name="RecordKeyword"/>, which its
 // grammar generator drops. Lowered by `patterns.toml` to a pure SemIR
 // comparison, so no hooks are needed.
+//
+// UNREFERENCED IN THIS VARIANT. This is the `slow` control: `record_declaration`
+// above deliberately keeps Roslyn's catch-all `syntax_token`, which is what makes
+// `class` viable as a record and drives the timing blow-up being reproduced. The
+// rule (and the `IsRecordKeyword` helper in this directory's `patterns.toml`) is
+// kept only so both variants generate from the identical helper set, isolating the
+// single grammar difference under measurement.
 record_keyword
   : {this.IsRecordKeyword()}? identifier_token
   ;

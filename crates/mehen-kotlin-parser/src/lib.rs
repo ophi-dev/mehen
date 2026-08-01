@@ -11,7 +11,10 @@
 //! `mehen-kotlin-parser = { git = "https://github.com/ophi-dev/mehen", tag = "…" }`
 //! — the same way this repo consumes the ruff/oxc/sqruff parser crates.
 //!
-//! The [`mehen-kotlin`](https://docs.rs/mehen-kotlin) analyzer crate depends
+//! (Linked to the repository, not docs.rs: the analyzer crates are
+//! `publish = false`, so they have no docs.rs page to link to.)
+//!
+//! The [`mehen-kotlin`](https://github.com/ophi-dev/mehen/tree/main/crates/mehen-kotlin) analyzer crate depends
 //! on this one and walks the resulting [`antlr4_runtime::ParseTree`] to
 //! compute metrics.
 //!

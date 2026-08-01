@@ -10,7 +10,7 @@ Context: [`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runti
 ## Quick start
 
 ```bash
-cargo install antlr-rust-runtime --version 0.21.0 \
+cargo install antlr-rust-runtime --version 0.25.0 \
     --features codegen --bin antlr4-rust-gen --force
 
 ./run.sh slow     # as-published: record keyword is the catch-all `syntax_token`
@@ -52,7 +52,7 @@ Credit for this diagnosis goes to the antlr-rust-runtime team on #248. My
 original hypothesis — Roslyn's optional body braces — was wrong: requiring the
 braces only shortens the ambiguity window and masks the real cause.
 
-## Measured (0.21.0, release build, M-series macOS)
+## Measured (runtime 0.21.0, release build, M-series macOS)
 
 | members | `slow` (as-published) | `fixed` (record restored) |
 |---|---|---|
@@ -97,20 +97,28 @@ works as a variable, field, and method name; 13/13 modern-C# probes pass.
 
 | Path | What it is |
 |---|---|
-| `grammar/` | The prepared pair plus `patterns.toml`. Roslyn ships a **parser-only** grammar, so the lexer (terminals, comment/directive channels, interpolation and XML-doc modes) is supplied here. |
+| `grammar/` | The prepared pair plus `patterns.toml`. Roslyn ships a **parser-only** grammar, so the lexer (terminals, comment/directive channels) is supplied here. The interpolation and XML-doc *mode definitions* are present but not reached — see Known gap. |
 | `grammar/unnarrowed-record/` | Same, with the record fix reverted — the `slow` control. |
 | `fixtures/gen-fixture.py` | Emits a class with N members. The cost scales with members per type, not file length, so a generated fixture reproduces it exactly and avoids vendoring third-party source. |
-| `fixtures/omitted-nodes.cs` | Regression fixture for Roslyn's "omitted" (empty) syntax nodes — `int[,]`, `int[,,]`, `Dictionary<,>`. Deleting those empty rules without preserving the syntax they expressed silently breaks all of it; `run.sh` asserts 0 errors here. |
-| `src/bin/time-parse.rs` | Times `compilation_unit` per file; prints ms + recovered-error count. |
+| `fixtures/omitted-nodes.cs` | Regression fixture for Roslyn's "omitted" (empty) syntax nodes — `int[,]`, `int[,,]`, `Dictionary<,>`. Deleting those empty rules without preserving the syntax they expressed silently breaks all of it; `run.sh` asserts 0 errors here via `time-parse --require-clean`. |
+| `src/bin/time-parse.rs` | Times `compilation_unit` per file; prints ms + recovered-error count. `--require-clean` exits 1 on any error, so a regression step can actually fail. |
 | `run.sh` | Generate → build → measure, either variant. |
 
 The grammar is derived by
-`crates/mehen-csharp-parser/grammar/prepare-roslyn-grammar.py` from a pinned
+`crates/mehen-csharp-parser/grammar/prepare-grammar.py` from a pinned
 upstream revision (`dotnet/roslyn` `76234ec6a1`, 2026-06-24). See that script and
 `crates/mehen-csharp-parser/grammar/PROVENANCE.md` for every correction and why.
 
 ## Known unrelated gap
 
-Interpolated strings do not parse here: `$"` is harvested as an ordinary literal,
-so the `INTERPOLATION` lexer mode is never entered. That is a defect in the
-preparation and does not affect these timings (no fixture uses `$"`).
+Interpolated strings do not parse in **this snapshot**: `$"` is harvested as an
+ordinary literal, so the `INTERPOLATION` mode is defined but never entered. The
+mode definitions in `grammar/CSharpLexer.g4` are therefore dead code here — read
+them as inert, not as working support.
+
+This is a defect in the *snapshot*, not in the current preparation: the grammar
+under `crates/mehen-csharp-parser/` rewrites those literals to the mode-pushing
+`INTERP_START` / `INTERP_VERBATIM_START` / `INTERP_RAW_START` tokens and does
+parse interpolated strings. This directory is a frozen reproduction for the
+`record`-keyword timing issue and is deliberately not resynced; it does not
+affect these timings, since no fixture uses `$"`.

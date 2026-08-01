@@ -22,7 +22,7 @@ another grammar (unlike the Kotlin grammar's `UnicodeClasses`), so no extra
 
 Generation reports, then removes, one unreachable rule:
 
-```
+```text
 warning[G4S078]: JavaParser.g4:343:0: parser rule altAnnotationQualifiedName
 is unreachable from entry rule compilationUnit
 pruned: JavaParser.g4:343:0: unreachable parser rule JavaParser.altAnnotationQualifiedName

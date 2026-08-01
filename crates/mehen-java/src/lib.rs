@@ -64,7 +64,7 @@ impl JavaAnalyzer {
     ///
     /// Replaces the runtime's default lexer console listener with a structured
     /// diagnostic collector and removes the parser console listener.
-    fn parse(&self, source: &str) -> Option<ParsedJava> {
+    fn parse(&self, source: &str, line_index: &LineIndex) -> Option<ParsedJava> {
         let mut lexer = JavaLexer::new(InputStream::new(source));
         lexer.remove_error_listeners();
         let lexer_diagnostics = DiagnosticCollector::default();
@@ -73,7 +73,7 @@ impl JavaAnalyzer {
         let mut parser = JavaParser::with_typed_hooks(tokens, JavaParserBase);
         parser.remove_error_listeners();
         let result = parser.compilation_unit().ok()?;
-        let lexer_diagnostics = lexer_diagnostics.diagnostics("java.syntax_error", 16);
+        let lexer_diagnostics = lexer_diagnostics.diagnostics("java.syntax_error", 16, line_index);
 
         // `into_parsed_file` consumes the parser and moves the eagerly-buffered
         // token store into the `ParsedFile`; the LOC token list is then read
@@ -107,7 +107,7 @@ impl LanguageAnalyzer for JavaAnalyzer {
     fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let line_index = LineIndex::new(&source.text);
 
-        let parsed = match self.parse(&source.text) {
+        let parsed = match self.parse(&source.text, &line_index) {
             Some(parsed) => parsed,
             None => {
                 let span = SourceSpan {
@@ -142,6 +142,7 @@ impl LanguageAnalyzer for JavaAnalyzer {
             tree,
             "java.syntax_error",
             remaining,
+            &line_index,
         ));
 
         Ok(LanguageAnalysis {

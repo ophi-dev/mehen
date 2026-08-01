@@ -7,6 +7,17 @@
 //! for the including binary's benefit but never re-exported across a crate
 //! boundary — hence the `unreachable_pub` allowance (the workspace lint is
 //! aimed at library code, where an unreachable `pub` really is dead surface).
+//!
+//! `mehen-java` and `mehen-kotlin` inline an equivalent helper per test file
+//! instead, because an earlier attempt at a shared module tripped the workspace's
+//! `-D warnings` policy. This crate keeps the shared module deliberately: the
+//! `allow` above resolves that (a `mod common` is compiled once per including
+//! binary, so a helper any *one* file leaves unused is dead only in that binary),
+//! and `analyze_clean`'s diagnostics assertion is load-bearing here in a way the
+//! Java/Kotlin harnesses have no equivalent of. Nine copies of it would be nine
+//! chances for one file to drop the assertion and start measuring error recovery
+//! instead of the construct under test — the exact failure mode
+//! `grammar/PROVENANCE.md` catalogues eight instances of.
 #![allow(unreachable_pub, dead_code)]
 
 use mehen_core::{AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, SourceFile};

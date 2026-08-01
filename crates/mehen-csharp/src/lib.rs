@@ -80,7 +80,7 @@ impl CSharpAnalyzer {
     ///
     /// Replaces the runtime's default lexer console listener with a structured
     /// diagnostic collector and removes the parser console listener.
-    fn parse(&self, source: &str) -> Option<ParsedCSharp> {
+    fn parse(&self, source: &str, line_index: &LineIndex) -> Option<ParsedCSharp> {
         // No hooks: the derived grammar keeps its interpolated-string state in
         // `@lexer::members`, lowered to pure SemIR via `patterns.toml`.
         let mut lexer = CSharpLexer::new(InputStream::new(source));
@@ -91,7 +91,8 @@ impl CSharpAnalyzer {
         let mut parser = CSharpParser::new(tokens);
         parser.remove_error_listeners();
         let result = parser.compilation_unit().ok()?;
-        let lexer_diagnostics = lexer_diagnostics.diagnostics("csharp.syntax_error", 16);
+        let lexer_diagnostics =
+            lexer_diagnostics.diagnostics("csharp.syntax_error", 16, line_index);
 
         // `into_parsed_file` consumes the parser and moves the eagerly-buffered
         // token store into the `ParsedFile`; the LOC token list is then read
@@ -125,7 +126,7 @@ impl LanguageAnalyzer for CSharpAnalyzer {
     fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let line_index = LineIndex::new(&source.text);
 
-        let parsed = match self.parse(&source.text) {
+        let parsed = match self.parse(&source.text, &line_index) {
             Some(parsed) => parsed,
             None => {
                 let span = SourceSpan {
@@ -160,6 +161,7 @@ impl LanguageAnalyzer for CSharpAnalyzer {
             tree,
             "csharp.syntax_error",
             remaining,
+            &line_index,
         ));
 
         Ok(LanguageAnalysis {

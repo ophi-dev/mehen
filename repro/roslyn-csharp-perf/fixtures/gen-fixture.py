@@ -11,6 +11,10 @@ third-party source. Verified against real code: `JsonDocument.Parse.cs`
 import sys
 
 n = int(sys.argv[1]) if len(sys.argv) > 1 else 18
+# `range(-1)` is empty, so a negative count would silently emit a zero-member
+# fixture and the timing row would read as "fast" rather than as a mistake.
+if n < 0:
+    sys.exit(f"error: member count must be non-negative, got {n}")
 print("class C\n{")
 for i in range(n):
     print(f"    public int P{i}() {{ return {i}; }}")

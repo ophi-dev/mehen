@@ -303,9 +303,17 @@ DIRECTIVE_LINE          : '#' ~[\r\n]*    -> channel(DIRECTIVE) ;
 // broad negated set would swallow ordinary code (an earlier flat-lexer attempt
 // lexed `class C ` as one token that way).
 //
-// The mode *transitions* are driven entirely by the typed hook in
-// `../src/hooks.rs`, not by grammar commands, because the interesting decision
-// is not expressible declaratively: the `}` that closes a hole is lexically
+// NOTE: in this frozen snapshot these modes are never entered at all — `$"` is
+// harvested as an ordinary literal, so nothing pushes INTERPOLATION. The rules
+// below are inert. (The live grammar under `crates/mehen-csharp-parser/` rewrites
+// those literals to mode-pushing tokens and does parse interpolated strings; see
+// that crate's `grammar/lexer-tokens.g4.in`. This directory is deliberately not
+// resynced — it reproduces one timing issue and no fixture uses `$"`.)
+//
+// The comment below described a design that no longer exists: there is no
+// `../src/hooks.rs`, and the live grammar drives every transition from grammar
+// commands with the brace depth held in `@lexer::members`. It is kept because the
+// *problem* it states is the real one: the `}` that closes a hole is lexically
 // identical to the one closing a nested block —
 //
 //     $"a{ new[]{ 1, 2 }.Length }b"

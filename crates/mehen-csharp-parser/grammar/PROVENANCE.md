@@ -7,7 +7,8 @@ to the transform or produced by it:
 | File | Role |
 |---|---|
 | `CSharp.Generated.g4` | vendored upstream grammar (see Source) |
-| `lexer-tokens.g4.in` | hand-written lexer — Roslyn publishes none |
+| `lexer-tokens.g4.in` | hand-written lexer rules — Roslyn publishes no lexer |
+| `lexer-members.g4.in` | the lexer's `@lexer::members` state; separate because ANTLR requires named actions in the header, before any rule |
 | `prepare-grammar.py` | the transform; a step of parser generation |
 | `CSharpLexer.g4`, `CSharpParser.g4`, `patterns.toml` | **derived, gitignored** |
 
@@ -128,7 +129,7 @@ The split is therefore **analysis upstream, edit locally**. The prep no longer
 walks the grammar itself; it runs the generator as a reachability query and
 deletes exactly the rules reported:
 
-```
+```text
 antlr4-rust-gen <parser>.g4 --entry-rule compilation_unit
 ```
 
