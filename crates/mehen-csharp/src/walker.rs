@@ -111,7 +111,9 @@ use mehen_csharp_parser::c_sharp_parser as cp;
 // declared direct children, which is the property the untyped `child_rule` /
 // `has_token` probes could only assert by comment. Dispatch stays on
 // `rule_index()`: a metric walker is fundamentally one match over rule kinds.
-use mehen_csharp_parser::c_sharp_parser::{ExpressionContext, PrefixUnaryExpressionContext};
+use mehen_csharp_parser::c_sharp_parser::{
+    ExpressionContext, OperatorDeclarationContext, PrefixUnaryExpressionContext,
+};
 
 /// Drive the walk over the parsed `compilation_unit` tree and return the unit
 /// `MetricSpace`. LOC is computed from `loc_tokens` in a single ordered pass
@@ -581,6 +583,11 @@ impl Walker<'_> {
             // node's `maybe_open_space`, since a member that is itself a nested
             // type has already pushed that type's space.
             cp::RULE_MEMBER_DECLARATION => (true, container_before_open, None),
+            // Enum members bypass `member_declaration` entirely: Roslyn inlines
+            // them into `enum_declaration` (`… '{' (enum_member_declaration (','
+            // enum_member_declaration)*)? '}'`), so the position must open here
+            // too. They are implicitly public constants of the enum.
+            cp::RULE_ENUM_DECLARATION => (true, Some(ContainerKind::Class), Some(true)),
             // Pure dispatch layers: keep the inbound member position so the hint
             // reaches the real declaration one level deeper.
             cp::RULE_BASE_FIELD_DECLARATION
@@ -1373,12 +1380,27 @@ fn function_name(ctx: RuleNodeView<'_>, hint: &ChildHint) -> Option<String> {
         });
     }
     // An operator's name is `operator <op>`. Roslyn spells the operator as a
-    // direct token choice on the declaration rather than a separate
-    // `overloadable_operator` rule, so name it from the declaration's text up to
-    // the parameter list.
+    // direct token choice on the declaration (`… KW_OPERATOR KW_CHECKED? (PLUS |
+    // MINUS | …)`) rather than a separate `overloadable_operator` rule, so the
+    // symbol is read from the token that follows `operator`. Using the token text
+    // avoids mapping ~30 token types by hand, and `direct_terminals()` cannot
+    // reach into the parameter list or body.
     if ctx.rule_index() == cp::RULE_OPERATOR_DECLARATION {
+        let typed = OperatorDeclarationContext::from_rule_node(ctx)?;
+        let mut seen_operator_keyword = false;
+        for terminal in typed.direct_terminals() {
+            let tt = terminal.symbol().token_type();
+            if tt == cl::KW_OPERATOR {
+                seen_operator_keyword = true;
+            } else if seen_operator_keyword && tt != cl::KW_CHECKED {
+                let symbol = terminal.symbol().text().unwrap_or_default();
+                return Some(format!("operator {symbol}"));
+            }
+        }
         return Some("operator".to_string());
     }
+    // A conversion operator is named by its target type (`implicit operator
+    // int`), which is a rule child rather than a token.
     if ctx.rule_index() == cp::RULE_CONVERSION_OPERATOR_DECLARATION {
         return Some("operator".to_string());
     }

@@ -197,10 +197,17 @@ fn a_verbatim_string_spanning_lines_marks_every_row_as_code() {
 }
 
 #[test]
-fn inactive_preprocessor_body_is_neither_code_nor_comment() {
-    // The `#if FALSE_SYMBOL` body is source the compiler never sees. The lexer
-    // hooks hand it over as a single hidden `SKIPPED_SECTION` token, which the
-    // analyzer classifies as neither code nor comment.
+fn preprocessor_directives_are_neither_code_nor_comment() {
+    // mehen does **not** evaluate `#if`: directives are routed to their own
+    // channel, so they are neither code nor comment for LOC, and an inactive
+    // region is still parsed as ordinary code.
+    //
+    // That is a deliberate trade. Evaluating `#if` means choosing a symbol set,
+    // and metrics for one configuration's subset of the file is less useful than
+    // approximate metrics for all of it — a member excluded in *this* build is
+    // still code someone maintains. (The previous grammars-v4 lexer evaluated
+    // directives via a stateful hook and handed the inactive branch over as a
+    // single hidden `SKIPPED_SECTION` token; this grammar has no such hook.)
     let a = loc("class C
          {
          #if NEVER
@@ -208,10 +215,11 @@ fn inactive_preprocessor_body_is_neither_code_nor_comment() {
          #endif
              void Kept() { }
          }");
-    assert_eq!(a.cloc, 0.0, "skipped source is not a comment");
-    // Only `Kept` is a real declaration: class(1) + Kept(1) = 2.
+    assert_eq!(a.cloc, 0.0, "a directive is not a comment");
+    // class(1) + Excluded(1) + Kept(1) = 3 — the `#if`/`#endif` rows themselves
+    // are not logical lines.
     assert_eq!(
-        a.lloc, 2.0,
-        "excluded member must not count as a declaration"
+        a.lloc, 3.0,
+        "an inactive region is parsed as code, so its member counts"
     );
 }
