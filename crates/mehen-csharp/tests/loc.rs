@@ -197,7 +197,7 @@ fn a_verbatim_string_spanning_lines_marks_every_row_as_code() {
 }
 
 #[test]
-fn preprocessor_directives_are_neither_code_nor_comment() {
+fn preprocessor_directives_are_not_comments_and_not_logical_lines() {
     // mehen does **not** evaluate `#if`: directives are routed to their own
     // channel, so they are neither code nor comment for LOC, and an inactive
     // region is still parsed as ordinary code.
@@ -222,4 +222,43 @@ fn preprocessor_directives_are_neither_code_nor_comment() {
         a.lloc, 3.0,
         "an inactive region is parsed as code, so its member counts"
     );
+    // A directive row IS a physical code line, though. It carries source text, so
+    // it must not fall through to `blank = sloc - ploc - only_comment`.
+    assert_eq!(a.sloc, 7.0);
+    assert_eq!(
+        a.ploc, 7.0,
+        "every row carries a token, directives included"
+    );
+    assert_eq!(a.blank, 0.0, "a directive row is not blank");
+}
+
+#[test]
+fn a_directive_row_is_code_not_blank() {
+    // REGRESSION. PLOC is recorded during the tree walk, which cannot see a
+    // directive — it goes to its own channel, so it never reaches the parser as a
+    // terminal. The row therefore carried no PLOC observation and was reported as a
+    // *blank line*, which it plainly is not. Directives are now routed through the
+    // same post-walk pass that handles comments.
+    let a = loc("class C
+         {
+         #define FOO
+             void M() { }
+         }");
+    assert_eq!(a.sloc, 5.0);
+    assert_eq!(a.ploc, 5.0);
+    assert_eq!(a.blank, 0.0);
+    assert_eq!(a.cloc, 0.0);
+}
+
+#[test]
+fn a_real_blank_line_is_still_blank() {
+    // The counterpart: routing directives into PLOC must not make every row code.
+    let a = loc("class C
+         {
+
+             void M() { }
+         }");
+    assert_eq!(a.sloc, 5.0);
+    assert_eq!(a.ploc, 4.0);
+    assert_eq!(a.blank, 1.0);
 }

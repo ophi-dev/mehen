@@ -177,25 +177,26 @@ impl LanguageAnalyzer for CSharpAnalyzer {
 /// Classify the parsed file's token store into the source-ordered LOC token
 /// list that drives the LOC family.
 ///
-/// C# comments come in five token types: the three doc-comment forms
-/// (`///`, `/** */`, and the empty `/***/`) plus the plain `//` and `/* */`
-/// forms. Whitespace is `WHITESPACES`; the lexer also emits
-/// `DIRECTIVE_WHITESPACES` inside preprocessor directives and a
-/// `BYTE_ORDER_MARK` token for a leading BOM — neither is code.
+/// C# comments come in four token types here: the two doc-comment forms (`///`
+/// and `/** */`) plus the plain `//` and `/* */` forms. Whitespace is
+/// `WHITESPACES` and a leading BOM is `BYTE_ORDER_MARK`; neither is code.
 ///
-/// `SKIPPED_SECTION` is the hidden-channel token the [`CSharpLexerBase`] hooks
-/// enqueue for an *inactive* `#if` block's body. Its text is source the
-/// compiler never sees, so it must count as neither code nor comment: it is
-/// skipped here, leaving those rows to fall out as blank (they carry no
-/// semantic weight for any metric).
+/// A preprocessor directive (`DIRECTIVE_LINE`) is **code**, not trivia. mehen does
+/// not evaluate `#if` — directives go to their own channel so the parser never sees
+/// them, and an inactive region is parsed as ordinary code (see the LOC tests) —
+/// but the directive row itself is still a physical line carrying source text. It is
+/// deliberately not a *logical* line (`#endif` is not a statement) and not a
+/// comment, so leaving it out of PLOC entirely made it fall through to
+/// `blank = sloc - ploc - only_comment` and report as a blank line, which it plainly
+/// is not.
 ///
-/// Unlike Kotlin, C# has no trivia-folding operator tokens, so no
-/// trivia-bearing token scan is needed. The token store is eagerly buffered
-/// through EOF, so every token (all channels) is present.
+/// Unlike Kotlin, C# has no trivia-folding operator tokens, so no trivia-bearing
+/// token scan is needed. The token store is eagerly buffered through EOF, so every
+/// token (all channels) is present.
 fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
     use mehen_csharp_parser::c_sharp_lexer::{
-        BYTE_ORDER_MARK, DELIMITED_COMMENT, DELIMITED_DOC_COMMENT, DIRECTIVE_LINE,
-        SINGLE_LINE_COMMENT, SINGLE_LINE_DOC_COMMENT, WHITESPACES,
+        BYTE_ORDER_MARK, DELIMITED_COMMENT, DELIMITED_DOC_COMMENT, SINGLE_LINE_COMMENT,
+        SINGLE_LINE_DOC_COMMENT, WHITESPACES,
     };
 
     mehen_antlr::loc_tokens(
@@ -206,10 +207,7 @@ fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
             SINGLE_LINE_DOC_COMMENT,
             DELIMITED_DOC_COMMENT,
         ],
-        // A preprocessor directive line is neither code nor comment for LOC:
-        // mehen routes directives to their own channel rather than evaluating
-        // them, so an inactive `#if` region is still parsed as ordinary code.
-        &[WHITESPACES, BYTE_ORDER_MARK, DIRECTIVE_LINE],
+        &[WHITESPACES, BYTE_ORDER_MARK],
         &[],
     )
 }

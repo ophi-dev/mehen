@@ -292,3 +292,35 @@ fn pattern_combinators_score_as_boolean_operators() {
     );
     assert_eq!(sum(&mixed), 2.0);
 }
+
+#[test]
+fn sibling_field_initializers_are_independent_boolean_contexts() {
+    // REGRESSION. Two field initializers share the enclosing *type* space rather
+    // than a statement, so neither hit any of the statement-shaped rules that reset
+    // the boolean-run tracker — the two `&&` runs collapsed into one and the pair
+    // scored 1. Pinned against the equivalent locals, which always scored 2.
+    let fields = analyze_clean(
+        "class C {
+             bool A = X() && Y();
+             bool B = U() && V();
+             static bool X() => true;
+             static bool Y() => true;
+             static bool U() => true;
+             static bool V() => true;
+         }",
+    );
+    let locals = analyze_clean(
+        "class C {
+             void F() {
+                 bool a = X() && Y();
+                 bool b = U() && V();
+             }
+             static bool X() => true;
+             static bool Y() => true;
+             static bool U() => true;
+             static bool V() => true;
+         }",
+    );
+    assert_eq!(sum(&fields), 2.0, "two independent `&&` runs");
+    assert_eq!(sum(&fields), sum(&locals));
+}

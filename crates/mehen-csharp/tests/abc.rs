@@ -315,3 +315,59 @@ fn a_split_shift_operator_is_one_halstead_operator() {
         "a shift must cost the same Halstead length as any other binary operator"
     );
 }
+
+#[test]
+fn an_operator_declarations_symbol_is_not_an_assignment() {
+    // REGRESSION. Roslyn spells an operator's symbol as a direct token choice on the
+    // declaration (`… KW_OPERATOR KW_CHECKED? (PLUS | PLUS_PLUS | …)`), so the `++` in
+    // `operator ++(C v)` reached the token scan looking exactly like a real increment
+    // and scored an ABC assignment — for the *declaration* of an operator, which
+    // mutates nothing.
+    let (a, _, _) = abc("class C { public static C operator ++(C v) => v; }");
+    assert_eq!(a, 0);
+}
+
+#[test]
+fn an_operator_declarations_symbol_is_not_a_condition() {
+    // The same suppression covers the comparison and boolean operators: declaring
+    // `operator <` must not score a comparison from its own signature.
+    let (_, _, c) = abc("class C {
+             public static bool operator <(C a, C b) => true;
+             public static bool operator >(C a, C b) => true;
+         }");
+    assert_eq!(c, 0);
+}
+
+#[test]
+fn an_operator_body_still_counts_its_operators() {
+    // The suppression is positional, not a blanket mute on operator declarations: a
+    // real `++` inside the body counts, alongside the initializer's `=`.
+    let (a, _, _) = abc("class C {
+             public static C operator +(C x, C y) {
+                 int i = 0;
+                 i++;
+                 return x;
+             }
+         }");
+    assert_eq!(a, 2, "the `int i = 0` initializer plus the `i++`");
+}
+
+#[test]
+fn a_utf8_literal_suffix_is_part_of_the_operand() {
+    // REGRESSION. `"text"u8` is one literal in real C#; Roslyn's grammar spells the
+    // suffix as a separate trailing token only because it models the syntax node that
+    // way. Classifying it as a Halstead *operator* made a UTF-8 literal cost a
+    // distinct operator that no operator was applied in — pinned against the plain
+    // literal, which must have the same operator vocabulary.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let utf8 = halstead("class C { System.ReadOnlySpan<byte> F() => \"text\"u8; }");
+    let plain = halstead("class C { System.ReadOnlySpan<byte> F() => \"text\"; }");
+    assert_eq!(
+        utf8.n1, plain.n1,
+        "the `u8` suffix must not add a distinct operator"
+    );
+    assert_eq!(utf8.big_n1, plain.big_n1, "nor an operator occurrence");
+}

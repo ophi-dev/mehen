@@ -64,7 +64,8 @@
 //!   call, so a qualified call still scores exactly one branch; and NOT `nameof`,
 //!   which only has the invocation *shape*); conditions via
 //!   `if`/`case`/`catch`/`when`/loops/comparison & equality/`&&`/`||`/ternary/
-//!   `??`/`is`/`as`/`and`/`or`.
+//!   `??`/`is`/`as`/`and`/`or`. An `operator_declaration`'s own symbol is excluded —
+//!   `operator ++` declares an operator rather than applying one.
 //!
 //!   `<` and `>` need care, because C# spells three unrelated things with them and
 //!   only the enclosing rule tells them apart. A comparison counts; the other two
@@ -90,13 +91,18 @@
 //!   `parenthesized_lambda_expression`, and `anonymous_method_expression` are
 //!   closure-shaped function spaces.
 //! - **LOC**: PLOC from per-space code-token rows during the walk, LLOC from
-//!   statement/declaration-shaped rules, CLOC from a source-ordered pass over
-//!   the hidden-channel comment tokens routed via `SpaceRangeTracker`.
+//!   statement/declaration-shaped rules, CLOC from a source-ordered pass over the
+//!   hidden-channel comment tokens routed via `SpaceRangeTracker`. Preprocessor
+//!   directives are routed through that same post-walk pass: they are on their own
+//!   channel, so the tree walk never sees them, but a `#if` row still carries source
+//!   text and must count as PLOC rather than falling out as a phantom blank.
 //! - **Halstead**: per-token operator/operand classification — keywords and
 //!   punctuation are operators; identifiers, literals, `this`, `base` are
 //!   operands (deduped by text). A terminal reached through `identifier_token` is
 //!   always an operand, which is what makes C#'s contextual keywords come out
-//!   right: the prep widens that rule to accept all 42 of them.
+//!   right: the prep widens that rule to accept all 42 of them. The UTF-8 literal
+//!   suffix (`"text"u8`) is an operand too — real C# lexes it as part of the
+//!   literal, and Roslyn splits it off only to model the syntax node.
 //! - **NPA / NPM / WMC**: class-vs-interface routing by the declaration rule
 //!   (`struct` and `record` count as class-like containers; `interface` as an
 //!   interface). NPA counts `field_declaration` / `event_field_declaration`
@@ -168,15 +174,32 @@ pub(crate) fn walk(
 
     // CLOC pass: route each comment to the deepest enclosing space (or the
     // unit) in source order (mirrors `mehen-java`/`mehen-kotlin`).
+    //
+    // Preprocessor directives are routed here as well, and only here. PLOC is
+    // otherwise recorded during the tree walk (`visit_terminal`), which cannot see
+    // them: a directive goes to its own channel, so it never reaches the parser and
+    // never appears as a terminal. Without this pass a `#if` / `#define` / `#endif`
+    // row carried no PLOC observation and fell out as
+    // `blank = sloc - ploc - only_comment` — reported as a blank line despite
+    // plainly carrying source text.
     for t in loc_tokens {
-        if t.kind == LocTokenKind::Comment {
-            walker.loc_routing.observe_comment(
+        match t.kind {
+            LocTokenKind::Comment => walker.loc_routing.observe_comment(
                 t.start_byte,
                 t.end_byte,
                 &mut unit_state.loc,
                 t.start_row,
                 t.end_row,
-            );
+            ),
+            // Only the off-channel tokens need this; an ordinary code token was
+            // already observed during the walk, and `observe_code_line` inserts into
+            // a row set, so a repeat is idempotent rather than double-counted.
+            LocTokenKind::Code => walker.loc_routing.observe_code_line(
+                t.start_byte,
+                t.end_byte,
+                &mut unit_state.loc,
+                t.start_row,
+            ),
         }
     }
 
@@ -285,6 +308,16 @@ struct ChildHint {
     /// own span already covers its attributes and there is no wrapper to open the
     /// space at. Both fields existed only for the grammars-v4 shape.)
     accessor_owner: Option<SmolStr>,
+    /// This terminal is the operator symbol in an `operator_declaration`'s
+    /// signature — the operator being *declared*, not one being applied.
+    ///
+    /// Roslyn spells the symbol as a direct token choice on the declaration
+    /// (`… KW_OPERATOR KW_CHECKED? (PLUS | PLUS_PLUS | AMP_AMP | LT | …)`), so those
+    /// tokens reach the scan looking exactly like real operators: `operator ++`
+    /// recorded an ABC assignment, and `operator &&` / `operator <` would have
+    /// recorded a decision and a comparison. Set only for the declaration's own
+    /// direct terminals, so the body and parameter defaults still count normally.
+    in_operator_symbol: bool,
     /// The NArgs an accessor of the enclosing member takes: the *indexer*'s
     /// parameter count (`this[int i]`'s getter is a one-argument function), or 0 for
     /// a property or event.
@@ -335,7 +368,13 @@ impl Walker<'_> {
         // `expression` rule, C#'s precedence cascade gives each `&&`/`||` its
         // own node, so observing the tokens in source order is exactly
         // SonarSource's flattened sequence.
-        if !hint.in_attributes {
+        //
+        // `in_operator_symbol` suppresses the whole family: in
+        // `public static C operator ++(C v)` the `++` is the operator being
+        // *declared*, not a mutation of anything, and `operator &&` / `operator <`
+        // would likewise have scored a boolean decision and a comparison from their
+        // own signatures.
+        if !hint.in_attributes && !hint.in_operator_symbol {
             match tt {
                 cl::KW_ELSE => self.current().cognitive.increment_by_one(),
                 cl::AMP_AMP => self.current().cognitive.observe_boolean("&&"),
@@ -631,6 +670,11 @@ impl Walker<'_> {
                 | cp::RULE_FUNCTION_POINTER_PARAMETER_LIST
         );
 
+        // The operator symbol in `public static C operator ++(C v)` is a direct
+        // token of the declaration, so a non-propagating flag covers exactly the
+        // signature's own terminals and leaves the parameter list and body alone.
+        let in_operator_symbol = ri == cp::RULE_OPERATOR_DECLARATION;
+
         // Inside an accessor's body from the accessor declaration downward, so
         // an expression-bodied `get => _x;` can count its own logical line. A
         // nested function or type resets it — their bodies are counted normally.
@@ -653,6 +697,7 @@ impl Walker<'_> {
                 in_attributes,
                 in_shift_operator,
                 in_type_delimiter,
+                in_operator_symbol,
                 in_accessor_body,
                 accessor_owner: accessor_owner.clone(),
                 accessor_args,
@@ -1206,9 +1251,17 @@ impl Walker<'_> {
             // Statement-shaped positions that are not one of the forms above
             // still start a fresh boolean sequence, so operators never collapse
             // across a boundary — `F(a && b); G(c && d)` is +2, not +1.
+            //
+            // `equals_value_clause` is the initializer of a field, property, or
+            // parameter default. It belongs here for the same reason: two sibling
+            // field initializers are independent boolean contexts, but they share
+            // the enclosing *type* space rather than a statement, so without a
+            // reset `bool A = x && y; bool B = u && v;` collapsed into one run and
+            // scored 1 where the equivalent pair of statements scores 2.
             cp::RULE_EXPRESSION_STATEMENT
             | cp::RULE_LOCAL_DECLARATION_STATEMENT
             | cp::RULE_ARROW_EXPRESSION_CLAUSE
+            | cp::RULE_EQUALS_VALUE_CLAUSE
             | cp::RULE_BLOCK => {
                 self.current().cognitive.boolean_seq.reset();
             }
@@ -1933,6 +1986,14 @@ fn halstead_class(tt: i32) -> HalsteadClass {
             // token: the hand-written lexer's mode rules all `type(…)` to it.
             | cl::INTERPOLATED_TEXT
             | cl::XML_TEXT_LIT
+            // The C# 11 UTF-8 literal suffix (`"text"u8`, either case). Real C#
+            // lexes this as part of the literal token, and Roslyn's grammar spells
+            // it as a separate trailing token only because it models the syntax
+            // node that way. It is part of the *operand*, not an operator applied
+            // to one — classifying it as an operator inflated the distinct-operator
+            // count and made `"text"u8` cost more than `"text"`.
+            | cl::KW_U8
+            | cl::KW_U8_LOWER
     ) {
         return HalsteadClass::Operand;
     }
@@ -1947,8 +2008,8 @@ fn halstead_class(tt: i32) -> HalsteadClass {
             | cl::DELIMITED_DOC_COMMENT
             // mehen routes preprocessor directives to their own channel rather
             // than evaluating them, so a directive line is neither operator nor
-            // operand. (The grammars-v4 lexer instead emitted a
-            // `SKIPPED_SECTION` for the inactive branch of an `#if`.)
+            // operand for Halstead. (It IS a physical code line for PLOC — see
+            // `collect_loc_tokens` — since the row carries source text.)
             | cl::DIRECTIVE_LINE
     ) || tt < 0
     {
