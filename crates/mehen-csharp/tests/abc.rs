@@ -371,3 +371,28 @@ fn a_utf8_literal_suffix_is_part_of_the_operand() {
     );
     assert_eq!(utf8.big_n1, plain.big_n1, "nor an operator occurrence");
 }
+
+#[test]
+fn an_auto_property_initializer_is_an_assignment() {
+    // REGRESSION. `public int P { get; set; } = 5;` carries its `equals_value_clause`
+    // directly on `property_declaration` rather than through a `variable_declarator`,
+    // so it scored no assignment while the equivalent field `public int P = 5;`
+    // scored one.
+    let (a, _, _) = abc("class C { public int P { get; set; } = 5; }");
+    assert_eq!(a, 1);
+    // And an uninitialized auto-property is still not an assignment.
+    let (a, _, _) = abc("class C { public int P { get; set; } }");
+    assert_eq!(a, 0);
+}
+
+#[test]
+fn a_query_let_binding_is_an_assignment() {
+    // REGRESSION. `let_clause : KW_LET identifier_token EQ expression` puts its `=` as
+    // a bare token on a rule that is not part of the inlined `expression`, so neither
+    // the token scan nor the expression classifier saw it — a `let` bound a name with
+    // no assignment recorded.
+    let (a, _, _) = abc("class C {
+             static object F(int[] s) { return from x in s let y = x select y; }
+         }");
+    assert_eq!(a, 1);
+}

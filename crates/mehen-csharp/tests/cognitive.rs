@@ -324,3 +324,48 @@ fn sibling_field_initializers_are_independent_boolean_contexts() {
     assert_eq!(sum(&fields), 2.0, "two independent `&&` runs");
     assert_eq!(sum(&fields), sum(&locals));
 }
+
+#[test]
+fn negation_does_not_break_a_boolean_run() {
+    // REGRESSION, and a cross-language inconsistency: C# scored `a && !b && c` as 2
+    // while `mehen-java` scored the identical logic as 1.
+    //
+    // Java is right. Both SonarJava (`CognitiveComplexityVisitor
+    // .flattenLogicalExpression`) and SonarKotlin (`CognitiveComplexity
+    // .flattenOperators`) flatten only the `&&`/`||` operators and treat a negated
+    // operand as a plain operand where flattening stops — the `!` is invisible to the
+    // run. See `mehen-java/tests/cognitive.rs::negation_does_not_break_boolean_run`,
+    // which cites both.
+    let negated = analyze_clean(
+        "class C {
+             static bool F(bool a, bool b, bool c) { return a && !b && c; }
+         }",
+    );
+    let plain = analyze_clean(
+        "class C {
+             static bool F(bool a, bool b, bool c) { return a && b && c; }
+         }",
+    );
+    assert_eq!(sum(&negated), 1.0, "the `!` must not split the `&&` run");
+    assert_eq!(sum(&negated), sum(&plain));
+
+    // Multiple negations in one run are equally invisible.
+    let many = analyze_clean(
+        "class C {
+             static bool F(bool a, bool b, bool c) { return !a && !b && c; }
+         }",
+    );
+    assert_eq!(sum(&many), 1.0);
+}
+
+#[test]
+fn mixing_boolean_operators_still_costs_two() {
+    // The counterpart to the negation fix: ignoring `!` must not also collapse a
+    // genuine operator *change*. `a && b || c` is two runs.
+    let a = analyze_clean(
+        "class C {
+             static bool F(bool a, bool b, bool c) { return a && b || c; }
+         }",
+    );
+    assert_eq!(sum(&a), 2.0);
+}

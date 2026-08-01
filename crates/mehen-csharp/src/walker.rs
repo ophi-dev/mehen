@@ -67,6 +67,15 @@
 //!   `??`/`is`/`as`/`and`/`or`. An `operator_declaration`'s own symbol is excluded —
 //!   `operator ++` declares an operator rather than applying one.
 //!
+//!   **Known gap:** null-conditional access (`a?.B`, `a?[i]`) records nothing. It
+//!   arguably should be a condition — it short-circuits on null exactly as `??` does,
+//!   and `??` counts — but there is no reliable anchor for it in this tree. Hub
+//!   inlining scatters the `?` onto an inner `expression` node holding only the
+//!   receiver, and `member_binding_expression`/`element_binding_expression` are
+//!   inlined too, so neither the token nor a rule index identifies the construct.
+//!   Every candidate match tried fired on chained `a?.B?.C` but not on a single
+//!   `a?.B`, which is worse than counting neither.
+//!
 //!   `<` and `>` need care, because C# spells three unrelated things with them and
 //!   only the enclosing rule tells them apart. A comparison counts; the other two
 //!   do not, and each has its own hint:
@@ -130,8 +139,7 @@ use mehen_csharp_parser::c_sharp_parser as cp;
 // `has_token` probes could only assert by comment. Dispatch stays on
 // `rule_index()`: a metric walker is fundamentally one match over rule kinds.
 use mehen_csharp_parser::c_sharp_parser::{
-    ExpressionContext, OperatorDeclarationContext, PatternContext, PrefixUnaryExpressionContext,
-    SwitchExpressionArmContext,
+    ExpressionContext, OperatorDeclarationContext, PatternContext, SwitchExpressionArmContext,
 };
 
 /// Drive the walk over the parsed `compilation_unit` tree and return the unit
@@ -1234,9 +1242,12 @@ impl Walker<'_> {
                     }
                 }
             }
-            cp::RULE_UNARY_PATTERN => {
-                self.current().cognitive.boolean_seq.not_operator("not");
-            }
+            // `not` is the pattern-position `!` and behaves the same way: it is not a
+            // decision, and it does not break a surrounding `and`/`or` run (see the
+            // note on `RULE_PREFIX_UNARY_EXPRESSION` below). So `o is not null` costs
+            // nothing beyond the `is` test itself, and
+            // `o is (int and not 0) and not 1` is one `and` run.
+            cp::RULE_UNARY_PATTERN => {}
             // `catch` is cognitive-only (matches SonarC#/SonarJava): a nesting
             // increment plus an ABC condition, but no cyclomatic decision. One
             // rule now covers both the typed and bare forms.
@@ -1265,16 +1276,28 @@ impl Walker<'_> {
             | cp::RULE_BLOCK => {
                 self.current().cognitive.boolean_seq.reset();
             }
-            // The prefix `!` records a not-operator so a following same-kind
-            // boolean operator is not collapsed with the one before the negation
-            // (`a && !b && c` is one run in SonarSource's model, but the run
-            // tracker needs the marker to keep parity with Kotlin).
-            cp::RULE_PREFIX_UNARY_EXPRESSION
-                if PrefixUnaryExpressionContext::from_rule_node(ctx)
-                    .is_some_and(|expr| expr.bang_token().is_some()) =>
-            {
-                self.current().cognitive.boolean_seq.not_operator("!");
-            }
+            // NOTE: the prefix `!` deliberately does NOTHING here.
+            //
+            // Both SonarJava (`CognitiveComplexityVisitor.flattenLogicalExpression`)
+            // and SonarKotlin (`CognitiveComplexity.flattenOperators`) flatten only
+            // the `&&`/`||` operators, treating a negated operand as a plain operand
+            // where flattening stops — the `!` is invisible to the run. So
+            // `a && !b && c` is a single `&&` run and costs exactly what
+            // `a && b && c` costs.
+            //
+            // This previously called `boolean_seq.not_operator("!")`, which broke the
+            // run and scored 2 where `mehen-java` scored 1 on identical logic. The
+            // comment justifying it claimed parity with Kotlin — and `mehen-kotlin`
+            // does score 2 — but Kotlin is the deviation, not the reference:
+            // `mehen-java`'s `negation_does_not_break_boolean_run` cites *both* Sonar
+            // implementations, SonarKotlin's included, for the correct behaviour.
+            //
+            // `mehen-kotlin` is deliberately left alone here. Its
+            // `kotlin_negation_breaks_boolean_sequence` test asserts the opposite, so
+            // the two walkers now disagree on identical logic and one of the two tests
+            // is wrong about its own citation. Reconciling that is a Kotlin-scoped
+            // change with its own snapshot churn, not something to fold into the C#
+            // PR — filed as a follow-up rather than settled by fiat here.
             _ => {}
         }
     }
@@ -1371,6 +1394,16 @@ impl Walker<'_> {
                 // The ternary `?:` — a decision, an ABC condition, and a
                 // cognitive nesting structure (SonarSource scores it like an
                 // `if`). Keyed on `?` so the `:` does not score a second time.
+                //
+                // NOTE: a *null-conditional* access (`a?.B`, `a?[i]`) also carries a
+                // bare `?` and is NOT scored anywhere — see the module header. It
+                // arguably should be an ABC condition (it short-circuits on null,
+                // exactly as `??` does, and `??` counts), but hub inlining scatters
+                // its `?` onto an inner `expression` node holding only the receiver,
+                // and `member_binding_expression`/`element_binding_expression` are
+                // inlined too — so neither the token nor a rule index is a reliable
+                // anchor. Left as a known gap rather than a half-working match that
+                // fires on some chains and not others.
                 cl::QUESTION => {
                     let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                     self.current().cyclomatic.record_decision();
@@ -1402,13 +1435,26 @@ impl Walker<'_> {
             // An initialized declarator is an assignment. Roslyn spells the
             // initializer as an `equals_value_clause` child rather than a bare
             // `=` token, so the presence of that child *is* the initialization.
+            //
+            // `property_declaration` is here for the auto-property initializer
+            // (`public int P { get; set; } = 5;`), which carries the clause directly
+            // on the declaration rather than through a `variable_declarator` — so it
+            // scored no assignment at all while the equivalent field
+            // (`public int P = 5;`) scored one.
             cp::RULE_VARIABLE_DECLARATOR
             | cp::RULE_PARAMETER
             | cp::RULE_ENUM_MEMBER_DECLARATION
+            | cp::RULE_PROPERTY_DECLARATION
                 if ctx.child_rule(cp::RULE_EQUALS_VALUE_CLAUSE).is_some() =>
             {
                 self.current().abc.record_assignment();
             }
+            // A query `let` binds a name to a value (`from x in s let y = f(x) …`),
+            // which is an assignment by any reading. Its `=` is a bare token on
+            // `let_clause : KW_LET identifier_token EQ expression` rather than an
+            // `equals_value_clause`, and `let_clause` is not part of the inlined
+            // `expression`, so neither the token scan nor `classify_expression` saw it.
+            cp::RULE_LET_CLAUSE => self.current().abc.record_assignment(),
             _ => {}
         }
     }
