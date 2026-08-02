@@ -310,6 +310,16 @@ struct ChildHint {
     /// Every other expression body hangs off a declaration that is already
     /// counted, where counting the clause too would double.
     in_accessor_body: bool,
+    /// We are inside a creation expression, so a nested `initializer_expression` is
+    /// that creation's element list rather than an allocation of its own.
+    ///
+    /// A brace-only array initializer (`int[] v = { 1, 2 };`) IS an allocation — Roslyn
+    /// represents the right-hand side as a bare `initializer_expression`, so nothing in
+    /// the creation list fired and it scored no ABC branch while `new[] { 1, 2 }` and
+    /// `[1, 2]` each scored one. But `new[] { 1, 2 }` *nests* an initializer inside the
+    /// creation, so counting the rule unconditionally would score that twice. This flag
+    /// marks the nested position.
+    in_creation_expression: bool,
     /// The enclosing member returns a *value*, so an expression body is a return.
     ///
     /// `int F() => 1;` has no `return_statement` node, so NExit stayed 0 while the
@@ -746,6 +756,21 @@ impl Walker<'_> {
                 | cp::RULE_FUNCTION_POINTER_PARAMETER_LIST
         );
 
+        // Sticky for the whole creation subtree: `new[] { new[] { 1 } }` has a nested
+        // creation whose own initializer must also not double-count.
+        let in_creation_expression = hint.in_creation_expression
+            || matches!(
+                ri,
+                cp::RULE_OBJECT_CREATION_EXPRESSION
+                    | cp::RULE_IMPLICIT_OBJECT_CREATION_EXPRESSION
+                    | cp::RULE_ANONYMOUS_OBJECT_CREATION_EXPRESSION
+                    | cp::RULE_ARRAY_CREATION_EXPRESSION
+                    | cp::RULE_IMPLICIT_ARRAY_CREATION_EXPRESSION
+                    | cp::RULE_COLLECTION_EXPRESSION
+                    | cp::RULE_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
+                    | cp::RULE_IMPLICIT_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
+            );
+
         // The operator symbol in `public static C operator ++(C v)` is a direct
         // token of the declaration, so a non-propagating flag covers exactly the
         // signature's own terminals and leaves the parameter list and body alone.
@@ -808,6 +833,7 @@ impl Walker<'_> {
                 in_shift_operator,
                 in_type_delimiter,
                 in_operator_symbol,
+                in_creation_expression,
                 in_accessor_body,
                 returns_value,
                 accessor_owner: accessor_owner.clone(),
@@ -1215,7 +1241,7 @@ impl Walker<'_> {
         if !hint.in_attributes {
             self.classify_control_flow(ctx, ri, hint);
             self.classify_expression(ctx, ri);
-            self.classify_abc_rule(ctx, ri);
+            self.classify_abc_rule(ctx, ri, hint);
         }
         // A split shift operator is one Halstead operator, recorded here because
         // `visit_terminal` skips its individual `>` tokens (see the
@@ -1580,7 +1606,7 @@ impl Walker<'_> {
 
     /// ABC accounting for the non-`expression` rules that carry an assignment or
     /// a branch.
-    fn classify_abc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize) {
+    fn classify_abc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) {
         match ri {
             // Object creation is its own rule rather than part of the inlined
             // expression cycle, so its branch is recorded here.
@@ -1608,6 +1634,17 @@ impl Walker<'_> {
             | cp::RULE_IMPLICIT_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
             | cp::RULE_CONSTRUCTOR_INITIALIZER
             | cp::RULE_PRIMARY_CONSTRUCTOR_BASE_TYPE => self.current().abc.record_branch(),
+            // A *bare* initializer is an allocation: `int[] v = { 1, 2 };` has no `new`
+            // and no `[…]`, so Roslyn puts an `initializer_expression` directly on the
+            // right-hand side and nothing above fired — it scored 0 where `new[] { 1, 2 }`
+            // and `[1, 2]` each scored 1.
+            //
+            // Guarded on `in_creation_expression` because a creation *nests* an
+            // initializer for its elements, and counting the rule unconditionally would
+            // score `new[] { 1, 2 }` twice.
+            cp::RULE_INITIALIZER_EXPRESSION if !hint.in_creation_expression => {
+                self.current().abc.record_branch();
+            }
             // A *named* anonymous-object member (`new { A = 1 }`) is an assignment.
             // Roslyn puts the `A =` in a `name_equals` child of
             // `anonymous_object_member_declarator`, so it is neither an

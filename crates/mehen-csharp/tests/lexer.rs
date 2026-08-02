@@ -354,6 +354,31 @@ fn a_directive_ends_at_every_csharp_line_terminator() {
 }
 
 #[test]
+fn every_enumerated_raw_string_fence_width_parses() {
+    // The fence-length rule ("close on a run at least as long as the opening one") needs
+    // state to express in general — a member holding the opening width and a predicate
+    // comparing each candidate closer. Every alternative here is stateless, so the widths
+    // are enumerated three through eight, each embedding one fewer quote than its fence.
+    //
+    // Six through eight were added after a review found that five was the ceiling: a
+    // six-quote fence (which exists to embed `"""""`) reported two diagnostics on valid
+    // C#. Past eight the three-quote arm matches and terminates early, costing the
+    // literal's tail — an acceptable floor, since the deepest fence in the 322-file
+    // corpus is three.
+    for width in 3..=8 {
+        let fence = "\"".repeat(width);
+        let inner = "\"".repeat(width - 1);
+        let source = format!("class C {{ static string M() => {fence}a{inner}b{fence}; }}");
+        assert_eq!(
+            lloc(&source),
+            2.0,
+            "a {width}-quote fence must embed a {}-quote run",
+            width - 1
+        );
+    }
+}
+
+#[test]
 fn a_longer_raw_string_fence_can_embed_three_quotes() {
     // REGRESSION. `""""a"""b""""` is valid C# — a four-quote fence exists precisely so
     // the content can contain `"""` — but a single non-greedy rule stopped at the

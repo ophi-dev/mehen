@@ -628,3 +628,28 @@ fn overloaded_true_and_false_symbols_are_operators() {
         plain.n1
     );
 }
+
+#[test]
+fn a_brace_only_array_initializer_is_a_branch() {
+    // REGRESSION. `int[] v = { 1, 2 };` has no `new` and no `[…]`, so Roslyn puts a bare
+    // `initializer_expression` on the right-hand side and nothing in the creation list
+    // fired — it scored 0 where `new[] { 1, 2 }` and `[1, 2]` each scored 1, making ABC
+    // depend on which of three equivalent spellings the author used.
+    let bare = abc("class C { static int[] F() { int[] v = { 1, 2 }; return v; } }");
+    let explicit = abc("class C { static int[] F() { int[] v = new[] { 1, 2 }; return v; } }");
+    let collection = abc("class C { static int[] F() { int[] v = [1, 2]; return v; } }");
+    assert_eq!(bare.1, 1);
+    assert_eq!(bare.1, explicit.1);
+    assert_eq!(bare.1, collection.1);
+}
+
+#[test]
+fn a_creations_own_initializer_is_not_a_second_branch() {
+    // The guard: a creation *nests* an initializer for its elements, so counting the rule
+    // unconditionally would score `new[] { 1, 2 }` twice. Nested creations too —
+    // `new[] { new[] { 1 } }` is two allocations, not four.
+    let nested = abc("class C {
+             static int[][] F() { int[][] v = new[] { new[] { 1 } }; return v; }
+         }");
+    assert_eq!(nested.1, 2, "two creations, each counted once");
+}

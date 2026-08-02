@@ -100,10 +100,20 @@ VERBATIM_STRING_LIT
 // `""""a"""b""""` — valid C#, and the reason longer fences exist — terminated early and
 // left `b""""` as stray tokens.
 //
-// Five and four quotes are spelled out because they are the fences real code uses
-// (three is the default; four to embed a `"""`; five to embed a `""""`). Beyond that
-// the three-quote form still applies and the early-termination caveat returns, which is
-// an acceptable floor: every metric touching a string literal reads only its extent.
+// Enumerated three through eight. The real rule is unbounded — C# allows any fence
+// length — and expressing that needs *state*: a member holding the opening run's width
+// and a predicate comparing each candidate closer against it. Every alternative here is
+// stateless, so the set has to be finite.
+//
+// Eight is the ceiling because each width covers embedding one fewer quote (a six-quote
+// fence exists to embed `"""""`), and content with five consecutive quotes is already
+// vanishingly rare — zero occurrences in the 322-file corpus, where the *deepest* fence
+// used is three. Past eight the three-quote arm still matches and terminates early,
+// which costs the literal's tail rather than the file: every metric touching a string
+// literal reads only its extent.
+//
+// If a real file ever needs a ninth quote, add an arm rather than reaching for state —
+// or file it, since at that point the state is probably worth it.
 //
 // Order is load-bearing twice over. Longest fence first, so a four-quote literal is not
 // claimed by the three-quote rule. And within each length, the single-line form precedes
@@ -117,13 +127,19 @@ VERBATIM_STRING_LIT
 // strings: the intervening statements vanish from every metric with no diagnostic to
 // show for it (a silently wrong tree, the failure mode PROVENANCE.md warns about).
 SL_RAW_STRING_LIT
-    : '"""""' ~[\r\n]*? '"""""' '"'*
+    : '""""""""' ~[\r\n]*? '""""""""' '"'*
+    | '"""""""' ~[\r\n]*? '"""""""' '"'*
+    | '""""""' ~[\r\n]*? '""""""' '"'*
+    | '"""""' ~[\r\n]*? '"""""' '"'*
     | '""""' ~[\r\n]*? '""""' '"'*
     | '"""' ~[\r\n]*? '"""' '"'*
     ;
 
 ML_RAW_STRING_LIT
-    : '"""""' .*? '"""""' '"'*
+    : '""""""""' .*? '""""""""' '"'*
+    | '"""""""' .*? '"""""""' '"'*
+    | '""""""' .*? '""""""' '"'*
+    | '"""""' .*? '"""""' '"'*
     | '""""' .*? '""""' '"'*
     | '"""' .*? '"""' '"'*
     ;
