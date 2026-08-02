@@ -344,3 +344,21 @@ fn crlf_does_not_double_count_a_comment_row() {
     let a = loc("/* a\r\nb */\nclass C { }");
     assert_eq!(a.cloc, 2.0);
 }
+
+#[test]
+fn a_comment_after_a_unicode_terminator_lands_on_its_own_row() {
+    // REGRESSION. `loc_tokens` took each token's start row from `tok.line()`, which the
+    // *runtime's* lexer advances on `\n` alone — so after any other terminator a comment
+    // was routed onto the preceding code row, and its real row fell out as a phantom
+    // blank. The row now comes from the shared `LineIndex`.
+    for terminator in ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'] {
+        let source = format!("class C {{ }}{terminator}// note");
+        let a = loc(&source);
+        assert_eq!(a.cloc, 1.0, "U+{:04X}: one comment row", terminator as u32);
+        assert_eq!(
+            a.blank, 0.0,
+            "U+{:04X}: the comment row must not read as blank",
+            terminator as u32
+        );
+    }
+}

@@ -128,7 +128,7 @@ impl KotlinAnalyzer {
         // straight from that store (all channels, so hidden-channel comments
         // are present — no `fill()` step needed).
         let parsed = parser.into_parsed_file(result);
-        let loc_tokens = collect_loc_tokens(&parsed);
+        let loc_tokens = collect_loc_tokens(&parsed, line_index);
         Some(ParsedKotlin {
             parsed,
             syntax_errors,
@@ -230,7 +230,7 @@ impl LanguageAnalyzer for KotlinAnalyzer {
 /// other token is code. Comments are absent from the parse tree (hidden
 /// channel), so LOC comes from this full token pass — the token store is
 /// eagerly buffered through EOF, so every token (all channels) is present.
-fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
+fn collect_loc_tokens(parsed: &ParsedFile, line_index: &LineIndex) -> Vec<mehen_antlr::LocToken> {
     use mehen_kotlin_parser::kotlin_lexer::{
         AS_SAFE, AT_BOTH_WS, AT_POST_WS, AT_PRE_WS, DELIMITED_COMMENT, EXCL_WS, INSIDE_COMMENT,
         INSIDE_NL, INSIDE_WS, LINE_COMMENT, NL, NOT_IN, NOT_IS, QUEST_WS, WS,
@@ -248,6 +248,7 @@ fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
         &[
             EXCL_WS, NOT_IS, NOT_IN, QUEST_WS, AS_SAFE, AT_POST_WS, AT_PRE_WS, AT_BOTH_WS,
         ],
+        line_index,
     )
 }
 

@@ -80,7 +80,7 @@ impl JavaAnalyzer {
         // straight from that store (all channels, so hidden-channel comments
         // are present — no `fill()` step needed).
         let parsed = parser.into_parsed_file(result);
-        let loc_tokens = collect_loc_tokens(&parsed);
+        let loc_tokens = collect_loc_tokens(&parsed, line_index);
         Some(ParsedJava {
             parsed,
             lexer_diagnostics,
@@ -162,7 +162,7 @@ impl LanguageAnalyzer for JavaAnalyzer {
 /// (annotations are a plain `AT` token followed by a name), so no
 /// trivia-bearing token scan is needed. The token store is eagerly buffered
 /// through EOF, so every token (all channels) is present.
-fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
+fn collect_loc_tokens(parsed: &ParsedFile, line_index: &LineIndex) -> Vec<mehen_antlr::LocToken> {
     use mehen_java_parser::java_lexer::{COMMENT, LINE_COMMENT, WS};
 
     mehen_antlr::loc_tokens(
@@ -173,6 +173,7 @@ fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
         &[COMMENT, LINE_COMMENT],
         &[WS],
         &[],
+        line_index,
     )
 }
 

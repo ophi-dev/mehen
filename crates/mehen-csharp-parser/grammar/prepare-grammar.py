@@ -614,7 +614,20 @@ RESERVED_KEYWORDS = frozenset(
 # the parser into error recovery, and recovery then accumulated diagnostics
 # without bound (>4.29e9 links, 15.5 GB RSS) until it either overflowed the
 # runtime's u32 diagnostic arena or the stack. See PROVENANCE.md.
-NON_IDENTIFIER_LITERALS = frozenset({"u8", "U8"})
+#
+# `u8`/`U8` were excluded here at first, and that was the same mistake in the same
+# comment: they are *contextual* — a suffix only when directly after a string
+# literal — so `class C { int u8; }` is valid C# and reported four diagnostics.
+# The set is now empty, kept as the place to record that: NOTHING identifier-shaped
+# should be withheld from the widening. A token that must not be an identifier in
+# ONE position is narrowed at that rule instead (see COMBINATOR_KEYWORDS, which
+# excludes `and`/`or`/`not` from `single_variable_designation` only).
+#
+# `u8`'s own special treatment survives because it is positional rather than
+# lexical: `utf8_string_literal_token : string_literal_token (KW_U8 | KW_U8_LOWER)`
+# requires the preceding literal, so widening `identifier_token` cannot make a bare
+# `u8` into a suffix.
+NON_IDENTIFIER_LITERALS: frozenset[str] = frozenset()
 
 # Roslyn's grammar lists only decimal and hexadecimal integer literals:
 #

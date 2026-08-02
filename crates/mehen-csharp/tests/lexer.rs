@@ -388,3 +388,24 @@ fn a_longer_fence_works_multi_line_too() {
         2.0
     );
 }
+
+#[test]
+fn u8_is_a_legal_identifier() {
+    // REGRESSION. `u8`/`U8` are *contextual* — a suffix only directly after a string
+    // literal — so `class C { int u8; }` is valid C# and reported four diagnostics.
+    // They had been withheld from the `identifier_token` widening, which is the same
+    // mistake the comment beside that set already warned about for `_`.
+    assert_eq!(lloc("class C { int u8; }"), 2.0);
+    assert_eq!(lloc("class C { int U8; }"), 2.0);
+}
+
+#[test]
+fn the_utf8_suffix_still_works_after_a_literal() {
+    // The counterpart: widening must not break the suffix, which is positional —
+    // `utf8_string_literal_token : string_literal_token (KW_U8 | KW_U8_LOWER)` requires
+    // the preceding literal, so a bare `u8` cannot be mistaken for it.
+    assert_eq!(
+        lloc("class C { static System.ReadOnlySpan<byte> M() => \"x\"u8; }"),
+        2.0
+    );
+}

@@ -78,6 +78,7 @@ pub fn loc_tokens<'a>(
     comment_token_types: &[i32],
     skip_token_types: &[i32],
     trivia_bearing_token_types: &[i32],
+    line_index: &mehen_core::LineIndex,
 ) -> Vec<LocToken> {
     let tokens = tokens.into_iter();
     let mut out = Vec::with_capacity(tokens.size_hint().0);
@@ -96,11 +97,17 @@ pub fn loc_tokens<'a>(
         let (Some(start_byte), Some(stop_byte)) = (tok.start_byte(), tok.stop_byte()) else {
             continue;
         };
+        // The start row comes from `LineIndex`, not `tok.line()`. The runtime's lexer
+        // advances its line counter on `\n` alone, while `LineIndex` counts all five
+        // terminators (CR, NEL, LS, PS too) — so after any of the other four, the
+        // token's own line is short and a comment gets routed onto the preceding code
+        // row, leaving its real row to fall out as a phantom blank.
+        let start_line = line_index.line_at(mehen_core::byte_offset_clamped(start_byte)) as usize;
         push_loc_token(
             tok.token_type(),
             start_byte,
             stop_byte,
-            tok.line(),
+            start_line,
             tok.text_or_empty(),
             comment_token_types,
             skip_token_types,

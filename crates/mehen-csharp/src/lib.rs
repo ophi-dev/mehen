@@ -114,7 +114,7 @@ impl CSharpAnalyzer {
         // straight from that store (all channels, so hidden-channel comments
         // are present — no `fill()` step needed).
         let parsed = parser.into_parsed_file(result);
-        let loc_tokens = collect_loc_tokens(&parsed);
+        let loc_tokens = collect_loc_tokens(&parsed, line_index);
         Some(ParsedCSharp {
             parsed,
             lexer_diagnostics,
@@ -208,7 +208,7 @@ impl LanguageAnalyzer for CSharpAnalyzer {
 /// Unlike Kotlin, C# has no trivia-folding operator tokens, so no trivia-bearing
 /// token scan is needed. The token store is eagerly buffered through EOF, so every
 /// token (all channels) is present.
-fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
+fn collect_loc_tokens(parsed: &ParsedFile, line_index: &LineIndex) -> Vec<mehen_antlr::LocToken> {
     use mehen_csharp_parser::c_sharp_lexer::{
         BYTE_ORDER_MARK, DELIMITED_COMMENT, DELIMITED_DOC_COMMENT, SINGLE_LINE_COMMENT,
         SINGLE_LINE_DOC_COMMENT, WHITESPACES,
@@ -224,6 +224,7 @@ fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
         ],
         &[WHITESPACES, BYTE_ORDER_MARK],
         &[],
+        line_index,
     )
 }
 
