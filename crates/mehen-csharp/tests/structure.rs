@@ -407,3 +407,42 @@ fn union_is_still_a_legal_identifier() {
     let a = analyze_clean("class C { void M() { int union = 1; var x = union; } }");
     assert_eq!(a.root.spaces[0].spaces.len(), 1);
 }
+
+#[test]
+fn a_delegate_does_not_get_a_synthetic_constructor() {
+    // REGRESSION. `delegate int D(int x);` carries a `parameter_list` because that IS
+    // its signature, but the primary-constructor path matched on "has a parameter list"
+    // and fabricated a function named `D` — inflating NOM/NArgs and rolling a phantom
+    // method into the delegate's WMC, which is meant to be a childless space.
+    let a = analyze_clean("delegate int D(int x);");
+    assert_eq!(
+        shape(&a.root),
+        vec![
+            (0, "unit".to_string(), None),
+            (1, "class".to_string(), Some("D".to_string())),
+        ],
+        "a delegate opens a childless type space"
+    );
+}
+
+#[test]
+fn every_primary_constructor_form_still_opens_one() {
+    // The allowlist must not drop a form that genuinely supports a primary constructor.
+    for source in [
+        "class C(int x) { }",
+        "struct C(int x) { }",
+        "record C(int X);",
+    ] {
+        let a = analyze_clean(source);
+        let functions: Vec<_> = shape(&a.root)
+            .into_iter()
+            .filter(|(_, kind, _)| kind == "function")
+            .map(|(_, _, name)| name)
+            .collect();
+        assert_eq!(
+            functions,
+            vec![Some("C".to_string())],
+            "`{source}` must open one constructor space"
+        );
+    }
+}

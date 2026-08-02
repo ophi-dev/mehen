@@ -366,7 +366,20 @@ fn can_launch(program: impl AsRef<std::ffi::OsStr>, arg: &str) -> bool {
 /// provision a matching interpreter rather than inheriting the ambient
 /// `python3`. It receives the resolved generator path because it delegates rule
 /// reachability to `antlr4-rust-gen` instead of reimplementing the analysis.
-fn run_prep(grammar_dir: &Path, target: &AntlrTarget, tools: &Toolchain) -> Result<(), String> {
+///
+/// `out_dir` is a **process-local** scratch directory, not `grammar_dir`. Writing the
+/// derived pair into the shared grammar directory raced: `generate` and
+/// `check-generated` running concurrently in one checkout (a developer alongside CI,
+/// or two xtask invocations) would each truncate and rewrite the same
+/// `CSharpLexer.g4` / `CSharpParser.g4` / `patterns.toml` while the other's generator
+/// was reading them — intermittent generation failures or false drift. The generated
+/// Rust output was already process-scoped; this closes the same gap for its input.
+fn run_prep(
+    grammar_dir: &Path,
+    out_dir: &Path,
+    target: &AntlrTarget,
+    tools: &Toolchain,
+) -> Result<(), String> {
     let (Some(script), Some(source)) = (target.prep_script, target.prep_source) else {
         return Ok(());
     };
@@ -378,7 +391,8 @@ fn run_prep(grammar_dir: &Path, target: &AntlrTarget, tools: &Toolchain) -> Resu
         ));
     }
     let status = Command::new("uv")
-        .args(["run", "--script", script, source, "--out-dir", "."])
+        .args(["run", "--script", script, source, "--out-dir"])
+        .arg(out_dir)
         .arg("--generator")
         .arg(&tools.rust_gen)
         .current_dir(grammar_dir)
@@ -593,7 +607,30 @@ fn run_pipeline_into(
     out_dir: &Path,
 ) -> Result<(), String> {
     let grammar_dir = workspace.join(target.grammar_dir);
-    run_prep(&grammar_dir, target, tools)?;
+
+    // A target with a preparation step derives its `.g4` pair (and `patterns.toml`)
+    // into a process-local scratch directory, and the generator then runs *there* — so
+    // two concurrent xtask invocations in one checkout cannot rewrite each other's
+    // inputs mid-read. A target without one (Kotlin, Java) vendors its pair directly,
+    // so the generator runs in `grammar_dir` and reads read-only files.
+    let prep_dir = target
+        .prep_script
+        .map(|_| scratch_dir("prep", target.slug))
+        .map(Ok::<PathBuf, String>)
+        .transpose()?;
+    if let Some(dir) = &prep_dir {
+        let _ = fs::remove_dir_all(dir);
+        fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+    }
+    run_prep(
+        &grammar_dir,
+        prep_dir.as_deref().unwrap_or(&grammar_dir),
+        target,
+        tools,
+    )?;
+    // Where the generator resolves the `.g4` pair and `patterns.toml` from.
+    let source_dir = prep_dir.as_deref().unwrap_or(&grammar_dir);
+
     let mut cmd = Command::new(&tools.rust_gen);
     cmd.arg(target.lexer_g4)
         .arg(target.parser_g4)
@@ -617,19 +654,22 @@ fn run_pipeline_into(
         .arg(target.grammar_entry_rule)
         .arg("--prune-unreachable");
     if let Some(patterns) = target.sem_patterns {
-        cmd.arg("--sem-patterns").arg(grammar_dir.join(patterns));
+        cmd.arg("--sem-patterns").arg(source_dir.join(patterns));
     }
     for hook in target.option_hooks {
         cmd.arg("--option-hook").arg(hook);
     }
     let gen_status = cmd
-        .current_dir(&grammar_dir)
+        .current_dir(source_dir)
         .status()
         .map_err(|e| format!("failed to launch antlr4-rust-gen: {e}"))?;
     if !gen_status.success() {
         return Err(format!("antlr4-rust-gen failed for `{}`", target.slug));
     }
     normalize_generated(out_dir)?;
+    if let Some(dir) = &prep_dir {
+        let _ = fs::remove_dir_all(dir);
+    }
     Ok(())
 }
 

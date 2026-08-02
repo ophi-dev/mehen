@@ -369,3 +369,27 @@ fn mixing_boolean_operators_still_costs_two() {
     );
     assert_eq!(sum(&a), 2.0);
 }
+
+#[test]
+fn switch_expression_arms_are_independent_boolean_contexts() {
+    // REGRESSION. An arm's result is a bare `expression` with no statement boundary, so
+    // nothing reset the run tracker between arms — `v switch { 1 => a && b, _ => c && d }`
+    // collapsed both `&&` into one run and scored 1 less than the equivalent switch
+    // statement, whose `case` bodies reach a statement rule and reset there.
+    let expression = analyze_clean(
+        "class C {
+             static bool F(int v, bool a, bool b, bool c, bool d) =>
+                 v switch { 1 => a && b, _ => c && d };
+         }",
+    );
+    let statement = analyze_clean(
+        "class C {
+             static bool F(int v, bool a, bool b, bool c, bool d) {
+                 switch (v) { case 1: return a && b; default: return c && d; }
+             }
+         }",
+    );
+    assert_eq!(sum(&expression), sum(&statement));
+    // switch nesting(1) + arm decision(1) + two independent `&&` runs(2) = ... 3.
+    assert_eq!(sum(&expression), 3.0);
+}

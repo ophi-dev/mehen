@@ -10,12 +10,19 @@ to the transform or produced by it:
 | `lexer-tokens.g4.in` | hand-written lexer rules — Roslyn publishes no lexer |
 | `lexer-members.g4.in` | the lexer's `@lexer::members` state; separate because ANTLR requires named actions in the header, before any rule |
 | `prepare-grammar.py` | the transform; a step of parser generation |
-| `CSharpLexer.g4`, `CSharpParser.g4`, `patterns.toml` | **derived, gitignored** |
+| `CSharpLexer.g4`, `CSharpParser.g4`, `patterns.toml` | **derived** into a process-local scratch dir, gitignored here |
 
 `cargo run -p xtask -- antlr generate csharp` runs the transform and then
 `antlr4-rust-gen`, writing the Rust modules in `../src/generated/`. That needs
 [`uv`](https://docs.astral.sh/uv/) in addition to the generator; the script's PEP
 723 block pins the interpreter.
+
+The derived pair goes to a **process-local scratch directory**, and the generator
+runs there — not in this tree. Two xtask invocations in one checkout (a developer
+alongside CI, say) would otherwise each truncate and rewrite the same derived files
+while the other's generator was reading them. To inspect the derived grammar, run the
+script by hand: `uv run prepare-grammar.py CSharp.Generated.g4 --out-dir .`, which is
+also how you iterate on the transform.
 
 ## Source
 

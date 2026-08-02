@@ -876,12 +876,29 @@ impl Walker<'_> {
         // opened immediately after the type space and closed here: the parameter list
         // is the whole of it, since a primary constructor has no body of its own.
         //
-        // `extension_block_declaration` is excluded even though it carries the same
-        // `parameter_list?`: that list is the extension *receiver* (`extension(string
-        // s)`), not a constructor — nothing is constructed, and the block has no name
-        // to give the space.
-        if ri != cp::RULE_EXTENSION_BLOCK_DECLARATION
-            && let Some(params) = type_ctx.child_rule(cp::RULE_PARAMETER_LIST)
+        // Matched on an allowlist of the declaration kinds that actually *support* a
+        // primary constructor, not on "has a `parameter_list`" — several type-like
+        // rules carry that child for unrelated reasons and would fabricate a
+        // constructor from it:
+        //
+        // - `delegate_declaration` — `delegate int D(int x);` has a parameter list
+        //   because that IS the delegate's signature. It invented a function named `D`,
+        //   inflating NOM/NArgs and rolling a phantom method into the delegate's WMC,
+        //   which is meant to be a childless space.
+        // - `extension_block_declaration` — the list is the extension *receiver*
+        //   (`extension(string s)`); nothing is constructed and there is no name.
+        //
+        // C# allows a primary constructor on exactly `class`, `struct`, `record`, and
+        // `record struct` (the last two are both `record_declaration` here), plus
+        // `interface` since C# 12 — where it declares parameters rather than a body,
+        // but is still spelled and named the same way.
+        if matches!(
+            ri,
+            cp::RULE_CLASS_DECLARATION
+                | cp::RULE_STRUCT_DECLARATION
+                | cp::RULE_RECORD_DECLARATION
+                | cp::RULE_INTERFACE_DECLARATION
+        ) && let Some(params) = type_ctx.child_rule(cp::RULE_PARAMETER_LIST)
         {
             let args = count_parameters(params);
             let mut ctor = self.new_space_state(params);
@@ -1196,11 +1213,19 @@ impl Walker<'_> {
             //
             // A discard arm (`_ => …`) is excluded for the same reason `default:` is
             // not a decision: it is the fall-through, not a test.
+            //
+            // Each arm also starts a fresh boolean sequence. Arms are independent
+            // expressions — a `case`'s body reaches `RULE_BLOCK` or a statement rule and
+            // resets there, but an arm's result is a bare `expression` with no such
+            // boundary. Without the reset, `v switch { 1 => a && b, _ => c && d }`
+            // collapsed both `&&` into one run and scored 1 less than the equivalent
+            // switch statement.
             cp::RULE_SWITCH_EXPRESSION_ARM => {
                 if !is_discard_arm(ctx) {
                     self.current().cyclomatic.record_decision();
                     self.current().abc.record_condition();
                 }
+                self.current().cognitive.boolean_seq.reset();
             }
             // NOTE: `try` and `lock` deliberately score NOTHING. SonarSource's
             // cognitive-complexity spec increments on `catch` (a handler is the

@@ -1,6 +1,12 @@
-# Derived by `prepare-grammar.py` during `cargo xtask antlr generate csharp`
-# from the vendored `CSharp.Generated.g4`. Build artifacts, not sources — see
-# PROVENANCE.md.
+# Derived from the vendored `CSharp.Generated.g4` by `prepare-grammar.py`.
+#
+# Since the concurrency fix these land in a process-local scratch directory
+# rather than here, so `cargo xtask antlr generate csharp` no longer writes them
+# into this tree at all. Kept ignored so a hand-run of the script
+# (`uv run prepare-grammar.py CSharp.Generated.g4 --out-dir .`, which is how you
+# iterate on the transform) does not show up as untracked noise.
+#
+# Build artifacts either way, never sources — see PROVENANCE.md.
 /CSharpLexer.g4
 /CSharpParser.g4
 /patterns.toml
