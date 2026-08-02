@@ -526,3 +526,54 @@ fn anonymous_object_creation_is_a_branch() {
     let (_, b, _) = abc("class C { static object F() => new { A = 1 }; }");
     assert_eq!(b, 1);
 }
+
+#[test]
+fn a_collection_expression_is_a_branch() {
+    // REGRESSION. C# 12's `int[] v = [1, 2];` allocates exactly as `new[] { 1, 2 }`
+    // does — the spelling changed, not the operation — but `collection_expression` was
+    // missing from the creation list, so it scored 0 where the older form scored 1.
+    let collection = abc("class C { static int[] F() { int[] v = [1, 2]; return v; } }");
+    let explicit = abc("class C { static int[] F() { int[] v = new[] { 1, 2 }; return v; } }");
+    assert_eq!(collection.1, 1);
+    assert_eq!(collection.1, explicit.1);
+}
+
+#[test]
+fn a_named_anonymous_object_member_is_an_assignment() {
+    // REGRESSION. Roslyn puts the `A =` of `new { A = 1 }` in a `name_equals` child of
+    // `anonymous_object_member_declarator`, so it is neither an assignment-shaped
+    // `expression` nor an `equals_value_clause` — it recorded nothing, while the
+    // equivalent `new C { A = 1 }` recorded one.
+    let (a, _, _) = abc("class C { static object F() => new { A = 1 }; }");
+    assert_eq!(a, 1);
+}
+
+#[test]
+fn an_inferred_anonymous_member_is_not_an_assignment() {
+    // The counterpart: `new { x }` infers the member name from the expression and
+    // assigns nothing explicitly, so it has no `name_equals` child and records nothing.
+    let (a, _, _) = abc("class C { static object F(int x) => new { x }; }");
+    assert_eq!(a, 0);
+}
+
+#[test]
+fn a_using_alias_is_not_an_assignment() {
+    // `name_equals` is shared with using-alias and attribute-argument names, which is
+    // why the match is at the *declarator* rather than at `name_equals` itself.
+    assert_eq!(abc("using S = System.String;\nclass C { }"), (0, 0, 0));
+}
+
+#[test]
+fn an_empty_interpolated_string_is_one_operand() {
+    // REGRESSION. `$""` produces no `INTERPOLATED_TEXT` token at all — only the start
+    // and end delimiters, which are operators — so it contributed zero Halstead
+    // operands where `""` contributes one, skewing volume and the maintainability
+    // index. Mirrors `mehen-kotlin`'s `classify_empty_string_operand`.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let interpolated = halstead("class C { static string F() { var s = $\"\"; return s; } }");
+    let plain = halstead("class C { static string F() { var s = \"\"; return s; } }");
+    assert_eq!(interpolated.n2, plain.n2, "empty `$\"\"` is one operand");
+}

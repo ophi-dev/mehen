@@ -405,7 +405,20 @@ INCOMPLETE_MEMBER_ALT = "  | incomplete_member\n"
 #
 # With the real token in place the hoist is safe: `T P { … }` no longer predicts the
 # record path at all, because `T` is not `KW_RECORD`.
-RECORD_DECL_ALT = "  | record_declaration\n"
+# `union_declaration` has the identical problem for the identical reason: `union` is
+# also only contextual (widened back into `identifier_token`), so `union Result { }`
+# matches `method_declaration` with `union` as the return type and `Result` as the
+# name. It differs from `record` in one detail — a union WITH members forces the type
+# path, because a member body cannot follow a method signature — so only the empty and
+# semicolon forms mis-parsed, which is why it survived longer.
+#
+# Both are hoisted together. `record_declaration` needed a real `KW_RECORD` token for
+# the hoist to be safe (see RECORD_KEYWORD_RULE); `union_declaration` already has a
+# real `KW_UNION` token, since Roslyn spells that keyword as a literal.
+HOISTED_TYPE_ALTS = (
+    "  | record_declaration\n",
+    "  | union_declaration\n",
+)
 MEMBER_METHOD_ALT = "  | base_method_declaration\n"
 
 # The pattern-combinator keywords (C# 9 `and` / `or` / `not`). Contextual, so
@@ -1022,7 +1035,8 @@ def main() -> int:
     src = src.replace(expression_rule.group(0), f"expression\n{reordered}  ;\n", 1)
 
     # -- 2g. Prioritize record_declaration in member position ----------------
-    # See RECORD_DECL_ALT: `record R(int X);` parses as a phantom *method* otherwise,
+    # See HOISTED_TYPE_ALTS: `record R(int X);` / `union U { }` parse as phantom
+    # *methods* otherwise,
     # because `record` is widened back into `identifier_token` and so is a viable
     # return type. Safe only because `record_keyword` is a real KW_RECORD token now.
     member_rule = rule_span(src, "member_declaration")
@@ -1036,20 +1050,22 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    if RECORD_DECL_ALT in body:
+    already = [alt.strip(" |\n") for alt in HOISTED_TYPE_ALTS if alt in body]
+    if already:
         print(
-            "error: record_declaration is already a member_declaration alternative",
+            "error: already a member_declaration alternative: " + ", ".join(already),
             file=sys.stderr,
         )
         return 1
     src = src.replace(
         member_rule.group(0),
         "member_declaration\n"
-        + body.replace(MEMBER_METHOD_ALT, RECORD_DECL_ALT + MEMBER_METHOD_ALT, 1)
+        + body.replace(MEMBER_METHOD_ALT, "".join(HOISTED_TYPE_ALTS) + MEMBER_METHOD_ALT, 1)
         + "  ;\n",
         1,
     )
-    print("hoisted record_declaration ahead of base_method_declaration")
+    hoisted = ", ".join(alt.strip(" |\n") for alt in HOISTED_TYPE_ALTS)
+    print(f"hoisted {hoisted} ahead of base_method_declaration")
 
     # -- 2h. Drop the error-recovery member alternative ----------------------
     # See INCOMPLETE_MEMBER_ALT: it makes `class C { int }` an error-free parse.

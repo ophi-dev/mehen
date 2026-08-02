@@ -382,3 +382,28 @@ fn conversion_operators_are_named_by_their_target_type() {
         ]
     );
 }
+
+#[test]
+fn a_union_declaration_opens_a_type_space() {
+    // REGRESSION, and the same shape as the `record` misparse: `union` is only a
+    // contextual keyword, so it is widened back into `identifier_token` and
+    // `union Result { }` matched `method_declaration` with `union` as the return type.
+    // It differs from `record` in one detail — a union *with members* forces the type
+    // path, because a member body cannot follow a method signature — which is why only
+    // the empty form mis-parsed and why this survived longer.
+    let empty = analyze_clean("union Result { }");
+    assert_eq!(empty.root.spaces[0].kind, SpaceKind::Class);
+    assert_eq!(empty.root.spaces[0].name.as_deref(), Some("Result"));
+
+    // With members it must match the `struct` control exactly.
+    let union = analyze_clean("union Result { public int A; public void M() { } }");
+    let structure = analyze_clean("struct Result { public int A; public void M() { } }");
+    assert_eq!(shape(&union.root), shape(&structure.root));
+}
+
+#[test]
+fn union_is_still_a_legal_identifier() {
+    // Hoisting `union_declaration` must not make the word reserved.
+    let a = analyze_clean("class C { void M() { int union = 1; var x = union; } }");
+    assert_eq!(a.root.spaces[0].spaces.len(), 1);
+}

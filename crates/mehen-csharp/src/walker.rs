@@ -1124,6 +1124,23 @@ impl Walker<'_> {
                 text: None,
             });
         }
+        // An *empty* interpolated string (`$""`, and the verbatim and raw equivalents)
+        // produces no `INTERPOLATED_TEXT` token at all — the lexer emits only the start
+        // and end delimiters, which are operators. So the expression contributed zero
+        // Halstead operands where the equivalent `""` contributes one, skewing volume
+        // and the maintainability index. Recorded here at the rule, mirroring
+        // `mehen-kotlin`'s `classify_empty_string_operand`.
+        //
+        // "Empty" means no content *rules*: an interpolation hole or a text run is a
+        // child rule, so this fires only when there are none.
+        if ri == cp::RULE_INTERPOLATED_STRING_EXPRESSION
+            && !ctx.children().any(|child| child.as_rule().is_some())
+        {
+            self.current().halstead.observe_operand(HalsteadOperand {
+                kind: SmolStr::new("Operand"),
+                text: Some(SmolStr::new("\"\"")),
+            });
+        }
         self.classify_loc_rule(ctx, ri, hint);
     }
 
@@ -1451,15 +1468,34 @@ impl Walker<'_> {
             // `anonymous_object_creation_expression` (`new { A = 1 }`) belongs here
             // too. It has no `argument_list`, so `classify_expression`'s invocation
             // shape never sees it, and a real allocation scored nothing.
+            // C# 12 collection expressions (`int[] v = [1, 2];`) allocate exactly as
+            // `new[] { 1, 2 }` does — the spelling changed, not the operation.
             cp::RULE_OBJECT_CREATION_EXPRESSION
             | cp::RULE_IMPLICIT_OBJECT_CREATION_EXPRESSION
             | cp::RULE_ANONYMOUS_OBJECT_CREATION_EXPRESSION
             | cp::RULE_ARRAY_CREATION_EXPRESSION
             | cp::RULE_IMPLICIT_ARRAY_CREATION_EXPRESSION
+            | cp::RULE_COLLECTION_EXPRESSION
             | cp::RULE_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
             | cp::RULE_IMPLICIT_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
             | cp::RULE_CONSTRUCTOR_INITIALIZER
             | cp::RULE_PRIMARY_CONSTRUCTOR_BASE_TYPE => self.current().abc.record_branch(),
+            // A *named* anonymous-object member (`new { A = 1 }`) is an assignment.
+            // Roslyn puts the `A =` in a `name_equals` child of
+            // `anonymous_object_member_declarator`, so it is neither an
+            // assignment-shaped `expression` nor an `equals_value_clause` — it was
+            // recording nothing, while the equivalent `new C { A = 1 }` recorded one.
+            //
+            // Matched at the *declarator* rather than at `name_equals`, because that
+            // rule is shared with using-alias and attribute-argument names, which are
+            // not assignments. The unnamed form (`new { x }`, inferring the member name
+            // from the expression) has no `name_equals` child and correctly records
+            // nothing.
+            cp::RULE_ANONYMOUS_OBJECT_MEMBER_DECLARATOR
+                if ctx.child_rule(cp::RULE_NAME_EQUALS).is_some() =>
+            {
+                self.current().abc.record_assignment();
+            }
             // A LINQ `where` is a filter predicate — the query-expression equivalent of
             // an `if`, and one ABC condition. Its own comparison (if any) is counted
             // separately by the token scan, exactly as `if (x > 0)` counts two; a
@@ -1575,6 +1611,7 @@ impl Walker<'_> {
                 | cp::RULE_INTERFACE_DECLARATION
                 | cp::RULE_ENUM_DECLARATION
                 | cp::RULE_RECORD_DECLARATION
+                | cp::RULE_UNION_DECLARATION
                 | cp::RULE_DELEGATE_DECLARATION
                 | cp::RULE_NAMESPACE_DECLARATION
                 | cp::RULE_FILE_SCOPED_NAMESPACE_DECLARATION
@@ -1650,6 +1687,10 @@ fn opens_type_like(ri: usize) -> bool {
             // Roslyn models `record` / `record struct` as their own node rather
             // than a modifier on a class, so it is a peer here.
             | cp::RULE_RECORD_DECLARATION
+            // A `union` is a type declaration like any other in this grammar. Without
+            // it the declaration opened no space at all, so a union's members attached
+            // to the enclosing type or unit and its NPA/NPM/WMC vanished.
+            | cp::RULE_UNION_DECLARATION
             // A C# 14 `extension(T x) { … }` block is a member container in its own
             // right: it holds `member_declaration*` exactly as a class body does. It
             // has no name of its own, so the space is anonymous — but it must open
@@ -1929,6 +1970,7 @@ fn declares_member(ri: usize) -> bool {
             | cp::RULE_INTERFACE_DECLARATION
             | cp::RULE_ENUM_DECLARATION
             | cp::RULE_RECORD_DECLARATION
+            | cp::RULE_UNION_DECLARATION
     )
 }
 
