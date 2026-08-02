@@ -630,6 +630,15 @@ impl Walker<'_> {
         // `visit_children`. They are listed here as well so the enclosing run is
         // restored after the last element, making the initializer one operand from
         // outside just as a call is.
+        //
+        // A switch *label* deliberately does NOT isolate, though it looks like it should.
+        // Each label already resets at `case_switch_label`/`case_pattern_switch_label` in
+        // `classify_rule`, and that reset runs before the label's own subtree — which is
+        // the right order here (unlike the `when` guard, whose reset had to move) because
+        // a label's pattern is the *first* thing in it. Measured: consecutive
+        // `case > 0 and < 10:` / `case > 20 and < 30:` labels score 3, which is correct
+        // (switch +1, two independent `and` runs +2), and adding an isolation here changed
+        // nothing.
         let saved_bool = if matches!(
             ri,
             cp::RULE_ARGUMENT
@@ -841,7 +850,7 @@ impl Walker<'_> {
             | cp::RULE_OPERATOR_DECLARATION
             | cp::RULE_LOCAL_FUNCTION_STATEMENT => ctx
                 .child_rule(cp::RULE_TYPE)
-                .is_some_and(|ty| ty.text() != "void"),
+                .is_some_and(|ty| !type_is_void_like(&ty.text())),
             // A constructor, destructor, and anonymous method (`delegate { … }`, which
             // has no expression-body form) return nothing here.
             cp::RULE_CONSTRUCTOR_DECLARATION
@@ -1079,6 +1088,17 @@ impl Walker<'_> {
         ) && let Some(params) = type_ctx.child_rule(cp::RULE_PARAMETER_LIST)
         {
             let args = count_parameters(params);
+            // NPM on the enclosing type, which is the space currently on top: an explicit
+            // `class C { public C(int x) { } }` reaches `classify_type_member` and records
+            // a class method there, but a primary constructor has no `member_declaration`
+            // to route through — so NPM depended on which spelling the author chose.
+            //
+            // Always public: a primary constructor's accessibility cannot be narrowed
+            // (there are no modifiers to put on it), and its parameters *are* the type's
+            // construction surface. The container is `Class` for all three declaration
+            // kinds here — `struct` and `record` are class-like for NPM, as
+            // `open_type_space` already treats them.
+            self.current().npm.record_method(ContainerKind::Class, true);
             let mut ctor = self.new_space_state(params);
             ctor.nom.record_function();
             ctor.nargs.record_function_args(args);
@@ -1905,6 +1925,31 @@ impl Walker<'_> {
 // Free helpers (top-down tree inspection — no parent pointers).
 // --------------------------------------------------------------------
 
+/// Whether a declared return type yields no value, so an expression body is not a
+/// return for NExit purposes.
+///
+/// `void` is the obvious one. The non-generic awaitables are the same thing in an
+/// `async` method: `async Task M() => await Work();` produces no result, and its
+/// block-bodied twin `async Task M() { await Work(); }` records no exit — so counting
+/// the arrow form made NExit depend on body syntax for what is a very common shape in
+/// modern C#. `Task<T>` and `ValueTask<T>` *do* return, which is why this matches the
+/// bare names only.
+///
+/// Matched on the type's text, which is all a syntax-only walker has: `System.Threading`
+/// is not resolved, so a user-defined type literally named `Task` would be treated as
+/// void-like. That is the same class of trade the grammar makes for contextual keywords,
+/// and the alternative — counting every `async Task` method's arrow body as a return —
+/// is wrong far more often.
+///
+/// `global::`-qualified and namespace-qualified spellings are accepted by comparing the
+/// last dot-separated segment, so `System.Threading.Tasks.Task` matches. Any generic
+/// argument list makes the text end in `>`, which no bare name does, so `Task<int>`
+/// cannot match by construction.
+fn type_is_void_like(text: &str) -> bool {
+    let name = text.rsplit(['.', ':']).next().unwrap_or(text).trim();
+    matches!(name, "void" | "Task" | "ValueTask")
+}
+
 /// Reduce an identifier token's text to the *name* it denotes, for use as a
 /// Halstead operand key.
 ///
@@ -2337,9 +2382,22 @@ fn is_discard_arm(ctx: RuleNodeView<'_>) -> bool {
     if arm.when_clause().is_some() {
         return false;
     }
-    arm.pattern()
-        .ok()
-        .is_some_and(|pattern| pattern.discard_pattern().is_some() || pattern.text() == "_")
+    arm.pattern().ok().is_some_and(|pattern| {
+        pattern.discard_pattern().is_some()
+            || pattern.text() == "_"
+            // A `var` pattern always matches too, so an unguarded `var x => …` is the
+            // fall-through just as `_ => …` is — it binds the subject and tests nothing.
+            // It was scored as a decision and an ABC condition, so the two spellings of
+            // one catch-all disagreed.
+            //
+            // Both designation shapes qualify. A `var` pattern never tests the type, so
+            // even the deconstructing `var (a, b) => …` succeeds whenever the subject is
+            // deconstructible — which the compiler has already established statically.
+            // (A *positional* pattern like `(1, 1) => …` does test, and is a different
+            // rule.) Measured: both forms scored cyclomatic 3 / conditions 2 against the
+            // discard's 2 / 1.
+            || pattern.var_pattern().is_some()
+    })
 }
 
 /// Is this invocation-shaped `expression` the `nameof` pseudo-call?

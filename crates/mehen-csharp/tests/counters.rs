@@ -392,3 +392,70 @@ fn a_throw_inside_a_larger_expression_body_is_a_second_exit() {
         metrics_json::nexits(&block.root.metrics).sum,
     );
 }
+
+#[test]
+fn a_primary_constructor_is_a_public_method_of_its_type() {
+    // REGRESSION. A primary constructor records NOM, NArgs, and WMC, but had no
+    // `member_declaration` to route through — so unlike the explicit spelling, which
+    // reaches `classify_type_member`, it recorded no NPM. The type's public API therefore
+    // depended on which constructor spelling the author chose.
+    //
+    // Always public: a primary constructor's accessibility cannot be narrowed (there are
+    // no modifiers to put on it), and its parameters ARE the construction surface.
+    let primary = analyze_clean("class C(int x) { }");
+    let explicit = analyze_clean("class C { public C(int x) { } }");
+    // `npm.classes` is the PUBLIC class-method count; `npm.class_methods` is all of them.
+    let npm = |a: &mehen_core::LanguageAnalysis| {
+        let m = metrics_json::npm(&a.root.metrics);
+        (m.classes, m.class_methods)
+    };
+    assert_eq!(npm(&primary), npm(&explicit));
+    assert_eq!(npm(&primary), (1.0, 1.0));
+
+    // `struct` and `record` are class-like for NPM, as they are for the rest of the
+    // family, so all three declaration kinds that admit a primary constructor agree.
+    for source in ["struct S(int x) { }", "record R(int X);"] {
+        assert_eq!(npm(&analyze_clean(source)), (1.0, 1.0), "{source}");
+    }
+}
+
+#[test]
+fn a_void_like_async_expression_body_is_not_an_exit() {
+    // REGRESSION. `returns_value` tested the declared type against the text `"void"`, so
+    // `async Task M() => await Work();` looked like it returned — but it produces no
+    // result, and its block-bodied twin records no exit. NExit therefore depended on body
+    // syntax for one of the most common shapes in modern C#.
+    let nexit = |source: &str| metrics_json::nexits(&analyze_clean(source).root.metrics).sum;
+
+    // The non-generic awaitables are void-like: arrow and block forms must agree.
+    for ty in ["Task", "ValueTask", "System.Threading.Tasks.Task"] {
+        let arrow = nexit(&format!(
+            "using System.Threading.Tasks;
+             class C {{ static async {ty} M() => await Task.Delay(1); }}"
+        ));
+        let block = nexit(&format!(
+            "using System.Threading.Tasks;
+             class C {{ static async {ty} M() {{ await Task.Delay(1); }} }}"
+        ));
+        assert_eq!(arrow, block, "`{ty}` is void-like");
+        assert_eq!(arrow, 0.0, "`{ty}` yields no value");
+    }
+
+    // The generic forms DO return, so they must keep their exit — the fix must not mute
+    // every task-returning method.
+    for ty in ["Task<int>", "ValueTask<int>"] {
+        let arrow = nexit(&format!(
+            "using System.Threading.Tasks;
+             class C {{ static async {ty} M() => await Task.FromResult(1); }}"
+        ));
+        assert_eq!(arrow, 1.0, "`{ty}` returns a value");
+    }
+
+    // And an ordinary value-returning arrow body still counts, so the void-like set did
+    // not widen into everything.
+    assert_eq!(nexit("class C { static int M() => 1; }"), 1.0);
+    assert_eq!(
+        nexit("class C { static void W() { } static void M() => W(); }"),
+        0.0
+    );
+}

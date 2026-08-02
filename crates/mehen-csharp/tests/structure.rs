@@ -596,3 +596,67 @@ fn an_interface_does_not_take_a_primary_constructor() {
         .count();
     assert_eq!(functions, 0, "no constructor for an invalid declaration");
 }
+
+#[test]
+fn a_var_pattern_is_not_a_constant_pattern() {
+    // REGRESSION, and another silent misparse: `var x` in pattern position parsed as a
+    // **constant pattern**, so `var_pattern` was unreachable. Two alternatives had to be
+    // cleared, and the second was the surprise —
+    //
+    // - `constant_pattern : expression` is a catch-all listed *second* in `pattern`, and
+    //   hub inlining folds the whole expression cycle into one rule (including
+    //   `declaration_expression`), so `var x` is a viable "expression";
+    // - `declaration_pattern : type variable_designation` would take it next anyway,
+    //   because `var` is contextual and hence a viable `type`.
+    //
+    // Measured on the tree: the arm's pattern came back as rule 115 (`constant_pattern`)
+    // and is now 134 (`var_pattern`).
+    //
+    // Asserted here through its consequence, which is what a metric consumer sees: an
+    // unguarded `var x =>` always matches, so it is the fall-through exactly as `_ =>`
+    // is, and the two spellings of one catch-all must agree.
+    let var_arm =
+        analyze_clean("class C { static int F(int v) => v switch { 1 => 1, var x => x }; }");
+    let discard = analyze_clean("class C { static int F(int v) => v switch { 1 => 1, _ => 0 }; }");
+    let cyclo = |a: &mehen_core::LanguageAnalysis| {
+        mehen_report::metrics_json::cyclomatic(&a.root.metrics).sum
+    };
+    assert_eq!(cyclo(&var_arm), cyclo(&discard));
+
+    // The deconstructing form qualifies too: a `var` pattern never tests the type, so
+    // `var (a, b)` succeeds whenever the subject is deconstructible — which the compiler
+    // has already established statically.
+    let decon = analyze_clean(
+        "class C { static int F((int,int) v) => v switch { (1,1) => 1, var (a,b) => a + b }; }",
+    );
+    let decon_discard =
+        analyze_clean("class C { static int F((int,int) v) => v switch { (1,1) => 1, _ => 0 }; }");
+    assert_eq!(cyclo(&decon), cyclo(&decon_discard));
+
+    // A *guarded* one is a real decision, since the guard can fail.
+    let guarded = analyze_clean(
+        "class C { static int F(int v) => v switch { 1 => 1, var x when x > 5 => x, _ => 0 }; }",
+    );
+    assert!(cyclo(&guarded) > cyclo(&var_arm));
+}
+
+#[test]
+fn the_var_hoist_leaves_every_other_pattern_form_alone() {
+    // The guard on the hoist: `var_pattern` now precedes the catch-all, so every other
+    // pattern form must still reach its own rule — and `var` must stay a legal name.
+    for source in [
+        "class C { static int F(object o) => o switch { int i => i, _ => 0 }; }",
+        "class C { static int F(object o) => o switch { int => 1, _ => 0 }; }",
+        "class C { static int F(int v) => v switch { > 5 => 1, _ => 0 }; }",
+        "class C { static int F(int v) => v switch { > 5 and < 9 => 1, _ => 0 }; }",
+        "class C { static bool F(object o) => o is not null; }",
+        "class C { static int F(int[] a) => a switch { [1, 2] => 1, _ => 0 }; }",
+        "class C { static int F(int[] a) => a switch { [1, .. var rest] => rest.Length, _ => 0 }; }",
+        "class C { static int F(int v) => v switch { (> 5) => 1, _ => 0 }; }",
+        "class C { static int F() { var x = 1; return x; } }",
+        "class C { static int F() { int var = 1; return var; } }",
+    ] {
+        // `analyze_clean` asserts no diagnostics, which is the whole assertion here.
+        let _ = analyze_clean(source);
+    }
+}

@@ -475,6 +475,35 @@ MEMBER_METHOD_ALT = "  | base_method_declaration\n"
 # valid C# anyway, since the compiler reads that as a combinator too.
 COMBINATOR_KEYWORDS = ("and", "or", "not")
 
+# The `member_declaration` ordering hazard again, one level down in `pattern`:
+#
+#     v switch { 1 => 1, var x => x }
+#
+# parsed `var x` as a **constant pattern**, and `var_pattern` was unreachable.
+# Structurally wrong with zero diagnostics — and it also defeats the catch-all
+# detection, since an unguarded `var x =>` always matches (a `var` pattern tests nothing)
+# and so is the fall-through exactly as `_ =>` is, which the walker cannot recognize
+# through a node that never appears.
+#
+# TWO alternatives have to be cleared, and the second was the surprise. Measured on the
+# tree, `var x` came back as `constant_pattern` (rule 115), not `declaration_pattern`:
+#
+# - `constant_pattern : expression` is a catch-all listed *second*, and hub inlining folds
+#   the whole expression cycle into one rule — including `declaration_expression`, so
+#   `var x` is a viable "expression". This is the same catch-all-near-the-front shape as
+#   `incomplete_member`.
+# - `declaration_pattern : type variable_designation` would take it next anyway, because
+#   `var` is a contextual keyword widened back into `identifier_token` and hence a viable
+#   `type`.
+#
+# Hoisting ahead of `constant_pattern` clears both. Only the hoist is needed, as with
+# `union`/`extension`: `KW_VAR` is already a real token (Roslyn spells `var` as a literal
+# here), so a genuine constant or `T x` pattern cannot predict the `var` path — neither
+# starts with `KW_VAR`. `var` stays a legal identifier everywhere, since the widening is
+# untouched.
+VAR_PATTERN_ALT = "  | var_pattern\n"
+PATTERN_CONSTANT_ALT = "  | constant_pattern\n"
+
 # `single_variable_designation` in its post-harvest tokenized form, and the
 # replacement that keeps every contextual keyword EXCEPT the combinators.
 DESIGNATION_RULE = "single_variable_designation\n  : identifier_token\n  ;"
@@ -1104,6 +1133,31 @@ def main() -> int:
         return 1
     src = src.replace(old, new, 1)
     print("made the query body's clauses optional")
+
+    # -- 2d4. Prioritize var_pattern over the catch-all pattern forms ---------
+    # See VAR_PATTERN_ALT: `var x => …` parsed as a *constant* pattern (whose body is a
+    # bare `expression`), so `var_pattern` was unreachable.
+    pattern_rule = rule_span(src, "pattern")
+    if not pattern_rule:
+        print("error: pattern rule not found", file=sys.stderr)
+        return 1
+    body = pattern_rule.group(1)
+    if VAR_PATTERN_ALT not in body or PATTERN_CONSTANT_ALT not in body:
+        print(
+            "error: pattern's var/constant alternatives changed upstream",
+            file=sys.stderr,
+        )
+        return 1
+    src = src.replace(
+        pattern_rule.group(0),
+        "pattern\n"
+        + body.replace(VAR_PATTERN_ALT, "").replace(
+            PATTERN_CONSTANT_ALT, VAR_PATTERN_ALT + PATTERN_CONSTANT_ALT, 1
+        )
+        + "  ;\n",
+        1,
+    )
+    print("hoisted var_pattern ahead of constant_pattern")
 
     # -- 2e. Accept binary integer literals ----------------------------------
     old, new = BINARY_LITERAL_FIX

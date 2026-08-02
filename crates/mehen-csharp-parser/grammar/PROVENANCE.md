@@ -81,7 +81,7 @@ Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
 corpus. All 5 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **fifteen** distinct silent misparses: structurally wrong
+grammar has now produced **sixteen** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -94,6 +94,7 @@ dump, never by an error count.
 | `SL_RAW_STRING_LIT` fenced with `""` | `var a = ""; f(); var b = "";` was ONE string token |
 | `identifier_token` widened with `and`/`or`/`not` | `o is int and > 5` declared a variable named `and` |
 | `constant_pattern` listed before `discard_pattern` | a `_ =>` arm is an expression, not the discard |
+| …and before `var_pattern` | `var x =>` was a *constant* pattern, so `var_pattern` was unreachable — and an always-matching arm read as a decision |
 | `base_method_declaration` listed before the type forms | `record R(int X);` was a *method* named `R` |
 | …and the same for `union` | `union U { }` was a *method* named `U` (with members it parsed correctly, hiding it) |
 | …and the same for `extension` | `extension(T x) { … }` was a *constructor* named `extension` (with a property member it parsed correctly, hiding it) |
@@ -104,12 +105,12 @@ dump, never by an error count.
 | `switch_statement`'s parens independently optional | `switch value { … }` parsed, though only the *expression* form is paren-free |
 | a local generic declaration loses to the expression statement | `List<int> l;` reads as chained comparison — **open, issue #218** |
 
-Six *delete* code from the tree, seven *relabel* it, and two accept
+Six *delete* code from the tree, eight *relabel* it, and two accept
 source that is not valid C# at all. Every shape is invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
 
-Six of the fifteen share one root cause: **an alternative that is viable for the
+Seven of the sixteen share one root cause: **an alternative that is viable for the
 wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
 each semantically — it knows whether `F` names a type, whether `and` resolves to a
 declared name, whether `record` is a keyword here — and a syntax-only grammar has
@@ -117,7 +118,7 @@ only alternative order and token identity to work with. Which of those two tools
 applies is not a matter of taste; see the `record` section below for a case where
 order alone provably cannot do it.
 
-Three of those six are the same `member_declaration` ordering hazard — `record`,
+Three of those seven are the same `member_declaration` ordering hazard — `record`,
 `union`, `extension` — and the last two are worth reading together, because each hid
 behind the *test input* rather than behind the grammar. A `union` with members parses
 correctly (a member body cannot follow a method signature), and an `extension` whose
