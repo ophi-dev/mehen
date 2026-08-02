@@ -437,6 +437,15 @@ impl Walker<'_> {
         // which carry dedicated token types but are identifiers here.
         let class = if hint.in_identifier {
             HalsteadClass::Operand
+        } else if hint.in_operator_symbol && matches!(tt, cl::KW_TRUE | cl::KW_FALSE) {
+            // `public static bool operator true(C c)` declares an operator, and its
+            // symbol happens to be spelled with the same token as the `true` *literal*
+            // — which is an operand. In this position it is the operator being
+            // declared, so it belongs with `operator +` and `operator ==` rather than
+            // in the operand vocabulary. (`operator true`/`false` are the only
+            // overloadable operators whose symbols are keywords that mean something
+            // else elsewhere.)
+            HalsteadClass::Operator
         } else {
             halstead_class(tt)
         };

@@ -599,3 +599,32 @@ fn a_generic_lists_comma_is_still_an_operator() {
         "the type-argument comma must count as an operator"
     );
 }
+
+#[test]
+fn overloaded_true_and_false_symbols_are_operators() {
+    // REGRESSION. `operator true` / `operator false` are the only overloadable
+    // operators whose symbols are keywords that mean something else elsewhere — as a
+    // *literal*, `true` is a Halstead operand, and the declaration reused the same
+    // token. So declaring them added operands rather than operators. `in_operator_symbol`
+    // already marked the position; it just did not reach the Halstead classification.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let bool_ops = halstead(
+        "class C {
+             public static bool operator true(C c) => true;
+             public static bool operator false(C c) => false;
+         }",
+    );
+    // Two distinct operators for the two declared symbols. The `true`/`false` in the
+    // bodies are still operands, so n2 is unaffected.
+    let plain = halstead("class C { public static C operator +(C a, C b) => a; }");
+    assert!(
+        bool_ops.n1 > plain.n1,
+        "declaring `operator true`/`false` must add distinct operators, \
+         got n1 {} vs {}",
+        bool_ops.n1,
+        plain.n1
+    );
+}

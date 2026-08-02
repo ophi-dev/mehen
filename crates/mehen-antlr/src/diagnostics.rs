@@ -98,7 +98,11 @@ impl DiagnosticCollector {
                 // `line` is 1-based in ANTLR and in `SourceSpan`, so the start
                 // carries over directly.
                 out.span = diagnostic.span.map(|(start_byte, end_byte)| {
-                    let start_line = diagnostic.line.max(1) as u32;
+                    // From the byte offset for the same reason as `collect_errors`
+                    // below: the runtime counts only `\n`, `LineIndex` counts all five
+                    // terminators, and a span whose halves disagree misdirects any
+                    // renderer that highlights by line.
+                    let start_line = line_index.line_at(start_byte);
                     SourceSpan {
                         start_byte,
                         end_byte,
@@ -176,7 +180,12 @@ pub fn collect_errors(
                 .map(|(start, stop)| {
                     let start_byte = byte_offset_clamped(start);
                     let end_byte = byte_offset_clamped(stop).max(start_byte);
-                    let start_line = line.max(1) as u32;
+                    // From the byte offset, not the token's `line()`: the runtime's
+                    // lexer advances its line counter on `\n` alone, while `LineIndex`
+                    // (and the C# lexer) also treat CR, NEL, U+2028, and U+2029 as
+                    // terminators. Taking `line()` produced a span whose `start_byte`
+                    // was on row 2 and whose `start_line` said row 1.
+                    let start_line = line_index.line_at(start_byte);
                     SourceSpan {
                         start_byte,
                         end_byte,
@@ -221,18 +230,26 @@ mod tests {
         assert_eq!(span.end_line, 3, "the literal covers three rows");
     }
 
-    /// `end_line` is clamped to at least `start_line`, so a zero-width or
-    /// already-clamped range can never produce an inverted span.
+    /// Both rows come from the byte offsets, so the runtime's own line counter cannot
+    /// contradict the span — and `end_line` is still clamped to at least `start_line`
+    /// so a zero-width range never inverts.
+    ///
+    /// The injected `line` here is deliberately wrong (row 3 for a byte on row 1): the
+    /// runtime's lexer advances its counter on `\n` alone, while `LineIndex` counts all
+    /// five terminators, so the two disagree on any file that uses another one. The
+    /// byte offset is the authority.
     #[test]
-    fn an_end_line_never_precedes_the_start_line() {
+    fn rows_come_from_the_byte_offsets_not_the_runtime_line() {
         let line_index = LineIndex::new("one\ntwo\nthree\n");
         let collector = DiagnosticCollector::default();
-        // A start line the byte range does not support (row 3 claimed, byte 0).
         collector.push_for_test(3, 0, Some((0, 0)));
         let diagnostics = collector.diagnostics("test.syntax_error", 16, &line_index);
 
         let span = diagnostics[0].span.expect("span present");
-        assert_eq!(span.start_line, 3);
-        assert_eq!(span.end_line, 3);
+        assert_eq!(
+            span.start_line, 1,
+            "byte 0 is row 1, whatever `line` claimed"
+        );
+        assert_eq!(span.end_line, 1);
     }
 }
