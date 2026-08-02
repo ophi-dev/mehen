@@ -429,6 +429,29 @@ The performance half was diagnosed by the antlr-rust-runtime team on
 [`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runtime/issues/248);
 `repro/roslyn-csharp-perf/` at the repo root reproduces both variants.
 
+### A query with no body clauses
+
+`query_body : query_clause+ select_or_group_clause query_continuation?` demands at
+least one clause between the `from` and the `select`/`group`. C# demands none —
+ECMA-334 §12.20.3 spells it `query_body_clauses? select_or_group_clause …` — so the two
+simplest queries the language has did not parse:
+
+| source | before | after |
+|---|---|---|
+| `from a in xs select a` | 2 diagnostics | clean |
+| `from a in xs group a by a` | 4 | clean |
+| `from a in xs where a == 1 select a` | clean | clean |
+
+Anything with a `where` / `orderby` / `let` / `join` in between parsed either way, which
+is why this survived: every query in the corpus had one. Found while verifying an
+unrelated review finding about the `join` clause, not by the corpus run.
+
+`Syntax.xml` models `QueryBodySyntax.Clauses` as a plain list, which can be empty, and
+the generator renders a list as `+` — so this is a generator artifact of the same kind
+as the dropped `record` contextual keyword rather than a deliberate restriction.
+Widening to `*` is a pure relaxation: `query_clause+` is a subset of `query_clause*`, so
+nothing that parsed before can stop.
+
 ### `union` and `extension`: the same hazard, cheaper fixes
 
 Both are contextual keywords that Roslyn *does* spell as literals, so `KW_UNION` and

@@ -722,3 +722,67 @@ fn distinct_names_and_literal_forms_still_stay_distinct() {
         "three literal forms are three operands, not one"
     );
 }
+
+#[test]
+fn a_linq_join_equality_is_a_condition() {
+    // REGRESSION. `join b in ys on a equals b` is the join's equality test — the
+    // query-syntax equivalent of `a == b` — but Roslyn spells `equals` as the contextual
+    // `KW_EQUALS` keyword rather than an `==` token, so the token-level condition scan
+    // never saw it and the whole join predicate scored zero conditions.
+    //
+    // Pinned against the method-syntax spelling of the same comparison, which scored one
+    // all along.
+    let join = abc(
+        "using System.Linq;
+         class C {
+             static object F(int[] xs, int[] ys) => from a in xs join b in ys on a equals b select a;
+         }",
+    );
+    let method = abc("using System.Linq;
+         class C {
+             static object F(int[] xs, int[] ys) => xs.Where(a => ys.Any(b => a == b));
+         }");
+    assert_eq!(join.2, method.2, "the join's equality is one condition");
+    assert_eq!(join.2, 1);
+
+    // Recorded on the clause, not on the token, so `equals` stays free as an ordinary
+    // name — it is contextual, and a variable called `equals` must score nothing.
+    let identifier = abc("class C { static int F() { int equals = 1; return equals; } }");
+    assert_eq!(identifier.2, 0);
+}
+
+#[test]
+fn a_query_needs_no_body_clause() {
+    // REGRESSION, and an upstream defect found while verifying the join above:
+    // `query_body : query_clause+ select_or_group_clause` required at least one clause
+    // between the `from` and the `select`, so the two simplest queries C# has did not
+    // parse at all — 2 and 4 diagnostics respectively. ECMA-334 §12.20.3 makes the clause
+    // list optional; `Syntax.xml` models it as a plain (possibly empty) list, and the
+    // generator renders a list as `+`.
+    //
+    // It survived because every query in the corpus had a `where` / `orderby` / `let` /
+    // `join` in between, which parses either way. `abc` asserts a clean parse, so
+    // reaching the assertions at all is the substance here.
+    for source in [
+        "using System.Linq; class C { static object F(int[] xs) => from a in xs select a; }",
+        "using System.Linq; class C { static object F(int[] xs) => from a in xs select a + 1; }",
+        "using System.Linq; class C { static object F(int[] xs) => from a in xs group a by a; }",
+    ] {
+        assert_eq!(
+            abc(source).2,
+            0,
+            "a bodyless query has no condition: {source}"
+        );
+    }
+
+    // And the forms that already worked still do — widening `+` to `*` is a pure
+    // relaxation, so nothing that parsed before may stop.
+    for source in [
+        "using System.Linq; class C { static object F(int[] xs) => from a in xs where a == 1 select a; }",
+        "using System.Linq; class C { static object F(int[] xs) => from a in xs orderby a select a; }",
+        "using System.Linq; class C { static object F(int[] xs) => from a in xs let y = a select y; }",
+        "using System.Linq; class C { static object F(int[] xs) => from a in xs group a by a into g select g; }",
+    ] {
+        let _ = abc(source);
+    }
+}

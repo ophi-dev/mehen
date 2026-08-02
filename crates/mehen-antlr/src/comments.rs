@@ -126,6 +126,7 @@ pub fn loc_tokens<'a>(
             skip_token_types,
             trivia_bearing_token_types,
             &mut out,
+            line_index,
         );
     }
     out
@@ -137,9 +138,11 @@ pub fn loc_tokens<'a>(
 /// [`TokenView`]s (which the 0.11 rewrite made un-buildable outside a real
 /// `TokenStore`). `text` is the token's UTF-8 text (empty when absent).
 ///
-/// `start_line` and `end_line` are 1-based rows already resolved through the
-/// caller's [`LineIndex`](mehen_core::LineIndex) — this function deliberately knows
-/// nothing about which characters break a row, since that is per-language policy.
+/// `start_line` and `end_line` are 1-based rows already resolved through
+/// `line_index` — this function deliberately derives no row from the token text,
+/// since which characters break a row is per-language policy. `line_index` itself is
+/// still needed to resolve rows *inside* a trivia-bearing token (see
+/// [`emit_embedded_comments`]).
 #[allow(clippy::too_many_arguments)]
 fn push_loc_token(
     tt: i32,
@@ -152,6 +155,7 @@ fn push_loc_token(
     skip_token_types: &[i32],
     trivia_bearing_token_types: &[i32],
     out: &mut Vec<LocToken>,
+    line_index: &mehen_core::LineIndex,
 ) {
     if tt < 0 || skip_token_types.contains(&tt) {
         return;
@@ -183,61 +187,74 @@ fn push_loc_token(
         // so a comment glued to the operator (`!is/* c */`) is part of
         // the token text rather than a standalone comment token. Recover
         // those as comments so CLOC isn't undercounted, using the same
-        // byte span and row offsets the embedded comment occupies. Only
-        // the declared trivia-bearing operator tokens are scanned, so a
-        // `//` or `/*` inside string-literal text is never misread.
+        // byte span the embedded comment occupies and rows resolved through
+        // the same index. Only the declared trivia-bearing operator tokens
+        // are scanned, so a `//` or `/*` inside string-literal text is never
+        // misread.
         if trivia_bearing_token_types.contains(&tt) {
-            emit_embedded_comments(text, start_byte, start_row, out);
+            emit_embedded_comments(text, start_byte, out, line_index);
         }
     }
 }
 
 /// Scan an operator-token's `text` for embedded `/* … */` or `// …` comment
-/// runs and push a [`LocTokenKind::Comment`] for each, with rows offset from
-/// the token's `start_row` and byte span offset from the token's
-/// `token_start_byte`. Handles multi-line block comments.
+/// runs and push a [`LocTokenKind::Comment`] for each, with the byte span offset
+/// from the token's `token_start_byte`. Handles multi-line block comments.
+///
+/// Rows are resolved through `line_index` from the absolute byte offsets, not by
+/// counting `\n` in the text. This scan is byte-oriented (it looks for `/*`, `*/`, and
+/// `//` in the UTF-8 bytes) and a multi-byte terminator like U+2028 cannot be recognized
+/// there without decoding — but the row question is already answered by the index, whose
+/// policy is the caller's. Counting `\n` alone attributed a comment split by a lone CR to
+/// one CLOC row in a two-row file, leaving the second row to fall out as a phantom blank.
 fn emit_embedded_comments(
     text: &str,
     token_start_byte: u32,
-    token_start_row: u32,
     out: &mut Vec<LocToken>,
+    line_index: &mehen_core::LineIndex,
 ) {
+    // 0-based row for an offset within `text`, via the absolute byte position.
+    let row_at = |offset: usize| {
+        line_index
+            .line_at(token_start_byte.saturating_add(mehen_core::byte_offset_clamped(offset)))
+            .saturating_sub(1)
+    };
     let bytes = text.as_bytes();
     let mut i = 0usize;
-    // Newlines before the current scan position → row offset within the token.
-    let mut row_offset = 0u32;
     while i + 1 < bytes.len() {
         match (bytes[i], bytes[i + 1]) {
             (b'/', b'*') => {
-                let start_row = token_start_row + row_offset;
                 let comment_start = i;
                 i += 2;
-                let mut inner_newlines = 0u32;
-                // Find the closing `*/`, counting newlines for the end row.
+                // Find the closing `*/`.
                 while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    if bytes[i] == b'\n' {
-                        inner_newlines += 1;
-                    }
                     i += 1;
                 }
                 i += 2; // consume `*/` (or run off the end on an unclosed comment)
                 let end = i.min(bytes.len());
+                let start_row = row_at(comment_start);
                 out.push(LocToken {
                     kind: LocTokenKind::Comment,
                     start_byte: token_start_byte + comment_start as u32,
                     end_byte: token_start_byte + end as u32,
                     start_row,
-                    end_row: start_row + inner_newlines,
+                    // From the end byte, so every terminator the caller's policy counts
+                    // is included — `end.saturating_sub(1)` stays inside the comment,
+                    // since the range is half-open.
+                    end_row: row_at(end.saturating_sub(1)).max(start_row),
                 });
-                row_offset += inner_newlines;
             }
             (b'/', b'/') => {
-                // Line comment runs to the next newline (or token end).
-                let start_row = token_start_row + row_offset;
+                // Line comment runs to the next `\n` (or token end). Scanning for `\n`
+                // is right here regardless of policy: a line comment ends at the first
+                // terminator, and any policy counts `\n` as one. A comment ended by a
+                // *different* terminator would run slightly long in the byte span, which
+                // the row lookup below then reports on the correct row anyway.
                 let comment_start = i;
                 while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
                 }
+                let start_row = row_at(comment_start);
                 out.push(LocToken {
                     kind: LocTokenKind::Comment,
                     start_byte: token_start_byte + comment_start as u32,
@@ -245,10 +262,6 @@ fn emit_embedded_comments(
                     start_row,
                     end_row: start_row,
                 });
-            }
-            (b'\n', _) => {
-                row_offset += 1;
-                i += 1;
             }
             _ => i += 1,
         }
@@ -308,7 +321,25 @@ mod tests {
 
     /// Run the LOC classification over a fake token list, mirroring what
     /// [`loc_tokens`] does per [`TokenView`].
+    ///
+    /// The rows come from each `Tok`'s own `line`/`end_line` (the caller resolves those
+    /// in real use), so an empty index suffices for every case except a
+    /// trivia-bearing token — whose *embedded* comment rows are looked up by byte
+    /// offset. [`classify_in`] supplies real source for those.
     fn classify(tokens: &[Tok], comment: &[i32], skip: &[i32], trivia: &[i32]) -> Vec<LocToken> {
+        classify_in("", tokens, comment, skip, trivia)
+    }
+
+    /// [`classify`] against a known `source`, so embedded-comment rows resolve through a
+    /// real [`LineIndex`] over it.
+    fn classify_in(
+        source: &str,
+        tokens: &[Tok],
+        comment: &[i32],
+        skip: &[i32],
+        trivia: &[i32],
+    ) -> Vec<LocToken> {
+        let line_index = mehen_core::LineIndex::new(source);
         let mut out = Vec::new();
         for t in tokens {
             push_loc_token(
@@ -322,6 +353,7 @@ mod tests {
                 skip,
                 trivia,
                 &mut out,
+                &line_index,
             );
         }
         out

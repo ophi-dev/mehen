@@ -609,6 +609,27 @@ SWITCH_PARENS = (
     "switch_statement\n  : attribute_list* 'switch' '(' expression ')' '{' switch_section* '}'\n  ;\n",
 )
 
+# `query_body : query_clause+ select_or_group_clause` requires at least ONE body clause
+# between the `from` and the `select`/`group`. C# requires none — ECMA-334 §12.20.3 spells
+# it `query_body : query_body_clauses? select_or_group_clause query_continuation?` — so the
+# two simplest possible queries do not parse:
+#
+#     from a in xs select a          // 2 diagnostics
+#     from a in xs group a by a      // 4
+#
+# while anything with a `where` / `orderby` / `let` / `join` in between parses cleanly.
+# That is why this survived: every query in the test corpus had a body clause.
+#
+# `Syntax.xml` models `QueryBodySyntax.Clauses` as a plain list, which can be empty; the
+# generator renders a list as `+` rather than `*`, so this is a generator artifact of the
+# same kind as the dropped `record` contextual keyword rather than a deliberate
+# restriction. Widening to `*` is a pure relaxation — it adds the two spellings above and
+# changes nothing else, since `query_clause+` is a subset of `query_clause*`.
+QUERY_BODY_CLAUSES_OPTIONAL = (
+    "query_body\n  : query_clause+ select_or_group_clause query_continuation?\n  ;",
+    "query_body\n  : query_clause* select_or_group_clause query_continuation?\n  ;",
+)
+
 BALANCED_BRACES_PATTERN = re.compile(r"LBRACE\? (.*?) RBRACE\?")
 BALANCED_BRACES_REPLACEMENT = r"(LBRACE \1 RBRACE)?"
 
@@ -1073,6 +1094,16 @@ def main() -> int:
         return 1
     src = src.replace(old, new, 1)
     print("required the switch statement's parentheses")
+
+    # -- 2d3. Let a query have no body clauses -------------------------------
+    # See QUERY_BODY_CLAUSES_OPTIONAL: `from a in xs select a` — the simplest query C#
+    # has — did not parse, because upstream renders the clause list as `+`.
+    old, new = QUERY_BODY_CLAUSES_OPTIONAL
+    if old not in src:
+        print("error: query_body shape changed upstream", file=sys.stderr)
+        return 1
+    src = src.replace(old, new, 1)
+    print("made the query body's clauses optional")
 
     # -- 2e. Accept binary integer literals ----------------------------------
     old, new = BINARY_LITERAL_FIX

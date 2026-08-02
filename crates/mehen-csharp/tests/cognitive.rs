@@ -440,3 +440,42 @@ fn each_interpolation_hole_is_its_own_boolean_context() {
     let one = analyze_clean("class C { static string F(bool a, bool b) => $\"{a && b}\"; }");
     assert_eq!(sum(&one), 1.0);
 }
+
+#[test]
+fn each_initializer_element_is_its_own_boolean_context() {
+    // REGRESSION, and the third instance of this shape after the `when` guard and the
+    // interpolation hole: each element of an initializer or collection expression is an
+    // independent expression, so `new[] { a && b, c && d }` has two `&&` runs. The first
+    // element left `&&` in `last_op` and the second collapsed into it for 1.
+    //
+    // Pinned against BOTH equivalent spellings, which already scored 2: the same
+    // expressions as call arguments, and hoisted into locals.
+    let initializer = analyze_clean(
+        "class C {
+             static bool[] F(bool a, bool b, bool c, bool d) => new[] { a && b, c && d };
+         }",
+    );
+    let arguments = analyze_clean(
+        "class C {
+             static bool[] G(bool p, bool q) => null;
+             static bool[] F(bool a, bool b, bool c, bool d) => G(a && b, c && d);
+         }",
+    );
+    assert_eq!(sum(&initializer), sum(&arguments));
+    assert_eq!(sum(&initializer), 2.0, "two independent runs");
+
+    // A collection expression (C# 12 `[a && b, c && d]`) is the same shape through a
+    // different rule, so it needs its own arm.
+    let collection = analyze_clean(
+        "class C {
+             static System.Collections.Generic.List<bool> F(bool a, bool b, bool c, bool d)
+                 => [a && b, c && d];
+         }",
+    );
+    assert_eq!(sum(&collection), 2.0);
+
+    // The guard: one element is still one run, so the per-element reset did not start
+    // splitting a single run at an element boundary.
+    let one = analyze_clean("class C { static bool[] F(bool a, bool b) => new[] { a && b }; }");
+    assert_eq!(sum(&one), 1.0);
+}

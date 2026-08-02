@@ -624,9 +624,19 @@ impl Walker<'_> {
         // Without this the first hole left `last_op` set to `&&` and the second collapsed
         // into it for 1 — the same string spelled as two locals scores 2, so the two
         // spellings disagreed.
+        //
+        // `initializer_expression` / `collection_expression` isolate too, but their unit
+        // is each *element* rather than the whole node — see the per-child reset in
+        // `visit_children`. They are listed here as well so the enclosing run is
+        // restored after the last element, making the initializer one operand from
+        // outside just as a call is.
         let saved_bool = if matches!(
             ri,
-            cp::RULE_ARGUMENT | cp::RULE_WHEN_CLAUSE | cp::RULE_INTERPOLATION
+            cp::RULE_ARGUMENT
+                | cp::RULE_WHEN_CLAUSE
+                | cp::RULE_INTERPOLATION
+                | cp::RULE_INITIALIZER_EXPRESSION
+                | cp::RULE_COLLECTION_EXPRESSION
         ) {
             Some(self.current().cognitive.boolean_seq.last_op.take())
         } else {
@@ -851,7 +861,27 @@ impl Walker<'_> {
             hint.in_accessor_body
         };
 
+        // An initializer's or collection expression's *elements* are independent boolean
+        // contexts, exactly like call arguments — `new[] { a && b, c && d }` has two runs
+        // and must score 2, matching both `G(a && b, c && d)` and the two-locals
+        // spelling. Without this the first element left `&&` in `last_op` and the second
+        // collapsed into it for 1.
+        //
+        // Done per *child* here rather than in the pre/post pair around
+        // `visit_children`, because unlike `RULE_ARGUMENT` these elements have no rule of
+        // their own to hang the reset on: `initializer_expression` holds them as bare
+        // `expression` children (`'{' (expression (',' expression)* ','?)? '}'`). A
+        // per-child reset over the element list is the same save/reset/restore, applied
+        // at the only place the boundaries are visible.
+        let isolate_elements = matches!(
+            ri,
+            cp::RULE_INITIALIZER_EXPRESSION | cp::RULE_COLLECTION_EXPRESSION
+        );
+
         for child in ctx.children() {
+            if isolate_elements {
+                self.current().cognitive.boolean_seq.last_op = None;
+            }
             let child_hint = ChildHint {
                 is_else_branch: propagate_else,
                 in_type_member: propagate_member,
@@ -1680,6 +1710,18 @@ impl Walker<'_> {
             // predicate that is already boolean (`where enabled`) has no comparison and
             // so scored nothing at all before this.
             cp::RULE_WHERE_CLAUSE => self.current().abc.record_condition(),
+            // A LINQ `join … on a.Id equals b.Id` is an equality test, so it is a
+            // condition for the same reason. `equals` is the join's comparison operator,
+            // but Roslyn spells it as the `KW_EQUALS` contextual keyword rather than as
+            // an `==` token — so the token-level condition scan never saw it and the
+            // whole join predicate scored zero, while the method-syntax spelling
+            // (`xs.Where(a => ys.Any(b => a == b))`) scored one.
+            //
+            // Recorded on the clause rather than on the token, matching `where`: the
+            // clause is the unit that exists exactly once per comparison, and `equals`
+            // stays a legal identifier elsewhere (it is contextual, so a variable named
+            // `equals` must not score).
+            cp::RULE_JOIN_CLAUSE => self.current().abc.record_condition(),
             // An initialized declarator is an assignment. Roslyn spells the
             // initializer as an `equals_value_clause` child rather than a bare
             // `=` token, so the presence of that child *is* the initialization.
