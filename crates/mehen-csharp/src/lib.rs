@@ -3,38 +3,53 @@
 
 //! `mehen-csharp` — C# language analyzer.
 //!
-//! C# is parsed by a parser generated from the community-maintained
-//! **grammars-v4 C# grammar** (`antlr/grammars-v4`, vendored in
-//! `crates/mehen-csharp-parser/grammar/`) running on the ANTLR Rust runtime via
-//! [`mehen_antlr`]. The grammar covers C# through 8.x (pattern matching,
-//! interpolated strings, local functions, expression-bodied members, ranges,
-//! null-coalescing assignment), giving the metric walker a semantically-named
-//! CST (`class_definition`, `property_declaration`, `switch_section`,
-//! `lambda_expression`, `conditional_and_expression`, …).
+//! C# is parsed by a parser derived from **Roslyn's own published grammar**
+//! (`CSharp.Generated.g4`, vendored in `crates/mehen-csharp-parser/grammar/`),
+//! running on the ANTLR Rust runtime via [`mehen_antlr`]. Roslyn generates that
+//! grammar from `Syntax.xml` — the same model that generates the compiler's syntax
+//! node classes — so it tracks **C# as implemented**: records, `is not`, `and`/`or`
+//! and relational patterns, list patterns, collection expressions, raw strings,
+//! primary constructors, `required` members, and the C# 14 additions (`field`,
+//! extension blocks). No community grammar does.
 //!
-//! The generated lexer/parser modules live in the separate
-//! [`mehen_csharp_parser`] crate; they are produced by
-//! `cargo xtask antlr generate csharp` and checked in verbatim. That crate also
-//! ships the hand-written [`CSharpLexerBase`](mehen_csharp_parser::hooks::CSharpLexerBase)
-//! hooks the grammar's `superClass` requires — the lexer **must** be built with
-//! them (`with_typed_hooks`), or interpolated strings and `#if` preprocessor
-//! directives fail loud instead of lexing.
+//! Rules are named after the compiler's syntax nodes (`class_declaration`,
+//! `property_declaration`, `switch_expression_arm`, `simple_lambda_expression`, …),
+//! which is what makes the walker's classification a `rule_index()` match rather
+//! than a keyword probe. See [`walker`] for the shape's consequences.
 //!
-//! Metric coverage follows SonarC#'s definitions where they exist; see
-//! [`walker`] for the per-metric table.
+//! The generated lexer/parser modules live in the separate [`mehen_csharp_parser`]
+//! crate, produced by `cargo xtask antlr generate csharp` and checked in verbatim.
+//! Both recognizers are constructed plainly — `CSharpLexer::new`,
+//! `CSharpParser::new` — because that crate ships **no hooks at all**: every
+//! semantic coordinate lowers to pure SemIR through the derived `patterns.toml`,
+//! and the interpolated-string brace bookkeeping lives in the grammar's own
+//! `@lexer::members`.
 //!
-//! # Language-version limitation
+//! Metric coverage follows SonarC#'s definitions where they exist; see [`walker`]
+//! for the per-metric table.
 //!
-//! The vendored grammar is **C# 7-era**. Nullable reference types, `??=`,
-//! tuple deconstruction, and file-scoped namespaces parse fine, but several
-//! post-7 constructs do not: `switch` *expressions* (C# 8), `is not` and the
-//! C# 9 logical/relational patterns (`is int i and > 5`), and `record`
-//! declarations. Affected files still produce metrics — mehen recovers from
-//! parse errors by design — but they carry `csharp.syntax_error` diagnostics
-//! and the metrics around the unparsed construct are approximations. See
-//! `crates/mehen-csharp-parser/grammar/PROVENANCE.md` for the measured impact,
-//! why upstream's `v8-spec` grammar is not a drop-in fix, and what would be
-//! needed to move to Roslyn's own (complete) grammar instead.
+//! # What the transform repairs, and what remains
+//!
+//! Roslyn's grammar is a **reference** grammar rather than a working parser: ANTLR
+//! rejects it outright (empty rules for its "omitted" syntax nodes), it publishes
+//! no lexer at all (terminals are character-level *parser* rules), and it is
+//! permissive by design — it models syntax nodes including error-recovery ones, and
+//! encodes no operator precedence. `prepare-grammar.py` repairs that as a step of
+//! parser generation.
+//!
+//! The catalogue lives in `crates/mehen-csharp-parser/grammar/PROVENANCE.md`, with
+//! the measured effect of each repair. Two things worth knowing here:
+//!
+//! - **A clean parse measures parseability, not correctness.** Twelve distinct
+//!   *silent misparses* have come out of this grammar — structurally wrong trees
+//!   with zero reported errors — each caught by a metric test or a parse-tree dump,
+//!   never by an error count. That is why the per-language tests assert numbers
+//!   against an equivalent spelling rather than just checking for diagnostics.
+//! - **One known limitation remains:** a preprocessor directive that splits a
+//!   single expression across `#if` branches (a return type, say) yields two
+//!   partial expressions where one belongs. Five of 322 files in the
+//!   `System.Text.Json` corpus hit it; they carry `csharp.syntax_error` and their
+//!   metrics near the split are approximations.
 
 #![forbid(unsafe_code)]
 
@@ -72,11 +87,11 @@ impl CSharpAnalyzer {
     /// Returns `None` only if the rule call hard-fails (returns `Err` rather
     /// than a recovered tree).
     ///
-    /// The lexer is constructed with the [`CSharpLexerBase`] typed hooks — the
-    /// exact port of the grammar's `superClass` state machine (interpolated
-    /// strings, `#if` preprocessor evaluation). The generated modules use
-    /// `--sem-unknown error`, so a hook-less lexer would hard-fail (not
-    /// mis-lex) on any file containing an interpolated string.
+    /// Both recognizers are constructed plainly (`CSharpLexer::new`,
+    /// `CSharpParser::new`): the derived grammar needs no hooks. Its
+    /// interpolated-string state lives in `@lexer::members` and every action and
+    /// predicate lowers to pure SemIR through the derived `patterns.toml`, so
+    /// there is no hand-written Rust to install.
     ///
     /// Replaces the runtime's default lexer console listener with a structured
     /// diagnostic collector and removes the parser console listener.
@@ -247,8 +262,10 @@ mod tests {
 
     #[test]
     fn interpolated_string_parses_cleanly() {
-        // Proves the `CSharpLexerBase` hooks are installed: without them the
-        // generated lexer fails loud (`--sem-unknown error`) here.
+        // Interpolation is the grammar's most stateful construct — three lexer
+        // modes plus a brace-depth stack — and all of it lowers to SemIR, so this
+        // is the case that would fail loud (`--sem-unknown error`) if a lowering
+        // regressed.
         let src = "class C { string M(int x) { return $\"a{x}b\"; } }\n";
         let a = analyze(src, "C.cs");
         assert!(

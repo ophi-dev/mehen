@@ -12,5 +12,6 @@ See `../../grammar/PROVENANCE.md` for the exact grammar commit and toolchain
 versions. `cargo run -p xtask -- antlr check-generated` guards against drift in
 CI when the toolchain is available.
 
-(The hand-written `../hooks.rs` — the `CSharpLexerBase` port — is NOT
-generated and lives outside this directory on purpose.)
+(This crate has no hand-written recognizer support at all: every semantic
+coordinate lowers to pure SemIR through the derived `patterns.toml`, so there is
+no `hooks.rs` and both recognizers are constructed with plain `::new`.)

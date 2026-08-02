@@ -22,13 +22,25 @@ impl Default for LineIndex {
 }
 
 impl LineIndex {
+    /// Build the row index for `text`.
+    ///
+    /// A row ends at `\n` or at one of the three Unicode line separators every
+    /// mainstream language spec also recognizes: NEL (U+0085), LS (U+2028), and PS
+    /// (U+2029). CRLF works through its `\n`; a lone `\r` is deliberately not a
+    /// break, matching how editors and `git diff` treat classic-Mac line endings in
+    /// otherwise-LF files.
+    ///
+    /// The Unicode separators matter because a *lexer* may accept them — C#'s does
+    /// (ECMA-334 §6.3.1 lists all five), so a file split by U+2028 parsed correctly
+    /// while reporting one physical row and attributing every declaration to it.
+    /// Scanning `char_indices` rather than bytes keeps the multi-byte separators from
+    /// being missed; the ASCII fast path is preserved by checking `\n` first.
     pub fn new(text: &str) -> Self {
         let mut line_starts = Vec::with_capacity(text.len() / 32 + 1);
         line_starts.push(0u32);
-        let bytes = text.as_bytes();
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'\n' {
-                let next = (i + 1) as u32;
+        for (i, c) in text.char_indices() {
+            if c == '\n' || c == '\u{85}' || c == '\u{2028}' || c == '\u{2029}' {
+                let next = (i + c.len_utf8()) as u32;
                 line_starts.push(next);
             }
         }
@@ -68,6 +80,44 @@ impl LineIndex {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn unicode_line_separators_start_new_rows() {
+        // REGRESSION. Only `\n` counted, so a file split by NEL / U+2028 / U+2029
+        // reported one physical row and attributed every declaration to it. Language
+        // specs recognize all four (C#'s ECMA-334 §6.3.1 lists them alongside CR/LF),
+        // and mehen's C# lexer accepts them — so a lexer could tokenize a multi-row file
+        // that this index reported as one line.
+        for separator in ['\n', '\u{85}', '\u{2028}', '\u{2029}'] {
+            let text = format!("a{separator}b");
+            let index = LineIndex::new(&text);
+            assert_eq!(
+                index.line_count(),
+                2,
+                "U+{:04X} must start a new row",
+                separator as u32
+            );
+            // The character after the separator is on row 2.
+            let after = (1 + separator.len_utf8()) as u32;
+            assert_eq!(index.line_at(after), 2);
+        }
+    }
+
+    #[test]
+    fn a_lone_carriage_return_is_not_a_row_break() {
+        // Deliberate: CRLF works through its `\n`, and a bare `\r` inside an
+        // otherwise-LF file is how editors and `git diff` treat classic-Mac endings.
+        let index = LineIndex::new("a\rb");
+        assert_eq!(index.line_count(), 1);
+    }
+
+    #[test]
+    fn crlf_counts_one_row_break() {
+        let index = LineIndex::new("a\r\nb");
+        assert_eq!(index.line_count(), 2);
+    }
+
     use super::*;
 
     #[test]

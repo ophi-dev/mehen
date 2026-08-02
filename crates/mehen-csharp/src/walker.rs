@@ -493,12 +493,30 @@ impl Walker<'_> {
         // observation and are reported as phantom blank lines
         // (`blank = sloc - ploc - only_comment`).
         if tt >= 0 {
-            let start_row = (term.symbol().line() as u32).saturating_sub(1);
+            // The start row comes from `LineIndex`, not from the token's own `line()`.
+            // The runtime's lexer counts only `\n`, while `LineIndex` (and this
+            // grammar's lexer) also treat NEL, U+2028, and U+2029 as terminators — so
+            // taking the token's line would put every row after such a separator one or
+            // more rows too high, disagreeing with the SLOC span and reporting phantom
+            // blanks. Deriving it from the byte offset keeps both in one convention.
+            let start_row = term
+                .symbol()
+                .start_byte()
+                .map(|start| {
+                    self.line_index
+                        .line_at(mehen_core::byte_offset_clamped(start))
+                        .saturating_sub(1)
+                })
+                .unwrap_or_else(|| (term.symbol().line() as u32).saturating_sub(1));
+            // Every C# line terminator, not just `\n` — the lexer accepts NEL,
+            // U+2028, and U+2029 (ECMA-334 §6.3.1), and `LineIndex` counts rows the
+            // same way, so a multi-row token split by one of them has to expand here
+            // too or its interior rows read as phantom blanks.
             let extra_rows = term
                 .symbol()
                 .text_or_empty()
-                .bytes()
-                .filter(|&b| b == b'\n')
+                .chars()
+                .filter(|&c| matches!(c, '\n' | '\u{85}' | '\u{2028}' | '\u{2029}'))
                 .count() as u32;
             for row in start_row..=start_row.saturating_add(extra_rows) {
                 self.current().loc.observe_code_line(row);
