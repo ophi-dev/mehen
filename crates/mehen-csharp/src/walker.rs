@@ -109,9 +109,12 @@
 //!   punctuation are operators; identifiers, literals, `this`, `base` are
 //!   operands (deduped by text). A terminal reached through `identifier_token` is
 //!   always an operand, which is what makes C#'s contextual keywords come out
-//!   right: the prep widens that rule to accept all 42 of them. The UTF-8 literal
-//!   suffix (`"text"u8`) is an operand too — real C# lexes it as part of the
-//!   literal, and Roslyn splits it off only to model the syntax node.
+//!   right: the prep widens that rule to accept all 42 of them. C# 14's contextual
+//!   `field` is an operand for the same reason `this` is — in expression position it
+//!   references the synthesized backing field. The UTF-8 literal suffix (`"text"u8`)
+//!   contributes *nothing*: real C# lexes the whole thing as one literal, so the
+//!   preceding `STRING_LIT` already recorded the operand and the split-off suffix
+//!   would double it.
 //! - **NPA / NPM / WMC**: class-vs-interface routing by the declaration rule
 //!   (`struct` and `record` count as class-like containers; `interface` as an
 //!   interface). NPA counts `field_declaration` / `event_field_declaration`
@@ -1952,15 +1955,27 @@ fn is_discard_arm(ctx: RuleNodeView<'_>) -> bool {
 /// so the check is on that child's own text. That is exact rather than a substring
 /// probe: the child spans the callee and nothing else, so it equals `"nameof"` only
 /// when the callee IS the bare identifier. A qualified `X.nameof(y)` has a `.` in the
-/// child's text and a local variable named `nameof` is never in callee position, so
-/// neither is mistaken for the operator.
+/// child's text, so it is not mistaken for the operator.
+///
+/// The arity check is what keeps a *user symbol* named `nameof` counting. `nameof` is
+/// only contextual, so `Func<int, int, int> nameof = …; nameof(1, 2)` is legal C# and
+/// is a real delegate call — text alone would suppress it. The operator takes exactly
+/// one argument, so anything else cannot be it. (A one-argument delegate named
+/// `nameof` is still indistinguishable without a symbol table, which is where Roslyn
+/// resolves it; that residue is vanishingly rare next to the `nameof(arg)` idiom this
+/// exists for.)
 ///
 /// Only ever consulted for a node that already has an `argument_list`, so the first
 /// `expression` child is the callee by construction.
 fn is_nameof_callee(expr: &ExpressionContext<'_>) -> bool {
-    expr.expression_children()
-        .next()
-        .is_some_and(|callee| callee.text() == "nameof")
+    let one_argument = expr
+        .argument_list()
+        .is_some_and(|list| list.argument_children().count() == 1);
+    one_argument
+        && expr
+            .expression_children()
+            .next()
+            .is_some_and(|callee| callee.text() == "nameof")
 }
 
 /// Equality / relational / boolean / null-coalescing operator tokens that count as
@@ -2026,19 +2041,19 @@ fn halstead_class(tt: i32) -> HalsteadClass {
             | cl::KW_NULL
             | cl::KW_THIS
             | cl::KW_BASE
+            // The C# 14 contextual `field` in a semi-auto property
+            // (`get => field; set => field = value;`). In expression position it is a
+            // value reference to the compiler-synthesized backing field — the same
+            // kind of thing as `this` or `base` — and Roslyn gives it its own
+            // `field_expression : KW_FIELD` rule there. Without this it fell through
+            // as an *operator*, adding a spurious one and omitting the backing-field
+            // operand.
+            | cl::KW_FIELD
             // Every interpolated-string content piece — literal text, escapes,
             // doubled braces, and the format specifier — arrives as this one
             // token: the hand-written lexer's mode rules all `type(…)` to it.
             | cl::INTERPOLATED_TEXT
             | cl::XML_TEXT_LIT
-            // The C# 11 UTF-8 literal suffix (`"text"u8`, either case). Real C#
-            // lexes this as part of the literal token, and Roslyn's grammar spells
-            // it as a separate trailing token only because it models the syntax
-            // node that way. It is part of the *operand*, not an operator applied
-            // to one — classifying it as an operator inflated the distinct-operator
-            // count and made `"text"u8` cost more than `"text"`.
-            | cl::KW_U8
-            | cl::KW_U8_LOWER
     ) {
         return HalsteadClass::Operand;
     }
@@ -2056,6 +2071,18 @@ fn halstead_class(tt: i32) -> HalsteadClass {
             // operand for Halstead. (It IS a physical code line for PLOC — see
             // `collect_loc_tokens` — since the row carries source text.)
             | cl::DIRECTIVE_LINE
+            // The C# 11 UTF-8 literal suffix (`"text"u8`, either case) contributes
+            // NOTHING of its own. Real C# lexes `"text"u8` as one literal token;
+            // Roslyn splits the suffix off only because it models the syntax node that
+            // way, and the preceding `STRING_LIT` has already recorded the operand.
+            //
+            // Classifying it as an operator was wrong (it is not applied to anything)
+            // and classifying it as an *operand* was also wrong — that made one C#
+            // literal contribute two operand occurrences, still inflating length,
+            // vocabulary, and volume. Skipping it makes `"text"u8` cost exactly what
+            // `"text"` costs, which is what the source says.
+            | cl::KW_U8
+            | cl::KW_U8_LOWER
     ) || tt < 0
     {
         return HalsteadClass::Skip;

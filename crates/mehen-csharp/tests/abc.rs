@@ -396,3 +396,63 @@ fn a_query_let_binding_is_an_assignment() {
          }");
     assert_eq!(a, 1);
 }
+
+#[test]
+fn a_user_symbol_named_nameof_is_still_a_branch() {
+    // REGRESSION. `nameof` is only *contextual*, so a delegate can legally be named
+    // `nameof` — and the operator takes exactly one argument, so a two-argument call
+    // cannot be it. A text-only callee check suppressed the real delegate call.
+    let (_, b, _) = abc("class C {
+             static int F() {
+                 System.Func<int, int, int> nameof = (x, y) => x + y;
+                 return nameof(1, 2);
+             }
+         }");
+    assert_eq!(b, 1, "the delegate call is a real branch");
+}
+
+#[test]
+fn the_nameof_operator_is_still_suppressed() {
+    // The counterpart: the arity guard must not stop suppressing the actual operator,
+    // which is always one argument.
+    let (_, b, _) = abc("class C { static string F() => nameof(F); }");
+    assert_eq!(b, 0);
+}
+
+#[test]
+fn a_utf8_literal_costs_the_same_as_a_plain_one() {
+    // REGRESSION, twice. `"text"u8` is ONE literal in C#; Roslyn splits the suffix off
+    // only to model the syntax node, and the preceding `STRING_LIT` has already
+    // recorded the operand. Classifying the suffix as an operator was wrong (nothing is
+    // applied), and classifying it as an *operand* was also wrong — that gave one
+    // literal two operand occurrences. It contributes nothing.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let utf8 = halstead("class C { static System.ReadOnlySpan<byte> F() => \"text\"u8; }");
+    let plain = halstead("class C { static System.ReadOnlySpan<byte> F() => \"text\"; }");
+    assert_eq!(utf8.n1, plain.n1, "no extra distinct operator");
+    assert_eq!(utf8.n2, plain.n2, "no extra distinct operand");
+    assert_eq!(utf8.length, plain.length, "no extra length");
+}
+
+#[test]
+fn the_contextual_field_keyword_is_an_operand() {
+    // REGRESSION. C# 14's semi-auto property (`get => field;`) references the
+    // compiler-synthesized backing field. In expression position that is a value
+    // reference like `this` or `base` — Roslyn even gives it its own
+    // `field_expression : KW_FIELD` rule — but the token does not pass through
+    // `identifier_token`, so it fell through as a Halstead *operator*: a spurious
+    // operator plus a missing operand.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let semi_auto = halstead("class C { public int P { get => field; } }");
+    let explicit = halstead("class C { int _x; public int P { get => _x; } }");
+    assert_eq!(
+        semi_auto.n1, explicit.n1,
+        "`field` must not add a distinct operator"
+    );
+}
