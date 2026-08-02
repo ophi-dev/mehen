@@ -159,12 +159,24 @@ BYTE_ORDER_MARK         : '﻿'        -> skip ;
 // directive text is then matched by the second alternative, which requires the next
 // character not to start a comment — so `#pragma warning disable CA1024 // note`
 // splits correctly while a path-like `#line 1 "a/b.cs"` stays whole.
+//
+// The trailing group is for a payload that *ends* with a slash — `#region generated/`
+// or `#warning path/`. Neither repetition alternative can take it (the first excludes
+// `/`, the second needs a following character), so without it the token stopped short
+// and the slash surfaced as a visible SLASH token, erroring on valid source.
+//
+// It requires a line terminator or EOF after the slash, so a bare `'/'?` will not do:
+// that matched the first `/` of a trailing `//` comment, which put the comment's second
+// slash on the directive channel and cost the row its CLOC. Lookahead by *consuming* the
+// terminator is safe here because WHITESPACES would otherwise take it as hidden trivia —
+// no token needs it.
 // Every alternative excludes the full `NewLine` set, not just CR/LF: a directive
 // ended by NEL / U+2028 / U+2029 otherwise consumed the separator *and everything
 // after it* onto the directive channel — a whole file reported as zero declarations
 // with zero diagnostics.
 DIRECTIVE_LINE
     : '#' ( ~[/\r\n\u0085\u2028\u2029] | '/' ~[/*\r\n\u0085\u2028\u2029] )*
+      ( '/' ( [\r\n\u0085\u2028\u2029] | EOF ) )?
       -> channel(DIRECTIVE)
     ;
 

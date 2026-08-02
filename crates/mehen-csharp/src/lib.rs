@@ -139,7 +139,12 @@ impl LanguageAnalyzer for CSharpAnalyzer {
     }
 
     fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
-        let line_index = LineIndex::new(&source.text);
+        // `with_unicode_separators`, not `new`: this grammar's lexer treats NEL,
+        // U+2028, and U+2029 as line terminators (ECMA-334 §6.3.1), so they are real row
+        // breaks here. The default policy is LF/CRLF-only because every
+        // tree-sitter-backed analyzer's row source counts only LF, and an index that
+        // disagrees with the parser produces spans the walker never routes tokens to.
+        let line_index = LineIndex::with_unicode_separators(&source.text);
 
         let parsed = match self.parse(&source.text, &line_index) {
             Some(parsed) => parsed,

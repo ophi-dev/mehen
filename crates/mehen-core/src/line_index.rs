@@ -24,18 +24,36 @@ impl Default for LineIndex {
 impl LineIndex {
     /// Build the row index for `text`.
     ///
-    /// A row ends at any of the five line terminators mainstream language specs
-    /// recognize: LF, CR, NEL (U+0085), LS (U+2028), and PS (U+2029). CRLF is one
-    /// break, not two — the `\r` is skipped when an `\n` follows it.
+    /// A row ends at `\n` or at a `\r` not followed by one (so CRLF is one break, not
+    /// two). This is the **default** policy, and the one every tree-sitter-backed
+    /// analyzer needs: tree-sitter's own `Point::row` advances at LF only, and a space's
+    /// LOC span is set from those rows, so an index that counted more terminators than
+    /// the parser would claim rows the walker never routes tokens to.
     ///
-    /// A lone `\r` counts, which matters because *lexers* treat it as a terminator:
-    /// C#'s does (ECMA-334 §6.3.1 lists all five). When the index and the lexer
-    /// disagree, a file parses correctly while reporting the wrong number of rows and
-    /// attributing declarations to a row they are not on.
-    ///
-    /// Scanning `char_indices` rather than bytes keeps the multi-byte separators from
-    /// being missed.
+    /// Use [`LineIndex::with_unicode_separators`] for a language whose *lexer* also
+    /// treats NEL (U+0085), LS (U+2028), or PS (U+2029) as terminators — C# does
+    /// (ECMA-334 §6.3.1 lists all five). When the index and the lexer disagree, a file
+    /// parses correctly while reporting the wrong number of rows and attributing
+    /// declarations to rows they are not on.
     pub fn new(text: &str) -> Self {
+        Self::build(text, false)
+    }
+
+    /// As [`LineIndex::new`], but NEL (U+0085), LS (U+2028), and PS (U+2029) also end a
+    /// row.
+    ///
+    /// For a language whose lexer accepts them, which makes them real row breaks in that
+    /// file. Kept opt-in rather than universal because the row *source* has to agree: a
+    /// tree-sitter parser reports LF-only rows, so widening the index there produces
+    /// spans whose `end_line` exceeds any row the walker observes — a phantom blank
+    /// line.
+    pub fn with_unicode_separators(text: &str) -> Self {
+        Self::build(text, true)
+    }
+
+    /// Scanning `char_indices` rather than bytes keeps the multi-byte separators from
+    /// being missed when `unicode_separators` is set.
+    fn build(text: &str, unicode_separators: bool) -> Self {
         let mut line_starts = Vec::with_capacity(text.len() / 32 + 1);
         line_starts.push(0u32);
         let mut chars = text.char_indices().peekable();
@@ -49,7 +67,8 @@ impl LineIndex {
                     }
                     true
                 }
-                '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => true,
+                '\n' => true,
+                '\u{85}' | '\u{2028}' | '\u{2029}' => unicode_separators,
                 _ => false,
             };
             if is_break {
@@ -102,15 +121,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unicode_line_separators_start_new_rows() {
+    fn unicode_line_separators_start_new_rows_when_opted_in() {
         // REGRESSION. Only `\n` counted, so a file split by NEL / U+2028 / U+2029
-        // reported one physical row and attributed every declaration to it. Language
-        // specs recognize all four (C#'s ECMA-334 §6.3.1 lists them alongside CR/LF),
-        // and mehen's C# lexer accepts them — so a lexer could tokenize a multi-row file
-        // that this index reported as one line.
+        // reported one physical row and attributed every declaration to it. C#'s lexer
+        // accepts all five terminators (ECMA-334 §6.3.1), so it could tokenize a
+        // multi-row file that this index called one line.
         for separator in ['\n', '\u{85}', '\u{2028}', '\u{2029}'] {
             let text = format!("a{separator}b");
-            let index = LineIndex::new(&text);
+            let index = LineIndex::with_unicode_separators(&text);
             assert_eq!(
                 index.line_count(),
                 2,
@@ -121,6 +139,27 @@ mod tests {
             let after = (1 + separator.len_utf8()) as u32;
             assert_eq!(index.line_at(after), 2);
         }
+    }
+
+    #[test]
+    fn the_default_policy_ignores_unicode_separators() {
+        // `new` stays LF/CRLF-only, and that is load-bearing rather than conservative:
+        // every tree-sitter-backed analyzer sets a space's LOC span from tree-sitter's
+        // own `Point::row`, which advances at LF alone. An index counting more
+        // terminators than the parser claims rows the walker never routes tokens to —
+        // a phantom blank line in, say, a Go raw string containing U+2028.
+        for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
+            let text = format!("a{separator}b");
+            assert_eq!(
+                LineIndex::new(&text).line_count(),
+                1,
+                "U+{:04X} is not a row break under the default policy",
+                separator as u32
+            );
+        }
+        // LF and CRLF break under both policies.
+        assert_eq!(LineIndex::new("a\nb").line_count(), 2);
+        assert_eq!(LineIndex::new("a\r\nb").line_count(), 2);
     }
 
     #[test]

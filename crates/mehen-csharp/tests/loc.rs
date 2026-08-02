@@ -362,3 +362,24 @@ fn a_comment_after_a_unicode_terminator_lands_on_its_own_row() {
         );
     }
 }
+
+#[test]
+fn a_directive_payload_may_end_with_a_slash() {
+    // REGRESSION introduced by the trailing-comment fix: excluding `/` from the negated
+    // set meant neither repetition alternative could take a *final* slash, so
+    // `#region generated/` stopped the token short and the slash surfaced as a visible
+    // SLASH token — a syntax error on valid source.
+    //
+    // The fix requires a line terminator or EOF after that slash. A bare `'/'?` was the
+    // first attempt and broke the case above: it matched the first `/` of a trailing
+    // `//` comment and cost the row its CLOC.
+    let a = loc("#region generated/
+         class C { }
+         #endregion");
+    assert_eq!(a.cloc, 0.0, "a directive is not a comment");
+    let b = loc("class C
+         {
+         #warning path/
+         }");
+    assert_eq!(b.cloc, 0.0);
+}
