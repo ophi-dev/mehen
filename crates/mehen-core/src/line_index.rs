@@ -142,8 +142,6 @@ mod tests {
         assert_eq!(index.line_count(), 2);
     }
 
-    use super::*;
-
     #[test]
     fn empty_text_has_one_line() {
         let idx = LineIndex::new("");
