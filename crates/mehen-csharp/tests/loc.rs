@@ -262,3 +262,42 @@ fn a_real_blank_line_is_still_blank() {
     assert_eq!(a.ploc, 4.0);
     assert_eq!(a.blank, 1.0);
 }
+
+#[test]
+fn a_trailing_comment_on_a_directive_still_counts_as_cloc() {
+    // REGRESSION. `DIRECTIVE_LINE` was `'#' ~[\r\n]*`, which swallowed the whole row —
+    // so `#if DEBUG // explain why` recorded no CLOC at all. The negated set now
+    // excludes `/` so the token stops before a comment.
+    let a = loc("class C {
+         #if DEBUG // explain why
+             void M() { }
+         #endif
+         }");
+    assert_eq!(a.cloc, 1.0);
+}
+
+#[test]
+fn a_directive_without_a_comment_records_no_cloc() {
+    let a = loc("class C {
+         #if DEBUG
+             void M() { }
+         #endif
+         }");
+    assert_eq!(a.cloc, 0.0);
+}
+
+#[test]
+fn a_slash_inside_a_directive_does_not_split_it() {
+    // The second alternative requires the char after `/` not to start a comment, so a
+    // path-like `#line` directive stays one token while `#pragma … // note` splits.
+    let path = loc("class C {
+         #line 1 \"a/b.cs\"
+             void M() { }
+         }");
+    assert_eq!(path.cloc, 0.0, "a `/` in a path is not a comment");
+    let pragma = loc("class C {
+         #pragma warning disable CA1024 // note
+             void M() { }
+         }");
+    assert_eq!(pragma.cloc, 1.0);
+}

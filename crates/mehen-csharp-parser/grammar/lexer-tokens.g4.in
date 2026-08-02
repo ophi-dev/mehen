@@ -114,11 +114,20 @@ DELIMITED_COMMENT       : '/*'  .*? '*/'  -> channel(COMMENTS_CHANNEL) ;
 WHITESPACES             : [ \t\r\n\f]+    -> channel(HIDDEN) ;
 BYTE_ORDER_MARK         : '﻿'        -> skip ;
 
-// A preprocessor directive line. mehen does not evaluate `#if` (unlike the
-// grammars-v4 lexer's `CSharpLexerBase`, which needs a stateful hook for it);
-// directives are routed to their own channel so they are neither code nor
-// comment for LOC, and inactive regions are still parsed as ordinary code.
-DIRECTIVE_LINE          : '#' ~[\r\n]*    -> channel(DIRECTIVE) ;
+// A preprocessor directive line. mehen does not evaluate `#if` — directives are
+// routed to their own channel, so they are neither a comment nor a *logical* line for
+// LOC (they are still a physical code row; see `collect_loc_tokens`), and an inactive
+// region is parsed as ordinary code.
+//
+// The negated set excludes `/` so the token stops before a trailing comment:
+// `#if DEBUG // explain why` must leave the `// explain why` for
+// SINGLE_LINE_COMMENT, or the row records no CLOC at all. A `/` *within* the
+// directive text is then matched by the second alternative, which requires the next
+// character not to start a comment — so `#pragma warning disable CA1024 // note`
+// splits correctly while a path-like `#line 1 "a/b.cs"` stays whole.
+DIRECTIVE_LINE
+    : '#' ( ~[/\r\n] | '/' ~[/*\r\n] )*    -> channel(DIRECTIVE)
+    ;
 
 // ---- interpolated strings ----------------------------------------------
 // Roslyn spells interpolated strings as

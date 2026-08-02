@@ -1448,8 +1448,12 @@ impl Walker<'_> {
             // base-constructor call: `class D(int x) : B(x)` is the same call as
             // `D(int x) : base(x)`, which reaches `constructor_initializer`. Without it
             // the two forms disagreed, 0 branches against 1.
+            // `anonymous_object_creation_expression` (`new { A = 1 }`) belongs here
+            // too. It has no `argument_list`, so `classify_expression`'s invocation
+            // shape never sees it, and a real allocation scored nothing.
             cp::RULE_OBJECT_CREATION_EXPRESSION
             | cp::RULE_IMPLICIT_OBJECT_CREATION_EXPRESSION
+            | cp::RULE_ANONYMOUS_OBJECT_CREATION_EXPRESSION
             | cp::RULE_ARRAY_CREATION_EXPRESSION
             | cp::RULE_IMPLICIT_ARRAY_CREATION_EXPRESSION
             | cp::RULE_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
@@ -1790,10 +1794,21 @@ fn function_name(ctx: RuleNodeView<'_>, hint: &ChildHint) -> Option<String> {
         }
         return Some("operator".to_string());
     }
-    // A conversion operator is named by its target type (`implicit operator
-    // int`), which is a rule child rather than a token.
+    // A conversion operator is named by its target type (`implicit operator int`),
+    // which is a rule child rather than a token — so it needs the `type` child's text
+    // rather than a `direct_terminals()` scan. Without it, a type declaring
+    // conversions to several targets reported every one as a bare `operator`,
+    // indistinguishable in per-function output.
+    //
+    // The `implicit`/`explicit` keyword is deliberately left out of the name: the two
+    // cannot both convert to the same target (C# forbids it), so the target type alone
+    // is unique within a type.
     if ctx.rule_index() == cp::RULE_CONVERSION_OPERATOR_DECLARATION {
-        return Some("operator".to_string());
+        return Some(
+            ctx.child_rule(cp::RULE_TYPE)
+                .map(|target| format!("operator {}", target.text()))
+                .unwrap_or_else(|| "operator".to_string()),
+        );
     }
     // A lambda / anonymous method is anonymous.
     if matches!(

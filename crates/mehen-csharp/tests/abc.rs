@@ -516,3 +516,13 @@ fn a_bare_default_literal_is_an_operand() {
         "`default` must cost the same as `null`"
     );
 }
+
+#[test]
+fn anonymous_object_creation_is_a_branch() {
+    // REGRESSION. `new { A = 1 }` has no `argument_list`, so `classify_expression`'s
+    // invocation shape never saw it, and `anonymous_object_creation_expression` was
+    // missing from the creation list — a real allocation scored nothing while
+    // `new object()` scored one.
+    let (_, b, _) = abc("class C { static object F() => new { A = 1 }; }");
+    assert_eq!(b, 1);
+}

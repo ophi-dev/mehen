@@ -356,3 +356,29 @@ fn an_extension_receiver_is_not_a_primary_constructor() {
         .collect();
     assert_eq!(functions, vec![Some("Length.get".to_string())]);
 }
+
+#[test]
+fn conversion_operators_are_named_by_their_target_type() {
+    // REGRESSION. A conversion operator's name is its target type, which is a rule
+    // child rather than a token — the code returned a bare `"operator"` while the
+    // comment above it said otherwise. A type declaring several conversions reported
+    // them all identically, indistinguishable in per-function output.
+    let a = analyze_clean(
+        "class C {
+             public static implicit operator int(C c) => 0;
+             public static explicit operator string(C c) => null;
+         }",
+    );
+    let names: Vec<_> = shape(&a.root)
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "function")
+        .map(|(_, _, name)| name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            Some("operator int".to_string()),
+            Some("operator string".to_string()),
+        ]
+    );
+}
