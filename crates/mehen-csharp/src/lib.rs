@@ -40,11 +40,13 @@
 //! The catalogue lives in `crates/mehen-csharp-parser/grammar/PROVENANCE.md`, with
 //! the measured effect of each repair. Two things worth knowing here:
 //!
-//! - **A clean parse measures parseability, not correctness.** Twelve distinct
+//! - **A clean parse measures parseability, not correctness.** Fourteen distinct
 //!   *silent misparses* have come out of this grammar — structurally wrong trees
 //!   with zero reported errors — each caught by a metric test or a parse-tree dump,
 //!   never by an error count. That is why the per-language tests assert numbers
-//!   against an equivalent spelling rather than just checking for diagnostics.
+//!   against an equivalent spelling rather than just checking for diagnostics: two of
+//!   the fourteen hid behind a passing test whose input happened to use the one
+//!   spelling that parses correctly.
 //! - **One known limitation remains:** a preprocessor directive that splits a
 //!   single expression across `#if` branches (a return type, say) yields two
 //!   partial expressions where one belongs. Five of 322 files in the

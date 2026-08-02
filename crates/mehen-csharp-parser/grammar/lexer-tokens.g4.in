@@ -190,11 +190,37 @@ BYTE_ORDER_MARK         : '﻿'        -> skip ;
 // ended by NEL / U+2028 / U+2029 otherwise consumed the separator *and everything
 // after it* onto the directive channel — a whole file reported as zero declarations
 // with zero diagnostics.
+//
+// The `DirectiveString` alternative makes the scan quote-aware, which the
+// comment-marker split above cannot be on its own. Roslyn's `line_directive_trivia`
+// and `load_directive_trivia` both accept a `string_literal_token`, so `//` and `/*`
+// inside those quotes are string *content*:
+//
+//     #line 1 "https://host/a.cs"
+//                    ^^ not a comment
+//
+// Without the atom the scan stopped at that `//` and SINGLE_LINE_COMMENT took the
+// rest, inflating CLOC by a phantom comment on a row that has none. `/*` was worse:
+// DELIMITED_COMMENT ran to the next `*/`, so `#line 1 "c:/a/*b*/c.cs"` left `c.cs"`
+// as visible tokens and reported two errors on valid source.
+//
+// `"` stays in the plain negated set as well as starting the atom, so the two paths
+// overlap. That is what handles an *unpaired* quote \u2014 `#error say "hi` has no closing
+// quote, so the atom cannot complete. ANTLR maximizes the match for the rule as a
+// whole rather than committing to the first viable alternative, so the paired case
+// takes the atom (a longer total match than stopping at the quote) while the unpaired
+// case falls through to the single-character path and still consumes the whole row.
+// Neither case needs a predicate.
 DIRECTIVE_LINE
-    : '#' ( ~[/\r\n\u0085\u2028\u2029] | '/' ~[/*\r\n\u0085\u2028\u2029] )*
+    : '#' ( DirectiveString | ~[/\r\n\u0085\u2028\u2029] | '/' ~[/*\r\n\u0085\u2028\u2029] )*
       ( '/' ( [\r\n\u0085\u2028\u2029] | EOF ) )?
       -> channel(DIRECTIVE)
     ;
+
+// A quoted run inside a directive, matched as one atom by DIRECTIVE_LINE. Excludes the
+// line terminators as well as `"`: a directive cannot span rows, so an unclosed quote
+// must not let the atom swallow the following line.
+fragment DirectiveString : '"' ~["\r\n\u0085\u2028\u2029]* '"' ;
 
 // ---- interpolated strings ----------------------------------------------
 // Roslyn spells interpolated strings as

@@ -264,6 +264,70 @@ fn an_extension_block_is_its_own_container() {
 }
 
 #[test]
+fn an_extension_block_holding_a_method_is_not_a_constructor() {
+    // REGRESSION, and the third instance of the contextual-keyword ordering hazard
+    // (`record`, `union`, now `extension`) — but the worst of them, because the
+    // collision is with `constructor_declaration`:
+    //
+    //     constructor_declaration
+    //       : attribute_list* modifier* identifier_token parameter_list … block
+    //
+    // is exactly the shape of `extension(string s) { … }`, and `member_declaration`
+    // lists `base_method_declaration` before `base_type_declaration`. So the block
+    // parsed as a *constructor named `extension`* holding its members as local
+    // functions — with zero diagnostics and metrics identical to the `E(string s)`
+    // constructor spelling.
+    //
+    // `an_extension_block_is_its_own_container` above did not catch it: it uses a
+    // *property* member, and a property is not a legal statement, so the constructor
+    // path dies there and ANTLR falls back to the type path. A method member IS a
+    // legal statement (`local_function_statement` takes `modifier*`), so the
+    // constructor path stayed viable end to end. Hence the assertion here is against
+    // the `class` control rather than a literal shape — an extension container must
+    // be indistinguishable from any other type container.
+    let extension = analyze_clean(
+        "static class E {
+             extension(string s) {
+                 public int L() { return s.Length; }
+             }
+         }",
+    );
+    let control = analyze_clean(
+        "static class E {
+             class Inner {
+                 public int L() { return 1; }
+             }
+         }",
+    );
+    // Only the container's own name differs — an extension block declares none.
+    let anonymize = |root: &MetricSpace| {
+        shape(root)
+            .into_iter()
+            .map(|(depth, kind, name)| (depth, kind, if depth == 2 { None } else { name }))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(anonymize(&extension.root), anonymize(&control.root));
+    // Spelled out, so a shape change in both at once cannot pass silently.
+    assert_eq!(
+        anonymize(&extension.root),
+        vec![
+            (0, "unit".to_string(), None),
+            (1, "class".to_string(), Some("E".to_string())),
+            (2, "class".to_string(), None),
+            (3, "function".to_string(), Some("L".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn extension_is_still_a_legal_identifier() {
+    // Hoisting `type_declaration` must not make the word reserved — `extension` is a
+    // contextual keyword, so it stays usable as an ordinary name.
+    let a = analyze_clean("class C { void M() { int extension = 1; var x = extension; } }");
+    assert_eq!(a.root.spaces[0].spaces.len(), 1);
+}
+
+#[test]
 fn a_positional_record_is_a_type_not_a_method() {
     // REGRESSION, and the most consequential silent misparse yet: `record R(int X);`
     // — the single most common record spelling — parsed as a *method* named `R`

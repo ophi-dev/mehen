@@ -383,3 +383,85 @@ fn a_directive_payload_may_end_with_a_slash() {
          }");
     assert_eq!(b.cloc, 0.0);
 }
+
+#[test]
+fn a_comment_marker_inside_a_directive_string_is_string_content() {
+    // REGRESSION. Roslyn's `line_directive_trivia` / `load_directive_trivia` both accept
+    // a `string_literal_token`, so `//` and `/*` between those quotes are string
+    // *content* — but the trailing-comment split above is character-level and stopped at
+    // the first `/`. `//` therefore left the rest of the row to SINGLE_LINE_COMMENT and
+    // invented a comment on a row that has none.
+    for source in [
+        "#line 1 \"https://host/a.cs\"\nclass C { }",
+        "#load \"https://host/a.csx\"\nclass C { }",
+    ] {
+        assert_eq!(
+            loc(source).cloc,
+            0.0,
+            "a `//` inside the directive's string is not a comment: {source}"
+        );
+    }
+
+    // `/*` was worse than a miscount: DELIMITED_COMMENT ran to the next `*/`, so the
+    // tail of the path came back as *visible* tokens. `loc` asserts a clean parse, so
+    // reaching the assertion at all is the substance of this case.
+    assert_eq!(loc("#line 1 \"c:/a/*b*/c.cs\"\nclass C { }").cloc, 0.0);
+}
+
+#[test]
+fn an_unpaired_quote_in_a_directive_still_ends_at_the_row() {
+    // The quote-aware alternative overlaps the plain single-character one, so an
+    // unclosed quote cannot complete the atom and falls through — consuming the rest of
+    // the row and no more. ANTLR maximizes the match for the rule as a whole rather than
+    // committing to the first viable alternative, which is what lets one rule serve both
+    // cases without a predicate.
+    //
+    // Two rows of code after the directive: if the atom had swallowed the newline, the
+    // class and its method would be inside the directive token and LLOC would drop.
+    assert_eq!(
+        loc("#error say \"hi
+             class C
+             {
+                 void M() { }
+             }")
+        .lloc,
+        2.0
+    );
+}
+
+#[test]
+fn a_trailing_comment_after_a_directive_string_still_counts() {
+    // The counterpart to the two cases above: making the scan quote-aware must not cost
+    // a *real* trailing comment its CLOC, and a `"` inside that comment must not start
+    // an atom that eats the row's end.
+    assert_eq!(loc("#line 1 \"a.cs\" // note\nclass C { }").cloc, 1.0);
+    assert_eq!(loc("#if A // say \"hi\nclass C { }\n#endif").cloc, 1.0);
+}
+
+#[test]
+fn an_extension_block_contributes_a_logical_line() {
+    // REGRESSION. An `extension(T x) { … }` block opens a class-like space, so it must
+    // record the logical line every other type-like declaration does — it was missing
+    // from the LLOC allowlist, so an extension holding one method reported 1 where the
+    // analogous `class Inner { … }` container reports 2.
+    //
+    // Asserted against the class control rather than an absolute, since the two
+    // spellings must be indistinguishable here.
+    let extension = loc("static class E
+         {
+             extension(string s)
+             {
+                 public int L() { return s.Length; }
+             }
+         }");
+    let control = loc("static class E
+         {
+             class Inner
+             {
+                 public int L() { return 1; }
+             }
+         }");
+    assert_eq!(extension.lloc, control.lloc);
+    // outer class + container + method + return = 4.
+    assert_eq!(extension.lloc, 4.0);
+}

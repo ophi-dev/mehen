@@ -1103,31 +1103,32 @@ impl Walker<'_> {
         }
     }
 
+    /// Build a space's initial `State` from the context's own span.
+    ///
+    /// No span widening, unlike the grammars-v4-backed walkers: those open a
+    /// member's space at a wrapper rule that excludes the leading `attribute_list*
+    /// modifier*`, so the span has to be pulled back to cover them. Roslyn puts
+    /// that prefix on the declaration itself (see [`maybe_open_space`]), so the
+    /// context's own start is already the member's first byte.
+    ///
+    /// [`maybe_open_space`]: Walker::maybe_open_space
     fn new_space_state(&self, ctx: RuleNodeView<'_>) -> State {
-        self.new_space_state_widened(ctx, None)
-    }
-
-    /// Build a space's initial `State`, optionally widening the span's start
-    /// (byte + line) upward to `widened_start`.
-    fn new_space_state_widened(
-        &self,
-        ctx: RuleNodeView<'_>,
-        widened_start: Option<(u32, u32)>,
-    ) -> State {
         let mut state = State::new();
         let span = ctx_span(ctx, self.line_index, self.source_len);
-        let start_line = match widened_start {
-            Some((_, line)) if line < span.start_line => line,
-            _ => span.start_line,
-        };
         state.loc.set_span(
-            start_line.saturating_sub(1),
+            span.start_line.saturating_sub(1),
             span.end_line.saturating_sub(1),
             false,
         );
         state
     }
 
+    /// Open a space over `ctx`'s span, recording it for LOC routing.
+    ///
+    /// The span is the context's own, for the same reason [`new_space_state`] does
+    /// no widening.
+    ///
+    /// [`new_space_state`]: Walker::new_space_state
     fn push_space(
         &mut self,
         kind: SpaceKind,
@@ -1136,29 +1137,7 @@ impl Walker<'_> {
         state: State,
         suppress_parent_wmc: bool,
     ) {
-        self.push_space_widened(kind, name, ctx, state, suppress_parent_wmc, None);
-    }
-
-    /// Like [`push_space`], but widens the recorded span's start (byte + line)
-    /// upward to `widened_start` when it precedes the context's own start — so
-    /// comment routing and the tree span cover the member's own-line
-    /// attributes/modifiers.
-    fn push_space_widened(
-        &mut self,
-        kind: SpaceKind,
-        name: Option<String>,
-        ctx: RuleNodeView<'_>,
-        state: State,
-        suppress_parent_wmc: bool,
-        widened_start: Option<(u32, u32)>,
-    ) {
-        let mut span = ctx_span(ctx, self.line_index, self.source_len);
-        if let Some((start_byte, start_line)) = widened_start
-            && start_byte < span.start_byte
-        {
-            span.start_byte = start_byte;
-            span.start_line = start_line;
-        }
+        let span = ctx_span(ctx, self.line_index, self.source_len);
         let space_id = self.tree.open(kind.clone(), span, name);
         self.loc_routing
             .record_open(space_id, span.start_byte, span.end_byte);
@@ -1791,6 +1770,12 @@ impl Walker<'_> {
                 | cp::RULE_ENUM_DECLARATION
                 | cp::RULE_RECORD_DECLARATION
                 | cp::RULE_UNION_DECLARATION
+                // A C# 14 `extension(T x) { … }` block is a declaration like any
+                // other type container, even though it declares no *name*. Omitting
+                // it made an extension holding one method report LLOC 1 where the
+                // analogous `class Inner { … }` container reports 2 — the container
+                // row itself went uncounted.
+                | cp::RULE_EXTENSION_BLOCK_DECLARATION
                 | cp::RULE_DELEGATE_DECLARATION
                 | cp::RULE_NAMESPACE_DECLARATION
                 | cp::RULE_FILE_SCOPED_NAMESPACE_DECLARATION

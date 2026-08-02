@@ -421,12 +421,33 @@ INCOMPLETE_MEMBER_ALT = "  | incomplete_member\n"
 # path, because a member body cannot follow a method signature — so only the empty and
 # semicolon forms mis-parsed, which is why it survived longer.
 #
-# Both are hoisted together. `record_declaration` needed a real `KW_RECORD` token for
-# the hoist to be safe (see RECORD_KEYWORD_RULE); `union_declaration` already has a
-# real `KW_UNION` token, since Roslyn spells that keyword as a literal.
+# `extension_block_declaration` (C# 14) is the third of the same shape, and the worst
+# of them, because the collision is with `constructor_declaration` rather than
+# `method_declaration`:
+#
+#     constructor_declaration
+#       : attribute_list* modifier* identifier_token parameter_list … block
+#
+# is character-for-character the shape of `extension(string s) { … }`, so an extension
+# block parsed as a *constructor named `extension`* — a function space holding the
+# extension's members, with metrics identical to the `E(string s) { … }` constructor
+# spelling and zero diagnostics. The members were still counted, so nothing looked
+# missing; they were just attributed to a constructor that does not exist.
+#
+# Like `union`, this one needs only the hoist: Roslyn spells `extension` as a literal,
+# so `KW_EXTENSION` is a real token already. The hoist is on `type_declaration`, which
+# is where `extension_block_declaration` lives — hoisting the parent covers all six of
+# its alternatives, and `class`/`interface`/`struct` are reserved words that could
+# never have collided, so widening the hoist costs nothing.
+#
+# All three are hoisted together. `record_declaration` needed a real `KW_RECORD` token
+# for the hoist to be safe (see RECORD_KEYWORD_RULE); `union_declaration` and
+# `extension_block_declaration` already have real `KW_UNION` / `KW_EXTENSION` tokens,
+# since Roslyn spells both of those keywords as literals.
 HOISTED_TYPE_ALTS = (
     "  | record_declaration\n",
     "  | union_declaration\n",
+    "  | extension_block_declaration\n",
 )
 MEMBER_METHOD_ALT = "  | base_method_declaration\n"
 

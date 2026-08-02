@@ -81,7 +81,7 @@ Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
 corpus. All 5 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **twelve** distinct silent misparses: structurally wrong
+grammar has now produced **fourteen** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -96,23 +96,35 @@ dump, never by an error count.
 | `constant_pattern` listed before `discard_pattern` | a `_ =>` arm is an expression, not the discard |
 | `base_method_declaration` listed before the type forms | `record R(int X);` was a *method* named `R` |
 | …and the same for `union` | `union U { }` was a *method* named `U` (with members it parsed correctly, hiding it) |
+| …and the same for `extension` | `extension(T x) { … }` was a *constructor* named `extension` (with a property member it parsed correctly, hiding it) |
+| `DIRECTIVE_LINE` was not quote-aware | `#line 1 "c:/a/*b*/c.cs"` ended at the `/*`, leaving `c.cs"` as visible tokens |
 | `compilation_unit` did not end in `EOF` | `class C { } } } }` was a clean parse; the tail was never read |
 | `incomplete_member` was reachable | `class C { int }` was a complete, error-free unit |
 | `switch_statement`'s parens independently optional | `switch value { … }` parsed, though only the *expression* form is paren-free |
 | a local generic declaration loses to the expression statement | `List<int> l;` reads as chained comparison — **open, issue #218** |
 
-The first five *delete* code from the tree, the next five *relabel* it, and two accept
+Six *delete* code from the tree, six *relabel* it, and two accept
 source that is not valid C# at all. Every shape is invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
 
-Five of the twelve share one root cause: **an alternative that is viable for the
+Six of the fourteen share one root cause: **an alternative that is viable for the
 wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
 each semantically — it knows whether `F` names a type, whether `and` resolves to a
 declared name, whether `record` is a keyword here — and a syntax-only grammar has
 only alternative order and token identity to work with. Which of those two tools
 applies is not a matter of taste; see the `record` section below for a case where
 order alone provably cannot do it.
+
+Three of those six are the same `member_declaration` ordering hazard — `record`,
+`union`, `extension` — and the last two are worth reading together, because each hid
+behind the *test input* rather than behind the grammar. A `union` with members parses
+correctly (a member body cannot follow a method signature), and an `extension` whose
+member is a *property* parses correctly (a property is not a legal statement, so the
+constructor path dies). Both had passing tests written against exactly the spelling
+that works. The regression tests now assert against an equivalent *control* spelling
+— an extension container must be indistinguishable from a `class` container — rather
+than against a literal shape, so a test cannot sit on the one viable case again.
 
 **No runtime capability is missing.** Every failure traced to either the prep or
 an upstream-generator blind spot, and each was fixable declaratively — every one of
@@ -415,6 +427,44 @@ and `record` as a type name is vanishingly rare in real C#.
 The performance half was diagnosed by the antlr-rust-runtime team on
 [`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runtime/issues/248);
 `repro/roslyn-csharp-perf/` at the repo root reproduces both variants.
+
+### `union` and `extension`: the same hazard, cheaper fixes
+
+Both are contextual keywords that Roslyn *does* spell as literals, so `KW_UNION` and
+`KW_EXTENSION` already exist and only the hoist is needed — no minted token, none of
+the three-attempt sequence above. But each collides with a different member form, and
+the `extension` one is the worst of the three:
+
+| declaration | collides with | parsed as |
+|---|---|---|
+| `record R(int X);` | `method_declaration` | method `R` returning type `record` |
+| `union U { }` | `method_declaration` | method `U` returning type `union` |
+| `extension(T x) { … }` | `constructor_declaration` | **constructor** named `extension` |
+
+`constructor_declaration : attribute_list* modifier* identifier_token parameter_list
+… block` is character-for-character an extension block's shape, so the members were
+still counted — just attributed to a constructor that does not exist. Metrics were
+byte-identical to the `E(T x) { … }` constructor spelling, which is why nothing looked
+missing.
+
+Both survived longer than `record` for the same reason, and it is a lesson about test
+inputs rather than about grammars: **each has a spelling that parses correctly, and
+the existing test happened to use it.** A `union` *with members* forces the type path,
+because a member body cannot follow a method signature. An `extension` whose member is
+a *property* forces the type path too, because `constructor_declaration` requires a
+`block` and only statements are legal inside one — `public int P => 1;` is not a
+statement, so the constructor path dies. A *method* member is a legal
+`local_function_statement`, so it keeps the constructor path viable end to end.
+
+The hoist for `extension` is on `type_declaration`, its parent, rather than on
+`extension_block_declaration` itself: that covers all six of its alternatives at once,
+and `class`/`interface`/`struct` are reserved words that could never have collided, so
+the wider hoist costs nothing.
+
+Two follow-ons in the walker, both invisible while the misparse stood:
+`RULE_EXTENSION_BLOCK_DECLARATION` had to join the LLOC declaration allowlist (the
+container row went uncounted), and `opens_type_like` already listed it — that arm had
+simply been unreachable.
 
 ## Semantic helpers — no hooks anywhere
 
