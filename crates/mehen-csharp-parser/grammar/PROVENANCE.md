@@ -81,7 +81,7 @@ Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
 corpus. All 5 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **fourteen** distinct silent misparses: structurally wrong
+grammar has now produced **fifteen** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -97,18 +97,19 @@ dump, never by an error count.
 | `base_method_declaration` listed before the type forms | `record R(int X);` was a *method* named `R` |
 | …and the same for `union` | `union U { }` was a *method* named `U` (with members it parsed correctly, hiding it) |
 | …and the same for `extension` | `extension(T x) { … }` was a *constructor* named `extension` (with a property member it parsed correctly, hiding it) |
+| every element after `'extension'` optional | once hoisted, `extension M() { … }` grew a phantom empty extension space beside the method |
 | `DIRECTIVE_LINE` was not quote-aware | `#line 1 "c:/a/*b*/c.cs"` ended at the `/*`, leaving `c.cs"` as visible tokens |
 | `compilation_unit` did not end in `EOF` | `class C { } } } }` was a clean parse; the tail was never read |
 | `incomplete_member` was reachable | `class C { int }` was a complete, error-free unit |
 | `switch_statement`'s parens independently optional | `switch value { … }` parsed, though only the *expression* form is paren-free |
 | a local generic declaration loses to the expression statement | `List<int> l;` reads as chained comparison — **open, issue #218** |
 
-Six *delete* code from the tree, six *relabel* it, and two accept
+Six *delete* code from the tree, seven *relabel* it, and two accept
 source that is not valid C# at all. Every shape is invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
 
-Six of the fourteen share one root cause: **an alternative that is viable for the
+Six of the fifteen share one root cause: **an alternative that is viable for the
 wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
 each semantically — it knows whether `F` names a type, whether `and` resolves to a
 declared name, whether `record` is a keyword here — and a syntax-only grammar has
@@ -463,6 +464,45 @@ possible) or is the method/property form being hoisted past. And of
 `type_declaration`'s six alternatives, `class` / `interface` / `struct` are reserved;
 only `record`, `union`, and `extension` lead with a contextual keyword. With all three
 hoisted, the hazard is closed at this rule.
+
+Hoisting `extension` then exposed a second defect, because upstream leaves **every**
+element after the keyword optional:
+
+```antlr
+extension_block_declaration
+  : attribute_list* modifier* 'extension' type_parameter_list? parameter_list?
+    type_parameter_constraint_clause* '{'? member_declaration* '}'? ';'?
+```
+
+The bare token `extension` is therefore a complete extension block. Harmless while the
+rule sat behind `base_method_declaration`; with priority, that zero-child match won
+before `method_declaration` could take `extension` as a *return type*, so
+`class C { extension M() { … } }` grew a phantom empty extension space beside the
+correct method — again with no diagnostic. This is the same all-optional pathology as
+the type-body braces, and the same fix: require the body
+(`EXTENSION_BODY_REQUIRED`). Nothing legal is lost, because unlike every other type
+form an extension block has no body-less spelling — `record R;` is valid C#,
+`extension;` is not, since the receiver alone declares nothing.
+
+#### The residual trade, measured
+
+Hoisting settles an ambiguity by alternative *order*, so whichever order is chosen one
+shape loses. All three keywords pay, and each pays somewhere different — worth knowing
+which, since the earlier `record` section states the principle but not the map:
+
+| source | `extension` | `record` / `union` |
+|---|---|---|
+| `class KW { KW() { } }` | ctor → anonymous container | correct |
+| `class C { KW M() { … } }` | correct (after the body fix) | method → a *class* named `M` |
+| field / parameter / local of type `KW` | correct | correct |
+
+So `extension` now has the *narrowest* trade of the three: one shape, an
+initializer-less constructor in a type literally named `extension`. A constructor
+*initializer* escapes it — `: this(…)` is a token an extension block cannot accept, so
+`extension() : this(1) { }` parses as the constructor it is. And it is irreducible
+without semantics: the body cannot disambiguate either, since `int x = 1;` is both a
+statement and a field declaration. `crates/mehen-csharp/tests/structure.rs` pins the
+whole table so the trade stays deliberate.
 
 Two follow-ons in the walker, both invisible while the misparse stood:
 `RULE_EXTENSION_BLOCK_DECLARATION` had to join the LLOC declaration allowlist (the

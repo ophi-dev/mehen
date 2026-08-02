@@ -17,7 +17,7 @@
 //! Java/Kotlin harnesses have no equivalent of. Nine copies of it would be nine
 //! chances for one file to drop the assertion and start measuring error recovery
 //! instead of the construct under test — the exact failure mode
-//! `grammar/PROVENANCE.md` catalogues fourteen instances of.
+//! `grammar/PROVENANCE.md` catalogues fifteen instances of.
 #![allow(unreachable_pub, dead_code)]
 
 use mehen_core::{AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, SourceFile};

@@ -612,6 +612,37 @@ SWITCH_PARENS = (
 BALANCED_BRACES_PATTERN = re.compile(r"LBRACE\? (.*?) RBRACE\?")
 BALANCED_BRACES_REPLACEMENT = r"(LBRACE \1 RBRACE)?"
 
+# `extension_block_declaration` has EVERY element after the keyword optional:
+#
+#     KW_EXTENSION type_parameter_list? parameter_list? … (LBRACE … RBRACE)? SEMICOLON?
+#
+# so the bare token `extension` is a complete extension block. Harmless while the rule
+# sat behind `base_method_declaration`; the moment HOISTED_TYPE_ALTS gave it priority,
+# that zero-child match won before `method_declaration` could take `extension` as a
+# *return type* — so `class C { extension M() { … } }` produced a phantom empty
+# extension-block space beside the correct method, with zero diagnostics.
+#
+# This is the same all-optional pathology the brace balancing above addresses, and the
+# fix is the same shape: require the body. Nothing legal is lost — unlike every other
+# type form, an extension block has no body-less spelling (`record R;` is valid C#,
+# `extension;` is not; the receiver is what it declares and a receiver alone declares
+# nothing). Roslyn's optionality is for its error-recovery node model, as with the
+# braces.
+#
+# The receiver `parameter_list` is deliberately left optional: `extension<T>` with only
+# type parameters is a C# 14 shape, and the trailing `SEMICOLON?` stays for a body-less
+# *declaration* the compiler itself rejects but which costs nothing to accept here.
+# Applied after harvesting, so the brace tokens carry their STABLE_TOKEN_NAMES names —
+# and after 4c, so the pair is already balanced.
+EXTENSION_BODY_REQUIRED = (
+    "extension_block_declaration\n  : attribute_list* modifier* KW_EXTENSION"
+    " type_parameter_list? parameter_list? type_parameter_constraint_clause*"
+    " (LBRACE member_declaration* RBRACE)? SEMICOLON?\n  ;",
+    "extension_block_declaration\n  : attribute_list* modifier* KW_EXTENSION"
+    " type_parameter_list? parameter_list? type_parameter_constraint_clause*"
+    " LBRACE member_declaration* RBRACE\n  ;",
+)
+
 # C# keywords that are *reserved*: never legal as an identifier (ECMA-334 §6.4.4
 # "Keywords", excluding the contextual ones listed there separately). Every other
 # identifier-shaped literal the grammar mentions is contextual, so it must remain
@@ -1309,6 +1340,20 @@ def main() -> int:
         print("error: no optional-brace bodies found to balance", file=sys.stderr)
         return 1
     print(f"balanced the brace pair in {braced} body rules")
+
+    # -- 4d. Require an extension block to have a body ------------------------
+    # See EXTENSION_BODY_REQUIRED: every element after `KW_EXTENSION` is optional
+    # upstream, so the bare keyword was a complete extension block — and once the rule
+    # was hoisted, `class C { extension M() { … } }` grew a phantom empty extension
+    # space beside the method. Runs after 4c so the brace pair is already balanced.
+    if EXTENSION_BODY_REQUIRED[0] not in src:
+        print(
+            "error: extension_block_declaration not in expected balanced form",
+            file=sys.stderr,
+        )
+        return 1
+    src = src.replace(*EXTENSION_BODY_REQUIRED, 1)
+    print("required the extension block's body")
 
     # -- 5. Emit the parser grammar -----------------------------------------
     src = re.sub(r"^//[^\n]*\n", "", src)  # drop the auto-generated banner

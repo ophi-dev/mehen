@@ -320,6 +320,69 @@ fn an_extension_block_holding_a_method_is_not_a_constructor() {
 }
 
 #[test]
+fn the_hoists_residual_trade_is_a_ctor_in_a_type_named_for_the_keyword() {
+    // The inverse collision, pinned deliberately rather than left to be rediscovered.
+    // Hoisting settles an ambiguity by alternative ORDER, so whichever order is chosen,
+    // one of the two shapes loses — and the loser is documented here.
+    //
+    // For `extension` it is an initializer-less constructor in a type *named*
+    // `extension`: `class extension { extension() { } }` reads as an extension block, so
+    // the constructor is reported as an anonymous nested container. Irreducible without
+    // semantics — the body cannot disambiguate either, since `int x = 1;` is both a
+    // statement and a field declaration.
+    //
+    // A *second* collision was found and fixed rather than traded: because every element
+    // after `KW_EXTENSION` was optional upstream, the bare keyword was a complete
+    // extension block — so `class C { extension M() { … } }` grew a phantom empty
+    // extension space beside the method. Requiring the body (EXTENSION_BODY_REQUIRED in
+    // the prep) removes it, and is what makes the return-type case below pass.
+    //
+    // Two things bound what remains, both measured:
+    let anon_container = vec![
+        (0, "unit".to_string(), None),
+        (1, "class".to_string(), Some("extension".to_string())),
+        (2, "class".to_string(), None),
+    ];
+    assert_eq!(
+        shape(&analyze_clean("class extension { extension() { } }").root),
+        anon_container
+    );
+
+    // 1. A constructor *initializer* is a token an extension block cannot accept, so the
+    //    common real-world constructor spelling escapes the trade entirely.
+    let with_initializer =
+        analyze_clean("class extension { extension() : this(1) { } extension(int x) { } }");
+    let functions: Vec<_> = shape(&with_initializer.root)
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "function")
+        .collect();
+    assert_eq!(
+        functions.len(),
+        1,
+        "`: this(…)` disambiguates — the delegating ctor is a function again"
+    );
+
+    // 2. The trade does NOT extend to fields, parameters, locals, or return types: only
+    //    the constructor shape collides, because only it is `name (params) { … }`.
+    //    Each is pinned against the same source with an ordinary type name, which must
+    //    produce an identical tree.
+    for template in [
+        "class C { NAME f; }",
+        "class C { void M(NAME p) { } }",
+        "class C { void M() { NAME v = null; } }",
+        "class C { NAME M() { return null; } }",
+    ] {
+        let keyword = analyze_clean(&template.replace("NAME", "extension"));
+        let control = analyze_clean(&template.replace("NAME", "Foo"));
+        assert_eq!(
+            shape(&keyword.root),
+            shape(&control.root),
+            "`extension` as an ordinary type name behaves like any other: {template}"
+        );
+    }
+}
+
+#[test]
 fn extension_is_still_a_legal_identifier() {
     // Hoisting `type_declaration` must not make the word reserved — `extension` is a
     // contextual keyword, so it stays usable as an ordinary name.
