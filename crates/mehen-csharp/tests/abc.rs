@@ -577,3 +577,25 @@ fn an_empty_interpolated_string_is_one_operand() {
     let plain = halstead("class C { static string F() { var s = \"\"; return s; } }");
     assert_eq!(interpolated.n2, plain.n2, "empty `$\"\"` is one operand");
 }
+
+#[test]
+fn a_generic_lists_comma_is_still_an_operator() {
+    // REGRESSION introduced by the `in_type_delimiter` fix itself: the hint marks a
+    // whole delimiter *list*, and the Halstead branch returned for every token in it —
+    // dropping the `,` between type arguments along with the `>`. Only `<`/`>` are the
+    // delimiter; a comma is ordinary punctuation and counts as it does in a parameter
+    // list.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let two = halstead("class C { System.Collections.Generic.Dictionary<int, string> F; }");
+    let one = halstead("class C { System.Collections.Generic.List<int> F; }");
+    // Two extra distinct operators over the one-argument form: the `,` and the extra
+    // type name's operand is separate — so the delta must be 2, not 1.
+    assert_eq!(
+        two.n1 - one.n1,
+        2.0,
+        "the type-argument comma must count as an operator"
+    );
+}

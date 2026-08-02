@@ -457,7 +457,15 @@ impl Walker<'_> {
                 // distinct-operator count does not conflate `List<int>` with
                 // `a < b`. Halstead pairs a bracket as one operator, so only the
                 // opener is recorded.
-                if hint.in_type_delimiter {
+                // The hint marks a whole delimiter *list*, but only its `<`/`>` are
+                // the delimiter — a `,` separating type arguments is ordinary
+                // punctuation and counts as it does anywhere else. Returning for every
+                // token in the list dropped it, so `Dictionary<int, string>` cost one
+                // operator less than the comma it visibly contains.
+                if hint.in_type_delimiter && matches!(tt, cl::LT | cl::GT) {
+                    // Halstead pairs a bracket as one operator, so only the opener is
+                    // recorded, under its own name — `List<int>` must not be conflated
+                    // with `a < b` in the distinct-operator set.
                     if tt == cl::LT {
                         self.current().halstead.observe_operator(HalsteadOperator {
                             kind: SmolStr::new("<>"),
@@ -508,15 +516,19 @@ impl Walker<'_> {
                         .saturating_sub(1)
                 })
                 .unwrap_or_else(|| (term.symbol().line() as u32).saturating_sub(1));
-            // Every C# line terminator, not just `\n` — the lexer accepts NEL,
-            // U+2028, and U+2029 (ECMA-334 §6.3.1), and `LineIndex` counts rows the
-            // same way, so a multi-row token split by one of them has to expand here
-            // too or its interior rows read as phantom blanks.
-            let extra_rows = term
-                .symbol()
-                .text_or_empty()
-                .chars()
-                .filter(|&c| matches!(c, '\n' | '\u{85}' | '\u{2028}' | '\u{2029}'))
+            // Every C# line terminator, not just `\n` — the lexer accepts all five
+            // (ECMA-334 §6.3.1) and `LineIndex` counts rows the same way, so a
+            // multi-row token split by one of them has to expand here too or its
+            // interior rows read as phantom blanks. CRLF is one break, matching
+            // `LineIndex`: the `\r` is skipped when an `\n` follows.
+            let text = term.symbol().text_or_empty();
+            let extra_rows = text
+                .char_indices()
+                .filter(|&(i, c)| match c {
+                    '\r' => !text[i..].starts_with("\r\n"),
+                    '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => true,
+                    _ => false,
+                })
                 .count() as u32;
             for row in start_row..=start_row.saturating_add(extra_rows) {
                 self.current().loc.observe_code_line(row);
@@ -961,12 +973,14 @@ impl Walker<'_> {
         // `record struct` (the last two are both `record_declaration` here), plus
         // `interface` since C# 12 — where it declares parameters rather than a body,
         // but is still spelled and named the same way.
+        // C# allows a primary constructor on exactly `class`, `struct`, `record`, and
+        // `record struct` (the last two are one rule here). An `interface` does NOT —
+        // `interface I(int x) { }` is not valid C#, and the permissive grammar accepts
+        // the optional parameter list without a diagnostic, so listing it here minted a
+        // constructor for invalid source.
         if matches!(
             ri,
-            cp::RULE_CLASS_DECLARATION
-                | cp::RULE_STRUCT_DECLARATION
-                | cp::RULE_RECORD_DECLARATION
-                | cp::RULE_INTERFACE_DECLARATION
+            cp::RULE_CLASS_DECLARATION | cp::RULE_STRUCT_DECLARATION | cp::RULE_RECORD_DECLARATION
         ) && let Some(params) = type_ctx.child_rule(cp::RULE_PARAMETER_LIST)
         {
             let args = count_parameters(params);

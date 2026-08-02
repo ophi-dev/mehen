@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::analyze_clean;
+use common::{analyze, analyze_clean};
 use mehen_core::{MetricSpace, SpaceKind};
 
 /// Flatten the space tree into `(depth, kind, name)` triples in tree order.
@@ -445,4 +445,18 @@ fn every_primary_constructor_form_still_opens_one() {
             "`{source}` must open one constructor space"
         );
     }
+}
+
+#[test]
+fn an_interface_does_not_take_a_primary_constructor() {
+    // REGRESSION. `interface I(int x) { }` is not valid C# — primary constructors are
+    // for `class`, `struct`, and `record` — but Roslyn's permissive grammar accepts the
+    // optional parameter list without a diagnostic, so listing `interface` in the
+    // allowlist minted a constructor space for invalid source.
+    let a = analyze("interface I(int x) { }");
+    let functions = shape(&a.root)
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "function")
+        .count();
+    assert_eq!(functions, 0, "no constructor for an invalid declaration");
 }

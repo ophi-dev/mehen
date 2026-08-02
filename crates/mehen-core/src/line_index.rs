@@ -24,24 +24,43 @@ impl Default for LineIndex {
 impl LineIndex {
     /// Build the row index for `text`.
     ///
-    /// A row ends at `\n` or at one of the three Unicode line separators every
-    /// mainstream language spec also recognizes: NEL (U+0085), LS (U+2028), and PS
-    /// (U+2029). CRLF works through its `\n`; a lone `\r` is deliberately not a
-    /// break, matching how editors and `git diff` treat classic-Mac line endings in
-    /// otherwise-LF files.
+    /// A row ends at any of the five line terminators mainstream language specs
+    /// recognize: LF, CR, NEL (U+0085), LS (U+2028), and PS (U+2029). CRLF is one
+    /// break, not two — the `\r` is skipped when an `\n` follows it.
     ///
-    /// The Unicode separators matter because a *lexer* may accept them — C#'s does
-    /// (ECMA-334 §6.3.1 lists all five), so a file split by U+2028 parsed correctly
-    /// while reporting one physical row and attributing every declaration to it.
+    /// A lone `\r` counts, which matters because *lexers* treat it as a terminator:
+    /// C#'s does (ECMA-334 §6.3.1 lists all five). When the index and the lexer
+    /// disagree, a file parses correctly while reporting the wrong number of rows and
+    /// attributing declarations to a row they are not on.
+    ///
     /// Scanning `char_indices` rather than bytes keeps the multi-byte separators from
-    /// being missed; the ASCII fast path is preserved by checking `\n` first.
+    /// being missed.
     pub fn new(text: &str) -> Self {
         let mut line_starts = Vec::with_capacity(text.len() / 32 + 1);
         line_starts.push(0u32);
-        for (i, c) in text.char_indices() {
-            if c == '\n' || c == '\u{85}' || c == '\u{2028}' || c == '\u{2029}' {
-                let next = (i + c.len_utf8()) as u32;
-                line_starts.push(next);
+        let mut chars = text.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            let is_break = match c {
+                // CRLF is a single break. Consume the `\n` here so the pair does not
+                // push two row starts.
+                '\r' => {
+                    if chars.peek().is_some_and(|&(_, next)| next == '\n') {
+                        chars.next();
+                    }
+                    true
+                }
+                '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => true,
+                _ => false,
+            };
+            if is_break {
+                // The next row starts after whatever was consumed, which for CRLF is
+                // two characters.
+                let consumed = if c == '\r' && text[i..].starts_with("\r\n") {
+                    2
+                } else {
+                    c.len_utf8()
+                };
+                line_starts.push((i + consumed) as u32);
             }
         }
         Self { line_starts }
@@ -105,11 +124,16 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_carriage_return_is_not_a_row_break() {
-        // Deliberate: CRLF works through its `\n`, and a bare `\r` inside an
-        // otherwise-LF file is how editors and `git diff` treat classic-Mac endings.
+    fn a_lone_carriage_return_is_a_row_break() {
+        // A previous revision deliberately excluded a bare `\r`, on the reasoning that
+        // CRLF works through its `\n` and a stray `\r` is a classic-Mac artifact. That
+        // was wrong for mehen's purpose: *lexers* treat it as a terminator (C#'s does,
+        // ECMA-334 §6.3.1), so excluding it made the row index disagree with the lexer
+        // that produced the tokens — a file split by `\r` parsed correctly while every
+        // declaration was attributed to row 1.
         let index = LineIndex::new("a\rb");
-        assert_eq!(index.line_count(), 1);
+        assert_eq!(index.line_count(), 2);
+        assert_eq!(index.line_at(2), 2);
     }
 
     #[test]

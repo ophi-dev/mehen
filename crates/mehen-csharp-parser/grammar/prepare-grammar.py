@@ -503,9 +503,15 @@ GENERATOR_GAP_FIXES = [
         " ';'))\n  ;",
         "accessor_declaration\n"
         "  : attribute_list* modifier* ('get' | 'set' | 'init' | 'add'"
-        " | 'remove' | identifier_token) (block | (arrow_expression_clause"
+        " | 'remove') (block | (arrow_expression_clause"
         " ';') | ';')\n  ;",
     ),
+    # The same rewrite also DROPS the `identifier_token` alternative. That is
+    # Roslyn's recovery shape — an accessor the author has not finished naming — and
+    # combined with the bare `;` body it made `int P { banana; }` a clean parse that
+    # opened a real function space named `P.accessor`, inflating NOM and WMC for
+    # source that does not compile. The five keywords are the whole legal set.
+    #
     # (2) parameter-position modifiers.
     (
         "parameter\n"
