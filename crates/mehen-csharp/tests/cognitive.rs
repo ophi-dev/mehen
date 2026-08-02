@@ -408,3 +408,35 @@ fn a_when_guard_is_its_own_boolean_context() {
     // switch nesting(1) + arm decision(0, cognitive) + guard run(1) + result run(1) = 3.
     assert_eq!(sum(&a), 3.0);
 }
+
+#[test]
+fn each_interpolation_hole_is_its_own_boolean_context() {
+    // REGRESSION, and the same shape as the `when` guard above: each `{…}` in one
+    // interpolated string is an independent expression, so `$"{a && b}{c && d}"` has two
+    // `&&` runs. Nothing separated them — the first hole left `last_op` set to `&&` and
+    // the second collapsed into it for a single increment.
+    //
+    // Pinned against the spelling that hoists each hole into a local, which must agree.
+    let holes = analyze_clean(
+        "class C {
+             static string F(bool a, bool b, bool c, bool d) => $\"{a && b}{c && d}\";
+         }",
+    );
+    let locals = analyze_clean(
+        "class C {
+             static string F(bool a, bool b, bool c, bool d)
+             {
+                 var x = a && b;
+                 var y = c && d;
+                 return $\"{x}{y}\";
+             }
+         }",
+    );
+    assert_eq!(sum(&holes), sum(&locals));
+    assert_eq!(sum(&holes), 2.0, "two independent runs");
+
+    // The guard: one hole is still one run, so the isolation did not start splitting a
+    // single run at the hole boundary.
+    let one = analyze_clean("class C { static string F(bool a, bool b) => $\"{a && b}\"; }");
+    assert_eq!(sum(&one), 1.0);
+}

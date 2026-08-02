@@ -500,9 +500,24 @@ impl Walker<'_> {
             }
             HalsteadClass::Operand => {
                 let text = term.symbol().text_or_empty();
+                // Identifiers are keyed by the *symbol*, not the spelling. C# admits two
+                // spellings of one name — the verbatim prefix (`@x` is the identifier
+                // `x`, spelled that way only to escape a keyword collision) and Unicode
+                // escapes (`a` is `a`, §6.4.3) — and neither is part of the name.
+                // Keying on raw text made `int @x = 1; return x;` two distinct operands,
+                // so Halstead vocabulary and volume tracked spelling rather than
+                // symbols: the identical program spelled `int x` reported a smaller
+                // vocabulary. Non-identifier operands (literals, `this`, interpolated
+                // text) are left verbatim: for those the spelling *is* the value, and
+                // `1` vs `1L` vs `0x1` are genuinely different operands.
+                let key = if tt == cl::IDENTIFIER {
+                    normalize_identifier(text)
+                } else {
+                    SmolStr::new(text)
+                };
                 self.current().halstead.observe_operand(HalsteadOperand {
                     kind: SmolStr::new("Operand"),
-                    text: Some(SmolStr::new(text)),
+                    text: Some(key),
                 });
             }
             HalsteadClass::Skip => {}
@@ -603,7 +618,16 @@ impl Walker<'_> {
         // two runs. A pre-children reset cannot do this — `classify_rule` runs before
         // the subtree, so it separates the guard from what came *before* it rather than
         // from what follows.
-        let saved_bool = if matches!(ri, cp::RULE_ARGUMENT | cp::RULE_WHEN_CLAUSE) {
+        //
+        // An interpolation hole is the third: each `{…}` in one interpolated string is a
+        // separate expression, so `$"{a && b}{c && d}"` has two runs and must score 2.
+        // Without this the first hole left `last_op` set to `&&` and the second collapsed
+        // into it for 1 — the same string spelled as two locals scores 2, so the two
+        // spellings disagreed.
+        let saved_bool = if matches!(
+            ri,
+            cp::RULE_ARGUMENT | cp::RULE_WHEN_CLAUSE | cp::RULE_INTERPOLATION
+        ) {
             Some(self.current().cognitive.boolean_seq.last_op.take())
         } else {
             None
@@ -1838,6 +1862,62 @@ impl Walker<'_> {
 // --------------------------------------------------------------------
 // Free helpers (top-down tree inspection — no parent pointers).
 // --------------------------------------------------------------------
+
+/// Reduce an identifier token's text to the *name* it denotes, for use as a
+/// Halstead operand key.
+///
+/// Two things in C# are spelling, not name (§6.4.3):
+///
+/// - the verbatim prefix `@`, which exists only to let a keyword be used as a name
+///   (`@class`), and is not part of the identifier;
+/// - Unicode escapes, which are legal identifier characters — `int a = 1;`
+///   declares `a`, and `a` and `a` are the same identifier.
+///
+/// So `@x` and `x` must share one operand, as must `a` and `a`. Returns the input
+/// unchanged (no allocation beyond the `SmolStr`) when neither applies, which is every
+/// ordinary identifier.
+///
+/// A malformed escape is left verbatim rather than dropped: the lexer's `UnicodeEscape`
+/// fragment cannot produce one, but a recovered error token can hold arbitrary text, and
+/// silently deleting characters would merge unrelated operands.
+fn normalize_identifier(text: &str) -> SmolStr {
+    let body = text.strip_prefix('@').unwrap_or(text);
+    if !body.contains('\\') {
+        // The common path: no escape to decode, so at most the `@` was removed.
+        return SmolStr::new(body);
+    }
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(slash) = rest.find('\\') {
+        out.push_str(&rest[..slash]);
+        // `\uXXXX` (4 digits) or `\UXXXXXXXX` (8), per the grammar's `UnicodeEscape`.
+        let after = &rest[slash + 1..];
+        let width = match after.as_bytes().first() {
+            Some(b'u') => 4,
+            Some(b'U') => 8,
+            _ => 0,
+        };
+        let decoded = (width > 0)
+            .then(|| after.get(1..=width))
+            .flatten()
+            .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+            .and_then(char::from_u32);
+        match decoded {
+            Some(ch) => {
+                out.push(ch);
+                rest = &after[1 + width..];
+            }
+            // Not a well-formed escape — keep the backslash and carry on so nothing
+            // is lost.
+            None => {
+                out.push('\\');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    SmolStr::new(out)
+}
 
 /// Rules that open a type-like metric space (see `maybe_open_space`).
 fn opens_type_like(ri: usize) -> bool {

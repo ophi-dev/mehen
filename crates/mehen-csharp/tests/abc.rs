@@ -669,3 +669,56 @@ fn a_nested_bare_initializer_is_one_allocation() {
     assert_eq!(bare.1, 1, "one array allocated");
     assert_eq!(bare.1, explicit.1);
 }
+
+#[test]
+fn an_identifiers_operand_is_its_name_not_its_spelling() {
+    // REGRESSION. C# has two spellings that are not part of the name (§6.4.3): the
+    // verbatim prefix (`@x` IS the identifier `x`, written that way only to escape a
+    // keyword collision) and Unicode escapes (`a` is `a`). Keying operands on the
+    // raw token text made `int @x = 1; return x;` two distinct operands, so Halstead
+    // vocabulary and volume tracked spelling rather than symbols.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let plain = halstead("class C { static int F() { int a = 1; return a; } }");
+    for spelling in [
+        // verbatim prefix on the declaration, plain at the use
+        "class C { static int F() { int @a = 1; return a; } }",
+        // `\uXXXX` (4 hex digits)
+        "class C { static int F() { int \\u0061 = 1; return a; } }",
+        // `\UXXXXXXXX` (8) — the other width the grammar's `UnicodeEscape` admits
+        "class C { static int F() { int \\U00000061 = 1; return a; } }",
+    ] {
+        let escaped = halstead(spelling);
+        assert_eq!(
+            escaped.n2, plain.n2,
+            "one name, one distinct operand: {spelling}"
+        );
+        assert_eq!(escaped.volume, plain.volume, "and one volume: {spelling}");
+    }
+}
+
+#[test]
+fn distinct_names_and_literal_forms_still_stay_distinct() {
+    // The guard on the normalization above: it must collapse *spellings of one name*,
+    // never two names, and must not touch non-identifier operands — for a literal the
+    // spelling IS the value, so `1`, `1L`, and `0x1` are genuinely three operands.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let two_names = halstead("class C { static int F(int x, int y) => x + y; }");
+    let one_name = halstead("class C { static int F(int x) => x + x; }");
+    assert!(
+        two_names.n2 > one_name.n2,
+        "two parameters are two operands"
+    );
+
+    let mixed = halstead("class C { static long F() => 1 + 1L + 0x1; }");
+    let same = halstead("class C { static long F() => 1 + 1 + 1; }");
+    assert!(
+        mixed.n2 > same.n2,
+        "three literal forms are three operands, not one"
+    );
+}

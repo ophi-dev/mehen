@@ -87,21 +87,12 @@ impl DiagnosticCollector {
             .iter()
             .take(max_diagnostics)
             .map(|diagnostic| {
-                let mut out = ParseDiagnostic::error(
-                    code,
-                    format!(
-                        "ANTLR error at line {}:{}: {}",
-                        diagnostic.line, diagnostic.column, diagnostic.message
-                    ),
-                );
                 // The offending token's byte range, when the runtime had one.
-                // `line` is 1-based in ANTLR and in `SourceSpan`, so the start
-                // carries over directly.
-                out.span = diagnostic.span.map(|(start_byte, end_byte)| {
+                let span = diagnostic.span.map(|(start_byte, end_byte)| {
                     // From the byte offset for the same reason as `collect_errors`
-                    // below: the runtime counts only `\n`, `LineIndex` counts all five
-                    // terminators, and a span whose halves disagree misdirects any
-                    // renderer that highlights by line.
+                    // below: the runtime counts only `\n`, `LineIndex` may count more,
+                    // and a span whose halves disagree misdirects any renderer that
+                    // highlights by line.
                     let start_line = line_index.line_at(start_byte);
                     SourceSpan {
                         start_byte,
@@ -110,6 +101,25 @@ impl DiagnosticCollector {
                         end_line: line_index.line_at(end_byte).max(start_line),
                     }
                 });
+                // The *message* row comes from the same place as the span's, so the two
+                // cannot contradict each other. Printing the runtime's own `line`
+                // produced a diagnostic that named row 1 while its structured span
+                // highlighted row 2, on any file using a terminator the runtime's lexer
+                // does not count. Without a span there is nothing better to use, so the
+                // runtime's row stands — it is at least self-consistent then.
+                //
+                // The column is left as reported: `LineIndex` resolves rows, not
+                // columns, and re-deriving one would need the row's start byte plus a
+                // decision about tabs and grapheme clusters that no consumer asks for.
+                let line = span.map_or(diagnostic.line, |s| s.start_line as usize);
+                let mut out = ParseDiagnostic::error(
+                    code,
+                    format!(
+                        "ANTLR error at line {}:{}: {}",
+                        line, diagnostic.column, diagnostic.message
+                    ),
+                );
+                out.span = span;
                 out
             })
             .collect()
@@ -151,11 +161,6 @@ pub fn collect_errors(
         .take(max_diagnostics)
         .map(|err| {
             let token = err.symbol();
-            let line = token.line();
-            let mut out = ParseDiagnostic::error(
-                code.to_string(),
-                format!("ANTLR error node at line {line}"),
-            );
             // The error leaf owns the offending token, so the diagnostic can carry
             // its byte range. `stop_byte` is **exclusive** — the runtime's own
             // `Token::byte_span` is `start_byte()..stop_byte()` — so it is used
@@ -174,7 +179,7 @@ pub fn collect_errors(
             //
             // `end_line` comes from the end byte, not from `line`: the offending
             // token may be a multi-row literal (see `diagnostics` above).
-            out.span = token
+            let span = token
                 .start_byte()
                 .zip(token.stop_byte())
                 .map(|(start, stop)| {
@@ -193,6 +198,16 @@ pub fn collect_errors(
                         end_line: line_index.line_at(end_byte).max(start_line),
                     }
                 });
+            // The message row comes from the span, so the prose and the structured span
+            // agree — printing `token.line()` alongside a `LineIndex`-derived span made
+            // the message name row 1 while the span highlighted row 2. Falls back to the
+            // runtime's row only when there is no span to derive one from.
+            let line = span.map_or_else(|| token.line(), |s| s.start_line as usize);
+            let mut out = ParseDiagnostic::error(
+                code.to_string(),
+                format!("ANTLR error node at line {line}"),
+            );
+            out.span = span;
             out
         })
         .collect()
