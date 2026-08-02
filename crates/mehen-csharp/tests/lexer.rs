@@ -321,3 +321,34 @@ fn a_line_comment_ends_at_every_csharp_line_terminator() {
         );
     }
 }
+
+#[test]
+fn a_unicode_escape_is_a_legal_identifier_character() {
+    // REGRESSION. `int a = 1;` declares `a` — Roslyn lists
+    // `unicode_escape_sequence` in both `identifier_start_character` and
+    // `identifier_part_character`, so tokenizing those rules has to carry it over. The
+    // backslash could not be consumed and the declaration reported two lexer errors.
+    assert_eq!(
+        lloc("class C { static void M() { int \\u0061 = 1; } }"),
+        3.0
+    );
+}
+
+#[test]
+fn a_directive_ends_at_every_csharp_line_terminator() {
+    // REGRESSION, and the same oversight as the comment rules one commit earlier:
+    // `DIRECTIVE_LINE` still stopped only at CR/LF, so a directive ended by NEL /
+    // U+2028 / U+2029 consumed the separator *and everything after it* onto the
+    // directive channel — a whole file reported as zero declarations with zero
+    // diagnostics.
+    for terminator in ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'] {
+        let source = format!("#if X{terminator}class C {{ void M() {{ }} }}\n#endif\n");
+        let a = analyze_clean(&source);
+        let nom = mehen_report::metrics_json::nom(&a.root.metrics);
+        assert_eq!(
+            nom.functions, 1.0,
+            "U+{:04X} must end the directive so the class survives",
+            terminator as u32
+        );
+    }
+}

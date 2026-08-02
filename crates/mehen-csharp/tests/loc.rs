@@ -301,3 +301,22 @@ fn a_slash_inside_a_directive_does_not_split_it() {
          }");
     assert_eq!(pragma.cloc, 1.0);
 }
+
+#[test]
+fn a_label_is_not_its_own_logical_line() {
+    // REGRESSION. `labeled_statement` is a wrapper: it recorded a logical line and the
+    // nested `return_statement` recorded another, so adding a label turned one statement
+    // into two even on the same source row. A label is an attribute of the statement it
+    // labels — `mehen-java` omits the equivalent wrapper for the same reason.
+    let labeled = loc("class C
+         {
+             static void M() { start: return; }
+         }");
+    let plain = loc("class C
+         {
+             static void M() { return; }
+         }");
+    assert_eq!(labeled.lloc, plain.lloc);
+    // class(1) + method(1) + return(1) = 3.
+    assert_eq!(labeled.lloc, 3.0);
+}

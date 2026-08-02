@@ -310,6 +310,17 @@ struct ChildHint {
     /// Every other expression body hangs off a declaration that is already
     /// counted, where counting the clause too would double.
     in_accessor_body: bool,
+    /// The enclosing member returns a *value*, so an expression body is a return.
+    ///
+    /// `int F() => 1;` has no `return_statement` node, so NExit stayed 0 while the
+    /// equivalent `int F() { return 1; }` reported 1 — and NExit's own documentation
+    /// includes value-returning expressions. Set on a member whose declared return type
+    /// is not `void`, plus getters and lambdas (a `get` accessor and a lambda body both
+    /// yield a value by construction); cleared on a `void` member, a constructor, a
+    /// destructor, and a `set`/`add`/`remove` accessor, none of which return anything.
+    ///
+    /// Read at `arrow_expression_clause`, which is the node that *is* the return.
+    returns_value: bool,
     /// The declared name of the enclosing property / indexer / event, threaded
     /// down so a `get`/`set` accessor space can be named `Prop.get` rather than
     /// anonymous.
@@ -538,7 +549,12 @@ impl Walker<'_> {
         // continues across the call as if it were a single operand. Same for a
         // parenthesized sub-expression's interior? No: parentheses ARE
         // transparent to SonarSource's flattening, so only arguments isolate.
-        let saved_bool = if ri == cp::RULE_ARGUMENT {
+        // A `when` guard isolates the same way, and for the same reason: the guard and
+        // the arm result are independent expressions, so `1 when a && b => c && d` has
+        // two runs. A pre-children reset cannot do this — `classify_rule` runs before
+        // the subtree, so it separates the guard from what came *before* it rather than
+        // from what follows.
+        let saved_bool = if matches!(ri, cp::RULE_ARGUMENT | cp::RULE_WHEN_CLAUSE) {
             Some(self.current().cognitive.boolean_seq.last_op.take())
         } else {
             None
@@ -696,6 +712,40 @@ impl Walker<'_> {
         // signature's own terminals and leaves the parameter list and body alone.
         let in_operator_symbol = ri == cp::RULE_OPERATOR_DECLARATION;
 
+        // Whether the member this node sits in returns a value, so an expression body
+        // is a return. Recomputed at every declaration that owns an expression body, and
+        // otherwise inherited so the `arrow_expression_clause` a few levels down can
+        // read it.
+        let returns_value = match ri {
+            // A getter yields a value by construction; `set`/`init`/`add`/`remove` do
+            // not. The keyword is a child token rather than part of the rule name.
+            cp::RULE_ACCESSOR_DECLARATION => ctx.has_token(cl::KW_GET),
+            // A lambda's body is its result — `x => x + 1` returns. Set for
+            // completeness, though it currently has no effect: a lambda spells its body
+            // as a bare `(block | expression)` rather than an `arrow_expression_clause`,
+            // so there is no node for the exit rule to match. An expression-bodied
+            // lambda therefore still reports NExit 0, which is a smaller gap than the
+            // member case (a lambda has no block-bodied form to disagree with unless
+            // the author writes `x => { return x + 1; }`, which does count).
+            cp::RULE_SIMPLE_LAMBDA_EXPRESSION | cp::RULE_PARENTHESIZED_LAMBDA_EXPRESSION => true,
+            // A property or indexer's expression body is its getter.
+            cp::RULE_PROPERTY_DECLARATION | cp::RULE_INDEXER_DECLARATION => true,
+            // For the rest, the declared return type decides. A conversion operator
+            // always produces its target type, so it returns unconditionally.
+            cp::RULE_CONVERSION_OPERATOR_DECLARATION => true,
+            cp::RULE_METHOD_DECLARATION
+            | cp::RULE_OPERATOR_DECLARATION
+            | cp::RULE_LOCAL_FUNCTION_STATEMENT => ctx
+                .child_rule(cp::RULE_TYPE)
+                .is_some_and(|ty| ty.text() != "void"),
+            // A constructor, destructor, and anonymous method (`delegate { … }`, which
+            // has no expression-body form) return nothing here.
+            cp::RULE_CONSTRUCTOR_DECLARATION
+            | cp::RULE_DESTRUCTOR_DECLARATION
+            | cp::RULE_ANONYMOUS_METHOD_EXPRESSION => false,
+            _ => hint.returns_value,
+        };
+
         // Inside an accessor's body from the accessor declaration downward, so
         // an expression-bodied `get => _x;` can count its own logical line. A
         // nested function or type resets it — their bodies are counted normally.
@@ -720,6 +770,7 @@ impl Walker<'_> {
                 in_type_delimiter,
                 in_operator_symbol,
                 in_accessor_body,
+                returns_value,
                 accessor_owner: accessor_owner.clone(),
                 accessor_args,
             };
@@ -1237,6 +1288,15 @@ impl Walker<'_> {
                 self.current().nexit.record_exit();
                 self.current().cognitive.boolean_seq.reset();
             }
+            // An expression body IS the return, for a member that returns a value.
+            // `int F() => 1;` has no `return_statement` node at all, so NExit stayed 0
+            // where `int F() { return 1; }` reported 1. `returns_value` keeps a `void`
+            // member, a constructor, and a `set` accessor out of it — none of those
+            // returns anything, so their expression body is a statement, not an exit.
+            cp::RULE_ARROW_EXPRESSION_CLAUSE if hint.returns_value => {
+                self.current().nexit.record_exit();
+                self.current().cognitive.boolean_seq.reset();
+            }
             // `yield return` / `yield break` both leave the iterator.
             cp::RULE_YIELD_STATEMENT => {
                 self.current().nexit.record_exit();
@@ -1260,6 +1320,8 @@ impl Walker<'_> {
             // (`case int i when i > 0:`) or a switch-expression arm — so it
             // records one ABC condition of its own. `catch (E e) when (…)` is a
             // separate rule with the same meaning.
+            // The guard's boolean *isolation* is handled in `visit` by the
+            // save/restore around its subtree, not here — see the `saved_bool` note.
             cp::RULE_WHEN_CLAUSE | cp::RULE_CATCH_FILTER_CLAUSE => {
                 self.current().abc.record_condition();
             }
@@ -1616,10 +1678,14 @@ impl Walker<'_> {
                 | cp::RULE_BREAK_STATEMENT
                 | cp::RULE_CONTINUE_STATEMENT
                 | cp::RULE_GOTO_STATEMENT
-                | cp::RULE_LABELED_STATEMENT
                 // Declaration-shaped rules. `empty_statement` is deliberately
                 // absent: a bare `;` is not a logical line. So is `block`, which
-                // is a wrapper whose inner statements each count.
+                // is a wrapper whose inner statements each count — and so is
+                // `labeled_statement`, which wraps the statement it labels:
+                // `start: return;` is one logical line, not two, and a label is an
+                // attribute of its inner statement rather than an executable statement
+                // of its own. (`mehen-java` omits the equivalent wrapper for the same
+                // reason.)
                 | cp::RULE_FIELD_DECLARATION
                 | cp::RULE_EVENT_FIELD_DECLARATION
                 | cp::RULE_EVENT_DECLARATION

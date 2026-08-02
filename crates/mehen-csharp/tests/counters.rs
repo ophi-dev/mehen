@@ -306,3 +306,46 @@ fn nom_and_nargs_count_a_primary_constructor() {
         assert_eq!(metrics_json::nargs(&a.root.metrics).total_functions, 1.0);
     }
 }
+
+#[test]
+fn an_expression_bodied_return_is_an_exit() {
+    // REGRESSION. `int F() => 1;` has no `return_statement` node, so NExit stayed 0
+    // while the equivalent `int F() { return 1; }` reported 1 — and NExit's own
+    // documentation includes value-returning expressions. Pinned against the block form.
+    let arrow = analyze_clean("class C { static int F() => 1; }");
+    let block = analyze_clean("class C { static int F() { return 1; } }");
+    assert_eq!(metrics_json::nexits(&arrow.root.metrics).sum, 1.0);
+    assert_eq!(
+        metrics_json::nexits(&arrow.root.metrics).sum,
+        metrics_json::nexits(&block.root.metrics).sum,
+    );
+}
+
+#[test]
+fn a_void_expression_body_is_not_an_exit() {
+    // The guard: an expression body is a return only when the member returns a value.
+    // A `void` member, a constructor, and a `set` accessor return nothing.
+    let void_member = analyze_clean("class C { static void G() { } static void M() => G(); }");
+    assert_eq!(metrics_json::nexits(&void_member.root.metrics).sum, 0.0);
+
+    let constructor = analyze_clean("class C { static void G() { } public C() => G(); }");
+    assert_eq!(metrics_json::nexits(&constructor.root.metrics).sum, 0.0);
+}
+
+#[test]
+fn a_getter_expression_body_is_an_exit_but_a_setter_is_not() {
+    // A `get` yields a value; `set` does not. Read per space, since the unit sums both.
+    let a = analyze_clean("class C { int _x; public int P { get => _x; set => _x = value; } }");
+    let accessors: Vec<_> = a.root.spaces[0]
+        .spaces
+        .iter()
+        .map(|s| (s.name.clone(), metrics_json::nexits(&s.metrics).sum))
+        .collect();
+    assert_eq!(
+        accessors,
+        vec![
+            (Some("P.get".to_string()), 1.0),
+            (Some("P.set".to_string()), 0.0),
+        ]
+    );
+}

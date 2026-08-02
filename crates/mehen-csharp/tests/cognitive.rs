@@ -393,3 +393,18 @@ fn switch_expression_arms_are_independent_boolean_contexts() {
     // switch nesting(1) + arm decision(1) + two independent `&&` runs(2) = ... 3.
     assert_eq!(sum(&expression), 3.0);
 }
+
+#[test]
+fn a_when_guard_is_its_own_boolean_context() {
+    // REGRESSION. `1 when a && b => c && d` has two independent `&&` runs, but nothing
+    // separated them — the guard's stayed in `last_op` and the arm result's collapsed
+    // into it. The guard now resets on entry, and the arm resets again afterwards.
+    let a = analyze_clean(
+        "class C {
+             static bool F(int v, bool a, bool b, bool c, bool d) =>
+                 v switch { 1 when a && b => c && d, _ => false };
+         }",
+    );
+    // switch nesting(1) + arm decision(0, cognitive) + guard run(1) + result run(1) = 3.
+    assert_eq!(sum(&a), 3.0);
+}
