@@ -68,10 +68,18 @@ CHAR_LIT
     : '\'' ( Escape | ~['\\\r\n] ) '\''
     ;
 
-// §6.4.5.6 escape sequences: simple (`\n`, `\\`, `\'`), hex (`\xA` .. `\xABCD`),
-// and unicode — four hex digits after `u`, eight after `U`.
+// §6.4.5.6 escape sequences: simple, hex (`\xA` .. `\xABCD`), and unicode — four hex
+// digits after `u`, eight after `U`.
+//
+// The simple set is ENUMERATED rather than written `| .`. The wildcard accepted any
+// character after a backslash, so `'\q'` — which is not valid C# — lexed as an ordinary
+// character literal and the analyzer reported a clean, complete analysis of invalid
+// source. That is the wrong direction for a tool whose contract is that a clean parse
+// means something.
+//
+// The set is exactly ECMA-334's: `\'` `\"` `\\` `\0` `\a` `\b` `\f` `\n` `\r` `\t` `\v`.
 fragment Escape
-    : '\\' ( 'u' HexQuad | 'U' HexQuad HexQuad | 'x' [0-9a-fA-F]+ | . )
+    : '\\' ( 'u' HexQuad | 'U' HexQuad HexQuad | 'x' [0-9a-fA-F]+ | ['"\\0abfnrtv] )
     ;
 
 fragment HexQuad
@@ -291,8 +299,32 @@ INTERP_VERBATIM_START : ( '$@"' | '@$"' ) -> pushMode(INTERPOLATION_VERBATIM) ;
 //
 // Longest first is load-bearing: `$$"""` must not be claimed by the one-dollar rule,
 // which would leave a stray `$` and lex the hole braces as text.
-INTERP_RAW_START_2 : '$$' '"""' '"'* -> type(INTERP_RAW_START), pushMode(INTERPOLATION_RAW_2) ;
-INTERP_RAW_START   : '$'  '"""' '"'* -> pushMode(INTERPOLATION_RAW) ;
+//
+// The FENCE width matters too, and independently. A four-quote opening fence exists so
+// that an embedded `"""` is content:
+//
+//     $""""a"""b""""
+//           ^^^ content, not the close
+//
+// so a mode whose close rule accepts any three-or-more run ends the string early and
+// leaves the tail as stray code. That is a hard error rather than a silent misparse (8
+// diagnostics), but the metrics around it are wrong too, so it still has to be right.
+//
+// Only the CLOSE rule is width-sensitive — text, quotes, braces, and holes are all
+// width-agnostic — so each fence width needs its own mode carrying its own close.
+// Widths 3 and 4 are covered per dollar width. Four is the documented floor here rather
+// than eight as in `SL_RAW_STRING_LIT`: a wider fence is only needed when the *content*
+// contains a run of three or more quotes, and `dotnet/runtime` has no interpolated raw
+// string with a four-quote fence at all, let alone five. A fifth width is another mode,
+// mechanically.
+//
+// Ordered longest-fence-first within each dollar width, for the same reason the dollar
+// widths are: `$""""` must not be claimed by the three-quote rule, which would leave a
+// stray quote as content and mis-detect the close.
+INTERP_RAW_START_2_4 : '$$' '""""' -> type(INTERP_RAW_START), pushMode(INTERPOLATION_RAW_2_4) ;
+INTERP_RAW_START_2   : '$$' '"""'  -> type(INTERP_RAW_START), pushMode(INTERPOLATION_RAW_2) ;
+INTERP_RAW_START_4   : '$'  '""""' -> type(INTERP_RAW_START), pushMode(INTERPOLATION_RAW_4) ;
+INTERP_RAW_START     : '$'  '"""'  -> pushMode(INTERPOLATION_RAW) ;
 
 // ---- braces and `:` inside an interpolation hole -----------------------
 // `{`, `}` and `:` mean different things inside a hole, so this file defines them
@@ -523,3 +555,44 @@ INTERP_FORMAT_TEXT
 INTERP_FORMAT_END
     : '}' { nestDepth = holeStack.Pop(); } -> type(RBRACE), popMode, popMode
     ;
+
+// ---- four-quote interpolated raw strings --------------------------------
+// The same two flavours with a FOUR-quote fence, which exists so that an embedded `"""`
+// is content: `$""""a"""b""""`. Only the close rule differs from the three-quote modes
+// above — text, quotes, braces, and holes are all fence-width-agnostic — but a mode
+// cannot parameterize a single rule, so each width carries its own.
+//
+// The close requires four quotes, so a three-quote run inside is claimed by the quote /
+// text rules and stays content. Its trailing `'"'*` absorbs a longer run for the same
+// reason the three-quote close does: C# ends a raw string at the *first* run of at least
+// the opening width, and any extra quotes belong to the token.
+mode INTERPOLATION_RAW_4;
+
+INTERP_R4_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
+INTERP_R4_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
+
+INTERP_R4_END : '""""' '"'* -> type(TRIPLE_DQUOTE), popMode ;
+
+// One to THREE quotes are content at this width; only a run of four closes. The
+// three-quote alternative is what the width-3 mode cannot express.
+INTERP_R4_QUOTE : '"' '"'? '"'? -> type(INTERPOLATED_TEXT) ;
+INTERP_R4_TEXT  : ~[{}"]+       -> type(INTERPOLATED_TEXT) ;
+
+INTERP_R4_HOLE_OPEN
+    : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
+    ;
+
+// `$$""""…""""`: a four-quote fence AND the doubled-brace hole width. Braces are split
+// into single-character rules for the same length-based reason as INTERPOLATION_RAW_2.
+mode INTERPOLATION_RAW_2_4;
+
+INTERP_R24_HOLE_OPEN
+    : '{{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
+    ;
+
+INTERP_R24_END : '""""' '"'* -> type(TRIPLE_DQUOTE), popMode ;
+
+INTERP_R24_QUOTE : '"' '"'? '"'? -> type(INTERPOLATED_TEXT) ;
+INTERP_R24_TEXT  : ~[{}"]+       -> type(INTERPOLATED_TEXT) ;
+INTERP_R24_LBRACE : '{' -> type(INTERPOLATED_TEXT) ;
+INTERP_R24_RBRACE : '}' -> type(INTERPOLATED_TEXT) ;

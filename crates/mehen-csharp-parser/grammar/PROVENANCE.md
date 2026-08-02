@@ -81,7 +81,7 @@ Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
 corpus. All 5 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **seventeen** distinct silent misparses: structurally wrong
+grammar has now produced **nineteen** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -93,6 +93,8 @@ dump, never by an error count.
 | `parameter`'s `type?` matches a tuple | `(a, b) => …` was a *simple* lambda |
 | `SL_RAW_STRING_LIT` fenced with `""` | `var a = ""; f(); var b = "";` was ONE string token |
 | one raw *interpolation* mode for every dollar width | `$$"""{{a && b}}"""` read its hole as escaped text — the expression vanished |
+| …and for every *fence* width | `$""""a"""b""""` closed at the embedded triple, leaving the tail as stray code |
+| `Escape` accepted any character after `\` | `'\q'` — not valid C# — lexed as an ordinary literal, so invalid source read as a clean analysis |
 | `identifier_token` widened with `and`/`or`/`not` | `o is int and > 5` declared a variable named `and` |
 | `constant_pattern` listed before `discard_pattern` | a `_ =>` arm is an expression, not the discard |
 | …and before `var_pattern` | `var x =>` was a *constant* pattern, so `var_pattern` was unreachable — and an always-matching arm read as a decision |
@@ -106,12 +108,12 @@ dump, never by an error count.
 | `switch_statement`'s parens independently optional | `switch value { … }` parsed, though only the *expression* form is paren-free |
 | a local generic declaration loses to the expression statement | `List<int> l;` reads as chained comparison — **open, issue #218** |
 
-Seven *delete* code from the tree, eight *relabel* it, and two accept
+Eight *delete* code from the tree, eight *relabel* it, and three accept
 source that is not valid C# at all. Every shape is invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
 
-Seven of the seventeen share one root cause: **an alternative that is viable for the
+Seven of the nineteen share one root cause: **an alternative that is viable for the
 wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
 each semantically — it knows whether `F` names a type, whether `and` resolves to a
 declared name, whether `record` is a keyword here — and a syntax-only grammar has
@@ -447,6 +449,19 @@ One mode per width, longest-prefix first, mirroring how the raw-string *fence* w
 enumerated in `SL_RAW_STRING_LIT`: the lowering DSL has no comparisons, so a stored width
 could not be compared against anything. Two widths are covered, which is what real code
 uses; a third is mechanical.
+
+The **fence** width is a second, independent axis, and the same shape: a four-quote
+opening fence exists so an embedded `"""` is content, but a mode whose close accepts any
+three-or-more run ends the string at that embedded triple and leaves the tail as stray
+code. Only the close rule is fence-width-sensitive — text, quotes, braces, and holes
+are all width-agnostic — so widths 3 and 4 each carry their own mode, per dollar width.
+Four is the floor rather than eight as in `SL_RAW_STRING_LIT`, because a wider
+interpolated fence is needed only when the *content* holds three or more consecutive
+quotes; `dotnet/runtime` has none with even a four-quote fence.
+
+That one is a hard error rather than a silent misparse (8 diagnostics), but the metrics
+around the failure are wrong too — LLOC 3 against 2 — so "it fails loudly" only went
+half way.
 
 The width-2 text rule then needed care, and the first attempt was wrong in an instructive
 way. Adding `{` to the text set let it match `{{a && b}}` entirely — 10 characters against

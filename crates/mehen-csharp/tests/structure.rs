@@ -660,3 +660,29 @@ fn the_var_hoist_leaves_every_other_pattern_form_alone() {
         let _ = analyze_clean(source);
     }
 }
+
+#[test]
+fn split_shift_operator_overloads_keep_their_symbol_in_the_name() {
+    // REGRESSION. The prep splits `>>` / `>>>` / `>>=` / `>>>=` into adjacent `>` tokens
+    // gated by an adjacency predicate, so their symbol is a child *rule* rather than a
+    // direct terminal. The naming scan looks for the terminal after `operator`, walked
+    // straight past to the `;`, and named the space `operator ;` — worse than the bare
+    // `operator` fallback it was meant to hit.
+    for (op, want) in [
+        (">>", "operator >>"),
+        (">>>", "operator >>>"),
+        // The unsplit forms, as controls.
+        ("<<", "operator <<"),
+        ("+", "operator +"),
+    ] {
+        let a = analyze_clean(&format!(
+            "class C {{ public static C operator {op}(C a, int b) => a; }}"
+        ));
+        let names: Vec<_> = shape(&a.root)
+            .into_iter()
+            .filter(|(_, kind, _)| kind == "function")
+            .map(|(_, _, name)| name)
+            .collect();
+        assert_eq!(names, vec![Some(want.to_string())], "operator {op}");
+    }
+}

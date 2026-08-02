@@ -486,3 +486,88 @@ fn a_lone_brace_in_a_two_dollar_raw_string_is_text() {
         4.0
     );
 }
+
+#[test]
+fn an_interpolated_raw_string_closes_on_its_own_fence_width() {
+    // REGRESSION. A four-quote opening fence exists so that an embedded `"""` is content:
+    // `$""""a"""b""""`. The interpolation modes closed on any three-or-more run, so the
+    // string ended at the embedded triple and the tail became stray code — 8 diagnostics,
+    // and the metrics around it wrong too (LLOC 3 against 2).
+    //
+    // Only the CLOSE rule is fence-width-sensitive, so each width carries its own mode.
+    // Four is the documented floor: a wider fence is needed only when the *content* holds a
+    // run of three or more quotes, and `dotnet/runtime` has no interpolated raw string with
+    // even a four-quote fence.
+    //
+    // `analyze_clean` asserts no diagnostics, so reaching the assertion is the substance;
+    // LLOC then pins that the token did not eat the statements after it.
+    for source in [
+        "class C { static string F() => $\"\"\"ab\"\"\"; }",
+        "class C { static string F() => $\"\"\"\"a\"\"\"b\"\"\"\"; }",
+        "class C { static string F(int v) => $$\"\"\"{{v}}\"\"\"; }",
+        "class C { static string F(int v) => $$\"\"\"\"{{v}}\"\"\"a\"\"\"b\"\"\"\"; }",
+    ] {
+        // class(1) + method(1) = 2. More means the literal's tail leaked out as code.
+        assert_eq!(lloc(source), 2.0, "fence width must be respected: {source}");
+    }
+}
+
+#[test]
+fn an_unknown_escape_sequence_is_an_error() {
+    // REGRESSION. `Escape` ended in `| .`, so any character after a backslash was accepted
+    // and `'\q'` — not valid C# — lexed as an ordinary character literal. The analyzer
+    // reported a clean, complete analysis of invalid source, which is the wrong direction
+    // for a tool whose contract is that a clean parse means something.
+    //
+    // `analyze` rather than `analyze_clean`: the point here is that diagnostics DO appear.
+    for source in [
+        "class C { static char F() => '\\q'; }",
+        "class C { static string F() => \"a\\qb\"; }",
+        "class C { static string F() => \"a\\eb\"; }",
+    ] {
+        assert!(
+            !common::analyze(source).diagnostics.is_empty(),
+            "an unknown escape must be reported: {source}"
+        );
+    }
+}
+
+#[test]
+fn every_legal_escape_sequence_still_lexes() {
+    // The guard on the enumeration: narrowing `Escape` must not reject anything ECMA-334
+    // §6.4.5.6 allows. The simple set is `\' \" \\ \0 \a \b \f \n \r \t \v`, plus hex
+    // (one to four digits) and the two unicode widths.
+    for escape in [
+        "\\'",
+        "\\\"",
+        "\\\\",
+        "\\0",
+        "\\a",
+        "\\b",
+        "\\f",
+        "\\n",
+        "\\r",
+        "\\t",
+        "\\v",
+        "\\x4",
+        "\\x41",
+        "\\x0041",
+        "\\u0041",
+        "\\U00000041",
+    ] {
+        // Both literal kinds: a char literal has no closure to absorb a mis-sized escape,
+        // so it is the stricter of the two.
+        assert_eq!(
+            lloc(&format!(
+                "class C {{ static string F() => \"a{escape}b\"; }}"
+            )),
+            2.0,
+            "`{escape}` must lex in a string"
+        );
+        assert_eq!(
+            lloc(&format!("class C {{ static char F() => '{escape}'; }}")),
+            2.0,
+            "`{escape}` must lex in a char literal"
+        );
+    }
+}

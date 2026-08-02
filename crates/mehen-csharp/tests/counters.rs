@@ -544,3 +544,72 @@ fn an_expression_bodied_lambda_records_its_exit() {
         "a throwing lambda has exactly one exit, not two"
     );
 }
+
+#[test]
+fn a_primary_constructor_owns_its_signature_tokens() {
+    // REGRESSION. The synthetic space was pushed and popped *before* the type's children
+    // were visited, so it received none of the tokens inside its own signature: Halstead
+    // vocabulary 0. It now opens when the walk reaches the `parameter_list`, which is what
+    // the constructor consists of — Roslyn synthesizes no `constructor_declaration` node.
+    fn ctor_space(a: &mehen_core::LanguageAnalysis) -> mehen_core::MetricSpace {
+        fn walk(s: &mehen_core::MetricSpace, out: &mut Vec<mehen_core::MetricSpace>) {
+            if s.kind == mehen_core::SpaceKind::Function {
+                out.push(s.clone());
+            }
+            for c in &s.spaces {
+                walk(c, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&a.root, &mut out);
+        out.remove(0)
+    }
+
+    let primary = ctor_space(&analyze_clean("class C(int x) { }"));
+    let vocab =
+        metrics_json::halstead(&primary.metrics).n1 + metrics_json::halstead(&primary.metrics).n2;
+    assert!(
+        vocab > 0.0,
+        "the constructor must own the tokens of `(int x)`, got vocabulary {vocab}"
+    );
+
+    // NOT compared against the explicit spelling's vocabulary, deliberately: the two
+    // occupy different source text. A primary constructor is `(int x)` — four tokens —
+    // while `public C(int x) { }` is eight, because it repeats the type name and adds a
+    // modifier and braces. Halstead measures the text, so it must differ; NOM, NArgs, NPM,
+    // and WMC are the metrics that must agree, and they are pinned above.
+    assert_eq!(metrics_json::nargs(&primary.metrics).total, 1.0);
+}
+
+#[test]
+fn each_anonymous_object_member_is_its_own_boolean_context() {
+    // REGRESSION, and the fourth instance of this shape (argument, interpolation hole,
+    // initializer element, now anonymous-object member): each member of
+    // `new { A = a && b, B = c && d }` is an independent expression, so there are two `&&`
+    // runs. Its members are real `anonymous_object_member_declarator` rules, so unlike
+    // initializer elements each isolates on its own rather than needing a per-child reset.
+    let cognitive = |source: &str| metrics_json::cognitive(&analyze_clean(source).root.metrics).sum;
+    let anon = cognitive(
+        "class C {
+             static object F(bool a, bool b, bool c, bool d) => new { A = a && b, B = c && d };
+         }",
+    );
+    let locals = cognitive(
+        "class C {
+             static object F(bool a, bool b, bool c, bool d)
+             {
+                 var x = a && b;
+                 var y = c && d;
+                 return new { A = x, B = y };
+             }
+         }",
+    );
+    assert_eq!(anon, locals);
+    assert_eq!(anon, 2.0, "two independent runs");
+
+    // The guard: one member is still one run.
+    assert_eq!(
+        cognitive("class C { static object F(bool a, bool b) => new { A = a && b }; }"),
+        1.0
+    );
+}

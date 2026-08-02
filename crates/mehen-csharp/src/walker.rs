@@ -263,12 +263,6 @@ struct ChildHint {
     /// declaration itself has no parent pointer and does not carry them.
     /// `None` outside a member position.
     member_is_public: Option<bool>,
-    /// This node is (within) a `for` statement's initializer, so a
-    /// `local_variable_declaration` reached through it is the loop initializer,
-    /// not a standalone statement — it must not add its own LLOC (the `for`
-    /// statement already contributes the single header logical line). Also set
-    /// for a `using`/`fixed` resource acquisition and a `foreach` header.
-    in_for_init: bool,
     /// This terminal is the token of an `identifier` rule. C#'s contextual
     /// keywords (`var`, `async`, `await`, `get`, `set`, `value`, `when`,
     /// `where`, `from`, `select`, `nameof`, …) lex as dedicated token types but
@@ -360,6 +354,20 @@ struct ChildHint {
     /// `indexer_declaration`, where the list is present, and reported 1 where the
     /// block-bodied form reported 0.
     accessor_args: u32,
+    /// The enclosing type's name, set on the direct children of a declaration that
+    /// carries a **primary constructor** (`class C(int x)`) so the `parameter_list`
+    /// child can open the synthetic constructor space and be *named* for the type.
+    ///
+    /// The space has to open when the walk reaches the list, not before it: Roslyn
+    /// synthesizes no `constructor_declaration` node, so the parameter list is the whole
+    /// of the constructor — and a space pushed and popped ahead of the traversal receives
+    /// none of the tokens inside it. That reported LLOC 0 and Halstead vocabulary 0 for
+    /// the primary form where the explicit spelling reported 1 and 8.
+    ///
+    /// `None` on any other node, which is what keeps a `delegate_declaration`'s or
+    /// `extension_block_declaration`'s parameter list — neither of which constructs
+    /// anything — from minting a constructor.
+    primary_ctor_name: Option<String>,
 }
 
 struct Walker<'a> {
@@ -603,7 +611,7 @@ impl Walker<'_> {
         // just-opened type instead of the real enclosing scope.
         let container_before_open = self.enclosing_container();
 
-        let opened = self.maybe_open_space(ctx, ri, hint);
+        let (opened, primary_ctor_name) = self.maybe_open_space(ctx, ri, hint);
         self.classify_rule(ctx, ri, hint);
 
         // A call argument (`G(a && b)`) is an independent boolean context: its
@@ -631,6 +639,12 @@ impl Walker<'_> {
         // restored after the last element, making the initializer one operand from
         // outside just as a call is.
         //
+        // `anonymous_object_creation_expression` isolates per *member* for the same reason
+        // an initializer does per element — `new { A = a && b, B = c && d }` has two runs —
+        // but its members are real `anonymous_object_member_declarator` rules rather than
+        // bare `expression` children, so each one isolates on its own here rather than
+        // needing the per-child reset in `visit_children`.
+        //
         // A switch *label* deliberately does NOT isolate, though it looks like it should.
         // Each label already resets at `case_switch_label`/`case_pattern_switch_label` in
         // `classify_rule`, and that reset runs before the label's own subtree — which is
@@ -646,13 +660,14 @@ impl Walker<'_> {
                 | cp::RULE_INTERPOLATION
                 | cp::RULE_INITIALIZER_EXPRESSION
                 | cp::RULE_COLLECTION_EXPRESSION
+                | cp::RULE_ANONYMOUS_OBJECT_MEMBER_DECLARATOR
         ) {
             Some(self.current().cognitive.boolean_seq.last_op.take())
         } else {
             None
         };
 
-        self.visit_children(ctx, ri, hint, container_before_open);
+        self.visit_children(ctx, ri, hint, container_before_open, primary_ctor_name);
 
         if let Some(prev) = saved_bool {
             self.current().cognitive.boolean_seq.last_op = prev;
@@ -676,6 +691,10 @@ impl Walker<'_> {
         ri: usize,
         hint: &ChildHint,
         container_before_open: Option<ContainerKind>,
+        // `Some` when this node is a type declaration carrying a primary constructor;
+        // threaded to its `parameter_list` child, which opens the synthetic space. Not
+        // inherited further — only the direct children see it.
+        primary_ctor_name: Option<String>,
     ) {
         // `NodeChildren` is a cheap `Clone` slice-iterator, so it is re-walked
         // below without allocating.
@@ -706,20 +725,6 @@ impl Walker<'_> {
         // Capture the member wrapper's start so a member space can widen its
         // span upward over its own-line attributes/modifiers. A nested type or
         // function resets it (their members compute from their own wrappers).
-        // A `for`/`foreach`/`using`/`fixed` header declaration must not let its
-        // declaration add a second LLOC — the statement already contributes the
-        // single header logical line. Tag ONLY the direct children of the
-        // header-bearing rules (a non-sticky flag), so a real local declaration
-        // nested inside a lambda in the initializer still counts.
-        //
-        // Roslyn inlines the header declaration into the statement itself
-        // (`for_statement : … LPAREN (variable_declaration? | …)`), so the tag
-        // goes on the statement rather than on a separate
-        // `for_initializer`/`resource_acquisition` rule.
-        let in_for_init = matches!(
-            ri,
-            cp::RULE_FOR_STATEMENT | cp::RULE_USING_STATEMENT | cp::RULE_FIXED_STATEMENT
-        );
 
         // A terminal directly under `identifier_token` is a name → Halstead
         // operand. This is what makes C#'s contextual keywords come out right:
@@ -896,7 +901,6 @@ impl Walker<'_> {
                 in_type_member: propagate_member,
                 member_container,
                 member_is_public,
-                in_for_init,
                 in_identifier,
                 in_attributes,
                 in_shift_operator,
@@ -907,6 +911,7 @@ impl Walker<'_> {
                 returns_value,
                 accessor_owner: accessor_owner.clone(),
                 accessor_args,
+                primary_ctor_name: primary_ctor_name.clone(),
             };
             self.visit(child, &child_hint);
         }
@@ -1023,7 +1028,14 @@ impl Walker<'_> {
     /// Open a type-like (`Class`/`Enum`/`Interface`) space for `type_ctx`.
     /// `span_ctx` supplies the span — the wrapper when opening there (so
     /// own-line attributes/modifiers are covered), otherwise the definition.
-    fn open_type_space(&mut self, span_ctx: RuleNodeView<'_>, type_ctx: RuleNodeView<'_>) {
+    /// Returns the type's name when it carries a **primary constructor**, for
+    /// [`ChildHint::primary_ctor_name`] to thread to the `parameter_list` child that
+    /// opens the synthetic constructor's space. `None` otherwise.
+    fn open_type_space(
+        &mut self,
+        span_ctx: RuleNodeView<'_>,
+        type_ctx: RuleNodeView<'_>,
+    ) -> Option<String> {
         let name = name_from_identifier(type_ctx);
         let ri = type_ctx.rule_index();
         let mut state = self.new_space_state(span_ctx);
@@ -1085,9 +1097,8 @@ impl Walker<'_> {
         if matches!(
             ri,
             cp::RULE_CLASS_DECLARATION | cp::RULE_STRUCT_DECLARATION | cp::RULE_RECORD_DECLARATION
-        ) && let Some(params) = type_ctx.child_rule(cp::RULE_PARAMETER_LIST)
+        ) && type_ctx.child_rule(cp::RULE_PARAMETER_LIST).is_some()
         {
-            let args = count_parameters(params);
             // NPM on the enclosing type, which is the space currently on top: an explicit
             // `class C { public C(int x) { } }` reaches `classify_type_member` and records
             // a class method there, but a primary constructor has no `member_declaration`
@@ -1099,13 +1110,13 @@ impl Walker<'_> {
             // kinds here — `struct` and `record` are class-like for NPM, as
             // `open_type_space` already treats them.
             self.current().npm.record_method(ContainerKind::Class, true);
-            let mut ctor = self.new_space_state(params);
-            ctor.nom.record_function();
-            ctor.nargs.record_function_args(args);
-            self.push_space(SpaceKind::Function, name, params, ctor, false);
-            self.enter_function_cognitive(false);
-            self.close_space();
+            // The space itself opens when the walk *reaches* the parameter list, via
+            // `primary_ctor_name`. Pushing and popping it here instead — which is what
+            // this did — gave the constructor none of the tokens inside its own signature:
+            // LLOC 0 and Halstead vocabulary 0, against 1 and 8 for the explicit spelling.
+            return name;
         }
+        None
     }
 
     /// Open a metric space for space-introducing rules. Returns whether a space
@@ -1120,7 +1131,15 @@ impl Walker<'_> {
     /// that prefix out of an LL decision, and the walker had to open the space at
     /// the wrapper and widen the span back. None of that applies here — hence no
     /// wrapper handling and no span widening.
-    fn maybe_open_space(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) -> bool {
+    /// Returns `(opened, primary_ctor_name)` — the second is `Some` only for a type
+    /// declaration carrying a primary constructor, and is threaded to its
+    /// `parameter_list` child so the synthetic constructor's space opens there.
+    fn maybe_open_space(
+        &mut self,
+        ctx: RuleNodeView<'_>,
+        ri: usize,
+        hint: &ChildHint,
+    ) -> (bool, Option<String>) {
         match ri {
             cp::RULE_METHOD_DECLARATION
             | cp::RULE_CONSTRUCTOR_DECLARATION
@@ -1129,7 +1148,7 @@ impl Walker<'_> {
             | cp::RULE_CONVERSION_OPERATOR_DECLARATION
             | cp::RULE_LOCAL_FUNCTION_STATEMENT => {
                 self.open_function_space(ctx, ctx, hint, SpaceKind::Function);
-                true
+                (true, None)
             }
             // Property / indexer / event accessors are each their own function
             // space (SonarC# counts them as methods): `get`/`set` bodies carry
@@ -1142,7 +1161,7 @@ impl Walker<'_> {
             // sibling-hoisting is needed.
             cp::RULE_ACCESSOR_DECLARATION => {
                 self.open_function_space(ctx, ctx, hint, SpaceKind::Function);
-                true
+                (true, None)
             }
             // An expression-bodied property or indexer (`int P => 1;`) is
             // semantically a getter, but has no `accessor_list` for the arm above
@@ -1155,7 +1174,7 @@ impl Walker<'_> {
                     && ctx.child_rule(cp::RULE_ARROW_EXPRESSION_CLAUSE).is_some() =>
             {
                 self.open_function_space(ctx, ctx, hint, SpaceKind::Function);
-                true
+                (true, None)
             }
             // Closures: a lambda (`x => …`, `(a, b) => …`) or an anonymous
             // method (`delegate(int x) { … }`). NOM/NArgs record them as
@@ -1167,13 +1186,34 @@ impl Walker<'_> {
             | cp::RULE_PARENTHESIZED_LAMBDA_EXPRESSION
             | cp::RULE_ANONYMOUS_METHOD_EXPRESSION => {
                 self.open_function_space(ctx, ctx, hint, SpaceKind::Closure);
-                true
+                (true, None)
             }
-            _ if opens_type_like(ri) => {
-                self.open_type_space(ctx, ctx);
-                true
+            // The synthetic space for a **primary constructor** (`class C(int x)`), opened
+            // at the parameter list because that IS the whole constructor — Roslyn
+            // synthesizes no `constructor_declaration` node. Opening it here rather than
+            // eagerly at the type is what gives it the tokens inside its own signature:
+            // pushed and popped ahead of the traversal, it reported LLOC 0 and Halstead
+            // vocabulary 0 against 1 and 8 for the explicit spelling.
+            //
+            // `primary_ctor_name` is `Some` only on the direct children of a declaration
+            // kind that actually supports one, so a `delegate`'s or extension block's
+            // parameter list — neither of which constructs anything — cannot reach here.
+            cp::RULE_PARAMETER_LIST if hint.primary_ctor_name.is_some() => {
+                let mut state = self.new_space_state(ctx);
+                state.nom.record_function();
+                state.nargs.record_function_args(count_parameters(ctx));
+                self.push_space(
+                    SpaceKind::Function,
+                    hint.primary_ctor_name.clone(),
+                    ctx,
+                    state,
+                    false,
+                );
+                self.enter_function_cognitive(false);
+                (true, None)
             }
-            _ => false,
+            _ if opens_type_like(ri) => (true, self.open_type_space(ctx, ctx)),
+            _ => (false, None),
         }
     }
 
@@ -1793,11 +1833,6 @@ impl Walker<'_> {
     }
 
     fn classify_loc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) {
-        // A `for`/`foreach`/`using` header's declaration is part of the
-        // statement's single logical line — not its own LLOC.
-        if ri == cp::RULE_VARIABLE_DECLARATION && hint.in_for_init {
-            return;
-        }
         // An *expression-bodied* lambda (`x => x + 1`) opens a closure space
         // but its body contains no statement/declaration, so the closure would
         // report `lloc = 0`. Count the lambda itself as one logical line to
@@ -2192,6 +2227,25 @@ fn function_name(ctx: RuleNodeView<'_>, hint: &ChildHint) -> Option<String> {
     // avoids mapping ~30 token types by hand, and `direct_terminals()` cannot
     // reach into the parameter list or body.
     if ctx.rule_index() == cp::RULE_OPERATOR_DECLARATION {
+        // Four of the 35 symbol alternatives are child *rules* rather than terminals:
+        // the prep splits `>>` / `>>>` / `>>=` / `>>>=` into adjacent `>` tokens gated by
+        // an adjacency predicate, so they are `right_shift`, `unsigned_right_shift`, and
+        // the two assignment forms. Checked first, because the terminal scan below cannot
+        // see them at all — it walked straight past to the `;` and named the space
+        // `operator ;`, which is worse than the fallback it was supposed to hit.
+        for (rule, symbol) in [
+            (cp::RULE_RIGHT_SHIFT, ">>"),
+            (cp::RULE_UNSIGNED_RIGHT_SHIFT, ">>>"),
+            (cp::RULE_RIGHT_SHIFT_ASSIGNMENT, ">>="),
+            (cp::RULE_UNSIGNED_RIGHT_SHIFT_ASSIGNMENT, ">>>="),
+        ] {
+            if ctx.child_rule(rule).is_some() {
+                return Some(format!("operator {symbol}"));
+            }
+        }
+        // The symbol is spelled out rather than taken from the child's text because the
+        // split tokens are not adjacent in the tree's own text rendering — `>>` would come
+        // back as `> >`, so the name would not match what the author wrote.
         let typed = OperatorDeclarationContext::from_rule_node(ctx)?;
         let mut seen_operator_keyword = false;
         for terminal in typed.direct_terminals() {
