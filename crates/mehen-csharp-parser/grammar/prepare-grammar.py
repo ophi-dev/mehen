@@ -255,7 +255,16 @@ INTERP_RAW_START_TOKEN = "INTERP_RAW_START"
 # hole, so `lexer-tokens.g4.in` defines them itself (gated rules first, then the
 # plain fallback) rather than having them harvested into the literals block above
 # the hand-written rules. See HOLE_SENSITIVE_LITERALS' use in step 6.
-HOLE_SENSITIVE_LITERALS = frozenset({"{", "}", ":"})
+#
+# `{`, `}` and `:` are the load-bearing three: a `}` may close a hole or a nested
+# block, and a `:` may open a format clause or belong to the expression.
+#
+# `(`, `)`, `[`, `]` are here for the *depth counter* rather than for their own
+# meaning. `nestDepth` has to track every bracketing construct inside a hole, not
+# just braces, or a `:` inside one of them looks like it is at depth 0 —
+# `$"{(flag ? 1 : 2)}"` then loses its ternary to the format clause. They still
+# emit the ordinary tokens via `type(…)`, so the parser sees no difference.
+HOLE_SENSITIVE_LITERALS = frozenset({"{", "}", ":", "(", ")", "[", "]"})
 
 STABLE_TOKEN_NAMES = {
     # Punctuation and delimiters.

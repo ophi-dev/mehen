@@ -196,3 +196,33 @@ fn generic_delimiters_are_not_decisions() {
     );
     assert_eq!(sum(&a), 3.0);
 }
+
+#[test]
+fn a_guarded_discard_arm_is_a_decision() {
+    // REGRESSION. A discard is the fall-through only when it is *unguarded*:
+    // `_ when enabled => …` tests `enabled` and can fail, so it is a real decision —
+    // and the equivalent `case _ when enabled:` in a switch statement counts as one.
+    // The arm was excluded on its pattern alone, so the guard scored nothing.
+    let expression = analyze_clean(
+        "class C {
+             static int F(int v, bool enabled) => v switch { _ when enabled => 1, _ => 0 };
+         }",
+    );
+    let statement = analyze_clean(
+        "class C {
+             static int F(int v, bool enabled) {
+                 switch (v) { case int _ when enabled: return 1; default: return 0; }
+             }
+         }",
+    );
+    assert_eq!(sum(&expression), sum(&statement));
+    // unit(1) + class(1) + method(1 + 1 guarded arm) = 4.
+    assert_eq!(sum(&expression), 4.0);
+}
+
+#[test]
+fn an_unguarded_discard_arm_is_not_a_decision() {
+    // The counterpart: a bare `_` always matches, so it stays the fall-through.
+    let a = analyze_clean("class C { static int F(int v) => v switch { _ => 0 }; }");
+    assert_eq!(sum(&a), 3.0);
+}

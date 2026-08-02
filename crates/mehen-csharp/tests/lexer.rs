@@ -259,3 +259,65 @@ fn an_alignment_and_format_clause_together_still_parse() {
         2.0
     );
 }
+
+#[test]
+fn a_parenthesized_ternary_in_an_interpolation_hole_parses() {
+    // REGRESSION. `nestDepth` counted only braces, so the ternary's `:` sat at depth 0
+    // and INTERP_FORMAT_COLON claimed it as a format delimiter — `2)` became
+    // interpolation text and `$"{(flag ? 1 : 2)}"` reported four diagnostics. The
+    // counter now tracks every bracketing construct inside a hole, since the only
+    // question it answers is whether a `:` is still part of the expression.
+    assert_eq!(
+        lloc("class C { static string M(bool flag) => $\"{(flag ? 1 : 2)}\"; }"),
+        2.0
+    );
+}
+
+#[test]
+fn brackets_in_an_interpolation_hole_parse() {
+    // The `[`/`]` half of the same counter — an indexer or a dictionary initializer
+    // inside a hole has the same shape as the parenthesized ternary.
+    assert_eq!(
+        lloc("class C { static string M(int[] a) => $\"{a[0]}\"; }"),
+        2.0
+    );
+}
+
+#[test]
+fn a_format_clause_does_not_leak_hole_state() {
+    // REGRESSION, and the worse of the two: INTERP_FORMAT_END popped both lexer modes
+    // but left its `holeStack` entry behind, so `holeStack.Count > 0` stayed true after
+    // the string ended. The next `:` anywhere in the file then matched
+    // INTERP_FORMAT_COLON and pushed INTERPOLATION_FORMAT again, swallowing the rest of
+    // the line as format text — here, a ternary three tokens later.
+    assert_eq!(
+        lloc(
+            "class C {
+             static int M(int n, bool flag) {
+                 var s = $\"{n:D4}\";
+                 return flag ? 1 : 2;
+             }
+         }"
+        ),
+        4.0
+    );
+}
+
+#[test]
+fn a_line_comment_ends_at_every_csharp_line_terminator() {
+    // REGRESSION. ECMA-334 §6.3.1 lists five line terminators — CR, LF, NEL (U+0085),
+    // LS (U+2028), PS (U+2029) — but the comment rules excluded only CR and LF, so a
+    // comment ended by one of the other three swallowed the rest of the file. The type
+    // grammar's optional braces then allowed recovery, so the analysis *completed* with
+    // the swallowed members silently missing: a clean parse over half a file.
+    for terminator in ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'] {
+        let source = format!("class C {{ // note{terminator}    void M() {{ }} }}");
+        let a = analyze_clean(&source);
+        let nom = mehen_report::metrics_json::nom(&a.root.metrics);
+        assert_eq!(
+            nom.functions, 1.0,
+            "U+{:04X} must end the comment so `M` survives",
+            terminator as u32
+        );
+    }
+}

@@ -107,11 +107,20 @@ ML_RAW_STRING_LIT
 // Comments go to a dedicated channel so the CLOC sweep can read them while the
 // parser never sees them. Roslyn models trivia as syntax, so its grammar has no
 // rules for these at all.
-SINGLE_LINE_DOC_COMMENT : '///' ~[\r\n]*  -> channel(COMMENTS_CHANNEL) ;
-DELIMITED_DOC_COMMENT   : '/**' .*? '*/'  -> channel(COMMENTS_CHANNEL) ;
-SINGLE_LINE_COMMENT     : '//'  ~[\r\n]*  -> channel(COMMENTS_CHANNEL) ;
-DELIMITED_COMMENT       : '/*'  .*? '*/'  -> channel(COMMENTS_CHANNEL) ;
-WHITESPACES             : [ \t\r\n\f]+    -> channel(HIDDEN) ;
+// A line comment ends at any C# *line terminator*, not just CR/LF. ECMA-334 §6.3.1
+// lists five: CR, LF, NEL (U+0085), LS (U+2028), PS (U+2029). Excluding only CR and LF
+// let a comment swallow the rest of the file across one of the other three — a real
+// loss, because the type grammar's optional braces then allow recovery, so the
+// analysis completes with the swallowed members silently missing.
+//
+// `NewLine` is a fragment so the comment rules and WHITESPACES cannot drift apart.
+fragment NewLine : [\r\n\u0085\u2028\u2029] ;
+
+SINGLE_LINE_DOC_COMMENT : '///' ~[\r\n\u0085\u2028\u2029]*  -> channel(COMMENTS_CHANNEL) ;
+DELIMITED_DOC_COMMENT   : '/**' .*? '*/'                     -> channel(COMMENTS_CHANNEL) ;
+SINGLE_LINE_COMMENT     : '//'  ~[\r\n\u0085\u2028\u2029]*  -> channel(COMMENTS_CHANNEL) ;
+DELIMITED_COMMENT       : '/*'  .*? '*/'                     -> channel(COMMENTS_CHANNEL) ;
+WHITESPACES             : ( [ \t\f] | NewLine )+            -> channel(HIDDEN) ;
 BYTE_ORDER_MARK         : '﻿'        -> skip ;
 
 // A preprocessor directive line. mehen does not evaluate `#if` — directives are
@@ -203,6 +212,34 @@ INTERP_NESTED_CLOSE
     : {nestDepth > 0}? '}' { nestDepth--; } -> type(RBRACE)
     ;
 
+// `(`/`[` inside a hole deepen the same counter the braces use, and their closers
+// unwind it. `nestDepth` is not "brace depth" but "depth of any bracketing construct
+// within this hole", because the only question it has to answer is whether a `:` is
+// still part of the expression.
+//
+// Without this, `$"{(flag ? 1 : 2)}"` failed to parse: the ternary's `:` sits at brace
+// depth 0, so INTERP_FORMAT_COLON claimed it as a format delimiter and `2)` became
+// interpolation text. A dictionary initializer or an indexer inside a hole has the
+// same shape.
+//
+// These are `type(…)`-mapped to the ordinary punctuation tokens, so the parser sees
+// exactly what it would outside a hole.
+INTERP_NESTED_LPAREN
+    : {holeStack.Count > 0}? '(' { nestDepth++; } -> type(LPAREN)
+    ;
+
+INTERP_NESTED_RPAREN
+    : {nestDepth > 0}? ')' { nestDepth--; } -> type(RPAREN)
+    ;
+
+INTERP_NESTED_LBRACKET
+    : {holeStack.Count > 0}? '[' { nestDepth++; } -> type(LBRACKET)
+    ;
+
+INTERP_NESTED_RBRACKET
+    : {nestDepth > 0}? ']' { nestDepth--; } -> type(RBRACKET)
+    ;
+
 // `nestDepth` is 0 here, so a hole is open and this `}` closes it. Popping
 // `holeStack` restores the *enclosing* hole's depth, which matters for
 // `$"{ $"{x}" }"`: the inner hole's count must not clobber the outer one's.
@@ -230,9 +267,13 @@ INTERP_FORMAT_COLON
 // The unguarded fallbacks, reached only when every predicate above was false —
 // i.e. ordinary code outside any interpolation hole. Their names are pinned by
 // STABLE_TOKEN_NAMES so the `type(…)` commands above stay valid.
-LBRACE : '{' ;
-RBRACE : '}' ;
-COLON  : ':' ;
+LBRACE   : '{' ;
+RBRACE   : '}' ;
+COLON    : ':' ;
+LPAREN   : '(' ;
+RPAREN   : ')' ;
+LBRACKET : '[' ;
+RBRACKET : ']' ;
 
 mode INTERPOLATION;
 
@@ -325,4 +366,13 @@ INTERP_FORMAT_TEXT
 
 // The `}` that closes the hole. Two pops: this mode, then the hole's own
 // DEFAULT_MODE, landing back in the enclosing interpolation text mode.
-INTERP_FORMAT_END : '}' -> type(RBRACE), popMode, popMode ;
+//
+// It must also pop `holeStack`, exactly as INTERP_HOLE_CLOSE does — the hole is over
+// either way, and the two rules differ only in whether a format clause was entered
+// first. Leaving the entry behind leaked hole state into ordinary code: after
+// `$"{n:D4}"`, `holeStack.Count > 0` stayed true, so the next `:` anywhere in the file
+// (a ternary, a label, a base-type list) matched INTERP_FORMAT_COLON and pushed
+// INTERPOLATION_FORMAT again, swallowing the rest of the line as format text.
+INTERP_FORMAT_END
+    : '}' { nestDepth = holeStack.Pop(); } -> type(RBRACE), popMode, popMode
+    ;

@@ -2048,8 +2048,18 @@ fn container_kind(parent_kind: SpaceKind) -> ContainerKind {
 /// declared name.) So the arm's pattern is matched on its text, which is exactly `_`
 /// for the discard and cannot be anything else for a one-token pattern.
 fn is_discard_arm(ctx: RuleNodeView<'_>) -> bool {
-    SwitchExpressionArmContext::from_rule_node(ctx)
-        .and_then(|arm| arm.pattern().ok())
+    let Some(arm) = SwitchExpressionArmContext::from_rule_node(ctx) else {
+        return false;
+    };
+    // A *guarded* discard is not the fall-through. `_ when enabled => …` tests
+    // `enabled` and can fail, so the arm is a real decision — and the equivalent
+    // `case _ when enabled:` in a switch statement counts as one. Only a bare `_`
+    // always matches.
+    if arm.when_clause().is_some() {
+        return false;
+    }
+    arm.pattern()
+        .ok()
         .is_some_and(|pattern| pattern.discard_pattern().is_some() || pattern.text() == "_")
 }
 
