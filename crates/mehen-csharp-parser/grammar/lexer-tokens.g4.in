@@ -302,7 +302,26 @@ mode INTERPOLATION_FORMAT;
 
 // The format text, emitted as the same token the grammar's
 // `interpolation_format_clause : ':' interpolated_string_text_token` expects.
-INTERP_FORMAT_TEXT : ~[}"]+ -> type(INTERPOLATED_TEXT) ;
+//
+// ONE token for the whole clause, not one per run: the parser rule takes a single
+// `interpolated_string_text_token`, so splitting an escape into its own token makes
+// the clause unparsable. Hence the alternation inside the `+` rather than separate
+// rules.
+//
+// A custom numeric format can carry a quoted literal — `$"{n:0\"kg\"}"` is valid C#
+// for "the number, then kg" — and this mode previously had no rule for `"` at all, so
+// the backslash lexed as text and the following quote could not be consumed: errors on
+// valid source. A *bare* `"` stays excluded, since that ends the enclosing string and
+// letting the format text swallow it would run the token past the literal.
+//
+// Both escape spellings are accepted because the enclosing string decides which is
+// legal (`\"` regular, `""` verbatim). Threading the flavour into this mode would be
+// the precise answer, but the format text's *extent* is all any metric reads — LOC
+// rows and one Halstead operand — so accepting both costs nothing here and cannot
+// mis-lex valid code either way.
+INTERP_FORMAT_TEXT
+    : ( '\\"' | '""' | '\\' | ~[}"\\] )+ -> type(INTERPOLATED_TEXT)
+    ;
 
 // The `}` that closes the hole. Two pops: this mode, then the hole's own
 // DEFAULT_MODE, landing back in the enclosing interpolation text mode.

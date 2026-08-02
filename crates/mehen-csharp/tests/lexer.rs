@@ -211,3 +211,51 @@ fn a_diagnostic_span_covers_exactly_the_offending_token() {
         );
     }
 }
+
+#[test]
+fn an_interpolation_format_clause_may_contain_a_quoted_literal() {
+    // REGRESSION. A custom numeric format can carry a quoted literal —
+    // `$"{n:0\"kg\"}"` is valid C# for "the number, then kg" — but the
+    // INTERPOLATION_FORMAT mode had no rule for `"` at all, so the backslash lexed as
+    // ordinary text and the following quote could not be consumed.
+    //
+    // The fix has to keep the whole clause as ONE token: the parser rule is
+    // `interpolation_format_clause : ':' interpolated_string_text_token`, so emitting
+    // the escape separately made the clause unparsable (the first attempt did exactly
+    // that and traded three lexer errors for two parser errors).
+    assert_eq!(
+        lloc("class C { static string M(int n) => $\"{n:0\\\"kg\\\"}\"; }"),
+        2.0
+    );
+}
+
+#[test]
+fn a_verbatim_format_clause_may_contain_a_doubled_quote() {
+    // The verbatim spelling of the same thing. Both escapes are accepted in this mode
+    // because the enclosing string decides which is legal, and the clause's extent is
+    // all any metric reads.
+    assert_eq!(
+        lloc("class C { static string M(int n) => $@\"{n:0\"\"kg\"\"}\"; }"),
+        2.0
+    );
+}
+
+#[test]
+fn a_backslash_in_a_format_clause_is_ordinary_text() {
+    // A backslash that is not part of an escaped quote must still lex — the first fix
+    // attempt broke this by giving `\` its own rule after the escape rule.
+    assert_eq!(
+        lloc("class C { static string M(int n) => $\"{n:0\\\\0}\"; }"),
+        2.0
+    );
+}
+
+#[test]
+fn an_alignment_and_format_clause_together_still_parse() {
+    // `{n,5:D4}` — the alignment clause is a separate rule reached before the format
+    // one, so this pins that widening the format text did not disturb it.
+    assert_eq!(
+        lloc("class C { static string M(int n) => $\"{n,5:D4}\"; }"),
+        2.0
+    );
+}
