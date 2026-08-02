@@ -349,3 +349,46 @@ fn a_getter_expression_body_is_an_exit_but_a_setter_is_not() {
         ]
     );
 }
+
+#[test]
+fn a_throw_only_expression_body_is_one_exit() {
+    // REGRESSION introduced by the expression-body exit fix: `int F() => throw new E();`
+    // recorded the clause's implicit return AND the descendant `throw`, reporting NExit 2
+    // where the block-bodied form reports 1. The clause is the return only when it
+    // actually returns a value.
+    let arrow = analyze_clean(
+        "class C { class E : System.Exception { } static int F() => throw new E(); }",
+    );
+    let block = analyze_clean(
+        "class C { class E : System.Exception { } static int F() { throw new E(); } }",
+    );
+    assert_eq!(metrics_json::nexits(&arrow.root.metrics).sum, 1.0);
+    assert_eq!(
+        metrics_json::nexits(&arrow.root.metrics).sum,
+        metrics_json::nexits(&block.root.metrics).sum,
+    );
+}
+
+#[test]
+fn a_throw_inside_a_larger_expression_body_is_a_second_exit() {
+    // The guard is one level deep, not a subtree scan: in `=> x ?? throw new E();` the
+    // clause's return is real (it returns `x` when non-null) and the `throw` is another
+    // exit, so both count — matching the block-bodied `return x ?? throw new E();`.
+    let arrow = analyze_clean(
+        "class C {
+             class E : System.Exception { }
+             static string F(string x) => x ?? throw new E();
+         }",
+    );
+    let block = analyze_clean(
+        "class C {
+             class E : System.Exception { }
+             static string F(string x) { return x ?? throw new E(); }
+         }",
+    );
+    assert_eq!(metrics_json::nexits(&arrow.root.metrics).sum, 2.0);
+    assert_eq!(
+        metrics_json::nexits(&arrow.root.metrics).sum,
+        metrics_json::nexits(&block.root.metrics).sum,
+    );
+}

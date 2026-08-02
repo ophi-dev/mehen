@@ -758,10 +758,16 @@ impl Walker<'_> {
 
         // Sticky for the whole creation subtree: `new[] { new[] { 1 } }` has a nested
         // creation whose own initializer must also not double-count.
+        // `initializer_expression` is included so a bare initializer's *nested* groups
+        // are part of the same allocation: `int[,] v = { { 1, 2 }, { 3, 4 } };` is one
+        // array, and without this each of the three initializer nodes scored a branch.
+        // The explicit `new int[,] { … }` spelling was already correct, because the
+        // creation set the flag before the initializers were reached.
         let in_creation_expression = hint.in_creation_expression
             || matches!(
                 ri,
-                cp::RULE_OBJECT_CREATION_EXPRESSION
+                cp::RULE_INITIALIZER_EXPRESSION
+                    | cp::RULE_OBJECT_CREATION_EXPRESSION
                     | cp::RULE_IMPLICIT_OBJECT_CREATION_EXPRESSION
                     | cp::RULE_ANONYMOUS_OBJECT_CREATION_EXPRESSION
                     | cp::RULE_ARRAY_CREATION_EXPRESSION
@@ -1360,7 +1366,11 @@ impl Walker<'_> {
             // where `int F() { return 1; }` reported 1. `returns_value` keeps a `void`
             // member, a constructor, and a `set` accessor out of it — none of those
             // returns anything, so their expression body is a statement, not an exit.
-            cp::RULE_ARROW_EXPRESSION_CLAUSE if hint.returns_value => {
+            // `throw` is excluded because `RULE_THROW_EXPRESSION` below records the same
+            // exit: `int F() => throw new E();` reported NExit 2 where the block-bodied
+            // `int F() { throw new E(); }` reports 1. The clause is the return only when
+            // it actually returns a value.
+            cp::RULE_ARROW_EXPRESSION_CLAUSE if hint.returns_value && !arrow_body_is_throw(ctx) => {
                 self.current().nexit.record_exit();
                 self.current().cognitive.boolean_seq.reset();
             }
@@ -2176,6 +2186,24 @@ fn container_kind(parent_kind: SpaceKind) -> ContainerKind {
         SpaceKind::Interface | SpaceKind::Trait => ContainerKind::Interface,
         _ => ContainerKind::Other,
     }
+}
+
+/// Does this `arrow_expression_clause`'s body consist of a `throw` expression?
+///
+/// `int F() => throw new E();` is an exit, but `RULE_THROW_EXPRESSION` already records
+/// it — so the clause must not record a second one, or the expression-bodied form
+/// reports NExit 2 where the block-bodied `int F() { throw new E(); }` reports 1.
+///
+/// Checked one level down as well as directly: the clause is `ARROW expression`, and hub
+/// inlining leaves the `throw` as a child of that `expression` rather than of the clause.
+/// One level is enough — a `throw` deeper than that is inside a sub-expression
+/// (`x ?? throw new E()`), where the clause's own return is real and both should count.
+fn arrow_body_is_throw(ctx: RuleNodeView<'_>) -> bool {
+    if ctx.child_rule(cp::RULE_THROW_EXPRESSION).is_some() {
+        return true;
+    }
+    ctx.child_rules(cp::RULE_EXPRESSION)
+        .any(|body| body.child_rule(cp::RULE_THROW_EXPRESSION).is_some())
 }
 
 /// Is this switch-expression arm the discard (`_ => …`) catch-all?

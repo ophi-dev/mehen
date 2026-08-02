@@ -653,3 +653,19 @@ fn a_creations_own_initializer_is_not_a_second_branch() {
          }");
     assert_eq!(nested.1, 2, "two creations, each counted once");
 }
+
+#[test]
+fn a_nested_bare_initializer_is_one_allocation() {
+    // REGRESSION introduced by the bare-initializer fix: a rectangular array
+    // `int[,] v = { { 1, 2 }, { 3, 4 } };` has three `initializer_expression` nodes and
+    // scored three branches, where the explicit `new int[,] { … }` scored one — the
+    // creation set the hint before its initializers were reached, but a *bare* outer
+    // initializer did not mark its own nested groups.
+    let bare =
+        abc("class C { static int[,] F() { int[,] v = { { 1, 2 }, { 3, 4 } }; return v; } }");
+    let explicit = abc("class C {
+             static int[,] F() { int[,] v = new int[,] { { 1, 2 }, { 3, 4 } }; return v; }
+         }");
+    assert_eq!(bare.1, 1, "one array allocated");
+    assert_eq!(bare.1, explicit.1);
+}
