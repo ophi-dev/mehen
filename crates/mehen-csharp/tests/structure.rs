@@ -362,15 +362,24 @@ fn the_hoists_residual_trade_is_a_ctor_in_a_type_named_for_the_keyword() {
         "`: this(…)` disambiguates — the delegating ctor is a function again"
     );
 
-    // 2. The trade does NOT extend to fields, parameters, locals, or return types: only
-    //    the constructor shape collides, because only it is `name (params) { … }`.
-    //    Each is pinned against the same source with an ordinary type name, which must
-    //    produce an identical tree.
+    // 2. The trade does NOT extend to any other position — field, parameter, local,
+    //    return type, property type, or type argument. Only the constructor shape
+    //    collides, because only it is `name (params) { … }`. Each is pinned against the
+    //    same source with an ordinary type name, which must produce an identical tree.
+    //
+    //    The return-type and property-type rows are the ones the body fix bought: while
+    //    the bare keyword was a complete extension block, both grew a phantom empty
+    //    extension space. `record` and `union` still lose both (a method or property
+    //    typed `record` becomes a *class*), and cannot be fixed the same way — their
+    //    bodies must stay optional, since `record R;` and `record R(int X);` are valid
+    //    C# while `extension;` is not.
     for template in [
         "class C { NAME f; }",
         "class C { void M(NAME p) { } }",
         "class C { void M() { NAME v = null; } }",
         "class C { NAME M() { return null; } }",
+        "class C { NAME P { get; set; } }",
+        "class C { System.Collections.Generic.List<NAME> f; }",
     ] {
         let keyword = analyze_clean(&template.replace("NAME", "extension"));
         let control = analyze_clean(&template.replace("NAME", "Foo"));

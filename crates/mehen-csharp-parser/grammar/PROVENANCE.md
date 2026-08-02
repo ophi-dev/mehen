@@ -494,15 +494,26 @@ which, since the earlier `record` section states the principle but not the map:
 |---|---|---|
 | `class KW { KW() { } }` | ctor → anonymous container | correct |
 | `class C { KW M() { … } }` | correct (after the body fix) | method → a *class* named `M` |
-| field / parameter / local of type `KW` | correct | correct |
+| `class C { KW P { get; set; } }` | correct (after the body fix) | property → a *class* named `P` |
+| field / parameter / local / type argument of type `KW` | correct | correct |
 
-So `extension` now has the *narrowest* trade of the three: one shape, an
-initializer-less constructor in a type literally named `extension`. A constructor
-*initializer* escapes it — `: this(…)` is a token an extension block cannot accept, so
-`extension() : this(1) { }` parses as the constructor it is. And it is irreducible
-without semantics: the body cannot disambiguate either, since `int x = 1;` is both a
-statement and a field declaration. `crates/mehen-csharp/tests/structure.rs` pins the
-whole table so the trade stays deliberate.
+So `extension` now has the *narrowest* trade of the three — one shape, an
+initializer-less constructor in a type literally named `extension` — and the last two
+rows are what the body fix bought: while the bare keyword was a complete extension
+block, both grew a phantom space. `record` and `union` cannot be fixed the same way,
+because their bodies must stay optional (`record R;` and `record R(int X);` are valid
+C#, `extension;` is not).
+
+The remaining `extension` case is irreducible without semantics. A constructor
+*initializer* does escape it — `: this(…)` is a token an extension block cannot accept,
+so `extension() : this(1) { }` parses as the constructor it is — but the body cannot
+disambiguate the initializer-less form, since `int x = 1;` is both a statement and a
+field declaration (verified across an empty, statement, and member body: all three take
+the extension path). What is left is "does `extension` name a type in scope", the
+semantic question a syntax-only grammar cannot answer.
+
+`crates/mehen-csharp/tests/structure.rs` pins the whole table, non-colliding positions
+included, so the trade stays deliberate.
 
 Two follow-ons in the walker, both invisible while the misparse stood:
 `RULE_EXTENSION_BLOCK_DECLARATION` had to join the LLOC declaration allowlist (the
