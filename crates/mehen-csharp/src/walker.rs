@@ -617,7 +617,17 @@ impl Walker<'_> {
         // operand. This is what makes C#'s contextual keywords come out right:
         // the prep widens `identifier_token` to accept all 42 of them, so a
         // `KW_VAR` reached here is an operand rather than an operator.
-        let in_identifier = ri == cp::RULE_IDENTIFIER_TOKEN;
+        //
+        // `literal_expression` gets the same treatment, for the keyword-spelled
+        // literals Roslyn groups there: bare `default` (`string v = default;`) and
+        // `__arglist`. Those produce a *value* and belong with `true`/`false`/`null`,
+        // which are already operands — without this they fell through as operators,
+        // adding a spurious one and omitting the value operand.
+        //
+        // Only the *bare* form is affected. `default(T)` is a separate
+        // `default_expression : KW_DEFAULT LPAREN type RPAREN` rule and stays an
+        // operator, which is right: there it operates on a type.
+        let in_identifier = matches!(ri, cp::RULE_IDENTIFIER_TOKEN | cp::RULE_LITERAL_EXPRESSION);
 
         // Once inside an attribute, stay inside for the whole subtree so
         // attribute metadata records no executable complexity.
@@ -1429,11 +1439,29 @@ impl Walker<'_> {
         match ri {
             // Object creation is its own rule rather than part of the inlined
             // expression cycle, so its branch is recorded here.
+            //
+            // The two `stackalloc` forms allocate exactly as the heap forms do, just on
+            // the stack, so they belong in the same list — without them
+            // `stackalloc int[4]` scored no branch while `new int[4]` scored one.
+            //
+            // `primary_constructor_base_type` is the primary-constructor spelling of a
+            // base-constructor call: `class D(int x) : B(x)` is the same call as
+            // `D(int x) : base(x)`, which reaches `constructor_initializer`. Without it
+            // the two forms disagreed, 0 branches against 1.
             cp::RULE_OBJECT_CREATION_EXPRESSION
             | cp::RULE_IMPLICIT_OBJECT_CREATION_EXPRESSION
             | cp::RULE_ARRAY_CREATION_EXPRESSION
             | cp::RULE_IMPLICIT_ARRAY_CREATION_EXPRESSION
-            | cp::RULE_CONSTRUCTOR_INITIALIZER => self.current().abc.record_branch(),
+            | cp::RULE_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
+            | cp::RULE_IMPLICIT_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
+            | cp::RULE_CONSTRUCTOR_INITIALIZER
+            | cp::RULE_PRIMARY_CONSTRUCTOR_BASE_TYPE => self.current().abc.record_branch(),
+            // A LINQ `where` is a filter predicate — the query-expression equivalent of
+            // an `if`, and one ABC condition. Its own comparison (if any) is counted
+            // separately by the token scan, exactly as `if (x > 0)` counts two; a
+            // predicate that is already boolean (`where enabled`) has no comparison and
+            // so scored nothing at all before this.
+            cp::RULE_WHERE_CLAUSE => self.current().abc.record_condition(),
             // An initialized declarator is an assignment. Roslyn spells the
             // initializer as an `equals_value_clause` child rather than a bare
             // `=` token, so the presence of that child *is* the initialization.

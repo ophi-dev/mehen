@@ -298,3 +298,25 @@ fn dropping_incomplete_member_keeps_every_real_member_form() {
         assert_eq!(syntax_errors(source), 0, "must parse: {source:?}");
     }
 }
+
+#[test]
+fn a_switch_statement_requires_its_parentheses() {
+    // REGRESSION. Roslyn writes `switch_statement`'s parens as independently optional
+    // (`'switch' '('? expression ')'? '{' … '}'`), so `switch value { … }` — which is
+    // not valid C# — parsed without recovery and was reported as a clean analysis. The
+    // paren-free spelling belongs to the switch *expression*, a separate rule.
+    assert!(syntax_errors("class C { void M(int v) { switch v { default: break; } } }\n") > 0);
+}
+
+#[test]
+fn requiring_switch_parens_keeps_both_valid_forms() {
+    // The statement with parens, and the paren-free switch *expression*.
+    assert_eq!(
+        syntax_errors("class C { void M(int v) { switch (v) { default: break; } } }\n"),
+        0
+    );
+    assert_eq!(
+        syntax_errors("class C { int M(int v) => v switch { _ => 0 }; }\n"),
+        0
+    );
+}

@@ -74,7 +74,7 @@ Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
 corpus. All 5 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **ten** distinct silent misparses: structurally wrong
+grammar has now produced **eleven** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -90,14 +90,15 @@ dump, never by an error count.
 | `base_method_declaration` listed before the type forms | `record R(int X);` was a *method* named `R` |
 | `compilation_unit` did not end in `EOF` | `class C { } } } }` was a clean parse; the tail was never read |
 | `incomplete_member` was reachable | `class C { int }` was a complete, error-free unit |
+| `switch_statement`'s parens independently optional | `switch value { … }` parsed, though only the *expression* form is paren-free |
+| a local generic declaration loses to the expression statement | `List<int> l;` reads as chained comparison — **open, issue #218** |
 
-The first five *delete* code from the tree, the next three *relabel* it, and the last
-two accept source that is not valid C# at all. Every shape is
-invisible to an error count, which is why the metric tests carry the load here
+The first five *delete* code from the tree, the next four *relabel* it, and two accept
+source that is not valid C# at all. Every shape is invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
 
-Three of the ten share one root cause: **an alternative that is viable for the
+Four of the eleven share one root cause: **an alternative that is viable for the
 wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
 each semantically — it knows whether `F` names a type, whether `and` resolves to a
 declared name, whether `record` is a keyword here — and a syntax-only grammar has

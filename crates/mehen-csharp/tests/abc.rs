@@ -456,3 +456,63 @@ fn the_contextual_field_keyword_is_an_operand() {
         "`field` must not add a distinct operator"
     );
 }
+
+#[test]
+fn stack_allocation_is_a_branch() {
+    // REGRESSION. `stackalloc` allocates exactly as `new` does, just on the stack, but
+    // `stack_alloc_array_creation_expression` and its implicit form were missing from
+    // the creation list — so `stackalloc int[4]` scored no branch while `new int[4]`
+    // scored one.
+    let (_, b, _) = abc("class C { static void F() { var s = stackalloc int[4]; } }");
+    assert_eq!(b, 1);
+    let (_, b, _) = abc("class C { static void F() { var s = stackalloc[] { 1, 2 }; } }");
+    assert_eq!(b, 1);
+}
+
+#[test]
+fn a_primary_constructors_base_call_is_a_branch() {
+    // REGRESSION. `class D(int x) : B(x)` is the primary-constructor spelling of a
+    // base-constructor call, but it reaches `primary_constructor_base_type` rather than
+    // `constructor_initializer` — so it scored 0 branches where the explicit
+    // `D(int x) : base(x)` scored 1. Pinned against that form.
+    let primary = abc("class B { public B(int x) { } }
+         class D(int x) : B(x) { }");
+    let explicit = abc("class B { public B(int x) { } }
+         class D : B { public D(int x) : base(x) { } }");
+    assert_eq!(primary.1, 1);
+    assert_eq!(primary.1, explicit.1);
+}
+
+#[test]
+fn a_linq_where_clause_is_a_condition() {
+    // REGRESSION. A `where` is the query-expression equivalent of an `if` — a filter
+    // predicate — and was recording nothing. A predicate that is already boolean has no
+    // comparison for the token scan to catch, so `where enabled` scored 0.
+    let (_, _, c) = abc("class C {
+             static object F(int[] xs, bool enabled) { return from x in xs where enabled select x; }
+         }");
+    assert_eq!(c, 1);
+    // With a comparison it is two, exactly as `if (x > 0)` is two.
+    let (_, _, c) = abc("class C {
+             static object F(int[] xs) { return from x in xs where x > 0 select x; }
+         }");
+    assert_eq!(c, 2);
+}
+
+#[test]
+fn a_bare_default_literal_is_an_operand() {
+    // REGRESSION. Roslyn groups bare `default` under `literal_expression` beside
+    // `true`/`false`/`null`, which are operands — but `KW_DEFAULT` does not pass
+    // through `identifier_token`, so it fell through as a Halstead *operator*: a
+    // spurious operator plus a missing value operand.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let default_lit = halstead("class C { static void F() { string v = default; } }");
+    let null_lit = halstead("class C { static void F() { string v = null; } }");
+    assert_eq!(
+        default_lit.n1, null_lit.n1,
+        "`default` must cost the same as `null`"
+    );
+}

@@ -537,6 +537,24 @@ GENERATOR_GAP_FIXES = [
 #
 # `.` excludes newlines and every emitted rule body is one line, so a match can
 # never span two rules. Step 4c re-checks that rather than leaving it implicit.
+# `switch_statement` has the same independently-optional-delimiter shape, in
+# parentheses rather than braces:
+#
+#     switch_statement : attribute_list* 'switch' '('? expression ')'? '{' … '}'
+#
+# and the same consequence: `switch value { default: break; }` — which is not valid
+# C# — matches without recovery and is reported as a clean analysis. The
+# parenthesis-free spelling belongs to the switch *expression* (`value switch { … }`),
+# a separate rule.
+#
+# Applied on the pristine literal forms (before harvesting), so the tokens are still
+# spelled `'('` / `')'`. Made a balanced pair for the same reason as the braces: it
+# drops only the half-present case, which no valid C# produces.
+SWITCH_PARENS = (
+    "switch_statement\n  : attribute_list* 'switch' '('? expression ')'? '{' switch_section* '}'\n  ;\n",
+    "switch_statement\n  : attribute_list* 'switch' '(' expression ')' '{' switch_section* '}'\n  ;\n",
+)
+
 BALANCED_BRACES_PATTERN = re.compile(r"LBRACE\? (.*?) RBRACE\?")
 BALANCED_BRACES_REPLACEMENT = r"(LBRACE \1 RBRACE)?"
 
@@ -948,6 +966,15 @@ def main() -> int:
     for literal in sorted(SHIFT_TOKEN_RULES, key=len, reverse=True):
         src = src.replace(f"'{literal}'", SHIFT_TOKEN_RULES[literal][0])
     src = src.rstrip() + "\n" + "".join(shift_rules)
+
+    # -- 2d2. Require the switch statement's parentheses ---------------------
+    # See SWITCH_PARENS: `switch value { … }` is not valid C# but parses cleanly.
+    old, new = SWITCH_PARENS
+    if old not in src:
+        print("error: switch_statement shape changed upstream", file=sys.stderr)
+        return 1
+    src = src.replace(old, new, 1)
+    print("required the switch statement's parentheses")
 
     # -- 2e. Accept binary integer literals ----------------------------------
     old, new = BINARY_LITERAL_FIX
