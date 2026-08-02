@@ -320,3 +320,27 @@ fn a_label_is_not_its_own_logical_line() {
     // class(1) + method(1) + return(1) = 3.
     assert_eq!(labeled.lloc, 3.0);
 }
+
+#[test]
+fn a_block_comment_counts_every_row_whatever_the_terminator() {
+    // REGRESSION from this PR's own terminator work: the lexer accepts all five C# line
+    // terminators, but `loc_tokens` counted only `\n` when finding a delimited
+    // comment's end row — so `/* a<U+2028>b */` reported one CLOC row instead of two.
+    for terminator in ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'] {
+        let source = format!("/* a{terminator}b */\nclass C {{ }}");
+        let a = loc(&source);
+        assert_eq!(
+            a.cloc, 2.0,
+            "U+{:04X} must split the comment across two CLOC rows",
+            terminator as u32
+        );
+    }
+}
+
+#[test]
+fn crlf_does_not_double_count_a_comment_row() {
+    // CRLF is one break, so `/* a\r\nb */` is two rows, not three — matching
+    // `LineIndex`, which skips the `\n` after a `\r`.
+    let a = loc("/* a\r\nb */\nclass C { }");
+    assert_eq!(a.cloc, 2.0);
+}

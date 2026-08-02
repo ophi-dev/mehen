@@ -352,3 +352,39 @@ fn a_directive_ends_at_every_csharp_line_terminator() {
         );
     }
 }
+
+#[test]
+fn a_longer_raw_string_fence_can_embed_three_quotes() {
+    // REGRESSION. `""""a"""b""""` is valid C# — a four-quote fence exists precisely so
+    // the content can contain `"""` — but a single non-greedy rule stopped at the
+    // *first* three-quote run, terminating the literal early and leaving `b""""` as
+    // stray tokens. The fence-length rule ("close on a run at least as long as the
+    // opening one") needs one alternative per length, longest first.
+    assert_eq!(
+        lloc("class C { static string M() => \"\"\"\"a\"\"\"b\"\"\"\"; }"),
+        2.0
+    );
+    // And one length further, for a literal embedding four quotes.
+    assert_eq!(
+        lloc("class C { static string M() => \"\"\"\"\"a\"\"\"\"b\"\"\"\"\"; }"),
+        2.0
+    );
+}
+
+#[test]
+fn a_longer_fence_works_multi_line_too() {
+    // The multi-line form needs the same per-length alternatives, and the single-line
+    // rule must still win the tie for a one-liner (ANTLR breaks equal-length matches by
+    // order, and the parser reaches the two through different rules).
+    assert_eq!(
+        lloc(
+            "class C
+             {
+                 static string M() => \"\"\"\"
+             a\"\"\"b
+             \"\"\"\";
+             }"
+        ),
+        2.0
+    );
+}

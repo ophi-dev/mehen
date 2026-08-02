@@ -135,9 +135,21 @@ fn push_loc_token(
     let end_byte = mehen_core::byte_offset_clamped(stop_byte).max(start_byte);
     let start_row = (line as u32).saturating_sub(1);
     if comment_token_types.contains(&tt) {
-        // A delimited comment's text may span multiple lines; count the
-        // newlines to find the end row. Line comments have none.
-        let extra_lines = text.bytes().filter(|&b| b == b'\n').count() as u32;
+        // A delimited comment's text may span multiple lines; count the row breaks
+        // to find the end row. Line comments have none.
+        //
+        // Every terminator `mehen_core::LineIndex` counts, not just `\n` — CR, NEL
+        // (U+0085), LS (U+2028), and PS (U+2029) too, with CRLF as one break. A lexer
+        // that accepts those (C#'s does, ECMA-334 §6.3.1) would otherwise report a
+        // block comment split by one of them as covering a single CLOC row.
+        let extra_lines = text
+            .char_indices()
+            .filter(|&(i, c)| match c {
+                '\r' => !text[i..].starts_with("\r\n"),
+                '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => true,
+                _ => false,
+            })
+            .count() as u32;
         out.push(LocToken {
             kind: LocTokenKind::Comment,
             start_byte,

@@ -92,28 +92,40 @@ VERBATIM_STRING_LIT
 // C# 11 raw string literals (§6.4.5.7). BOTH forms are fenced by *at least*
 // three quotes — the single-/multi-line distinction is whether the content
 // contains a newline, not a shorter fence. The real rule also requires the
-// closing fence to be at least as long as the opening one, which a context-free
-// lexer rule cannot express; a non-greedy match is sufficient here because every
-// metric that touches a string literal (LOC rows, Halstead operand) only needs
-// the token's extent, not its internal structure.
+// closing fence to be at least as long as the opening one — see the note on the
+// rules below for how that is approximated.
+// The fence-length rule needs one alternative per length, longest first. A single
+// `'"""' '"'*  …  '"""' '"'*` rule cannot express "close on a run at least as long as
+// the opening one": the non-greedy body stops at the *first* three-quote run, so
+// `""""a"""b""""` — valid C#, and the reason longer fences exist — terminated early and
+// left `b""""` as stray tokens.
 //
-// Order is load-bearing: ANTLR breaks an equal-length match by rule order, so
-// the single-line form must come first. A one-line raw string matches both rules
-// over the same extent and has to lex as SL_RAW_STRING_LIT (the parser reaches it
-// through `single_line_raw_string_literal_token`); a multi-line one cannot match
-// SL at all — `~[\r\n]` blocks the newline — so it falls through to ML.
+// Five and four quotes are spelled out because they are the fences real code uses
+// (three is the default; four to embed a `"""`; five to embed a `""""`). Beyond that
+// the three-quote form still applies and the early-termination caveat returns, which is
+// an acceptable floor: every metric touching a string literal reads only its extent.
 //
-// Do NOT relax the opening fence to `'""'`. An empty string is `""`, so a
-// two-quote fence makes `var a = ""; f(); var b = "";` lex as ONE token spanning
-// both empty strings: the intervening statements vanish from every metric with no
-// diagnostic to show for it (a silently wrong tree, the failure mode
-// PROVENANCE.md warns about).
+// Order is load-bearing twice over. Longest fence first, so a four-quote literal is not
+// claimed by the three-quote rule. And within each length, the single-line form precedes
+// the multi-line one — both match a one-liner over the same extent, and ANTLR breaks the
+// tie by rule order, so SL must come first to reach
+// `single_line_raw_string_literal_token`. A multi-line literal cannot match SL at all
+// (`~[\r\n]` blocks the break) and falls through to ML.
+//
+// Do NOT relax any opening fence to `'""'`. An empty string is `""`, so a two-quote
+// fence makes `var a = ""; f(); var b = "";` lex as ONE token spanning both empty
+// strings: the intervening statements vanish from every metric with no diagnostic to
+// show for it (a silently wrong tree, the failure mode PROVENANCE.md warns about).
 SL_RAW_STRING_LIT
-    : '"""' '"'* ~[\r\n]*? '"""' '"'*
+    : '"""""' ~[\r\n]*? '"""""' '"'*
+    | '""""' ~[\r\n]*? '""""' '"'*
+    | '"""' ~[\r\n]*? '"""' '"'*
     ;
 
 ML_RAW_STRING_LIT
-    : '"""' '"'* .*? '"""' '"'*
+    : '"""""' .*? '"""""' '"'*
+    | '""""' .*? '""""' '"'*
+    | '"""' .*? '"""' '"'*
     ;
 
 // ---- trivia -------------------------------------------------------------
