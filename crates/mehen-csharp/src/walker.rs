@@ -850,7 +850,7 @@ impl Walker<'_> {
             | cp::RULE_OPERATOR_DECLARATION
             | cp::RULE_LOCAL_FUNCTION_STATEMENT => ctx
                 .child_rule(cp::RULE_TYPE)
-                .is_some_and(|ty| !type_is_void_like(&ty.text())),
+                .is_some_and(|ty| !type_is_void_like(&ty.text(), is_async(ctx))),
             // A constructor, destructor, and anonymous method (`delegate { … }`, which
             // has no expression-body form) return nothing here.
             cp::RULE_CONSTRUCTOR_DECLARATION
@@ -1427,6 +1427,29 @@ impl Walker<'_> {
                 self.current().nexit.record_exit();
                 self.current().cognitive.boolean_seq.reset();
             }
+            // The same thing for a lambda, which needs its own arm because it has no
+            // `arrow_expression_clause` to match: Roslyn spells the body as a bare
+            // `(block | expression)` directly on the lambda
+            // (`simple_lambda_expression : … ARROW (block | expression)`). So
+            // `x => x + 1` reported NExit 0 while `x => { return x + 1; }` reported 1 —
+            // body syntax again deciding a metric.
+            //
+            // The body is the return whenever it is not a block: a lambda's expression body
+            // is its result by construction, and an `Action`-typed lambda whose body is a
+            // *statement* expression (`() => Console.WriteLine(x)`) still completes the
+            // delegate the same way. That is why this needs no `returns_value` test, unlike
+            // the member case — `returns_value` is set unconditionally for the two lambda
+            // rules already, and there is no void-lambda spelling to distinguish.
+            //
+            // A block body is excluded because its own `return` statements record the exits,
+            // and a `throw` body is excluded for the same reason as above:
+            // `RULE_THROW_EXPRESSION` records that exit itself.
+            cp::RULE_SIMPLE_LAMBDA_EXPRESSION | cp::RULE_PARENTHESIZED_LAMBDA_EXPRESSION
+                if ctx.child_rule(cp::RULE_BLOCK).is_none() && !arrow_body_is_throw(ctx) =>
+            {
+                self.current().nexit.record_exit();
+                self.current().cognitive.boolean_seq.reset();
+            }
             // `yield return` / `yield break` both leave the iterator.
             cp::RULE_YIELD_STATEMENT => {
                 self.current().nexit.record_exit();
@@ -1928,26 +1951,42 @@ impl Walker<'_> {
 /// Whether a declared return type yields no value, so an expression body is not a
 /// return for NExit purposes.
 ///
-/// `void` is the obvious one. The non-generic awaitables are the same thing in an
-/// `async` method: `async Task M() => await Work();` produces no result, and its
-/// block-bodied twin `async Task M() { await Work(); }` records no exit — so counting
-/// the arrow form made NExit depend on body syntax for what is a very common shape in
-/// modern C#. `Task<T>` and `ValueTask<T>` *do* return, which is why this matches the
-/// bare names only.
+/// `void` is unconditional. The non-generic awaitables are void-like **only when the
+/// method is `async`**, and that distinction is the whole point of the `is_async`
+/// parameter: `async` makes the compiler wrap the body's completion in the task, so
+/// `async Task M() => await Work();` produces no result — but a non-async
+/// `Task M() => Task.CompletedTask;` must literally return a task object, and its
+/// block-bodied twin `Task M() { return Task.CompletedTask; }` records an exit.
+///
+/// So "is this void-like" is not a property of the type alone. Ignoring `async` fixed
+/// the async case and broke the non-async one, which is the same
+/// body-syntax-dependent NExit in a different place.
+///
+/// `Task<T>` and `ValueTask<T>` return a value even when `async`, which is why only the
+/// bare names match.
 ///
 /// Matched on the type's text, which is all a syntax-only walker has: `System.Threading`
-/// is not resolved, so a user-defined type literally named `Task` would be treated as
-/// void-like. That is the same class of trade the grammar makes for contextual keywords,
-/// and the alternative — counting every `async Task` method's arrow body as a return —
-/// is wrong far more often.
+/// is not resolved, so a user-defined type literally named `Task` in an `async` method
+/// would be treated as void-like. That is the same class of trade the grammar makes for
+/// contextual keywords, and `async` narrows it a great deal — an `async` method whose
+/// return type is a *non-awaitable* type named `Task` does not compile.
 ///
 /// `global::`-qualified and namespace-qualified spellings are accepted by comparing the
 /// last dot-separated segment, so `System.Threading.Tasks.Task` matches. Any generic
 /// argument list makes the text end in `>`, which no bare name does, so `Task<int>`
 /// cannot match by construction.
-fn type_is_void_like(text: &str) -> bool {
+fn type_is_void_like(text: &str, is_async: bool) -> bool {
     let name = text.rsplit(['.', ':']).next().unwrap_or(text).trim();
-    matches!(name, "void" | "Task" | "ValueTask")
+    name == "void" || (is_async && matches!(name, "Task" | "ValueTask"))
+}
+
+/// Does this declaration carry the `async` modifier?
+///
+/// `async` is a `modifier` child rule rather than a direct token of the declaration
+/// (Roslyn folds every modifier into one rule), so it cannot be found with `has_token`.
+fn is_async(ctx: RuleNodeView<'_>) -> bool {
+    ctx.child_rules(cp::RULE_MODIFIER)
+        .any(|m| m.has_token(cl::KW_ASYNC))
 }
 
 /// Reduce an identifier token's text to the *name* it denotes, for use as a
@@ -2340,16 +2379,21 @@ fn container_kind(parent_kind: SpaceKind) -> ContainerKind {
     }
 }
 
-/// Does this `arrow_expression_clause`'s body consist of a `throw` expression?
+/// Does this expression body consist of a `throw` expression?
 ///
 /// `int F() => throw new E();` is an exit, but `RULE_THROW_EXPRESSION` already records
-/// it — so the clause must not record a second one, or the expression-bodied form
+/// it — so the body must not record a second one, or the expression-bodied form
 /// reports NExit 2 where the block-bodied `int F() { throw new E(); }` reports 1.
 ///
-/// Checked one level down as well as directly: the clause is `ARROW expression`, and hub
-/// inlining leaves the `throw` as a child of that `expression` rather than of the clause.
-/// One level is enough — a `throw` deeper than that is inside a sub-expression
-/// (`x ?? throw new E()`), where the clause's own return is real and both should count.
+/// Used for both an `arrow_expression_clause` and a lambda, whose bodies are the same
+/// shape one node down (`ARROW expression` vs `… ARROW (block | expression)`). The lambda
+/// case needs it for the identical reason, and a direct `child_rule` probe was not enough
+/// there either — `x => throw new E()` reported 2.
+///
+/// Checked one level down as well as directly, because hub inlining leaves the `throw` as
+/// a child of the body `expression` rather than of the node above it. One level is enough —
+/// a `throw` deeper than that is inside a sub-expression (`x ?? throw new E()`), where the
+/// body's own return is real and both should count.
 fn arrow_body_is_throw(ctx: RuleNodeView<'_>) -> bool {
     if ctx.child_rule(cp::RULE_THROW_EXPRESSION).is_some() {
         return true;

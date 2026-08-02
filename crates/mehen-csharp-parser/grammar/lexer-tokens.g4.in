@@ -276,7 +276,23 @@ INTERP_VERBATIM_START : ( '$@"' | '@$"' ) -> pushMode(INTERPOLATION_VERBATIM) ;
 //
 // `$"""` is a longer match than `$"`, so it wins over INTERP_START regardless of
 // rule order; it is placed here for readability.
-INTERP_RAW_START : '$'+ '"""' '"'* -> pushMode(INTERPOLATION_RAW) ;
+//
+// The DOLLAR COUNT sets the brace width: with `$$"""…"""`, a hole opens on `{{` and a
+// single `{` is literal text — C# 11 chose this so JSON and other brace-heavy text needs
+// no escaping. One rule per width, longest first, each pushing its own mode, exactly as
+// the raw-string *fence* widths are enumerated in `SL_RAW_STRING_LIT` above and for the
+// same reason: the DSL has no comparisons, so a stored width could not be compared
+// against anything.
+//
+// Two widths are covered, which is what real code uses — `$$"""{"k":{{v}}}"""` is the
+// motivating shape (embedding JSON), and `dotnet/runtime` uses `$$` and nothing deeper.
+// A third width needs a third mode; that is mechanical, and the comment on
+// `SL_RAW_STRING_LIT` says the same thing about a ninth quote.
+//
+// Longest first is load-bearing: `$$"""` must not be claimed by the one-dollar rule,
+// which would leave a stray `$` and lex the hole braces as text.
+INTERP_RAW_START_2 : '$$' '"""' '"'* -> type(INTERP_RAW_START), pushMode(INTERPOLATION_RAW_2) ;
+INTERP_RAW_START   : '$'  '"""' '"'* -> pushMode(INTERPOLATION_RAW) ;
 
 // ---- braces and `:` inside an interpolation hole -----------------------
 // `{`, `}` and `:` mean different things inside a hole, so this file defines them
@@ -417,6 +433,53 @@ INTERP_R_QUOTE : '"' '"'? -> type(INTERPOLATED_TEXT) ;
 INTERP_R_TEXT  : ~[{}"]+  -> type(INTERPOLATED_TEXT) ;
 
 INTERP_R_HOLE_OPEN : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+
+// The `$$"""…"""` flavour: two dollars means a hole opens on `{{` and a *single* brace is
+// literal text. Everything else — the fence, quote, and text handling — is identical to
+// the width-1 mode above, so only the brace rules differ.
+//
+// Without this mode, `$$"""{{a && b}}"""` had its hole swallowed as literal text: the
+// width-1 rules read `{{` as an escaped brace, so `a && b` never reached the parser and
+// its operators and complexity vanished — with zero diagnostics, the shape
+// PROVENANCE.md catalogues.
+//
+// The close is the ordinary `}` path in the default mode: a hole's `}}` arrives as
+// INTERP_NESTED_CLOSE / INTERP_HOLE_CLOSE for the first brace, and the second is then
+// matched here as text — which is why `INTERP_R2_TEXT` must accept a lone brace.
+mode INTERPOLATION_RAW_2;
+
+// A hole opens on the doubled brace. First, so `{{` is never split by the text rule.
+INTERP_R2_HOLE_OPEN
+    : '{{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
+    ;
+
+// The fence, before the quote rule, so a `"""` run is never split into text quotes.
+INTERP_R2_END : '"""' '"'* -> type(TRIPLE_DQUOTE), popMode ;
+
+INTERP_R2_QUOTE : '"' '"'? -> type(INTERPOLATED_TEXT) ;
+
+// A run of ordinary characters. Braces are deliberately EXCLUDED from this set even
+// though a lone brace is literal text at this width — that is what the two
+// single-character rules below are for.
+//
+// The reason is ANTLR's matching rule: it takes the longest match for the rule as a whole
+// and breaks only *ties* by order. A text rule that could consume `{{a && b}}` (10
+// characters) therefore beats INTERP_R2_HOLE_OPEN's 2 no matter which is written first.
+// That was the first attempt here and it swallowed the hole exactly as the width-1 mode
+// did — the same shape as the `""` raw-string fence bug in PROVENANCE.md.
+//
+// Splitting the braces out makes the decision length-based instead: `{{` is 2 characters
+// and `{` is 1, so the hole rule wins on length whenever a doubled brace is present, and
+// the single-brace rule fires only when it is not. Nothing depends on rule order, which is
+// what makes it robust.
+INTERP_R2_TEXT : ~[{}"]+ -> type(INTERPOLATED_TEXT) ;
+
+// A brace that did not start a hole (`{`) or close one (`}`) is literal text. One
+// character each, so INTERP_R2_HOLE_OPEN's two-character `{{` always outranks them.
+// `}` needs no doubled form: a hole's `}}` is consumed in the default mode — the first
+// brace by INTERP_HOLE_CLOSE, the second here as text.
+INTERP_R2_LBRACE : '{' -> type(INTERPOLATED_TEXT) ;
+INTERP_R2_RBRACE : '}' -> type(INTERPOLATED_TEXT) ;
 
 // A format specifier (`{x:D4}`) is a further mode: after the `:` that ends a
 // hole's expression, the remaining text up to the closing `}` is literal format

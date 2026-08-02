@@ -434,3 +434,55 @@ fn the_utf8_suffix_still_works_after_a_literal() {
         2.0
     );
 }
+
+#[test]
+fn a_two_dollar_raw_string_opens_its_hole_on_a_doubled_brace() {
+    // REGRESSION. The dollar count sets the brace width: with `$$"""…"""` a hole opens on
+    // `{{` and a lone `{` is literal text (C# 11 chose this so brace-heavy text like JSON
+    // needs no escaping). The lexer had ONE raw mode, whose `{{` rule read a doubled brace
+    // as escaped text — so `$$"""{{a && b}}"""` swallowed the hole's expression whole. Zero
+    // diagnostics, and `a && b`'s operators and complexity vanished.
+    //
+    // `dotnet/runtime` uses this shape for embedded JSON (`$$"""{"k":{{v}}}"""`), which is
+    // exactly why it matters, and why it was missed: those files are under `tests/`, not in
+    // the `src/` corpus.
+    //
+    // Asserted through cognitive complexity, which is 0 if the hole is text and 1 if the
+    // `&&` really reached the parser — pinned against both narrower spellings.
+    let cognitive = |source: &str| {
+        mehen_report::metrics_json::cognitive(&analyze_clean(source).root.metrics).sum
+    };
+    let two_dollar =
+        cognitive("class C { static string F(bool a, bool b) => $$\"\"\"{{a && b}}\"\"\"; }");
+    let one_dollar =
+        cognitive("class C { static string F(bool a, bool b) => $\"\"\"{a && b}\"\"\"; }");
+    let plain = cognitive("class C { static string F(bool a, bool b) => $\"{a && b}\"; }");
+    assert_eq!(two_dollar, one_dollar, "the hole must reach the parser");
+    assert_eq!(two_dollar, plain);
+    assert_eq!(two_dollar, 1.0);
+}
+
+#[test]
+fn a_lone_brace_in_a_two_dollar_raw_string_is_text() {
+    // The counterpart, and the reason the width-2 text rule is split into single-character
+    // brace rules: a LONE brace at this width is literal text, so brace-heavy content must
+    // survive intact. ANTLR takes the longest match and breaks only ties by order, so a
+    // text rule able to consume `{{a}}` would beat the two-character hole rule no matter
+    // which came first — that was the first attempt and it swallowed the hole again.
+    //
+    // Two statements after the literal: if a brace rule over-matched, the token would eat
+    // them and LLOC would drop. class(1) + method(1) + 2 locals = 4.
+    assert_eq!(
+        lloc(
+            "class C
+             {
+                 static void M()
+                 {
+                     var json = $$\"\"\"{\"k\": 1}\"\"\";
+                     int x = 1;
+                 }
+             }"
+        ),
+        4.0
+    );
+}

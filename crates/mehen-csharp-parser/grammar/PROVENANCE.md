@@ -81,7 +81,7 @@ Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
 corpus. All 5 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **sixteen** distinct silent misparses: structurally wrong
+grammar has now produced **seventeen** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -92,6 +92,7 @@ dump, never by an error count.
 | `parameter`'s elements all optional | `Zero()` had one empty parameter |
 | `parameter`'s `type?` matches a tuple | `(a, b) => …` was a *simple* lambda |
 | `SL_RAW_STRING_LIT` fenced with `""` | `var a = ""; f(); var b = "";` was ONE string token |
+| one raw *interpolation* mode for every dollar width | `$$"""{{a && b}}"""` read its hole as escaped text — the expression vanished |
 | `identifier_token` widened with `and`/`or`/`not` | `o is int and > 5` declared a variable named `and` |
 | `constant_pattern` listed before `discard_pattern` | a `_ =>` arm is an expression, not the discard |
 | …and before `var_pattern` | `var x =>` was a *constant* pattern, so `var_pattern` was unreachable — and an always-matching arm read as a decision |
@@ -105,12 +106,12 @@ dump, never by an error count.
 | `switch_statement`'s parens independently optional | `switch value { … }` parsed, though only the *expression* form is paren-free |
 | a local generic declaration loses to the expression statement | `List<int> l;` reads as chained comparison — **open, issue #218** |
 
-Six *delete* code from the tree, eight *relabel* it, and two accept
+Seven *delete* code from the tree, eight *relabel* it, and two accept
 source that is not valid C# at all. Every shape is invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
 
-Seven of the sixteen share one root cause: **an alternative that is viable for the
+Seven of the seventeen share one root cause: **an alternative that is viable for the
 wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
 each semantically — it knows whether `F` names a type, whether `and` resolves to a
 declared name, whether `record` is a keyword here — and a syntax-only grammar has
@@ -429,6 +430,31 @@ and `record` as a type name is vanishingly rare in real C#.
 The performance half was diagnosed by the antlr-rust-runtime team on
 [`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runtime/issues/248);
 `repro/roslyn-csharp-perf/` at the repo root reproduces both variants.
+
+### The dollar width of a raw interpolated string
+
+`$$"""…"""` is not a longer `$"""…"""`: the **dollar count sets the brace width**, so with
+two dollars a hole opens on `{{` and a lone `{` is literal text. C# 11 added that so
+brace-heavy content — JSON, mustache templates — needs no escaping.
+
+The lexer had one raw-interpolation mode, whose `{{` rule read a doubled brace as escaped
+text. So `$$"""{{a && b}}"""` swallowed its hole whole: `a && b` never reached the parser,
+and its operators and complexity vanished with no diagnostic. `dotnet/runtime` writes
+exactly this shape for embedded JSON (`$$"""{"k":{{v}}}"""`), which is both why it matters
+and why it was missed — those files live under `tests/`, outside the `src/` corpus.
+
+One mode per width, longest-prefix first, mirroring how the raw-string *fence* widths are
+enumerated in `SL_RAW_STRING_LIT`: the lowering DSL has no comparisons, so a stored width
+could not be compared against anything. Two widths are covered, which is what real code
+uses; a third is mechanical.
+
+The width-2 text rule then needed care, and the first attempt was wrong in an instructive
+way. Adding `{` to the text set let it match `{{a && b}}` entirely — 10 characters against
+the hole rule's 2 — and **ANTLR takes the longest match, breaking only ties by order**, so
+writing the hole rule first changed nothing and the hole was swallowed again. Splitting the
+braces into their own single-character rules makes the decision length-based instead: `{{`
+is two characters and `{` is one, so the hole wins whenever a doubled brace is present.
+Nothing depends on rule order, which is what makes it hold.
 
 ### A query with no body clauses
 

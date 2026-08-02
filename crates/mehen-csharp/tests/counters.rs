@@ -459,3 +459,88 @@ fn a_void_like_async_expression_body_is_not_an_exit() {
         0.0
     );
 }
+
+#[test]
+fn a_non_async_task_method_still_returns() {
+    // REGRESSION introduced by the void-like fix above: treating a bare `Task` as
+    // void-like unconditionally suppressed the exit for a *non-async* task-returning
+    // method, which must literally `return` a task object — so
+    // `Task M() => Task.CompletedTask;` reported 0 while
+    // `Task M() { return Task.CompletedTask; }` reported 1. The same
+    // body-syntax-dependent NExit, moved rather than fixed.
+    //
+    // "Void-like" is therefore a property of the type AND the `async` modifier, not of
+    // the type alone: `async` makes the compiler wrap the body's completion in the task.
+    let nexit = |source: &str| metrics_json::nexits(&analyze_clean(source).root.metrics).sum;
+
+    for ty in ["Task", "ValueTask"] {
+        let arrow = nexit(&format!(
+            "using System.Threading.Tasks;
+             class C {{ static {ty} M() => default; }}"
+        ));
+        let block = nexit(&format!(
+            "using System.Threading.Tasks;
+             class C {{ static {ty} M() {{ return default; }} }}"
+        ));
+        assert_eq!(arrow, block, "non-async `{ty}` returns a value");
+        assert_eq!(arrow, 1.0, "non-async `{ty}` is not void-like");
+    }
+
+    // `void` stays void-like unconditionally — it has no async/non-async distinction.
+    assert_eq!(
+        nexit("class C { static void W() { } static void M() => W(); }"),
+        0.0
+    );
+}
+
+#[test]
+fn an_expression_bodied_lambda_records_its_exit() {
+    // REGRESSION. A lambda has no `arrow_expression_clause` for the member arm to match —
+    // Roslyn spells the body as a bare `(block | expression)` directly on the lambda — so
+    // `x => x + 1` reported NExit 0 while `x => { return x + 1; }` reported 1.
+    let closure_nexit = |source: &str| {
+        let a = analyze_clean(source);
+        fn walk(s: &mehen_core::MetricSpace, out: &mut Vec<f64>) {
+            if s.kind == mehen_core::SpaceKind::Closure {
+                out.push(metrics_json::nexits(&s.metrics).sum);
+            }
+            for c in &s.spaces {
+                walk(c, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&a.root, &mut out);
+        out
+    };
+
+    let arrow = closure_nexit(
+        "using System;
+         class C { static void F() { Func<int,int> f = x => x + 1; f(1); } }",
+    );
+    let block = closure_nexit(
+        "using System;
+         class C { static void F() { Func<int,int> f = x => { return x + 1; }; f(1); } }",
+    );
+    assert_eq!(arrow, block, "the two lambda body spellings must agree");
+    assert_eq!(arrow, vec![1.0]);
+
+    // The explicitly-typed C# 10 form is the same node with a `type?` child, so it agrees.
+    assert_eq!(
+        closure_nexit(
+            "using System;
+             class C { static void F() { Func<int,int> f = int (int x) => x + 1; f(1); } }"
+        ),
+        vec![1.0]
+    );
+
+    // A `throw` body is excluded, for the same reason the member arm excludes it:
+    // `RULE_THROW_EXPRESSION` records that exit itself, so counting here would double it.
+    assert_eq!(
+        closure_nexit(
+            "using System;
+             class C { static void F() { Func<int,int> f = x => throw new Exception(); f(1); } }"
+        ),
+        vec![1.0],
+        "a throwing lambda has exactly one exit, not two"
+    );
+}

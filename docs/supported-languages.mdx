@@ -21,7 +21,7 @@ gives mehen the best semantic coverage for that ecosystem.
 | **Go** | `.go` | [tree-sitter-go](https://github.com/tree-sitter/tree-sitter-go) |
 | **Kotlin** | `.kt`, `.kts` | [ANTLR](https://www.antlr.org/) — official [Kotlin spec grammar](https://github.com/Kotlin/kotlin-spec) via [antlr-rust-runtime](https://github.com/ophi-dev/antlr-rust-runtime) |
 | **Java** | `.java` | [ANTLR](https://www.antlr.org/) — [grammars-v4 Java grammar](https://github.com/antlr/grammars-v4/tree/master/java/java) via [antlr-rust-runtime](https://github.com/ophi-dev/antlr-rust-runtime) |
-| **C#** | `.cs`, `.csx` | [ANTLR](https://www.antlr.org/) — [grammars-v4 C# grammar](https://github.com/antlr/grammars-v4/tree/master/csharp) via [antlr-rust-runtime](https://github.com/ophi-dev/antlr-rust-runtime) |
+| **C#** | `.cs`, `.csx` | [ANTLR](https://www.antlr.org/) — [Roslyn's own generated grammar](https://github.com/dotnet/roslyn/blob/main/src/Compilers/CSharp/Portable/Generated/CSharp.Generated.g4) via [antlr-rust-runtime](https://github.com/ophi-dev/antlr-rust-runtime) |
 | **C** | `.c`, `.h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) |
 | **PowerShell** | `.ps1`, `.psm1`, `.psd1` | [tree-sitter-pwsh](https://github.com/wharflab/tree-sitter-powershell) |
 
@@ -51,10 +51,15 @@ TypeScript front-end and `.jsx` through Oxc's TSX front-end.
   jumps, property accessors) as first-class, semantically-named rules. Java uses the community
   [grammars-v4 Java grammar](https://github.com/antlr/grammars-v4/tree/master/java/java), which
   covers modern Java (records, sealed types, switch expressions, text blocks, pattern matching,
-  modules). C# uses the [grammars-v4 C# grammar](https://github.com/antlr/grammars-v4/tree/master/csharp),
-  covering properties and accessors, indexers, events, local functions, expression-bodied members,
-  pattern matching with `when` guards, interpolated strings, and `#if` preprocessor directives. All
-  three are richer than a tree-sitter CST.
+  modules). C# uses [Roslyn's own generated
+  grammar](https://github.com/dotnet/roslyn/blob/main/src/Compilers/CSharp/Portable/Generated/CSharp.Generated.g4),
+  which the C# compiler generates from the same `Syntax.xml` model that produces its syntax node
+  classes — so it tracks C# *as implemented*: records, `is not`, `and`/`or` and relational patterns,
+  list patterns, collection expressions, raw strings, primary constructors, `required` members, and
+  the C# 14 additions (`field`, extension blocks). It replaced the community grammars-v4 C# grammar,
+  which stops at C# 7 and parsed 93 of 322 `System.Text.Json` files against 317 for the derived
+  Roslyn grammar; see `crates/mehen-csharp-parser/grammar/PROVENANCE.md` for the pinned revision and
+  what the derivation repairs. All three are richer than a tree-sitter CST.
 - **Tree-sitter** is mehen's pick for Go, C, and PowerShell, where its grammar quality and
   ecosystem maturity make it the best fit.
 
