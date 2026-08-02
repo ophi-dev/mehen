@@ -435,15 +435,20 @@ INCOMPLETE_MEMBER_ALT = "  | incomplete_member\n"
 # missing; they were just attributed to a constructor that does not exist.
 #
 # Like `union`, this one needs only the hoist: Roslyn spells `extension` as a literal,
-# so `KW_EXTENSION` is a real token already. The hoist is on `type_declaration`, which
-# is where `extension_block_declaration` lives — hoisting the parent covers all six of
-# its alternatives, and `class`/`interface`/`struct` are reserved words that could
-# never have collided, so widening the hoist costs nothing.
+# so `KW_EXTENSION` is a real token already.
 #
-# All three are hoisted together. `record_declaration` needed a real `KW_RECORD` token
-# for the hoist to be safe (see RECORD_KEYWORD_RULE); `union_declaration` and
-# `extension_block_declaration` already have real `KW_UNION` / `KW_EXTENSION` tokens,
-# since Roslyn spells both of those keywords as literals.
+# All three are hoisted together, and they are exactly the complete set. Every one of
+# `member_declaration`'s other alternatives either leads with a *reserved* word
+# (`event`, `namespace`, `enum`, `delegate` — never a legal identifier, so no
+# collision is possible) or is itself the method/property form being hoisted past. Of
+# `type_declaration`'s six alternatives, `class` / `interface` / `struct` are reserved
+# and only these three lead with a contextual keyword — so the hazard is closed here,
+# not merely patched three times.
+#
+# `record_declaration` needed a real `KW_RECORD` token for its hoist to be safe (see
+# RECORD_KEYWORD_RULE); `union_declaration` and `extension_block_declaration` already
+# have real `KW_UNION` / `KW_EXTENSION` tokens, since Roslyn spells both of those
+# keywords as literals.
 HOISTED_TYPE_ALTS = (
     "  | record_declaration\n",
     "  | union_declaration\n",

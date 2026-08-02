@@ -456,10 +456,13 @@ a *property* forces the type path too, because `constructor_declaration` require
 statement, so the constructor path dies. A *method* member is a legal
 `local_function_statement`, so it keeps the constructor path viable end to end.
 
-The hoist for `extension` is on `type_declaration`, its parent, rather than on
-`extension_block_declaration` itself: that covers all six of its alternatives at once,
-and `class`/`interface`/`struct` are reserved words that could never have collided, so
-the wider hoist costs nothing.
+These three are the *complete* set, not three patches to the same wall. Every other
+`member_declaration` alternative either leads with a reserved word (`event`,
+`namespace`, `enum`, `delegate` — never a legal identifier, so no collision is
+possible) or is the method/property form being hoisted past. And of
+`type_declaration`'s six alternatives, `class` / `interface` / `struct` are reserved;
+only `record`, `union`, and `extension` lead with a contextual keyword. With all three
+hoisted, the hazard is closed at this rule.
 
 Two follow-ons in the walker, both invisible while the misparse stood:
 `RULE_EXTENSION_BLOCK_DECLARATION` had to join the LLOC declaration allowlist (the
