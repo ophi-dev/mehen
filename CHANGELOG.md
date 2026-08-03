@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.8.0](https://github.com/ophi-dev/mehen/compare/v1.7.0...v1.8.0) (2026-08-03)
+
+
+### Features
+
+* **antlr:** upgrade runtime to 0.18.0 + exact JavaParserBase predicate semantics ([#211](https://github.com/ophi-dev/mehen/issues/211)) ([d91a556](https://github.com/ophi-dev/mehen/commit/d91a55607cf91fdb869d20b23ab13333f4769b7a))
+* **parser-crates:** generate consume-me READMEs from a shared template ([bb00c4f](https://github.com/ophi-dev/mehen/commit/bb00c4f3f1feeea85d844846bc35d5691b9b157b))
+
+
+### Parser & Grammar Updates
+
+* bump ra_ap_syntax from 0.0.342 to 0.0.343 ([#205](https://github.com/ophi-dev/mehen/issues/205)) ([a504bb0](https://github.com/ophi-dev/mehen/commit/a504bb0a412e2f69be838aaa1cda6e2c7bf0883e))
+* bump ra_ap_syntax from 0.0.343 to 0.0.344 ([#215](https://github.com/ophi-dev/mehen/issues/215)) ([ebb0399](https://github.com/ophi-dev/mehen/commit/ebb03993729eba4f39f32381e57bb33f929c6428))
+* bump the mago group with 3 updates ([#203](https://github.com/ophi-dev/mehen/issues/203)) ([d132408](https://github.com/ophi-dev/mehen/commit/d1324084f75413c088c0efe063026aaa8030e9f2))
+* bump the oxc group with 6 updates ([#202](https://github.com/ophi-dev/mehen/issues/202)) ([fe0bff8](https://github.com/ophi-dev/mehen/commit/fe0bff8e1b610705e3db80fc0eb4c5a2daf5df6c))
+* bump the oxc group with 6 updates ([#214](https://github.com/ophi-dev/mehen/issues/214)) ([f77b1c3](https://github.com/ophi-dev/mehen/commit/f77b1c3d43e24ebb6c777251f42c417111e26f84))
+
 ## [1.7.0](https://github.com/ophi-dev/mehen/compare/v1.6.0...v1.7.0) (2026-07-24)
 
 
