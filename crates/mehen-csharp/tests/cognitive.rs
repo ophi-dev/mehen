@@ -479,3 +479,43 @@ fn each_initializer_element_is_its_own_boolean_context() {
     let one = analyze_clean("class C { static bool[] F(bool a, bool b) => new[] { a && b }; }");
     assert_eq!(sum(&one), 1.0);
 }
+
+#[test]
+fn each_linq_clause_is_its_own_boolean_context() {
+    // REGRESSION, and the fifth instance of this shape (argument, interpolation hole,
+    // initializer element, anonymous-object member, now LINQ clause). A query's clauses are
+    // independent expressions, so `from x in xs where a && b select c && d` has two runs —
+    // the predicate and the projection are no more one boolean context than two statements
+    // are. The predicate left `&&` in `last_op` and the projection collapsed into it.
+    let query = analyze_clean(
+        "using System.Linq;
+         class C {
+             static object F(bool[] xs, bool a, bool b, bool c, bool d)
+                 => from x in xs where a && b select c && d;
+         }",
+    );
+    let locals = analyze_clean(
+        "using System.Linq;
+         class C {
+             static object F(bool[] xs, bool a, bool b, bool c, bool d)
+             {
+                 var p = a && b;
+                 var q = c && d;
+                 return from x in xs where p select q;
+             }
+         }",
+    );
+    assert_eq!(sum(&query), sum(&locals));
+    assert_eq!(sum(&query), 2.0, "two independent runs");
+
+    // The guard: one clause with a run is still one run.
+    assert_eq!(
+        sum(&analyze_clean(
+            "using System.Linq;
+             class C {
+                 static object F(bool[] xs, bool a, bool b) => from x in xs where a && b select x;
+             }"
+        )),
+        1.0
+    );
+}

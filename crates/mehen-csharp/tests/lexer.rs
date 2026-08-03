@@ -571,3 +571,107 @@ fn every_legal_escape_sequence_still_lexes() {
         );
     }
 }
+
+#[test]
+fn an_interpolated_string_validates_its_escapes_too() {
+    // REGRESSION beyond the ordinary-literal escape fix: the interpolation mode had its own
+    // `'\\' .` rule, so `$"\q"` still lexed clean while `"\q"` was rejected — the two
+    // spellings of the same invalid source disagreed. It now reuses the enumerated `Escape`
+    // fragment.
+    for source in [
+        "class C { static string F() => $\"\\q\"; }",
+        "class C { static string F() => $\"a\\eb\"; }",
+    ] {
+        assert!(
+            !common::analyze(source).diagnostics.is_empty(),
+            "an unknown escape in an interpolated string must be reported: {source}"
+        );
+    }
+    // And a legal one still lexes, in the interpolated spelling as well.
+    assert_eq!(lloc("class C { static string F() => $\"a\\nb\"; }"), 2.0);
+}
+
+#[test]
+fn a_hex_escape_takes_at_most_four_digits() {
+    // REGRESSION. `'x' [0-9a-fA-F]+` consumed an unbounded run, so `'\x12345'` — five
+    // digits, not valid C# — lexed as one clean character literal. ECMA-334 allows one to
+    // four.
+    assert!(
+        !common::analyze("class C { static char F() => '\\x12345'; }")
+            .diagnostics
+            .is_empty(),
+        "five hex digits must be reported"
+    );
+    // All four legal widths still lex.
+    for escape in ["\\x1", "\\x12", "\\x123", "\\x1234"] {
+        assert_eq!(
+            lloc(&format!("class C {{ static char F() => '{escape}'; }}")),
+            2.0,
+            "`{escape}` must lex"
+        );
+    }
+}
+
+#[test]
+fn an_integer_suffix_takes_at_most_one_marker_of_each_kind() {
+    // REGRESSION. Two independent `[uUlL]?` slots accepted combinations C# rejects — `1uu`,
+    // `1LL`, `1uU` all lexed as ordinary integer literals, so invalid source reported a
+    // clean parse. `IntSuffix` now enumerates the legal pairs: at most one unsigned marker
+    // and one long marker, in either order.
+    for bad in ["1uu", "1UU", "1ll", "1LL", "1uU", "1Ll"] {
+        assert!(
+            !common::analyze(&format!("class C {{ static object F() => {bad}; }}"))
+                .diagnostics
+                .is_empty(),
+            "`{bad}` is not a legal suffix combination"
+        );
+    }
+    // Every legal combination, across all three integer bases.
+    for good in [
+        "1u", "1U", "1l", "1L", "1ul", "1uL", "1Ul", "1UL", "1lu", "1lU", "1Lu", "1LU", "0x1u",
+        "0x1UL", "0b1ul",
+    ] {
+        assert_eq!(
+            lloc(&format!("class C {{ static object F() => {good}; }}")),
+            2.0,
+            "`{good}` must lex"
+        );
+    }
+}
+
+#[test]
+fn a_width_two_hole_close_consumes_both_braces() {
+    // REGRESSION. The hole close lives in the *default* mode, shared by every interpolation
+    // flavour, and matched one `}`. A hole opened with `{{` therefore left its second brace
+    // to be re-lexed in the width-two mode, which called it literal text — one phantom
+    // Halstead operand that the equivalent one-dollar spelling does not have.
+    //
+    // A `wideStack` parallel to `holeStack` records each open hole's brace width, so the
+    // doubled close is gated on it. That gate is load-bearing: a first attempt matched `}}`
+    // whenever a hole was open, which broke `$"{v}}}"` — a width-one close followed by an
+    // escaped brace — by taking both braces as the close.
+    let vocab = |source: &str| {
+        let a = analyze_clean(source);
+        let h = mehen_report::metrics_json::halstead(&a.root.metrics);
+        h.n1 + h.n2
+    };
+    assert_eq!(
+        vocab("class C { static string F(int v) => $$\"\"\"{{v}}\"\"\"; }"),
+        vocab("class C { static string F(int v) => $\"\"\"{v}\"\"\"; }"),
+        "the two hole widths must cost the same"
+    );
+
+    // The cases the gate protects, all of which must stay clean:
+    for source in [
+        // width-one close plus an escaped brace
+        "class C { static string F(int v) => $\"{v}}}\"; }",
+        // a genuinely literal brace at width two
+        "class C { static string F() => $$\"\"\"a}b\"\"\"; }",
+        // nesting: the inner hole's width must not clobber the outer one's
+        "class C { static string F(int v) => $$\"\"\"{{ $\"{v}\" }}\"\"\"; }",
+        // and a format clause, whose close pops the same stacks
+        "class C { static string F(int v) => $$\"\"\"{{v:D4}}\"\"\"; }",
+    ] {
+        assert_eq!(lloc(source), 2.0, "{source}");
+    }
+}

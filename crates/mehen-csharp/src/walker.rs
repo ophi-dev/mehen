@@ -661,6 +661,22 @@ impl Walker<'_> {
                 | cp::RULE_INITIALIZER_EXPRESSION
                 | cp::RULE_COLLECTION_EXPRESSION
                 | cp::RULE_ANONYMOUS_OBJECT_MEMBER_DECLARATOR
+                // Every LINQ clause is an independent expression, so
+                // `from x in xs where a && b select c && d` has two runs — the `where`
+                // predicate and the `select` projection are no more one boolean context
+                // than two statements are. Without this the predicate left `&&` in
+                // `last_op` and the projection collapsed into it for 1, where the same
+                // query with each expression hoisted into a local scores 2.
+                //
+                // All six clause rules, not just `where`/`select`: a `let` binding, an
+                // `ordering` key, a `group … by` key, and a `join … on … equals` operand
+                // are each their own expression too.
+                | cp::RULE_WHERE_CLAUSE
+                | cp::RULE_SELECT_CLAUSE
+                | cp::RULE_GROUP_CLAUSE
+                | cp::RULE_LET_CLAUSE
+                | cp::RULE_ORDERING
+                | cp::RULE_JOIN_CLAUSE
         ) {
             Some(self.current().cognitive.boolean_seq.last_op.take())
         } else {
@@ -1477,15 +1493,22 @@ impl Walker<'_> {
             // The body is the return whenever it is not a block: a lambda's expression body
             // is its result by construction, and an `Action`-typed lambda whose body is a
             // *statement* expression (`() => Console.WriteLine(x)`) still completes the
-            // delegate the same way. That is why this needs no `returns_value` test, unlike
-            // the member case — `returns_value` is set unconditionally for the two lambda
-            // rules already, and there is no void-lambda spelling to distinguish.
+            // delegate the same way.
+            //
+            // The one exception is an *explicitly* `void` lambda, C# 10's
+            // `void () => Console.WriteLine()`. That does declare a return type, and it
+            // declares no value — so it must not record an exit, or it disagrees with its own
+            // block-bodied twin. Only `parenthesized_lambda_expression` can carry a `type?`;
+            // `x => …` has no slot for one, which is why the check is on the child rather
+            // than on the rule index.
             //
             // A block body is excluded because its own `return` statements record the exits,
             // and a `throw` body is excluded for the same reason as above:
             // `RULE_THROW_EXPRESSION` records that exit itself.
             cp::RULE_SIMPLE_LAMBDA_EXPRESSION | cp::RULE_PARENTHESIZED_LAMBDA_EXPRESSION
-                if ctx.child_rule(cp::RULE_BLOCK).is_none() && !arrow_body_is_throw(ctx) =>
+                if ctx.child_rule(cp::RULE_BLOCK).is_none()
+                    && !arrow_body_is_throw(ctx)
+                    && !lambda_returns_void(ctx) =>
             {
                 self.current().nexit.record_exit();
                 self.current().cognitive.boolean_seq.reset();
@@ -1833,6 +1856,19 @@ impl Walker<'_> {
     }
 
     fn classify_loc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) {
+        // A **primary constructor** opens its space at the `parameter_list`, which is not a
+        // declaration rule, so the space had no logical line of its own — `class C(int x)`
+        // reported 0 where `class C { C(int x) { } }` reports 1. Its declaration IS the
+        // parameter list (Roslyn synthesizes no `constructor_declaration`), so the line is
+        // recorded here.
+        //
+        // Exactly the precedent the lambda arm just below sets, which is what settles a
+        // worry that this double-counts the `class C(int x)` row: the row belongs to the
+        // *class* space, recorded by `class_declaration`, and this is the *constructor*
+        // space's own line. Two spaces, one row each, as with a lambda inside a method.
+        if ri == cp::RULE_PARAMETER_LIST && hint.primary_ctor_name.is_some() {
+            self.current().loc.observe_lloc();
+        }
         // An *expression-bodied* lambda (`x => x + 1`) opens a closure space
         // but its body contains no statement/declaration, so the closure would
         // report `lloc = 0`. Count the lambda itself as one logical line to
@@ -2431,6 +2467,20 @@ fn container_kind(parent_kind: SpaceKind) -> ContainerKind {
         SpaceKind::Interface | SpaceKind::Trait => ContainerKind::Interface,
         _ => ContainerKind::Other,
     }
+}
+
+/// Does this lambda declare an explicit `void` return type?
+///
+/// C# 10 allows one — `Action a = void () => Console.WriteLine();` — and it returns no
+/// value, so its expression body is not an exit. Without this it recorded one while the
+/// block-bodied `void () => { Console.WriteLine(); }` recorded none.
+///
+/// Only `parenthesized_lambda_expression` has the `type?` slot (`attribute_list* modifier*
+/// type? parameter_list ARROW …`); `x => …` cannot carry one, so a missing child is the
+/// common case rather than an error.
+fn lambda_returns_void(ctx: RuleNodeView<'_>) -> bool {
+    ctx.child_rule(cp::RULE_TYPE)
+        .is_some_and(|ty| ty.text().trim() == "void")
 }
 
 /// Does this expression body consist of a `throw` expression?

@@ -34,17 +34,29 @@ fragment UnicodeEscape
     : '\\' ( 'u' HexQuad | 'U' HexQuad HexQuad )
     ;
 
-// §6.4.5.3 Integer literals. Two suffix slots cover `ul` / `lu`.
+// §6.4.5.3 Integer literals. `IntSuffix` below covers the legal suffix combinations.
 DEC_INT_LIT
-    : [0-9] [0-9_]* [uUlL]? [uUlL]?
+    : [0-9] [0-9_]* IntSuffix?
     ;
 
 HEX_INT_LIT
-    : '0' [xX] [0-9a-fA-F_]+ [uUlL]? [uUlL]?
+    : '0' [xX] [0-9a-fA-F_]+ IntSuffix?
     ;
 
 BIN_INT_LIT
-    : '0' [bB] [01_]+ [uUlL]? [uUlL]?
+    : '0' [bB] [01_]+ IntSuffix?
+    ;
+
+// §6.4.5.3 integer type suffixes. At most ONE unsigned marker and at most ONE long
+// marker, in either order — `1u`, `1L`, `1ul`, `1LU`, `1Lu`, `1uL`.
+//
+// Two independent `[uUlL]?` slots was the earlier spelling and accepted combinations C#
+// rejects: `1uu`, `1LL`, `1uU` all lexed as ordinary integer literals, so the analyzer
+// reported a clean parse of invalid source. Enumerating the pairs is exact and needs no
+// state.
+fragment IntSuffix
+    : [uU] [lL]?
+    | [lL] [uU]?
     ;
 
 // §6.4.5.5 Real literals — embedded dot, leading dot, exponent-only, and
@@ -78,8 +90,15 @@ CHAR_LIT
 // means something.
 //
 // The set is exactly ECMA-334's: `\'` `\"` `\\` `\0` `\a` `\b` `\f` `\n` `\r` `\t` `\v`.
+//
+// The hex form takes ONE to FOUR digits, spelled out rather than `+`. An unbounded run
+// swallowed `'\x12345'` — five digits, not valid C# — as one clean character literal.
+// The bound also makes the token end where the language says it does, so a fifth hex
+// character after a full escape is content rather than part of it.
 fragment Escape
-    : '\\' ( 'u' HexQuad | 'U' HexQuad HexQuad | 'x' [0-9a-fA-F]+ | ['"\\0abfnrtv] )
+    : '\\' ( 'u' HexQuad | 'U' HexQuad HexQuad
+            | 'x' [0-9a-fA-F] [0-9a-fA-F]? [0-9a-fA-F]? [0-9a-fA-F]?
+            | ['"\\0abfnrtv] )
     ;
 
 fragment HexQuad
@@ -375,8 +394,31 @@ INTERP_NESTED_RBRACKET
 // `nestDepth` is 0 here, so a hole is open and this `}` closes it. Popping
 // `holeStack` restores the *enclosing* hole's depth, which matters for
 // `$"{ $"{x}" }"`: the inner hole's count must not clobber the outer one's.
+//
+// TWO braces close a hole opened with two (`$$"""{{v}}"""`), so the doubled form comes
+// first — a hole's delimiter width matches its opening `$` count. Both alternatives emit a
+// single `RBRACE`, which is what the parser wants either way
+// (`interpolation : LBRACE expression … RBRACE`).
+//
+// This close lives in the *default* mode, shared by every interpolation flavour, so it
+// cannot consult the width — but it does not need to: the doubled alternative is only
+// reachable when a `}}` is actually present, and in a width-one hole a `}}` is a close
+// followed by a literal brace, where taking both would be wrong…
+//
+// …which is why the doubled form is gated on `nestDepth`-free hole state *and* ordered
+// first: ANTLR takes the longest match, so `}}` wins wherever it appears directly at a
+// hole's end. Measured on both widths afterwards: `$$"""{{v}}"""` now reports the same
+// Halstead vocabulary as `$"{v}"` (it was one higher, a phantom `}` operand emitted as
+// INTERPOLATED_TEXT by the width-two mode), and `$"{v}}}"` — close plus an escaped brace
+// — is unchanged.
+INTERP_HOLE_CLOSE_2
+    : {wideStack.Peek() > 0}? '}}'
+      { nestDepth = holeStack.Pop(); wideStack.Pop(); } -> type(RBRACE), popMode
+    ;
+
 INTERP_HOLE_CLOSE
-    : {holeStack.Count > 0}? '}' { nestDepth = holeStack.Pop(); } -> type(RBRACE), popMode
+    : {holeStack.Count > 0}? '}'
+      { nestDepth = holeStack.Pop(); wideStack.Pop(); } -> type(RBRACE), popMode
     ;
 
 // An opening brace inside a hole deepens the count.
@@ -416,12 +458,17 @@ INTERP_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
 
 // Text between holes. A backslash starts an escape sequence, so `\"` does not
 // end the string and must be consumed as a unit.
-INTERP_ESCAPE     : '\\' . -> type(INTERPOLATED_TEXT) ;
+//
+// The forms are the SAME enumerated set as an ordinary string literal's, reusing the
+// `Escape` fragment: a regular interpolated string is a string, so `$"\q"` is no more
+// valid than `"\q"`. This was `'\\' .` — any character — so the two spellings disagreed
+// about the same invalid source once the ordinary literal was tightened.
+INTERP_ESCAPE     : Escape -> type(INTERPOLATED_TEXT) ;
 INTERPOLATED_TEXT : ~[{}"\\]+ ;
 
 // A hole opens: its expression is ordinary C#, so switch to the default mode and
 // start counting braces for this hole.
-INTERP_HOLE_OPEN : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+INTERP_HOLE_OPEN : '{' { holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
 
 // The string ends: drop this string's entry and leave the text mode.
 INTERP_END : '"' -> type(DQUOTE), popMode ;
@@ -441,7 +488,7 @@ INTERP_V_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
 INTERP_V_ESCAPED_QUOTE : '""' -> type(INTERPOLATED_TEXT) ;
 INTERP_V_TEXT          : ~[{}"]+ -> type(INTERPOLATED_TEXT) ;
 
-INTERP_V_HOLE_OPEN : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+INTERP_V_HOLE_OPEN : '{' { holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
 INTERP_V_END       : '"' -> type(DQUOTE), popMode ;
 
 // An interpolated *raw* string (`$"""…"""`) is a third flavour: a lone `"` is
@@ -464,7 +511,7 @@ INTERP_R_END : '"""' '"'* -> type(TRIPLE_DQUOTE), popMode ;
 INTERP_R_QUOTE : '"' '"'? -> type(INTERPOLATED_TEXT) ;
 INTERP_R_TEXT  : ~[{}"]+  -> type(INTERPOLATED_TEXT) ;
 
-INTERP_R_HOLE_OPEN : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+INTERP_R_HOLE_OPEN : '{' { holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
 
 // The `$$"""…"""` flavour: two dollars means a hole opens on `{{` and a *single* brace is
 // literal text. Everything else — the fence, quote, and text handling — is identical to
@@ -482,7 +529,7 @@ mode INTERPOLATION_RAW_2;
 
 // A hole opens on the doubled brace. First, so `{{` is never split by the text rule.
 INTERP_R2_HOLE_OPEN
-    : '{{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
+    : '{{' { holeStack.Push(nestDepth); wideStack.Push(1); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
     ;
 
 // The fence, before the quote rule, so a `"""` run is never split into text quotes.
@@ -553,7 +600,7 @@ INTERP_FORMAT_TEXT
 // (a ternary, a label, a base-type list) matched INTERP_FORMAT_COLON and pushed
 // INTERPOLATION_FORMAT again, swallowing the rest of the line as format text.
 INTERP_FORMAT_END
-    : '}' { nestDepth = holeStack.Pop(); } -> type(RBRACE), popMode, popMode
+    : '}' { nestDepth = holeStack.Pop(); wideStack.Pop(); } -> type(RBRACE), popMode, popMode
     ;
 
 // ---- four-quote interpolated raw strings --------------------------------
@@ -579,7 +626,7 @@ INTERP_R4_QUOTE : '"' '"'? '"'? -> type(INTERPOLATED_TEXT) ;
 INTERP_R4_TEXT  : ~[{}"]+       -> type(INTERPOLATED_TEXT) ;
 
 INTERP_R4_HOLE_OPEN
-    : '{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
+    : '{' { holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
     ;
 
 // `$$""""…""""`: a four-quote fence AND the doubled-brace hole width. Braces are split
@@ -587,7 +634,7 @@ INTERP_R4_HOLE_OPEN
 mode INTERPOLATION_RAW_2_4;
 
 INTERP_R24_HOLE_OPEN
-    : '{{' { holeStack.Push(nestDepth); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
+    : '{{' { holeStack.Push(nestDepth); wideStack.Push(1); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
     ;
 
 INTERP_R24_END : '""""' '"'* -> type(TRIPLE_DQUOTE), popMode ;

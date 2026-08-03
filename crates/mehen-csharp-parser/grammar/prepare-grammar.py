@@ -821,6 +821,14 @@ name = "holeStack"
 kind = "stack"
 scope = "lexer"
 
+# `wideStack` is parallel to `holeStack`: one entry per open hole, nonzero when that
+# hole was opened with a DOUBLED brace. A hole's close must consume as many braces as
+# its open did, and `holeStack.Count > 0` cannot tell the widths apart.
+[[member]]
+name = "wideStack"
+kind = "stack"
+scope = "lexer"
+
 # Truthiness only: nonzero means "deeper than the hole's own level".
 [[pattern]]
 match = "nestDepth > 0"
@@ -831,6 +839,12 @@ lower = "not(not(member(nestDepth)))"
 match = "holeStack.Count > 0"
 lower = "not(not(member_len(holeStack)))"
 
+# The innermost hole's brace width: nonzero means it was opened with `{{`, so its close
+# consumes `}}`. Reads the top without popping — the close's own action pops.
+[[pattern]]
+match = "wideStack.Peek() > 0"
+lower = "not(not(member_top(wideStack)))"
+
 [[pattern]]
 match = "nestDepth++"
 lower = "add_member(nestDepth, int(1))"
@@ -839,16 +853,22 @@ lower = "add_member(nestDepth, int(1))"
 match = "nestDepth--"
 lower = "add_member(nestDepth, int(-1))"
 
-# A hole opens: save the enclosing hole's depth, then start this one at 0.
+# A hole opens: save the enclosing hole's depth, record this hole's brace width, then
+# start its own depth at 0. One pattern per width, since the literal `0`/`1` is part of
+# the matched body.
 [[pattern]]
-match = "holeStack.Push(nestDepth); nestDepth = 0;"
-lower = "seq(push_member(holeStack, member(nestDepth)), set_member(nestDepth, int(0)))"
+match = "holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0;"
+lower = "seq(push_member(holeStack, member(nestDepth)), push_member(wideStack, int(0)), set_member(nestDepth, int(0)))"
 
-# A hole closes: restore the enclosing depth. `member_top` reads before the pop,
-# which is how an assignment-from-pop decomposes in this DSL.
 [[pattern]]
-match = "nestDepth = holeStack.Pop();"
-lower = "seq(set_member(nestDepth, member_top(holeStack)), pop_member(holeStack))"
+match = "holeStack.Push(nestDepth); wideStack.Push(1); nestDepth = 0;"
+lower = "seq(push_member(holeStack, member(nestDepth)), push_member(wideStack, int(1)), set_member(nestDepth, int(0)))"
+
+# A hole closes: restore the enclosing depth and drop this hole's width. `member_top`
+# reads before the pop, which is how an assignment-from-pop decomposes in this DSL.
+[[pattern]]
+match = "nestDepth = holeStack.Pop(); wideStack.Pop();"
+lower = "seq(set_member(nestDepth, member_top(holeStack)), pop_member(holeStack), pop_member(wideStack))"
 """
 
 CONTEXTUAL_KEYWORD_NOTE = """

@@ -613,3 +613,95 @@ fn each_anonymous_object_member_is_its_own_boolean_context() {
         1.0
     );
 }
+
+#[test]
+fn a_primary_constructor_records_its_logical_line() {
+    // REGRESSION, and a correction to my own earlier reasoning: opening the synthetic space
+    // at the `parameter_list` gave it tokens but no logical line, because a parameter list
+    // is not a declaration rule. `class C(int x) { }` reported LLOC 0 for its constructor
+    // where `class C { C(int x) { } }` reports 1.
+    //
+    // This does NOT double-count the `class C(int x)` row: that row belongs to the *class*
+    // space, recorded by `class_declaration`. This is the *constructor* space's own line —
+    // exactly the precedent an expression-bodied lambda sets, which records one so it
+    // matches its block-bodied twin.
+    fn first_function(a: &mehen_core::LanguageAnalysis) -> mehen_core::MetricSpace {
+        fn walk(s: &mehen_core::MetricSpace, out: &mut Vec<mehen_core::MetricSpace>) {
+            if s.kind == mehen_core::SpaceKind::Function {
+                out.push(s.clone());
+            }
+            for c in &s.spaces {
+                walk(c, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&a.root, &mut out);
+        out.remove(0)
+    }
+
+    let primary = first_function(&analyze_clean("class C(int x) { }"));
+    let explicit = first_function(&analyze_clean("class C { public C(int x) { } }"));
+    assert_eq!(
+        metrics_json::loc(&primary.metrics).lloc,
+        metrics_json::loc(&explicit.metrics).lloc
+    );
+    assert_eq!(metrics_json::loc(&primary.metrics).lloc, 1.0);
+
+    for source in ["struct S(int x) { }", "record R(int X);"] {
+        assert_eq!(
+            metrics_json::loc(&first_function(&analyze_clean(source)).metrics).lloc,
+            1.0,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn an_explicitly_void_lambda_is_not_an_exit() {
+    // REGRESSION introduced by the lambda-exit fix: that arm recorded an exit for *every*
+    // non-block lambda body, but C# 10's `void () => Console.WriteLine()` declares a return
+    // type and declares no value — so it disagreed with its own block-bodied twin.
+    let closure_nexits = |source: &str| {
+        let a = analyze_clean(source);
+        fn walk(s: &mehen_core::MetricSpace, out: &mut Vec<f64>) {
+            if s.kind == mehen_core::SpaceKind::Closure {
+                out.push(metrics_json::nexits(&s.metrics).sum);
+            }
+            for c in &s.spaces {
+                walk(c, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&a.root, &mut out);
+        out
+    };
+
+    let arrow = closure_nexits(
+        "using System;
+         class C { static void F() { Action a = void () => Console.WriteLine(); a(); } }",
+    );
+    let block = closure_nexits(
+        "using System;
+         class C { static void F() { Action a = void () => { Console.WriteLine(); }; a(); } }",
+    );
+    assert_eq!(arrow, block, "the two void-lambda spellings must agree");
+    assert_eq!(arrow, vec![0.0]);
+
+    // The guard: an explicitly-typed *value*-returning lambda keeps its exit, so the check
+    // reads the declared type rather than muting every typed lambda.
+    assert_eq!(
+        closure_nexits(
+            "using System;
+             class C { static void F() { Func<int,int> f = int (int x) => x + 1; f(1); } }"
+        ),
+        vec![1.0]
+    );
+    // And an untyped one, which has no `type?` slot at all.
+    assert_eq!(
+        closure_nexits(
+            "using System;
+             class C { static void F() { Func<int,int> f = x => x + 1; f(1); } }"
+        ),
+        vec![1.0]
+    );
+}
