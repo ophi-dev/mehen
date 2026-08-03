@@ -1,0 +1,16 @@
+version = 1
+
+# `record` is a contextual keyword. Roslyn declares
+# `<ContextualKind Name="RecordKeyword"/>` on
+# RecordDeclarationSyntax.Keyword, but its grammar generator reads only
+# `<Kind>`, so the published grammar spells the keyword as the catch-all
+# `syntax_token` — which makes `class` viable as a record declaration and
+# costs ~quadratic prediction time per type member. `prepare-roslyn-grammar.py`
+# restores the restriction as a text comparison on the lookahead token; it
+# lowers to a pure SemIR expression, so no typed hook is needed.
+
+[[helper]]
+kind = "parser-predicate"
+name = "IsRecordKeyword"
+returns = "bool"
+lower = "cmp(eq, token_text(1), str(\"record\"))"

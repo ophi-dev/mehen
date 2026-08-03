@@ -1,0 +1,685 @@
+// Lexer rules supplied for Roslyn's parser-only C# grammar, spliced verbatim
+// into the generated `CSharpLexer.g4` by `prepare-roslyn-grammar.py`.
+//
+// Roslyn's `CSharp.Generated.g4` describes its terminals as character-level
+// *parser* rules (`identifier_token : '@'? identifier_start_character …`,
+// `decimal_digit : '0' | '1' | …`). Those cannot stay in the parser: single
+// character tokens would shadow multi-character ones, so `'C'` beats
+// `IDENTIFIER` and `'1'` beats a decimal literal. Each rule below replaces one
+// such Roslyn rule, following the C# lexical grammar (ECMA-334 §6.4).
+//
+// This file is hand-written ANTLR (not generated), kept separate from the
+// script so the ANTLR-level escaping is readable and reviewable as grammar
+// source rather than as nested Python string escapes.
+//
+// The `TOKEN <-> roslyn_rule` mapping is declared in the script's
+// LEXER_TOKEN_RULES table; adding a rule here requires adding it there too.
+
+// §6.4.3 Identifiers. `@` is the verbatim-identifier prefix; the character
+// classes follow identifier_start_character / identifier_part_character.
+IDENTIFIER
+    : '@'? ( [\p{L}\p{Nl}_] | UnicodeEscape )
+      ( [\p{L}\p{Nl}\p{Nd}\p{Mn}\p{Mc}\p{Pc}\p{Cf}] | UnicodeEscape )*
+    ;
+
+// A Unicode escape is a legal identifier character in C#: `int \u0061 = 1;` declares
+// `a`. Roslyn lists `unicode_escape_sequence` in both `identifier_start_character` and
+// `identifier_part_character`, so tokenizing those rules has to carry it over — without
+// it the backslash could not be consumed and the declaration reported two lexer
+// diagnostics.
+//
+// Shared with the `Escape` fragment's `\u`/`\U` forms below, but kept separate: an
+// identifier admits only the Unicode forms, not `\n` or `\x41`.
+//
+// KNOWN over-permissiveness, deliberately left: the DECODED codepoint is not validated
+// against the identifier categories, so `int \u002B = 1;` — an escape decoding to `+`,
+// which does not compile — lexes as an ordinary IDENTIFIER with no diagnostic.
+//
+// Not fixable here. A lexer rule matches *characters*, and `\u002B` is six of them; asking
+// what they decode to needs arithmetic over the hex digits plus a Unicode category lookup.
+// The lowering DSL has neither, the legal codepoints span hundreds of blocks so no
+// character class enumerates them, and the alternative — dropping the escape from
+// `IDENTIFIER` — would reject `int \u0061 = 1;`, which IS valid C#. Trading a false accept
+// for a false reject is the worse deal, since mehen measures code a compiler already
+// accepted (see PROVENANCE.md on rules made stricter than the language).
+//
+// A typed hook could do it, at the cost of this crate's zero-hook property and a Unicode
+// table at lex time. Worth revisiting only if a real file ever depends on it.
+fragment UnicodeEscape
+    : '\\' ( 'u' HexQuad | 'U' HexQuad HexQuad )
+    ;
+
+// §6.4.5.3 Integer literals. `IntSuffix` below covers the legal suffix combinations.
+//
+// A digit separator may appear only BETWEEN digits (C# 7.0, §6.4.5.3), which is why the
+// tail is `( '_'* [0-9] )*` rather than `[0-9_]*`: the character-class form let a literal
+// end in one, so `1_` and `1__0` — neither valid C# — lexed as ordinary integer literals
+// and the analyzer reported a clean parse of invalid source. Runs of separators between
+// digits ARE legal (`1__0` is not, but `1_0` and `0x1_F` are, and C# permits `1___0`
+// too), hence `'_'*` rather than `'_'?`.
+//
+// A LEADING separator is not a literal at all: `_1` is a legal *identifier*, and it still
+// lexes as one — verified, since narrowing here must not steal it.
+DEC_INT_LIT
+    : [0-9] ( '_'* [0-9] )* IntSuffix?
+    ;
+
+HEX_INT_LIT
+    : '0' [xX] [0-9a-fA-F] ( '_'* [0-9a-fA-F] )* IntSuffix?
+    ;
+
+BIN_INT_LIT
+    : '0' [bB] [01] ( '_'* [01] )* IntSuffix?
+    ;
+
+// §6.4.5.3 integer type suffixes. At most ONE unsigned marker and at most ONE long
+// marker, in either order — `1u`, `1L`, `1ul`, `1LU`, `1Lu`, `1uL`.
+//
+// Two independent `[uUlL]?` slots was the earlier spelling and accepted combinations C#
+// rejects: `1uu`, `1LL`, `1uU` all lexed as ordinary integer literals, so the analyzer
+// reported a clean parse of invalid source. Enumerating the pairs is exact and needs no
+// state.
+fragment IntSuffix
+    : [uU] [lL]?
+    | [lL] [uU]?
+    ;
+
+// §6.4.5.5 Real literals — embedded dot, leading dot, exponent-only, and
+// suffix-only forms.
+REAL_LIT
+    : [0-9] [0-9_]* '.' [0-9] [0-9_]* ExponentPart? [fFdDmM]?
+    | '.' [0-9] [0-9_]* ExponentPart? [fFdDmM]?
+    | [0-9] [0-9_]* ExponentPart [fFdDmM]?
+    | [0-9] [0-9_]* [fFdDmM]
+    ;
+
+fragment ExponentPart
+    : [eE] [+-]? [0-9] [0-9_]*
+    ;
+
+// §6.4.5.6 Character literals. A char literal holds exactly one character, so
+// unlike STRING_LIT below it has no closure to absorb a mis-sized escape: the
+// escape forms have to be spelled out, or `'\ud800'` matches `\u` and then looks
+// for the closing quote at `d`.
+CHAR_LIT
+    : '\'' ( Escape | ~['\\\r\n] ) '\''
+    ;
+
+// §6.4.5.6 escape sequences: simple, hex (`\xA` .. `\xABCD`), and unicode — four hex
+// digits after `u`, eight after `U`.
+//
+// The simple set is ENUMERATED rather than written `| .`. The wildcard accepted any
+// character after a backslash, so `'\q'` — which is not valid C# — lexed as an ordinary
+// character literal and the analyzer reported a clean, complete analysis of invalid
+// source. That is the wrong direction for a tool whose contract is that a clean parse
+// means something.
+//
+// The set is exactly ECMA-334's: `\'` `\"` `\\` `\0` `\a` `\b` `\f` `\n` `\r` `\t` `\v`.
+//
+// The hex form takes ONE to FOUR digits, spelled out rather than `+`. An unbounded run
+// swallowed `'\x12345'` — five digits, not valid C# — as one clean character literal.
+// The bound also makes the token end where the language says it does, so a fifth hex
+// character after a full escape is content rather than part of it.
+fragment Escape
+    : '\\' ( 'u' HexQuad | 'U' HexQuad HexQuad
+            | 'x' [0-9a-fA-F] [0-9a-fA-F]? [0-9a-fA-F]? [0-9a-fA-F]?
+            | ['"\\0abfnrtv] )
+    ;
+
+fragment HexQuad
+    : [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]
+    ;
+
+// §6.4.5.7 String literals. The `*` closure means a mis-sized escape still lexes
+// (the remaining characters match the negated set), but spell the escapes anyway
+// so the token boundary is right for `"\\"` and friends.
+STRING_LIT
+    : '"' ( Escape | ~["\\\r\n] )* '"'
+    ;
+
+VERBATIM_STRING_LIT
+    : '@"' ( '""' | ~'"' )* '"'
+    ;
+
+// C# 11 raw string literals (§6.4.5.7). BOTH forms are fenced by *at least*
+// three quotes — the single-/multi-line distinction is whether the content
+// contains a newline, not a shorter fence. The real rule also requires the
+// closing fence to be at least as long as the opening one — see the note on the
+// rules below for how that is approximated.
+// The fence-length rule needs one alternative per length, longest first. A single
+// `'"""' '"'*  …  '"""' '"'*` rule cannot express "close on a run at least as long as
+// the opening one": the non-greedy body stops at the *first* three-quote run, so
+// `""""a"""b""""` — valid C#, and the reason longer fences exist — terminated early and
+// left `b""""` as stray tokens.
+//
+// Enumerated three through eight. The real rule is unbounded — C# allows any fence
+// length — and expressing that needs *state*: a member holding the opening run's width
+// and a predicate comparing each candidate closer against it. Every alternative here is
+// stateless, so the set has to be finite.
+//
+// Eight is the ceiling because each width covers embedding one fewer quote (a six-quote
+// fence exists to embed `"""""`), and content with five consecutive quotes is already
+// vanishingly rare — zero occurrences in the 322-file corpus, where the *deepest* fence
+// used is three. Past eight the three-quote arm still matches and terminates early,
+// which costs the literal's tail rather than the file: every metric touching a string
+// literal reads only its extent.
+//
+// If a real file ever needs a ninth quote, add an arm rather than reaching for state —
+// or file it, since at that point the state is probably worth it.
+//
+// Order is load-bearing twice over. Longest fence first, so a four-quote literal is not
+// claimed by the three-quote rule. And within each length, the single-line form precedes
+// the multi-line one — both match a one-liner over the same extent, and ANTLR breaks the
+// tie by rule order, so SL must come first to reach
+// `single_line_raw_string_literal_token`. A multi-line literal cannot match SL at all
+// (`~[\r\n]` blocks the break) and falls through to ML.
+//
+// Do NOT relax any opening fence to `'""'`. An empty string is `""`, so a two-quote
+// fence makes `var a = ""; f(); var b = "";` lex as ONE token spanning both empty
+// strings: the intervening statements vanish from every metric with no diagnostic to
+// show for it (a silently wrong tree, the failure mode PROVENANCE.md warns about).
+SL_RAW_STRING_LIT
+    : '""""""""' ~[\r\n]*? '""""""""' '"'*
+    | '"""""""' ~[\r\n]*? '"""""""' '"'*
+    | '""""""' ~[\r\n]*? '""""""' '"'*
+    | '"""""' ~[\r\n]*? '"""""' '"'*
+    | '""""' ~[\r\n]*? '""""' '"'*
+    | '"""' ~[\r\n]*? '"""' '"'*
+    ;
+
+ML_RAW_STRING_LIT
+    : '""""""""' .*? '""""""""' '"'*
+    | '"""""""' .*? '"""""""' '"'*
+    | '""""""' .*? '""""""' '"'*
+    | '"""""' .*? '"""""' '"'*
+    | '""""' .*? '""""' '"'*
+    | '"""' .*? '"""' '"'*
+    ;
+
+// ---- trivia -------------------------------------------------------------
+// Comments go to a dedicated channel so the CLOC sweep can read them while the
+// parser never sees them. Roslyn models trivia as syntax, so its grammar has no
+// rules for these at all.
+// A line comment ends at any C# *line terminator*, not just CR/LF. ECMA-334 §6.3.1
+// lists five: CR, LF, NEL (U+0085), LS (U+2028), PS (U+2029). Excluding only CR and LF
+// let a comment swallow the rest of the file across one of the other three — a real
+// loss, because the type grammar's optional braces then allow recovery, so the
+// analysis completes with the swallowed members silently missing.
+//
+// `NewLine` is a fragment so the comment rules and WHITESPACES cannot drift apart.
+fragment NewLine : [\r\n\u0085\u2028\u2029] ;
+
+SINGLE_LINE_DOC_COMMENT : '///' ~[\r\n\u0085\u2028\u2029]*  -> channel(COMMENTS_CHANNEL) ;
+DELIMITED_DOC_COMMENT   : '/**' .*? '*/'                     -> channel(COMMENTS_CHANNEL) ;
+SINGLE_LINE_COMMENT     : '//'  ~[\r\n\u0085\u2028\u2029]*  -> channel(COMMENTS_CHANNEL) ;
+DELIMITED_COMMENT       : '/*'  .*? '*/'                     -> channel(COMMENTS_CHANNEL) ;
+WHITESPACES             : ( [ \t\f] | NewLine )+            -> channel(HIDDEN) ;
+BYTE_ORDER_MARK         : '﻿'        -> skip ;
+
+// A preprocessor directive line. mehen does not evaluate `#if` — directives are
+// routed to their own channel, so they are neither a comment nor a *logical* line for
+// LOC (they are still a physical code row; see `collect_loc_tokens`), and an inactive
+// region is parsed as ordinary code.
+//
+// The negated set excludes `/` so the token stops before a trailing comment:
+// `#if DEBUG // explain why` must leave the `// explain why` for
+// SINGLE_LINE_COMMENT, or the row records no CLOC at all. A `/` *within* the
+// directive text is then matched by the second alternative, which requires the next
+// character not to start a comment — so `#pragma warning disable CA1024 // note`
+// splits correctly while a path-like `#line 1 "a/b.cs"` stays whole.
+//
+// The trailing group is for a payload that *ends* with a slash — `#region generated/`
+// or `#warning path/`. Neither repetition alternative can take it (the first excludes
+// `/`, the second needs a following character), so without it the token stopped short
+// and the slash surfaced as a visible SLASH token, erroring on valid source.
+//
+// It requires a line terminator or EOF after the slash, so a bare `'/'?` will not do:
+// that matched the first `/` of a trailing `//` comment, which put the comment's second
+// slash on the directive channel and cost the row its CLOC. Lookahead by *consuming* the
+// terminator is safe here because WHITESPACES would otherwise take it as hidden trivia —
+// no token needs it.
+// Every alternative excludes the full `NewLine` set, not just CR/LF: a directive
+// ended by NEL / U+2028 / U+2029 otherwise consumed the separator *and everything
+// after it* onto the directive channel — a whole file reported as zero declarations
+// with zero diagnostics.
+//
+// The `DirectiveString` alternative makes the scan quote-aware, which the
+// comment-marker split above cannot be on its own. Roslyn's `line_directive_trivia`
+// and `load_directive_trivia` both accept a `string_literal_token`, so `//` and `/*`
+// inside those quotes are string *content*:
+//
+//     #line 1 "https://host/a.cs"
+//                    ^^ not a comment
+//
+// Without the atom the scan stopped at that `//` and SINGLE_LINE_COMMENT took the
+// rest, inflating CLOC by a phantom comment on a row that has none. `/*` was worse:
+// DELIMITED_COMMENT ran to the next `*/`, so `#line 1 "c:/a/*b*/c.cs"` left `c.cs"`
+// as visible tokens and reported two errors on valid source.
+//
+// `"` stays in the plain negated set as well as starting the atom, so the two paths
+// overlap. That is what handles an *unpaired* quote \u2014 `#error say "hi` has no closing
+// quote, so the atom cannot complete. ANTLR maximizes the match for the rule as a
+// whole rather than committing to the first viable alternative, so the paired case
+// takes the atom (a longer total match than stopping at the quote) while the unpaired
+// case falls through to the single-character path and still consumes the whole row.
+// Neither case needs a predicate.
+DIRECTIVE_LINE
+    : '#' ( DirectiveString | ~[/\r\n\u0085\u2028\u2029] | '/' ~[/*\r\n\u0085\u2028\u2029] )*
+      ( '/' ( [\r\n\u0085\u2028\u2029] | EOF ) )?
+      -> channel(DIRECTIVE)
+    ;
+
+// A quoted run inside a directive, matched as one atom by DIRECTIVE_LINE. Excludes the
+// line terminators as well as `"`: a directive cannot span rows, so an unclosed quote
+// must not let the atom swallow the following line.
+fragment DirectiveString : '"' ~["\r\n\u0085\u2028\u2029]* '"' ;
+
+// ---- interpolated strings ----------------------------------------------
+// Roslyn spells interpolated strings as
+//
+//     interpolated_string_expression
+//       : '$"'  interpolated_string_content* '"'
+//       | '$@"' interpolated_string_content* '"' ;
+//     interpolation : '{' expression … '}' ;
+//
+// The *text* between holes needs its own lexer mode: in the default mode a
+// broad negated set would swallow ordinary code (an earlier flat-lexer attempt
+// lexed `class C ` as one token that way).
+//
+// The state and every mode transition live in the grammar. The one genuinely
+// hard decision is the `}` that closes a hole, which is lexically identical to
+// the one closing a nested block:
+//
+//     $"a{ new[]{ 1, 2 }.Length }b"
+//                ^^^^^^^^^  must NOT end the hole
+//
+// SemIR has no conditional and no mode-changing *action* (its statements only
+// touch member state), so this cannot be one rule with an `if`. Instead the two
+// meanings become two rules over the same character, each gated by a predicate
+// on the brace depth and each carrying its own *unconditional* command. The
+// lexer evaluates predicates during ATN simulation, so the rule choice does the
+// work the missing conditional would:
+//
+//     INTERP_NESTED_CLOSE : {nestDepth > 0}?      '}' { nestDepth--; }
+//     INTERP_HOLE_CLOSE   : {holeStack.Count > 0}? '}' -> popMode
+//
+// Stack-valued member state is runtime 0.20.1+ (upstream #206, filed for exactly
+// this shape).
+//
+// Regular vs. verbatim needs no state: `$"` and `$@"` push *different* text
+// modes, so the mode itself records the flavour.
+//
+// `prepare-grammar.py` rewrites the harvested `'$"'` / `'$@"'` literals to the
+// named tokens below (INTERP_TOKEN_LITERALS). `LBRACE` / `RBRACE` / `DQUOTE` /
+// `COLON` are harvested literals the script pins to those names
+// (STABLE_TOKEN_NAMES) so the `type(…)` commands here stay valid — the default
+// `OP_nnn` names are index-derived and shift whenever the literal set changes.
+// The prefixes are order-insensitive in C# 11+: `$@"…"` and `@$"…"` are the same
+// string, so both spellings push the verbatim text mode. (Roslyn's grammar spells
+// only `'$@"'`, which is why the `@$` form needs an explicit alternative here.)
+INTERP_START          : '$"'  -> pushMode(INTERPOLATION) ;
+INTERP_VERBATIM_START : ( '$@"' | '@$"' ) -> pushMode(INTERPOLATION_VERBATIM) ;
+
+// C# 11 interpolated *raw* string (`$"""a{x}b"""`). Roslyn spells the opening
+// fence as three parser tokens (`DOLLAR+ TRIPLE_DQUOTE DQUOTE*`), but the text
+// between holes cannot be lexed in the default mode — `a` would come back as an
+// IDENTIFIER — so this is one token that pushes a third text mode, and
+// `prepare-grammar.py` retargets both Roslyn start-token rules at it.
+//
+// `$"""` is a longer match than `$"`, so it wins over INTERP_START regardless of
+// rule order; it is placed here for readability.
+//
+// The DOLLAR COUNT sets the brace width: with `$$"""…"""`, a hole opens on `{{` and a
+// single `{` is literal text — C# 11 chose this so JSON and other brace-heavy text needs
+// no escaping. One rule per width, longest first, each pushing its own mode, exactly as
+// the raw-string *fence* widths are enumerated in `SL_RAW_STRING_LIT` above and for the
+// same reason: the DSL has no comparisons, so a stored width could not be compared
+// against anything.
+//
+// Two widths are covered, which is what real code uses — `$$"""{"k":{{v}}}"""` is the
+// motivating shape (embedding JSON), and `dotnet/runtime` uses `$$` and nothing deeper.
+// A third width needs a third mode; that is mechanical, and the comment on
+// `SL_RAW_STRING_LIT` says the same thing about a ninth quote.
+//
+// Longest first is load-bearing: `$$"""` must not be claimed by the one-dollar rule,
+// which would leave a stray `$` and lex the hole braces as text.
+//
+// The FENCE width matters too, and independently. A four-quote opening fence exists so
+// that an embedded `"""` is content:
+//
+//     $""""a"""b""""
+//           ^^^ content, not the close
+//
+// so a mode whose close rule accepts any three-or-more run ends the string early and
+// leaves the tail as stray code. That is a hard error rather than a silent misparse (8
+// diagnostics), but the metrics around it are wrong too, so it still has to be right.
+//
+// Only the CLOSE rule is width-sensitive — text, quotes, braces, and holes are all
+// width-agnostic — so each fence width needs its own mode carrying its own close.
+// Widths 3 and 4 are covered per dollar width. Four is the documented floor here rather
+// than eight as in `SL_RAW_STRING_LIT`: a wider fence is only needed when the *content*
+// contains a run of three or more quotes, and `dotnet/runtime` has no interpolated raw
+// string with a four-quote fence at all, let alone five. A fifth width is another mode,
+// mechanically.
+//
+// Ordered longest-fence-first within each dollar width, for the same reason the dollar
+// widths are: `$""""` must not be claimed by the three-quote rule, which would leave a
+// stray quote as content and mis-detect the close.
+INTERP_RAW_START_2_4 : '$$' '""""' -> type(INTERP_RAW_START), pushMode(INTERPOLATION_RAW_2_4) ;
+INTERP_RAW_START_2   : '$$' '"""'  -> type(INTERP_RAW_START), pushMode(INTERPOLATION_RAW_2) ;
+INTERP_RAW_START_4   : '$'  '""""' -> type(INTERP_RAW_START), pushMode(INTERPOLATION_RAW_4) ;
+INTERP_RAW_START     : '$'  '"""'  -> pushMode(INTERPOLATION_RAW) ;
+
+// ---- braces and `:` inside an interpolation hole -----------------------
+// `{`, `}` and `:` mean different things inside a hole, so this file defines them
+// rather than letting the script harvest them into the literals block: ANTLR
+// breaks an equal-length match by rule order, so the gated rules have to come
+// first and the plain fallbacks last. (HOLE_SENSITIVE_LITERALS in the script
+// keeps the harvester from emitting duplicates.)
+//
+// Order is load-bearing twice over. Between the gated rules, the DSL cannot
+// express `inHole && depth == 0`, so the deeper case goes first: if `nestDepth`
+// is nonzero we are certainly inside a hole, and reaching the next rule proves
+// `nestDepth == 0`. And all of them precede the unguarded fallbacks, which are
+// what ordinary code outside any hole matches.
+
+// Nested block/initializer brace — unwind one level, stay in the hole.
+INTERP_NESTED_CLOSE
+    : {nestDepth > 0}? '}' { nestDepth--; } -> type(RBRACE)
+    ;
+
+// `(`/`[` inside a hole deepen the same counter the braces use, and their closers
+// unwind it. `nestDepth` is not "brace depth" but "depth of any bracketing construct
+// within this hole", because the only question it has to answer is whether a `:` is
+// still part of the expression.
+//
+// Without this, `$"{(flag ? 1 : 2)}"` failed to parse: the ternary's `:` sits at brace
+// depth 0, so INTERP_FORMAT_COLON claimed it as a format delimiter and `2)` became
+// interpolation text. A dictionary initializer or an indexer inside a hole has the
+// same shape.
+//
+// These are `type(…)`-mapped to the ordinary punctuation tokens, so the parser sees
+// exactly what it would outside a hole.
+INTERP_NESTED_LPAREN
+    : {holeStack.Count > 0}? '(' { nestDepth++; } -> type(LPAREN)
+    ;
+
+INTERP_NESTED_RPAREN
+    : {nestDepth > 0}? ')' { nestDepth--; } -> type(RPAREN)
+    ;
+
+INTERP_NESTED_LBRACKET
+    : {holeStack.Count > 0}? '[' { nestDepth++; } -> type(LBRACKET)
+    ;
+
+INTERP_NESTED_RBRACKET
+    : {nestDepth > 0}? ']' { nestDepth--; } -> type(RBRACKET)
+    ;
+
+// `nestDepth` is 0 here, so a hole is open and this `}` closes it. Popping
+// `holeStack` restores the *enclosing* hole's depth, which matters for
+// `$"{ $"{x}" }"`: the inner hole's count must not clobber the outer one's.
+//
+// TWO braces close a hole opened with two (`$$"""{{v}}"""`), so the doubled form comes
+// first — a hole's delimiter width matches its opening `$` count. Both alternatives emit a
+// single `RBRACE`, which is what the parser wants either way
+// (`interpolation : LBRACE expression … RBRACE`).
+//
+// This close lives in the *default* mode, shared by every interpolation flavour, so it
+// cannot consult the width — but it does not need to: the doubled alternative is only
+// reachable when a `}}` is actually present, and in a width-one hole a `}}` is a close
+// followed by a literal brace, where taking both would be wrong…
+//
+// …which is why the doubled form is gated on `nestDepth`-free hole state *and* ordered
+// first: ANTLR takes the longest match, so `}}` wins wherever it appears directly at a
+// hole's end. Measured on both widths afterwards: `$$"""{{v}}"""` now reports the same
+// Halstead vocabulary as `$"{v}"` (it was one higher, a phantom `}` operand emitted as
+// INTERPOLATED_TEXT by the width-two mode), and `$"{v}}}"` — close plus an escaped brace
+// — is unchanged.
+INTERP_HOLE_CLOSE_2
+    : {wideStack.Peek() > 0}? '}}'
+      { nestDepth = holeStack.Pop(); wideStack.Pop(); } -> type(RBRACE), popMode
+    ;
+
+INTERP_HOLE_CLOSE
+    : {holeStack.Count > 0}? '}'
+      { nestDepth = holeStack.Pop(); wideStack.Pop(); } -> type(RBRACE), popMode
+    ;
+
+// An opening brace inside a hole deepens the count.
+INTERP_NESTED_OPEN
+    : {holeStack.Count > 0}? '{' { nestDepth++; } -> type(LBRACE)
+    ;
+
+// `{x:D4}` — a `:` at depth 0 inside a hole starts the format specifier, so the
+// rest of the hole is literal text. Guarded by `nestDepth` first for the same
+// reason: a `:` at any deeper level belongs to a nested construct (a ternary, a
+// dictionary initializer, a label) and must stay an ordinary `COLON`.
+INTERP_NESTED_COLON
+    : {nestDepth > 0}? ':' -> type(COLON)
+    ;
+
+INTERP_FORMAT_COLON
+    : {holeStack.Count > 0}? ':' -> type(COLON), pushMode(INTERPOLATION_FORMAT)
+    ;
+
+// The unguarded fallbacks, reached only when every predicate above was false —
+// i.e. ordinary code outside any interpolation hole. Their names are pinned by
+// STABLE_TOKEN_NAMES so the `type(…)` commands above stay valid.
+LBRACE   : '{' ;
+RBRACE   : '}' ;
+COLON    : ':' ;
+LPAREN   : '(' ;
+RPAREN   : ')' ;
+LBRACKET : '[' ;
+RBRACKET : ']' ;
+
+mode INTERPOLATION;
+
+// `{{` / `}}` are escaped literal braces, not holes — first so they win the
+// longest match over the single-brace rules below.
+INTERP_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
+INTERP_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
+
+// Text between holes. A backslash starts an escape sequence, so `\"` does not
+// end the string and must be consumed as a unit.
+//
+// The forms are the SAME enumerated set as an ordinary string literal's, reusing the
+// `Escape` fragment: a regular interpolated string is a string, so `$"\q"` is no more
+// valid than `"\q"`. This was `'\\' .` — any character — so the two spellings disagreed
+// about the same invalid source once the ordinary literal was tightened.
+INTERP_ESCAPE     : Escape -> type(INTERPOLATED_TEXT) ;
+// A regular interpolated string follows ordinary string-literal rules, so it cannot span
+// source rows — the negated set therefore excludes the full `NewLine` set as well.
+// Accepting a newline here made `$"a<LF>b"` a clean parse while the plain `"a<LF>b"` was
+// correctly rejected, so the two spellings disagreed about the same invalid source. The
+// verbatim and raw modes stay multi-line, which is what distinguishes them.
+INTERPOLATED_TEXT : ~[{}"\\\r\n\u0085\u2028\u2029]+ ;
+
+// A hole opens: its expression is ordinary C#, so switch to the default mode and
+// start counting braces for this hole.
+INTERP_HOLE_OPEN : '{' { holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+
+// The string ends: drop this string's entry and leave the text mode.
+INTERP_END : '"' -> type(DQUOTE), popMode ;
+
+// A *verbatim* interpolated string (`$@"…"`) has different lexical rules for the
+// same syntax: a backslash is an ordinary character (no escape sequences) and a
+// doubled `""` is the escaped quote. One text rule cannot serve both flavours,
+// so `$@"` pushes this mode instead. (The grammars-v4 C# lexer splits the same
+// two cases for the same reason.) Braces and holes behave identically, so these
+// rules mirror the ones above and emit the same token types.
+mode INTERPOLATION_VERBATIM;
+
+INTERP_V_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
+INTERP_V_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
+
+// `""` is a literal quote inside a verbatim string, so it must not end it.
+INTERP_V_ESCAPED_QUOTE : '""' -> type(INTERPOLATED_TEXT) ;
+INTERP_V_TEXT          : ~[{}"]+ -> type(INTERPOLATED_TEXT) ;
+
+INTERP_V_HOLE_OPEN : '{' { holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+INTERP_V_END       : '"' -> type(DQUOTE), popMode ;
+
+// An interpolated *raw* string (`$"""…"""`) is a third flavour: a lone `"` is
+// ordinary text (only a `"""` run closes the string) and there are no backslash
+// escapes. Text and hole handling otherwise mirror the two modes above.
+//
+// The closing fence emits TRIPLE_DQUOTE because the parser spells the end as
+// `interpolated_raw_string_end_token : TRIPLE_DQUOTE DQUOTE*`.
+mode INTERPOLATION_RAW;
+
+INTERP_R_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
+INTERP_R_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
+
+// The fence first, so a `"""` run is never split into text quotes.
+INTERP_R_END : '"""' '"'* -> type(TRIPLE_DQUOTE), popMode ;
+
+// One or two quotes are literal content inside a raw string; only a run of three
+// closes it. Kept as its own rule so the negated text set can exclude `"`
+// entirely and leave fence detection to the rule above.
+INTERP_R_QUOTE : '"' '"'? -> type(INTERPOLATED_TEXT) ;
+INTERP_R_TEXT  : ~[{}"]+  -> type(INTERPOLATED_TEXT) ;
+
+INTERP_R_HOLE_OPEN : '{' { holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE) ;
+
+// The `$$"""…"""` flavour: two dollars means a hole opens on `{{` and a *single* brace is
+// literal text. Everything else — the fence, quote, and text handling — is identical to
+// the width-1 mode above, so only the brace rules differ.
+//
+// Without this mode, `$$"""{{a && b}}"""` had its hole swallowed as literal text: the
+// width-1 rules read `{{` as an escaped brace, so `a && b` never reached the parser and
+// its operators and complexity vanished — with zero diagnostics, the shape
+// PROVENANCE.md catalogues.
+//
+// The close is the ordinary `}` path in the default mode: a hole's `}}` arrives as
+// INTERP_NESTED_CLOSE / INTERP_HOLE_CLOSE for the first brace, and the second is then
+// matched here as text — which is why `INTERP_R2_TEXT` must accept a lone brace.
+mode INTERPOLATION_RAW_2;
+
+// A hole opens on the doubled brace. First, so `{{` is never split by the text rule.
+INTERP_R2_HOLE_OPEN
+    : '{{' { holeStack.Push(nestDepth); wideStack.Push(1); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
+    ;
+
+// The fence, before the quote rule, so a `"""` run is never split into text quotes.
+INTERP_R2_END : '"""' '"'* -> type(TRIPLE_DQUOTE), popMode ;
+
+INTERP_R2_QUOTE : '"' '"'? -> type(INTERPOLATED_TEXT) ;
+
+// A run of ordinary characters. Braces are deliberately EXCLUDED from this set even
+// though a lone brace is literal text at this width — that is what the two
+// single-character rules below are for.
+//
+// The reason is ANTLR's matching rule: it takes the longest match for the rule as a whole
+// and breaks only *ties* by order. A text rule that could consume `{{a && b}}` (10
+// characters) therefore beats INTERP_R2_HOLE_OPEN's 2 no matter which is written first.
+// That was the first attempt here and it swallowed the hole exactly as the width-1 mode
+// did — the same shape as the `""` raw-string fence bug in PROVENANCE.md.
+//
+// Splitting the braces out makes the decision length-based instead: `{{` is 2 characters
+// and `{` is 1, so the hole rule wins on length whenever a doubled brace is present, and
+// the single-brace rule fires only when it is not. Nothing depends on rule order, which is
+// what makes it robust.
+INTERP_R2_TEXT : ~[{}"]+ -> type(INTERPOLATED_TEXT) ;
+
+// A brace that did not start a hole (`{`) or close one (`}`) is literal text. One
+// character each, so INTERP_R2_HOLE_OPEN's two-character `{{` always outranks them.
+// `}` needs no doubled form: a hole's `}}` is consumed in the default mode — the first
+// brace by INTERP_HOLE_CLOSE, the second here as text.
+INTERP_R2_LBRACE : '{' -> type(INTERPOLATED_TEXT) ;
+INTERP_R2_RBRACE : '}' -> type(INTERPOLATED_TEXT) ;
+
+// A format specifier (`{x:D4}`) is a further mode: after the `:` that ends a
+// hole's expression, the remaining text up to the closing `}` is literal format
+// text, not C# code — `D4` must not lex as an identifier. (The grammars-v4 C#
+// lexer has an INTERPOLATION_FORMAT mode for the same reason.) Entered from the
+// default mode by the `:` rule below, at brace depth 0 inside a hole.
+mode INTERPOLATION_FORMAT;
+
+// The format text, emitted as the same token the grammar's
+// `interpolation_format_clause : ':' interpolated_string_text_token` expects.
+//
+// ONE token for the whole clause, not one per run: the parser rule takes a single
+// `interpolated_string_text_token`, so splitting an escape into its own token makes
+// the clause unparsable. Hence the alternation inside the `+` rather than separate
+// rules.
+//
+// A custom numeric format can carry a quoted literal — `$"{n:0\"kg\"}"` is valid C#
+// for "the number, then kg" — and this mode previously had no rule for `"` at all, so
+// the backslash lexed as text and the following quote could not be consumed: errors on
+// valid source. A *bare* `"` stays excluded, since that ends the enclosing string and
+// letting the format text swallow it would run the token past the literal.
+//
+// Both escape spellings are accepted because the enclosing string decides which is
+// legal (`\"` regular, `""` verbatim). Threading the flavour into this mode would be
+// the precise answer, but the format text's *extent* is all any metric reads — LOC
+// rows and one Halstead operand — so accepting both costs nothing here and cannot
+// mis-lex valid code either way.
+INTERP_FORMAT_TEXT
+    : ( '\\"' | '""' | '\\' | ~[}"\\] )+ -> type(INTERPOLATED_TEXT)
+    ;
+
+// The `}` that closes the hole. Two pops: this mode, then the hole's own
+// DEFAULT_MODE, landing back in the enclosing interpolation text mode.
+//
+// It must also pop `holeStack`, exactly as INTERP_HOLE_CLOSE does — the hole is over
+// either way, and the two rules differ only in whether a format clause was entered
+// first. Leaving the entry behind leaked hole state into ordinary code: after
+// `$"{n:D4}"`, `holeStack.Count > 0` stayed true, so the next `:` anywhere in the file
+// (a ternary, a label, a base-type list) matched INTERP_FORMAT_COLON and pushed
+// INTERPOLATION_FORMAT again, swallowing the rest of the line as format text.
+// Two braces when the hole opened with two, exactly as INTERP_HOLE_CLOSE_2 above —
+// gated on the same `wideStack` top, and ordered first for the same reason. Without
+// this the format path left the second brace to the width-two mode, which called it
+// literal text: `$$"""{{n:D4}}"""` carried a phantom `}` operand that
+// `$"""{n:D4}"""` does not.
+INTERP_FORMAT_END_2
+    : {wideStack.Peek() > 0}? '}}'
+      { nestDepth = holeStack.Pop(); wideStack.Pop(); } -> type(RBRACE), popMode, popMode
+    ;
+
+INTERP_FORMAT_END
+    : '}' { nestDepth = holeStack.Pop(); wideStack.Pop(); } -> type(RBRACE), popMode, popMode
+    ;
+
+// ---- four-quote interpolated raw strings --------------------------------
+// The same two flavours with a FOUR-quote fence, which exists so that an embedded `"""`
+// is content: `$""""a"""b""""`. Only the close rule differs from the three-quote modes
+// above — text, quotes, braces, and holes are all fence-width-agnostic — but a mode
+// cannot parameterize a single rule, so each width carries its own.
+//
+// The close requires four quotes, so a three-quote run inside is claimed by the quote /
+// text rules and stays content. Its trailing `'"'*` absorbs a longer run for the same
+// reason the three-quote close does: C# ends a raw string at the *first* run of at least
+// the opening width, and any extra quotes belong to the token.
+mode INTERPOLATION_RAW_4;
+
+INTERP_R4_ESCAPED_OPEN  : '{{' -> type(INTERPOLATED_TEXT) ;
+INTERP_R4_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
+
+INTERP_R4_END : '""""' '"'* -> type(TRIPLE_DQUOTE), popMode ;
+
+// One to THREE quotes are content at this width; only a run of four closes. The
+// three-quote alternative is what the width-3 mode cannot express.
+INTERP_R4_QUOTE : '"' '"'? '"'? -> type(INTERPOLATED_TEXT) ;
+INTERP_R4_TEXT  : ~[{}"]+       -> type(INTERPOLATED_TEXT) ;
+
+INTERP_R4_HOLE_OPEN
+    : '{' { holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
+    ;
+
+// `$$""""…""""`: a four-quote fence AND the doubled-brace hole width. Braces are split
+// into single-character rules for the same length-based reason as INTERPOLATION_RAW_2.
+mode INTERPOLATION_RAW_2_4;
+
+INTERP_R24_HOLE_OPEN
+    : '{{' { holeStack.Push(nestDepth); wideStack.Push(1); nestDepth = 0; } -> type(LBRACE), pushMode(DEFAULT_MODE)
+    ;
+
+INTERP_R24_END : '""""' '"'* -> type(TRIPLE_DQUOTE), popMode ;
+
+INTERP_R24_QUOTE : '"' '"'? '"'? -> type(INTERPOLATED_TEXT) ;
+INTERP_R24_TEXT  : ~[{}"]+       -> type(INTERPOLATED_TEXT) ;
+INTERP_R24_LBRACE : '{' -> type(INTERPOLATED_TEXT) ;
+INTERP_R24_RBRACE : '}' -> type(INTERPOLATED_TEXT) ;

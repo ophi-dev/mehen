@@ -11,7 +11,10 @@
 //! `mehen-java-parser = { git = "https://github.com/ophi-dev/mehen", tag = "…" }`
 //! — the same way this repo consumes the ruff/oxc/sqruff parser crates.
 //!
-//! The [`mehen-java`](https://docs.rs/mehen-java) analyzer crate depends on
+//! (Linked to the repository, not docs.rs: the analyzer crates are
+//! `publish = false`, so they have no docs.rs page to link to.)
+//!
+//! The [`mehen-java`](https://github.com/ophi-dev/mehen/tree/main/crates/mehen-java) analyzer crate depends on
 //! this one and walks the resulting [`antlr4_runtime::ParseTree`] to compute
 //! metrics.
 //!

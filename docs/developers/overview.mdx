@@ -11,10 +11,16 @@ This section documents how to build mehen, run its tests, and contribute changes
 - A recent stable Rust toolchain. See [rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
 - For tree-sitter grammar regeneration (Go / C / PowerShell): a Linux or macOS shell, or
   Windows via WSL.
-- For ANTLR grammar regeneration (Kotlin, Java): the `antlr4-rust-gen` generator, pinned to the
-  workspace runtime version
-  (`cargo install antlr-rust-runtime --version 0.15.2 --features codegen --bin antlr4-rust-gen`).
-  Only needed to *regenerate* parsers; a normal build uses the checked-in modules.
+- For ANTLR grammar regeneration (Kotlin, Java, C#): the `antlr4-rust-gen` generator, whose version
+  must **match** the workspace runtime pin — the generated modules call the runtime's API directly,
+  so a mismatched generator produces code that does not compile against the pinned crate
+  (`cargo install antlr-rust-runtime --version 0.25.0 --features codegen --bin antlr4-rust-gen`).
+  The authoritative version is `GENERATOR_VERSION` in `xtask/src/antlr.rs`, which
+  `cargo xtask antlr generate` checks before running. Only needed to *regenerate* parsers; a normal
+  build uses the checked-in modules.
+- For the C# grammar specifically, also [`uv`](https://docs.astral.sh/uv/): the Roslyn grammar is
+  transformed by `crates/mehen-csharp-parser/grammar/prepare-grammar.py`, run as a step of
+  generation via its PEP 723 inline metadata.
 
 ## Clone
 
@@ -84,6 +90,7 @@ failures.
 | `crates/mehen-rust` | Rust analyzer (`ra_ap_syntax`). |
 | `crates/mehen-kotlin` | Kotlin analyzer (ANTLR — official Kotlin spec grammar). |
 | `crates/mehen-java` | Java analyzer (ANTLR — grammars-v4 Java grammar). |
+| `crates/mehen-csharp` | C# analyzer (ANTLR — Roslyn's own generated grammar). |
 | `crates/mehen-sql` | SQL analyzer (sqruff) — publishes the dedicated `sql.*` metric family. |
 | `crates/mehen-go`, `mehen-c`, `mehen-powershell` | Tree-sitter-backed analyzers. |
 | `crates/mehen-markdown` | Markdown analyzer (pulldown-cmark) with embedded-code dispatch via `LanguageDispatcher`. |

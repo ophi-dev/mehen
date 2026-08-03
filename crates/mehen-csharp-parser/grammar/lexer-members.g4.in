@@ -1,0 +1,30 @@
+// Interpolated-string state. Kept in the grammar rather than a hand-written Rust
+// hook so the lexer is self-describing; `prepare-grammar.py` emits matching
+// `[[member]]` / `[[pattern]]` declarations into `patterns.toml`, which lower
+// every body below to pure SemIR (runtime 0.20.1+, upstream #206).
+//
+//   holeStack — one entry per interpolation hole currently open, holding the
+//               brace-nesting depth *within* that hole. Pushed when a hole opens,
+//               popped when it closes, so it survives nesting like
+//               `$"{ $"{x}" }"`. Its depth is nonzero exactly while inside a
+//               hole's expression.
+//   nestDepth — mirror of the innermost hole's depth, kept as a scalar because
+//               the pattern DSL can test a scalar's truthiness directly.
+//
+// Two slots rather than one because the lowering DSL has only `not` and
+// truthiness — no comparisons and no `&&`. Each slot must therefore answer one
+// yes/no question on its own, and the *conjunction* comes from rule order: the
+// deeper case is written first, so reaching a later rule already implies the
+// earlier predicate was false.
+//   wideStack — parallel to `holeStack`: one entry per open hole, nonzero when that
+//               hole was opened with a DOUBLED brace (`$$"""{{v}}"""`). Its close must
+//               then consume two braces, and a width-one hole's must consume one, so
+//               `$"{v}}}"` — close plus a literal brace — keeps working. A stack rather
+//               than a scalar for the same reason `holeStack` is one: the width travels
+//               with the hole, so `$$"""{{ $"{x}" }}"""` restores the outer width when
+//               the inner hole closes.
+@lexer::members
+{private int nestDepth;
+private Stack<int> holeStack = new Stack<int>();
+private Stack<int> wideStack = new Stack<int>();
+}

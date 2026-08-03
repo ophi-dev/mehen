@@ -1,0 +1,59 @@
+{
+  "version": 2,
+  "policy": "error",
+  "note": "unknown coordinates currently default to assume-true; a future minor release changes the default to error",
+  "options": [
+    {"name": "tokenVocab", "value": "CSharpLexer", "line": 5, "column": 10, "disposition": "metadata"}
+  ],
+  "grammars": [
+    {
+      "kind": "lexer",
+      "name": "CSharpLexer",
+      "coordinates": [
+        {"kind": "lexer-action", "rule": "INTERP_NESTED_CLOSE", "rule_index": 204, "index": 0, "atn_state": null, "line": 608, "column": 27, "body": "nestDepth--;", "disposition": "translated", "template": "MemberStmt(Add(0, Int(-1)))"},
+        {"kind": "lexer-action", "rule": "INTERP_NESTED_LPAREN", "rule_index": 205, "index": 1, "atn_state": null, "line": 624, "column": 33, "body": "nestDepth++;", "disposition": "translated", "template": "MemberStmt(Add(0, Int(1)))"},
+        {"kind": "lexer-action", "rule": "INTERP_NESTED_RPAREN", "rule_index": 206, "index": 2, "atn_state": null, "line": 628, "column": 27, "body": "nestDepth--;", "disposition": "translated", "template": "MemberStmt(Add(0, Int(-1)))"},
+        {"kind": "lexer-action", "rule": "INTERP_NESTED_LBRACKET", "rule_index": 207, "index": 3, "atn_state": null, "line": 632, "column": 33, "body": "nestDepth++;", "disposition": "translated", "template": "MemberStmt(Add(0, Int(1)))"},
+        {"kind": "lexer-action", "rule": "INTERP_NESTED_RBRACKET", "rule_index": 208, "index": 4, "atn_state": null, "line": 636, "column": 27, "body": "nestDepth--;", "disposition": "translated", "template": "MemberStmt(Add(0, Int(-1)))"},
+        {"kind": "lexer-action", "rule": "INTERP_HOLE_CLOSE_2", "rule_index": 209, "index": 5, "atn_state": null, "line": 661, "column": 6, "body": "nestDepth = holeStack.Pop(); wideStack.Pop();", "disposition": "translated", "template": "MemberStmt(Seq([Set(0, MemberTop(0)), Pop(0), Pop(1)]))"},
+        {"kind": "lexer-action", "rule": "INTERP_HOLE_CLOSE", "rule_index": 210, "index": 6, "atn_state": null, "line": 666, "column": 6, "body": "nestDepth = holeStack.Pop(); wideStack.Pop();", "disposition": "translated", "template": "MemberStmt(Seq([Set(0, MemberTop(0)), Pop(0), Pop(1)]))"},
+        {"kind": "lexer-action", "rule": "INTERP_NESTED_OPEN", "rule_index": 211, "index": 7, "atn_state": null, "line": 671, "column": 33, "body": "nestDepth++;", "disposition": "translated", "template": "MemberStmt(Add(0, Int(1)))"},
+        {"kind": "lexer-action", "rule": "INTERP_HOLE_OPEN", "rule_index": 225, "index": 8, "atn_state": null, "line": 721, "column": 23, "body": "holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0;", "disposition": "translated", "template": "MemberStmt(Seq([Push(0, Member(0)), Push(1, Int(0)), Set(0, Int(0))]))"},
+        {"kind": "lexer-action", "rule": "INTERP_V_HOLE_OPEN", "rule_index": 231, "index": 9, "atn_state": null, "line": 741, "column": 25, "body": "holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0;", "disposition": "translated", "template": "MemberStmt(Seq([Push(0, Member(0)), Push(1, Int(0)), Set(0, Int(0))]))"},
+        {"kind": "lexer-action", "rule": "INTERP_R_HOLE_OPEN", "rule_index": 238, "index": 10, "atn_state": null, "line": 764, "column": 25, "body": "holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0;", "disposition": "translated", "template": "MemberStmt(Seq([Push(0, Member(0)), Push(1, Int(0)), Set(0, Int(0))]))"},
+        {"kind": "lexer-action", "rule": "INTERP_R2_HOLE_OPEN", "rule_index": 239, "index": 11, "atn_state": null, "line": 782, "column": 11, "body": "holeStack.Push(nestDepth); wideStack.Push(1); nestDepth = 0;", "disposition": "translated", "template": "MemberStmt(Seq([Push(0, Member(0)), Push(1, Int(1)), Set(0, Int(0))]))"},
+        {"kind": "lexer-action", "rule": "INTERP_FORMAT_END_2", "rule_index": 246, "index": 12, "atn_state": null, "line": 859, "column": 6, "body": "nestDepth = holeStack.Pop(); wideStack.Pop();", "disposition": "translated", "template": "MemberStmt(Seq([Set(0, MemberTop(0)), Pop(0), Pop(1)]))"},
+        {"kind": "lexer-action", "rule": "INTERP_FORMAT_END", "rule_index": 247, "index": 13, "atn_state": null, "line": 863, "column": 10, "body": "nestDepth = holeStack.Pop(); wideStack.Pop();", "disposition": "translated", "template": "MemberStmt(Seq([Set(0, MemberTop(0)), Pop(0), Pop(1)]))"},
+        {"kind": "lexer-action", "rule": "INTERP_R4_HOLE_OPEN", "rule_index": 253, "index": 14, "atn_state": null, "line": 889, "column": 10, "body": "holeStack.Push(nestDepth); wideStack.Push(0); nestDepth = 0;", "disposition": "translated", "template": "MemberStmt(Seq([Push(0, Member(0)), Push(1, Int(0)), Set(0, Int(0))]))"},
+        {"kind": "lexer-action", "rule": "INTERP_R24_HOLE_OPEN", "rule_index": 254, "index": 15, "atn_state": null, "line": 897, "column": 11, "body": "holeStack.Push(nestDepth); wideStack.Push(1); nestDepth = 0;", "disposition": "translated", "template": "MemberStmt(Seq([Push(0, Member(0)), Push(1, Int(1)), Set(0, Int(0))]))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_CLOSE", "rule_index": 204, "index": 0, "atn_state": null, "line": 608, "column": 6, "body": "nestDepth > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(Member(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_LPAREN", "rule_index": 205, "index": 1, "atn_state": null, "line": 624, "column": 6, "body": "holeStack.Count > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberLen(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_RPAREN", "rule_index": 206, "index": 2, "atn_state": null, "line": 628, "column": 6, "body": "nestDepth > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(Member(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_LBRACKET", "rule_index": 207, "index": 3, "atn_state": null, "line": 632, "column": 6, "body": "holeStack.Count > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberLen(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_RBRACKET", "rule_index": 208, "index": 4, "atn_state": null, "line": 636, "column": 6, "body": "nestDepth > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(Member(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_HOLE_CLOSE_2", "rule_index": 209, "index": 5, "atn_state": null, "line": 660, "column": 6, "body": "wideStack.Peek() > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberTop(1))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_HOLE_CLOSE", "rule_index": 210, "index": 6, "atn_state": null, "line": 665, "column": 6, "body": "holeStack.Count > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberLen(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_OPEN", "rule_index": 211, "index": 7, "atn_state": null, "line": 671, "column": 6, "body": "holeStack.Count > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberLen(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_NESTED_COLON", "rule_index": 212, "index": 8, "atn_state": null, "line": 679, "column": 6, "body": "nestDepth > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(Member(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_FORMAT_COLON", "rule_index": 213, "index": 9, "atn_state": null, "line": 683, "column": 6, "body": "holeStack.Count > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberLen(0))))"},
+        {"kind": "lexer-predicate", "rule": "INTERP_FORMAT_END_2", "rule_index": 246, "index": 10, "atn_state": null, "line": 858, "column": 6, "body": "wideStack.Peek() > 0", "disposition": "translated", "template": "MemberExpr(Not(Not(MemberTop(1))))"}
+      ]
+    },
+    {
+      "kind": "parser",
+      "name": "CSharpParser",
+      "coordinates": [
+        {"kind": "parser-action", "rule": "name", "rule_index": 8, "index": null, "atn_state": 557, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-action", "rule": "type", "rule_index": 76, "index": null, "atn_state": 1609, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-action", "rule": "pattern", "rule_index": 114, "index": null, "atn_state": 2076, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-action", "rule": "expression", "rule_index": 148, "index": null, "atn_state": 2343, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null},
+        {"kind": "parser-predicate", "rule": "right_shift", "rule_index": 238, "index": 17, "atn_state": null, "line": 1572, "column": 10, "body": "this.IsRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift", "rule_index": 239, "index": 18, "atn_state": null, "line": 1576, "column": 10, "body": "this.IsUnsignedRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift", "rule_index": 239, "index": 19, "atn_state": null, "line": 1576, "column": 44, "body": "this.IsUnsignedRightShift()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "right_shift_assignment", "rule_index": 240, "index": 20, "atn_state": null, "line": 1580, "column": 10, "body": "this.IsRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift_assignment", "rule_index": 241, "index": 21, "atn_state": null, "line": 1584, "column": 10, "body": "this.IsUnsignedRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"},
+        {"kind": "parser-predicate", "rule": "unsigned_right_shift_assignment", "rule_index": 241, "index": 22, "atn_state": null, "line": 1584, "column": 54, "body": "this.IsUnsignedRightShiftAssignment()", "disposition": "translated", "template": "TokenPairAdjacent"}
+      ]
+    }
+  ]
+}

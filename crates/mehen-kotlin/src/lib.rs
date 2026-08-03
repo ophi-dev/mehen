@@ -63,8 +63,13 @@ impl KotlinAnalyzer {
     /// one recovered any errors, so clean input parses exactly once. Ties go
     /// to the preferred rule. Returns `None` only if both entry-rule calls
     /// hard-fail (return `Err` rather than a recovered tree).
-    fn parse_best(&self, source: &str, prefers_script: bool) -> Option<ParsedKotlin> {
-        let preferred = self.parse_entry(source, prefers_script);
+    fn parse_best(
+        &self,
+        source: &str,
+        prefers_script: bool,
+        line_index: &LineIndex,
+    ) -> Option<ParsedKotlin> {
+        let preferred = self.parse_entry(source, prefers_script, line_index);
         // A clean (zero-error) preferred parse wins outright — no second parse.
         if preferred
             .as_ref()
@@ -72,7 +77,7 @@ impl KotlinAnalyzer {
         {
             return preferred;
         }
-        let alternate = self.parse_entry(source, !prefers_script);
+        let alternate = self.parse_entry(source, !prefers_script, line_index);
         match (preferred, alternate) {
             // Keep whichever recovered fewer errors; ties favor the preferred.
             (Some(preferred), Some(alternate)) => {
@@ -95,7 +100,12 @@ impl KotlinAnalyzer {
     /// Replaces the runtime's default lexer console listener with a structured
     /// diagnostic collector, removes the parser console listener, and folds the
     /// recovered tree into a [`ParsedFile`] that owns the token store and CST.
-    fn parse_entry(&self, source: &str, script_rule: bool) -> Option<ParsedKotlin> {
+    fn parse_entry(
+        &self,
+        source: &str,
+        script_rule: bool,
+        line_index: &LineIndex,
+    ) -> Option<ParsedKotlin> {
         let entry = if script_rule {
             KotlinParser::script
         } else {
@@ -110,14 +120,15 @@ impl KotlinAnalyzer {
         parser.remove_error_listeners();
         let result = entry(&mut parser).ok()?;
         let syntax_errors = parser.number_of_syntax_errors();
-        let lexer_diagnostics = lexer_diagnostics.diagnostics("kotlin.syntax_error", 16);
+        let lexer_diagnostics =
+            lexer_diagnostics.diagnostics("kotlin.syntax_error", 16, line_index);
 
         // `into_parsed_file` consumes the parser and moves the eagerly-buffered
         // token store into the `ParsedFile`; the LOC token list is then read
         // straight from that store (all channels, so hidden-channel comments
         // are present — no `fill()` step needed).
         let parsed = parser.into_parsed_file(result);
-        let loc_tokens = collect_loc_tokens(&parsed);
+        let loc_tokens = collect_loc_tokens(&parsed, line_index);
         Some(ParsedKotlin {
             parsed,
             syntax_errors,
@@ -160,7 +171,7 @@ impl LanguageAnalyzer for KotlinAnalyzer {
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("kts"));
 
-        let parsed = match self.parse_best(&source.text, prefers_script) {
+        let parsed = match self.parse_best(&source.text, prefers_script, &line_index) {
             Some(parsed) => parsed,
             None => {
                 // Both entry rules hard-failed (the rule call itself returned
@@ -199,6 +210,7 @@ impl LanguageAnalyzer for KotlinAnalyzer {
             tree,
             "kotlin.syntax_error",
             remaining,
+            &line_index,
         ));
 
         Ok(LanguageAnalysis {
@@ -218,7 +230,7 @@ impl LanguageAnalyzer for KotlinAnalyzer {
 /// other token is code. Comments are absent from the parse tree (hidden
 /// channel), so LOC comes from this full token pass — the token store is
 /// eagerly buffered through EOF, so every token (all channels) is present.
-fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
+fn collect_loc_tokens(parsed: &ParsedFile, line_index: &LineIndex) -> Vec<mehen_antlr::LocToken> {
     use mehen_kotlin_parser::kotlin_lexer::{
         AS_SAFE, AT_BOTH_WS, AT_POST_WS, AT_PRE_WS, DELIMITED_COMMENT, EXCL_WS, INSIDE_COMMENT,
         INSIDE_NL, INSIDE_WS, LINE_COMMENT, NL, NOT_IN, NOT_IS, QUEST_WS, WS,
@@ -236,6 +248,7 @@ fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
         &[
             EXCL_WS, NOT_IS, NOT_IN, QUEST_WS, AS_SAFE, AT_POST_WS, AT_PRE_WS, AT_BOTH_WS,
         ],
+        line_index,
     )
 }
 

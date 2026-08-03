@@ -37,6 +37,7 @@ pub enum FenceLanguage {
     Java,
     Powershell,
     C,
+    CSharp,
     Php,
 }
 
@@ -128,6 +129,10 @@ fn map_fence_to_lang(info: &str) -> Option<FenceLanguage> {
         "java" => FenceLanguage::Java,
         "powershell" | "pwsh" | "ps1" => FenceLanguage::Powershell,
         "c" => FenceLanguage::C,
+        // `cs` and `csharp` are the tags GitHub and dotnet docs use; `csx` marks
+        // a script fence, which Roslyn's `compilation_unit` accepts via
+        // `global_statement`.
+        "csharp" | "cs" | "c#" | "csx" => FenceLanguage::CSharp,
         "php" => FenceLanguage::Php,
         _ => return None,
     })

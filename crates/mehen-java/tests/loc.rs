@@ -310,3 +310,36 @@ fn block_only_statement_is_not_its_own_lloc() {
     }
     "#);
 }
+
+#[test]
+fn a_unicode_separator_in_a_block_comment_is_not_a_row_break() {
+    // REGRESSION from the C# work in this PR. `loc_tokens` in the shared `mehen-antlr`
+    // crate counted five line terminators inline when finding a block comment's end row
+    // — but which characters break a row is per-language policy, and Java passes
+    // `LineIndex::new` (LF/CRLF only, matching the JLS \u000A/\u000D/\u2028?/no).
+    //
+    // So `/*a<U+2028>b*/` was reported as covering two comment rows in a ONE-row file:
+    // CLOC 2 against SLOC 1, which is impossible, and which also skews
+    // `blank = sloc - ploc - only_comment` and every MI variant downstream. The end row
+    // now comes from the same `LineIndex` the start row does.
+    for separator in ['\u{85}', '\u{2028}', '\u{2029}'] {
+        let a = analyze(&format!("class C {{ /*a{separator}b*/ }}"));
+        let loc = mehen_report::metrics_json::loc(&a.root.metrics);
+        assert_eq!(
+            loc.cloc, 1.0,
+            "U+{:04X} is not a row break for Java",
+            separator as u32
+        );
+        assert!(
+            loc.cloc <= loc.sloc,
+            "U+{:04X}: CLOC {} must not exceed SLOC {}",
+            separator as u32,
+            loc.cloc,
+            loc.sloc
+        );
+    }
+
+    // The control: LF *is* a row break, so the same comment covers two rows.
+    let lf = mehen_report::metrics_json::loc(&analyze("class C { /*a\nb*/ }").root.metrics);
+    assert_eq!(lf.cloc, 2.0);
+}

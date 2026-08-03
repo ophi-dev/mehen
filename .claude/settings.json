@@ -7,6 +7,9 @@
         "CLICOLOR_FORCE": "1",
         "NEXTEST_COLOR": "1",
         "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1",
+        "CLAUDE_CODE_RETRY_WATCHDOG": "1",
+        "CLAUDE_ENABLE_BYTE_WATCHDOG_BEDROCK": "1",
+        "ENABLE_PROMPT_CACHING_1H": "1",
         "GH_PAGER": "cat",
         "MAX_THINKING_TOKENS": "32000"
     },
@@ -39,7 +42,6 @@
         ],
         "deny": []
     },
-    "hooks": {
-    },
+    "hooks": {},
     "enableAllProjectMcpServers": true
 }

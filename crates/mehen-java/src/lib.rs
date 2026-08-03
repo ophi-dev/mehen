@@ -64,7 +64,7 @@ impl JavaAnalyzer {
     ///
     /// Replaces the runtime's default lexer console listener with a structured
     /// diagnostic collector and removes the parser console listener.
-    fn parse(&self, source: &str) -> Option<ParsedJava> {
+    fn parse(&self, source: &str, line_index: &LineIndex) -> Option<ParsedJava> {
         let mut lexer = JavaLexer::new(InputStream::new(source));
         lexer.remove_error_listeners();
         let lexer_diagnostics = DiagnosticCollector::default();
@@ -73,14 +73,14 @@ impl JavaAnalyzer {
         let mut parser = JavaParser::with_typed_hooks(tokens, JavaParserBase);
         parser.remove_error_listeners();
         let result = parser.compilation_unit().ok()?;
-        let lexer_diagnostics = lexer_diagnostics.diagnostics("java.syntax_error", 16);
+        let lexer_diagnostics = lexer_diagnostics.diagnostics("java.syntax_error", 16, line_index);
 
         // `into_parsed_file` consumes the parser and moves the eagerly-buffered
         // token store into the `ParsedFile`; the LOC token list is then read
         // straight from that store (all channels, so hidden-channel comments
         // are present — no `fill()` step needed).
         let parsed = parser.into_parsed_file(result);
-        let loc_tokens = collect_loc_tokens(&parsed);
+        let loc_tokens = collect_loc_tokens(&parsed, line_index);
         Some(ParsedJava {
             parsed,
             lexer_diagnostics,
@@ -107,7 +107,7 @@ impl LanguageAnalyzer for JavaAnalyzer {
     fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let line_index = LineIndex::new(&source.text);
 
-        let parsed = match self.parse(&source.text) {
+        let parsed = match self.parse(&source.text, &line_index) {
             Some(parsed) => parsed,
             None => {
                 let span = SourceSpan {
@@ -142,6 +142,7 @@ impl LanguageAnalyzer for JavaAnalyzer {
             tree,
             "java.syntax_error",
             remaining,
+            &line_index,
         ));
 
         Ok(LanguageAnalysis {
@@ -161,7 +162,7 @@ impl LanguageAnalyzer for JavaAnalyzer {
 /// (annotations are a plain `AT` token followed by a name), so no
 /// trivia-bearing token scan is needed. The token store is eagerly buffered
 /// through EOF, so every token (all channels) is present.
-fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
+fn collect_loc_tokens(parsed: &ParsedFile, line_index: &LineIndex) -> Vec<mehen_antlr::LocToken> {
     use mehen_java_parser::java_lexer::{COMMENT, LINE_COMMENT, WS};
 
     mehen_antlr::loc_tokens(
@@ -172,6 +173,7 @@ fn collect_loc_tokens(parsed: &ParsedFile) -> Vec<mehen_antlr::LocToken> {
         &[COMMENT, LINE_COMMENT],
         &[WS],
         &[],
+        line_index,
     )
 }
 
@@ -205,5 +207,35 @@ mod tests {
         assert_eq!(a.root.spaces.len(), 1);
         assert_eq!(a.root.spaces[0].kind, SpaceKind::Class);
         assert_eq!(a.root.spaces[0].name.as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn recovered_error_nodes_carry_byte_spans() {
+        // Since the 0.19 runtime the offending token reaches the diagnostic
+        // path (upstream #196), so a recovered parse error must report a real
+        // byte range rather than only a line number in its message.
+        let src = "class C {\n    void m() { int x = @@@; }\n}\n";
+        let a = analyze(src, "C.java");
+        let spanned: Vec<_> = a
+            .diagnostics
+            .iter()
+            .filter_map(|d| d.span.as_ref())
+            .collect();
+        assert!(
+            !spanned.is_empty(),
+            "recovered error nodes should carry spans, got {:?}",
+            a.diagnostics
+        );
+        for span in spanned {
+            assert!(
+                span.end_byte > span.start_byte,
+                "span must be non-empty: {span:?}"
+            );
+            assert!(
+                (span.end_byte as usize) <= src.len(),
+                "span must stay inside the source: {span:?}"
+            );
+            assert_eq!(span.start_line, 2, "the bad token is on line 2");
+        }
     }
 }

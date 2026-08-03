@@ -32,7 +32,7 @@ The exact rule is language-specific:
 | Python | A class attribute that does not start with `_`. |
 | Ruby | An `attr_accessor` / `attr_reader` / `attr_writer` declaration (Ruby fields are private by
 default). |
-| C# | A field with `public` access modifier (mehen support is partial — see analyzer notes). |
+| C# | A field, constant, or event declared `public`. A member with no access modifier is `private`, and `internal` is assembly-scoped, so neither counts. `enum` members are always public. |
 
 ## How to read it
 

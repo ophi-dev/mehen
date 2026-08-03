@@ -116,6 +116,10 @@ mod markdown_dispatch {
             FenceLanguage::Kotlin => "fence.kts",
             FenceLanguage::Java => "fence.java",
             FenceLanguage::Powershell => "fence.ps1",
+            // `.csx` (script) rather than `.cs`: a fence is usually a snippet of
+            // top-level statements, which Roslyn's `compilation_unit` accepts via
+            // `global_statement`, and both extensions route to the same analyzer.
+            FenceLanguage::CSharp => "fence.csx",
             FenceLanguage::C => "fence.c",
             FenceLanguage::Php => "fence.php",
         };
@@ -134,6 +138,7 @@ mod markdown_dispatch {
             FenceLanguage::Kotlin => Language::Kotlin,
             FenceLanguage::Java => Language::Java,
             FenceLanguage::Powershell => Language::PowerShell,
+            FenceLanguage::CSharp => Language::CSharp,
             FenceLanguage::C => Language::C,
             FenceLanguage::Php => Language::Php,
         }
@@ -159,6 +164,27 @@ mod markdown_dispatch {
         fn registry_dispatch_keeps_clean_python() {
             let good = "def f():\n    return 1\n".to_string();
             assert!(dispatch(FenceLanguage::Python, good).is_some());
+        }
+
+        /// A C# fence must reach the analyzer. Registering `Language::CSharp` in
+        /// the registry is not enough on its own: the fence tag has to map to a
+        /// `FenceLanguage` variant, and that variant needs both a synthetic path
+        /// and a `Language` mapping here, or the fence is silently skipped and
+        /// its volume/complexity/SLOC never reach the Markdown score.
+        #[test]
+        fn registry_dispatch_analyzes_csharp_fence() {
+            let good = "class C { void M() { } }\n".to_string();
+            assert!(dispatch(FenceLanguage::CSharp, good).is_some());
+        }
+
+        /// A fence is usually a snippet of top-level statements rather than a
+        /// full compilation unit, which the Roslyn-derived grammar accepts via
+        /// `global_statement` (C# 9). Pinned because the synthetic path is
+        /// `fence.csx` for exactly this reason.
+        #[test]
+        fn registry_dispatch_analyzes_csharp_top_level_statements() {
+            let script = "var total = 1 + 2;\n".to_string();
+            assert!(dispatch(FenceLanguage::CSharp, script).is_some());
         }
     }
 }
