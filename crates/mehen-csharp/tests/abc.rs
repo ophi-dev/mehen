@@ -786,3 +786,29 @@ fn a_query_needs_no_body_clause() {
         let _ = abc(source);
     }
 }
+
+#[test]
+fn a_utf8_literal_is_a_distinct_operand_from_its_plain_twin() {
+    // REGRESSION. The `u8` suffix contributes no operand *occurrence* — one C# literal is
+    // one operand — but it must be part of the operand's KEY: `"x"u8` is a
+    // `ReadOnlySpan<byte>` and `"x"` is a `string`, two values of two types. Skipping the
+    // suffix entirely collapsed them into one operand, undercounting vocabulary.
+    let halstead = |source: &str| {
+        let a = analyze_clean(source);
+        mehen_report::metrics_json::halstead(&a.root.metrics)
+    };
+    let mixed = halstead("class C { static void F() { var a = \"x\"u8; var b = \"x\"; } }");
+    let both_plain = halstead("class C { static void F() { var a = \"x\"; var b = \"x\"; } }");
+    let both_u8 = halstead("class C { static void F() { var a = \"x\"u8; var b = \"x\"u8; } }");
+
+    assert!(
+        mixed.n2 > both_plain.n2,
+        "`\"x\"u8` and `\"x\"` are two operands, not one"
+    );
+    assert_eq!(
+        both_plain.n2, both_u8.n2,
+        "but two identical literals are still one operand at either type"
+    );
+    // And the suffix still adds no occurrence, which is what the earlier fix established.
+    assert_eq!(both_u8.big_n2, both_plain.big_n2);
+}

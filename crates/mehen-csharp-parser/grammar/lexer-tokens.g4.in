@@ -30,21 +30,46 @@ IDENTIFIER
 //
 // Shared with the `Escape` fragment's `\u`/`\U` forms below, but kept separate: an
 // identifier admits only the Unicode forms, not `\n` or `\x41`.
+//
+// KNOWN over-permissiveness, deliberately left: the DECODED codepoint is not validated
+// against the identifier categories, so `int \u002B = 1;` — an escape decoding to `+`,
+// which does not compile — lexes as an ordinary IDENTIFIER with no diagnostic.
+//
+// Not fixable here. A lexer rule matches *characters*, and `\u002B` is six of them; asking
+// what they decode to needs arithmetic over the hex digits plus a Unicode category lookup.
+// The lowering DSL has neither, the legal codepoints span hundreds of blocks so no
+// character class enumerates them, and the alternative — dropping the escape from
+// `IDENTIFIER` — would reject `int \u0061 = 1;`, which IS valid C#. Trading a false accept
+// for a false reject is the worse deal, since mehen measures code a compiler already
+// accepted (see PROVENANCE.md on rules made stricter than the language).
+//
+// A typed hook could do it, at the cost of this crate's zero-hook property and a Unicode
+// table at lex time. Worth revisiting only if a real file ever depends on it.
 fragment UnicodeEscape
     : '\\' ( 'u' HexQuad | 'U' HexQuad HexQuad )
     ;
 
 // §6.4.5.3 Integer literals. `IntSuffix` below covers the legal suffix combinations.
+//
+// A digit separator may appear only BETWEEN digits (C# 7.0, §6.4.5.3), which is why the
+// tail is `( '_'* [0-9] )*` rather than `[0-9_]*`: the character-class form let a literal
+// end in one, so `1_` and `1__0` — neither valid C# — lexed as ordinary integer literals
+// and the analyzer reported a clean parse of invalid source. Runs of separators between
+// digits ARE legal (`1__0` is not, but `1_0` and `0x1_F` are, and C# permits `1___0`
+// too), hence `'_'*` rather than `'_'?`.
+//
+// A LEADING separator is not a literal at all: `_1` is a legal *identifier*, and it still
+// lexes as one — verified, since narrowing here must not steal it.
 DEC_INT_LIT
-    : [0-9] [0-9_]* IntSuffix?
+    : [0-9] ( '_'* [0-9] )* IntSuffix?
     ;
 
 HEX_INT_LIT
-    : '0' [xX] [0-9a-fA-F_]+ IntSuffix?
+    : '0' [xX] [0-9a-fA-F] ( '_'* [0-9a-fA-F] )* IntSuffix?
     ;
 
 BIN_INT_LIT
-    : '0' [bB] [01_]+ IntSuffix?
+    : '0' [bB] [01] ( '_'* [01] )* IntSuffix?
     ;
 
 // §6.4.5.3 integer type suffixes. At most ONE unsigned marker and at most ONE long
@@ -464,7 +489,12 @@ INTERP_ESCAPED_CLOSE : '}}' -> type(INTERPOLATED_TEXT) ;
 // valid than `"\q"`. This was `'\\' .` — any character — so the two spellings disagreed
 // about the same invalid source once the ordinary literal was tightened.
 INTERP_ESCAPE     : Escape -> type(INTERPOLATED_TEXT) ;
-INTERPOLATED_TEXT : ~[{}"\\]+ ;
+// A regular interpolated string follows ordinary string-literal rules, so it cannot span
+// source rows — the negated set therefore excludes the full `NewLine` set as well.
+// Accepting a newline here made `$"a<LF>b"` a clean parse while the plain `"a<LF>b"` was
+// correctly rejected, so the two spellings disagreed about the same invalid source. The
+// verbatim and raw modes stay multi-line, which is what distinguishes them.
+INTERPOLATED_TEXT : ~[{}"\\\r\n\u0085\u2028\u2029]+ ;
 
 // A hole opens: its expression is ordinary C#, so switch to the default mode and
 // start counting braces for this hole.
@@ -599,6 +629,16 @@ INTERP_FORMAT_TEXT
 // `$"{n:D4}"`, `holeStack.Count > 0` stayed true, so the next `:` anywhere in the file
 // (a ternary, a label, a base-type list) matched INTERP_FORMAT_COLON and pushed
 // INTERPOLATION_FORMAT again, swallowing the rest of the line as format text.
+// Two braces when the hole opened with two, exactly as INTERP_HOLE_CLOSE_2 above —
+// gated on the same `wideStack` top, and ordered first for the same reason. Without
+// this the format path left the second brace to the width-two mode, which called it
+// literal text: `$$"""{{n:D4}}"""` carried a phantom `}` operand that
+// `$"""{n:D4}"""` does not.
+INTERP_FORMAT_END_2
+    : {wideStack.Peek() > 0}? '}}'
+      { nestDepth = holeStack.Pop(); wideStack.Pop(); } -> type(RBRACE), popMode, popMode
+    ;
+
 INTERP_FORMAT_END
     : '}' { nestDepth = holeStack.Pop(); wideStack.Pop(); } -> type(RBRACE), popMode, popMode
     ;

@@ -519,3 +519,37 @@ fn each_linq_clause_is_its_own_boolean_context() {
         1.0
     );
 }
+
+#[test]
+fn nested_pattern_combinators_are_observed_in_source_order() {
+    // REGRESSION. `classify_rule` runs pre-order, so a nested pattern's combinator was
+    // observed AFTER its parent's: `v is (> 0 and < 10) or (> 20 and < 30)` came through as
+    // `or, and, and`, collapsing the two `and`s into one run for 2. Source order is
+    // `and, or, and` — three runs — and the boolean tracker only collapses ADJACENT
+    // same-kind operators.
+    //
+    // Pinned against the operator spelling of the same test, which scored 3 all along.
+    let pattern = analyze_clean(
+        "class C { static bool F(int v) => v is (> 0 and < 10) or (> 20 and < 30); }",
+    );
+    let operators = analyze_clean(
+        "class C { static bool F(int v) => (v > 0 && v < 10) || (v > 20 && v < 30); }",
+    );
+    assert_eq!(sum(&pattern), sum(&operators));
+    assert_eq!(sum(&pattern), 3.0);
+
+    // The guards: the flat cases must not change, since only nesting was mis-ordered.
+    assert_eq!(
+        sum(&analyze_clean(
+            "class C { static bool F(int v) => v is > 0 and < 10; }"
+        )),
+        1.0
+    );
+    assert_eq!(
+        sum(&analyze_clean(
+            "class C { static bool F(int v) => v is > 0 and < 10 or > 20; }"
+        )),
+        2.0,
+        "one operator change is two runs"
+    );
+}

@@ -81,7 +81,7 @@ Measured end to end through `mehen metrics`, not just the parser: ~179 s for the
 corpus. All 5 remaining files are the directive-split-expression case below.
 
 Note that a "clean" corpus count measures *parseability*, not correctness — this
-grammar has now produced **twenty-three** distinct silent misparses: structurally wrong
+grammar has now produced **twenty-seven** distinct silent misparses: structurally wrong
 trees with zero reported errors. Each was caught by a metric test or a parse-tree
 dump, never by an error count.
 
@@ -99,6 +99,10 @@ dump, never by an error count.
 | the hex escape was unbounded | `'\x12345'` — five digits — lexed as one clean character literal |
 | two independent integer suffix slots | `1uu`, `1LL`, `1uU` all lexed as ordinary integer literals |
 | the hole close consumed one brace at every width | `$$"""{{v}}"""` left its second `}` as literal text, a phantom Halstead operand |
+| …and so did the *format-clause* close | `$$"""{{n:D4}}"""` leaked the same brace after the non-format path was fixed |
+| a digit separator could be trailing | `1_` — not valid C# — lexed as an ordinary integer literal |
+| `INTERPOLATED_TEXT` absorbed line terminators | `$"a<LF>b"` was a clean parse where the plain `"a<LF>b"` is rejected |
+| the `u8` suffix was dropped from the operand key | `"x"u8` and `"x"` — a span and a string — collapsed into ONE Halstead operand |
 | `identifier_token` widened with `and`/`or`/`not` | `o is int and > 5` declared a variable named `and` |
 | `constant_pattern` listed before `discard_pattern` | a `_ =>` arm is an expression, not the discard |
 | …and before `var_pattern` | `var x =>` was a *constant* pattern, so `var_pattern` was unreachable — and an always-matching arm read as a decision |
@@ -112,12 +116,12 @@ dump, never by an error count.
 | `switch_statement`'s parens independently optional | `switch value { … }` parsed, though only the *expression* form is paren-free |
 | a local generic declaration loses to the expression statement | `List<int> l;` reads as chained comparison — **open, issue #218** |
 
-Nine *delete* code from the tree, eight *relabel* it, and six accept
+Ten *delete* code from the tree, nine *relabel* it, and eight accept
 source that is not valid C# at all. Every shape is invisible to an error count, which is why the metric tests carry the load here
 — see `crates/mehen-csharp/tests/lexer.rs`, whose assertions are all "did this
 token span eat the statements after it".
 
-Seven of the twenty-three share one root cause: **an alternative that is viable for the
+Seven of the twenty-seven share one root cause: **an alternative that is viable for the
 wrong input because a contextual keyword is a legal identifier.** Roslyn resolves
 each semantically — it knows whether `F` names a type, whether `and` resolves to a
 declared name, whether `record` is a keyword here — and a syntax-only grammar has

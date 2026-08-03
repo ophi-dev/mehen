@@ -24,51 +24,67 @@ impl Default for LineIndex {
 impl LineIndex {
     /// Build the row index for `text`.
     ///
-    /// A row ends at `\n` or at a `\r` not followed by one (so CRLF is one break, not
-    /// two). This is the **default** policy, and the one every tree-sitter-backed
-    /// analyzer needs: tree-sitter's own `Point::row` advances at LF only, and a space's
-    /// LOC span is set from those rows, so an index that counted more terminators than
-    /// the parser would claim rows the walker never routes tokens to.
+    /// A row ends at `\n`, and CRLF is one break rather than two. This is the
+    /// **default** policy, and the one every tree-sitter-backed analyzer needs:
+    /// tree-sitter's own `Point::row` advances at LF only, and a space's LOC span is set
+    /// from those rows, so an index counting more terminators than the parser would claim
+    /// rows the walker never routes tokens to.
     ///
-    /// Use [`LineIndex::with_unicode_separators`] for a language whose *lexer* also
-    /// treats NEL (U+0085), LS (U+2028), or PS (U+2029) as terminators — C# does
-    /// (ECMA-334 §6.3.1 lists all five). When the index and the lexer disagree, a file
-    /// parses correctly while reporting the wrong number of rows and attributing
-    /// declarations to rows they are not on.
+    /// A **lone** `\r` therefore does NOT end a row here. It did briefly, and that was
+    /// the same over-reach as counting the Unicode separators unconditionally: a Go or C
+    /// file containing a classic-Mac line ending gained a row in the index that
+    /// tree-sitter never reports, so a byte-derived `SourceSpan` landed on row 2 while the
+    /// LOC observations stayed on row 1.
+    ///
+    /// Use [`LineIndex::with_unicode_separators`] for a language whose *lexer* treats the
+    /// other four terminators as row breaks — C# does (ECMA-334 §6.3.1 lists all five).
+    /// When the index and the lexer disagree, a file parses correctly while reporting the
+    /// wrong number of rows and attributing declarations to rows they are not on.
     pub fn new(text: &str) -> Self {
         Self::build(text, false)
     }
 
-    /// As [`LineIndex::new`], but NEL (U+0085), LS (U+2028), and PS (U+2029) also end a
-    /// row.
+    /// As [`LineIndex::new`], but a lone `\r`, NEL (U+0085), LS (U+2028), and PS
+    /// (U+2029) also end a row.
     ///
     /// For a language whose lexer accepts them, which makes them real row breaks in that
     /// file. Kept opt-in rather than universal because the row *source* has to agree: a
     /// tree-sitter parser reports LF-only rows, so widening the index there produces
     /// spans whose `end_line` exceeds any row the walker observes — a phantom blank
     /// line.
+    ///
+    /// The name says "unicode separators" for the three that are; the lone `\r` rides
+    /// along because it needs the identical treatment and no caller wants one without the
+    /// other.
     pub fn with_unicode_separators(text: &str) -> Self {
         Self::build(text, true)
     }
 
     /// Scanning `char_indices` rather than bytes keeps the multi-byte separators from
-    /// being missed when `unicode_separators` is set.
-    fn build(text: &str, unicode_separators: bool) -> Self {
+    /// being missed when `extended` is set.
+    fn build(text: &str, extended: bool) -> Self {
         let mut line_starts = Vec::with_capacity(text.len() / 32 + 1);
         line_starts.push(0u32);
         let mut chars = text.char_indices().peekable();
         while let Some((i, c)) = chars.next() {
             let is_break = match c {
-                // CRLF is a single break. Consume the `\n` here so the pair does not
-                // push two row starts.
+                // CRLF is a single break under either policy. Consume the `\n` here so
+                // the pair does not push two row starts; the break itself is then
+                // unconditional, since the `\n` would have counted anyway.
                 '\r' => {
                     if chars.peek().is_some_and(|&(_, next)| next == '\n') {
                         chars.next();
+                        true
+                    } else {
+                        // A LONE `\r` follows the extended policy, exactly as the three
+                        // Unicode separators do and for the same reason: tree-sitter
+                        // reports LF-only rows, so counting it in the default index gives
+                        // a file a row the walker never observes.
+                        extended
                     }
-                    true
                 }
                 '\n' => true,
-                '\u{85}' | '\u{2028}' | '\u{2029}' => unicode_separators,
+                '\u{85}' | '\u{2028}' | '\u{2029}' => extended,
                 _ => false,
             };
             if is_break {
@@ -163,16 +179,41 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_carriage_return_is_a_row_break() {
-        // A previous revision deliberately excluded a bare `\r`, on the reasoning that
-        // CRLF works through its `\n` and a stray `\r` is a classic-Mac artifact. That
-        // was wrong for mehen's purpose: *lexers* treat it as a terminator (C#'s does,
-        // ECMA-334 §6.3.1), so excluding it made the row index disagree with the lexer
-        // that produced the tokens — a file split by `\r` parsed correctly while every
-        // declaration was attributed to row 1.
-        let index = LineIndex::new("a\rb");
-        assert_eq!(index.line_count(), 2);
-        assert_eq!(index.line_at(2), 2);
+    fn a_lone_carriage_return_follows_the_extended_policy() {
+        // This test has been inverted twice, and the history is the point.
+        //
+        // Originally a bare `\r` was excluded, on the reasoning that CRLF works through
+        // its `\n` and a stray `\r` is a classic-Mac artifact. That is wrong for a
+        // language whose *lexer* treats it as a terminator — C#'s does (ECMA-334 §6.3.1)
+        // — so the index disagreed with the lexer that produced the tokens and every
+        // declaration after a `\r` was attributed to the previous row.
+        //
+        // It was then made unconditional, which over-reached in the other direction:
+        // tree-sitter's `Point::row` advances at LF only, so a Go or C file with a
+        // classic-Mac line ending gained a row the walker never observes — a byte-derived
+        // `SourceSpan` on row 2 against LOC observations on row 1.
+        //
+        // Both are true at once, which means it is a *policy* question rather than a
+        // single right answer — exactly like the three Unicode separators, which had
+        // already been split for the identical reason. So the lone `\r` is gated the same
+        // way, and neither language is wrong about its own files.
+        assert_eq!(
+            LineIndex::new("a\rb").line_count(),
+            1,
+            "the default (tree-sitter) policy counts LF only"
+        );
+        let extended = LineIndex::with_unicode_separators("a\rb");
+        assert_eq!(extended.line_count(), 2);
+        assert_eq!(extended.line_at(2), 2);
+    }
+
+    #[test]
+    fn crlf_is_one_break_under_both_policies() {
+        // The `\r` of a CRLF pair breaks regardless, because the `\n` after it would
+        // have. Only a LONE `\r` is policy-dependent, so the pair must not become two
+        // rows under the extended policy nor zero under the default.
+        assert_eq!(LineIndex::new("a\r\nb").line_count(), 2);
+        assert_eq!(LineIndex::with_unicode_separators("a\r\nb").line_count(), 2);
     }
 
     #[test]

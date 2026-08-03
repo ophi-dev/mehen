@@ -675,3 +675,90 @@ fn a_width_two_hole_close_consumes_both_braces() {
         assert_eq!(lloc(source), 2.0, "{source}");
     }
 }
+
+#[test]
+fn a_width_two_format_clause_also_consumes_both_braces() {
+    // REGRESSION, and a gap in my own previous fix: the doubled hole close was added, but
+    // the *format-clause* close path was left consuming one brace. So
+    // `$$"""{{n:D4}}"""` still leaked its second `}` as literal text — one phantom Halstead
+    // operand that `$"""{n:D4}"""` does not have.
+    let vocab = |source: &str| {
+        let a = analyze_clean(source);
+        let h = mehen_report::metrics_json::halstead(&a.root.metrics);
+        h.n1 + h.n2
+    };
+    assert_eq!(
+        vocab("class C { static string F(int n) => $$\"\"\"{{n:D4}}\"\"\"; }"),
+        vocab("class C { static string F(int n) => $\"\"\"{n:D4}\"\"\"; }"),
+        "a format clause must cost the same at both hole widths"
+    );
+    // And an alignment clause, which shares the same close path.
+    assert_eq!(
+        lloc("class C { static string F(int n) => $$\"\"\"{{n,5}}\"\"\"; }"),
+        2.0
+    );
+}
+
+#[test]
+fn a_digit_separator_may_not_be_trailing() {
+    // REGRESSION. `[0-9_]*` let a literal end in a separator, so `1_` — not valid C# —
+    // lexed as an ordinary integer literal and the analyzer reported a clean parse.
+    for bad in ["1_", "0x1F_", "0b10_"] {
+        assert!(
+            !common::analyze(&format!("class C {{ static object F() => {bad}; }}"))
+                .diagnostics
+                .is_empty(),
+            "`{bad}` ends in a separator, which C# does not allow"
+        );
+    }
+
+    // What must keep working. Separators BETWEEN digits are legal, and C# 7.2 allows runs
+    // of them (`1___0` compiles), so the fix is `( '_'* [0-9] )*` rather than `'_'?`.
+    for good in [
+        "1_000",
+        "1__0",
+        "1___0",
+        "0x1_F",
+        "0b1010_1010",
+        "1_000L",
+        "0x1_Fu",
+    ] {
+        assert_eq!(
+            lloc(&format!("class C {{ static object F() => {good}; }}")),
+            2.0,
+            "`{good}` is a legal literal"
+        );
+    }
+
+    // A LEADING separator is not a literal at all — `_1` is a legal identifier, and
+    // narrowing the literal rule must not steal it.
+    // class(1) + method(1) + declaration(1) + return(1) = 4.
+    assert_eq!(
+        lloc("class C { static int F() { int _1 = 5; return _1; } }"),
+        4.0
+    );
+}
+
+#[test]
+fn a_regular_interpolated_string_cannot_span_rows() {
+    // REGRESSION. `INTERPOLATED_TEXT`'s negated set excluded only braces, quotes, and the
+    // backslash, so a physical newline was absorbed as text: `$"a<LF>b"` was a clean parse
+    // where the plain `"a<LF>b"` is correctly rejected. A regular interpolated string
+    // follows ordinary string-literal rules.
+    for terminator in ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'] {
+        let source = format!("class C {{ static string F() => $\"a{terminator}b\"; }}");
+        assert!(
+            !common::analyze(&source).diagnostics.is_empty(),
+            "U+{:04X} must not be absorbed into a regular interpolated string",
+            terminator as u32
+        );
+    }
+
+    // The verbatim and raw flavours ARE multi-line, which is what distinguishes them —
+    // narrowing the regular mode must not touch either.
+    assert_eq!(lloc("class C { static string F() => $@\"a\nb\"; }"), 2.0);
+    assert_eq!(
+        lloc("class C { static string F() => $\"\"\"\na\nb\n\"\"\"; }"),
+        2.0
+    );
+}

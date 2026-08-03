@@ -354,6 +354,16 @@ struct ChildHint {
     /// `indexer_declaration`, where the list is present, and reported 1 where the
     /// block-bodied form reported 0.
     accessor_args: u32,
+    /// This literal carries a UTF-8 suffix (`"text"u8`), so its operand key must include
+    /// it: `"text"u8` is a `ReadOnlySpan<byte>` while `"text"` is a `string`, so they are
+    /// two operands even though the literal token's text is identical. Keying on the text
+    /// alone collapsed them into one, undercounting vocabulary and volume.
+    ///
+    /// Set at the `utf8_*_literal_token` wrapper, which is the only place both the literal
+    /// and the suffix are visible — they are sibling terminals, so neither can see the
+    /// other. The suffix terminal itself still contributes nothing, so one C# literal
+    /// remains one operand *occurrence*.
+    in_utf8_literal: bool,
     /// The enclosing type's name, set on the direct children of a declaration that
     /// carries a **primary constructor** (`class C(int x)`) so the `parameter_list`
     /// child can open the synthetic constructor space and be *named* for the type.
@@ -520,6 +530,11 @@ impl Walker<'_> {
                 // `1` vs `1L` vs `0x1` are genuinely different operands.
                 let key = if tt == cl::IDENTIFIER {
                     normalize_identifier(text)
+                } else if hint.in_utf8_literal {
+                    // `"text"u8` is a `ReadOnlySpan<byte>`; `"text"` is a `string`. Two
+                    // values of two types, so two operands — the suffix has to be part of
+                    // the key even though it contributes no occurrence of its own.
+                    SmolStr::new(format!("{text}u8"))
                 } else {
                     SmolStr::new(text)
                 };
@@ -841,6 +856,30 @@ impl Walker<'_> {
                     | cp::RULE_IMPLICIT_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
             );
 
+        // A UTF-8 literal's suffix and its literal token are siblings, so the flag is set
+        // at their shared wrapper and read by the literal terminal one level down. Not
+        // propagated further, which costs nothing: the wrapper's only children are the
+        // literal and the suffix.
+        let in_utf8_literal = matches!(
+            ri,
+            cp::RULE_UTF8_STRING_LITERAL_TOKEN
+                | cp::RULE_UTF8_SINGLE_LINE_RAW_STRING_LITERAL_TOKEN
+                | cp::RULE_UTF8_MULTI_LINE_RAW_STRING_LITERAL_TOKEN
+        ) || (hint.in_utf8_literal
+            // The literal terminal is not the wrapper's direct child: Roslyn interposes
+            // dispatch rules (`utf8_string_literal_token -> string_literal_token ->
+            // regular_string_literal_token -> STRING_LIT`), so the flag has to survive
+            // them. Only those pure-dispatch layers carry it, which keeps it from
+            // leaking anywhere a real expression could appear.
+            && matches!(
+                ri,
+                cp::RULE_STRING_LITERAL_TOKEN
+                    | cp::RULE_REGULAR_STRING_LITERAL_TOKEN
+                    | cp::RULE_VERBATIM_STRING_LITERAL_TOKEN
+                    | cp::RULE_SINGLE_LINE_RAW_STRING_LITERAL_TOKEN
+                    | cp::RULE_MULTI_LINE_RAW_STRING_LITERAL_TOKEN
+            ));
+
         // The operator symbol in `public static C operator ++(C v)` is a direct
         // token of the declaration, so a non-propagating flag covers exactly the
         // signature's own terminals and leaves the parameter list and body alone.
@@ -908,9 +947,39 @@ impl Walker<'_> {
             cp::RULE_INITIALIZER_EXPRESSION | cp::RULE_COLLECTION_EXPRESSION
         );
 
+        // A binary pattern is `left op right`, and its operator belongs to the boolean
+        // *sequence* between its operands — see the note in `classify_rule`'s
+        // `RULE_PATTERN` arm. Observed here, after the first `pattern` child has been
+        // walked and before the second, which is what in-order means for this shape.
+        let pattern_combinator = (ri == cp::RULE_PATTERN)
+            .then(|| PatternContext::from_rule_node(ctx))
+            .flatten()
+            .and_then(|pattern| {
+                if pattern.kw_or_token().is_some() {
+                    Some("or")
+                } else if pattern.kw_and_token().is_some() {
+                    Some("and")
+                } else {
+                    None
+                }
+            });
+        let mut seen_operand = false;
+
         for child in ctx.children() {
             if isolate_elements {
                 self.current().cognitive.boolean_seq.last_op = None;
+            }
+            if let Some(op) = pattern_combinator
+                && child
+                    .as_rule()
+                    .is_some_and(|r| r.rule_index() == cp::RULE_PATTERN)
+            {
+                if seen_operand {
+                    // The right operand is next, so the operator sits here.
+                    self.current().cognitive.observe_boolean(op);
+                } else {
+                    seen_operand = true;
+                }
             }
             let child_hint = ChildHint {
                 is_else_branch: propagate_else,
@@ -922,6 +991,7 @@ impl Walker<'_> {
                 in_shift_operator,
                 in_type_delimiter,
                 in_operator_symbol,
+                in_utf8_literal,
                 in_creation_expression,
                 in_accessor_body,
                 returns_value,
@@ -1568,10 +1638,20 @@ impl Walker<'_> {
                     } else {
                         None
                     };
-                    if let Some(op) = combinator {
+                    if combinator.is_some() {
+                        // Cyclomatic and ABC are order-insensitive — each combinator adds
+                        // one wherever it is seen — so they stay here.
+                        //
+                        // `observe_boolean` does NOT: it tracks a *sequence*, and this
+                        // runs pre-order, so a nested pattern's operator arrives after its
+                        // parent's. `v is (> 0 and < 10) or (> 20 and < 30)` was observed
+                        // as `or, and, and` — collapsing the two `and`s into one run for 2
+                        // — where source order is `and, or, and` and scores 3, matching
+                        // the equivalent `(v > 0 && v < 10) || (v > 20 && v < 30)`. The
+                        // observation therefore happens *between the operands* in
+                        // `visit_children`.
                         self.current().cyclomatic.record_decision();
                         self.current().abc.record_condition();
-                        self.current().cognitive.observe_boolean(op);
                     }
                 }
             }
