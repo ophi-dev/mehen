@@ -2128,9 +2128,9 @@ dependencies = [
 
 [[package]]
 name = "mago-syntax-core"
-version = "1.43.0"
+version = "1.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29b7be35b1522d084ea7c98f302c4ba092db9c8068b3515accaed24ab0635681"
+checksum = "bf2c79172d33ba3805367f070c09afc8f167a1c53f6f846a139e29e56cd59e63"
 dependencies = [
  "mago-allocator",
  "mago-database",
