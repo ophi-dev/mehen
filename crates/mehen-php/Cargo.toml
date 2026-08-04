@@ -21,7 +21,7 @@ mehen-metrics = { workspace = true }
 # writes into (mago 1.42 replaced the external `bumpalo` dependency
 # with its own allocator).
 mago-syntax = "=1.43.0"
-mago-syntax-core = "=1.43.0"
+mago-syntax-core = "=1.45.0"
 mago-database = "=1.45.0"
 mago-span = "=1.45.0"
 mago-allocator = "=1.45.0"
