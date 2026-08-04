@@ -112,18 +112,17 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
   </Step>
   <Step title="Generate the parser modules">
     ```bash
-    # provides antlr4-rust-gen (or set MEHEN_ANTLR_RUST_GEN). Pin --version to
-    # the workspace `antlr4_runtime` version so the generator matches the
-    # runtime the checked-in modules were built against.
-    cargo install antlr-rust-runtime --version 0.25.0 --features codegen --bin antlr4-rust-gen --force
     cargo xtask antlr generate <lang>
     ```
 
+    xtask calls the workspace-pinned `antlr-rust-codegen` library directly. No external generator
+    binary is required; keep its exact workspace pin in lockstep with `antlr-rust-runtime`.
+
     The result lands in `crates/mehen-<lang>-parser/src/generated/`: the `<lang>_lexer.rs` and
-    `<lang>_parser.rs` modules plus a `semantics.json` sidecar emitted by the generator.
-    All three are checked in and drift-checked. The generated files carry their own lint and
-    `rustfmt::skip` attributes, so the parser crate includes them with plain `pub mod ...;`
-    declarations.
+    `<lang>_parser.rs` modules plus `decisions.json` and `semantics.json` sidecars emitted by the
+    generator. All four are checked in and drift-checked. The generated Rust files carry their own
+    lint and `rustfmt::skip` attributes, so the parser crate includes them with plain
+    `pub mod ...;` declarations.
 
     The same command also renders the parser crate's `README.md` from the shared
     `xtask/templates/parser-readme.md` template, using the target's display metadata (see the
@@ -135,9 +134,8 @@ tools can depend on the parser alone. The analyzer crate `mehen-<lang>` then dep
     <Warning>
     Never edit the generated modules **or the generated `README.md`** — both are regenerated from
     the grammar and the template. `cargo xtask antlr check-generated` guards drift (modules and
-    README) in CI when the toolchain is available (it skips, exit 0, where the tools are absent).
-    Keep the README's parse example in step with the compile-tested `//!` example in the crate's
-    `lib.rs`.
+    README) without a separately installed generator. Keep the README's parse example in step with
+    the compile-tested `//!` example in the crate's `lib.rs`.
     </Warning>
   </Step>
   <Step title="Add the dependencies">

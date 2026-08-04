@@ -11,13 +11,9 @@ This section documents how to build mehen, run its tests, and contribute changes
 - A recent stable Rust toolchain. See [rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
 - For tree-sitter grammar regeneration (Go / C / PowerShell): a Linux or macOS shell, or
   Windows via WSL.
-- For ANTLR grammar regeneration (Kotlin, Java, C#): the `antlr4-rust-gen` generator, whose version
-  must **match** the workspace runtime pin — the generated modules call the runtime's API directly,
-  so a mismatched generator produces code that does not compile against the pinned crate
-  (`cargo install antlr-rust-runtime --version 0.25.0 --features codegen --bin antlr4-rust-gen`).
-  The authoritative version is `GENERATOR_VERSION` in `xtask/src/antlr.rs`, which
-  `cargo xtask antlr generate` checks before running. Only needed to *regenerate* parsers; a normal
-  build uses the checked-in modules.
+- ANTLR grammar regeneration (Kotlin, Java, C#) needs no separately installed generator:
+  xtask links the workspace-pinned `antlr-rust-codegen` crate directly. Keep that exact pin in
+  lockstep with `antlr-rust-runtime`; a normal build still uses the checked-in modules.
 - For the C# grammar specifically, also [`uv`](https://docs.astral.sh/uv/): the Roslyn grammar is
   transformed by `crates/mehen-csharp-parser/grammar/prepare-grammar.py`, run as a step of
   generation via its PEP 723 inline metadata.

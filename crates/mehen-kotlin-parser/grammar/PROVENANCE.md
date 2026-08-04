@@ -35,7 +35,7 @@ comment in the `.g4` file.
 
 | Tool | Version |
 |---|---|
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.25.0` |
+| Rust runtime + codegen | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.28.0` |
 
 ## Regenerating
 
@@ -46,10 +46,13 @@ grammar or the runtime:
 cargo xtask antlr generate kotlin
 ```
 
-That command runs:
+That command configures `antlr_rust_codegen::Builder` with the equivalent of:
 
-```bash
-antlr4-rust-gen KotlinLexer.g4 KotlinParser.g4 --out-dir ../src/generated
+```rust
+Builder::new()
+    .grammar("KotlinLexer.g4")
+    .grammar("KotlinParser.g4")
+    .out_dir("../src/generated")
 ```
 
 The analyzer selects between the generated `kotlinFile`

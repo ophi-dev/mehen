@@ -18,7 +18,7 @@
       "coordinates": [
         {"kind": "parser-predicate", "rule": "annotationFieldValue", "rule_index": 58, "index": 0, "atn_state": null, "line": 360, "column": 1, "body": "this.IsNotIdentifierAssign()", "disposition": "hooked", "template": "Hook"},
         {"kind": "parser-predicate", "rule": "recordComponentList", "rule_index": 75, "index": 1, "atn_state": null, "line": 453, "column": 45, "body": "this.DoLastRecordComponent()", "disposition": "hooked", "template": "Hook"},
-        {"kind": "parser-action", "rule": "expression", "rule_index": 98, "index": null, "atn_state": 1410, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null}
+        {"kind": "parser-action", "rule": "expression", "rule_index": 98, "index": 0, "atn_state": 1410, "line": null, "column": null, "body": null, "disposition": "synthetic", "template": null}
       ]
     }
   ]

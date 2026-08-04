@@ -135,7 +135,7 @@ flat arena), so thread any parent-dependent context top-down as you walk.
 
 - **Upstream grammar:** [`{{ upstream_name }}`]({{ upstream_url }})
 - **Vendored `.g4` files + any local patches:** [`grammar/`](grammar/) — see [`grammar/PROVENANCE.md`](grammar/PROVENANCE.md) for the exact commit
-- **ANTLR Rust runtime + generator:** [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v{{ runtime_version }}`
+- **ANTLR Rust runtime + codegen:** [`antlr-rust-runtime`](https://crates.io/crates/antlr-rust-runtime) / [`antlr-rust-codegen`](https://crates.io/crates/antlr-rust-codegen) `v{{ runtime_version }}`
 
 ## License
 
