@@ -4,11 +4,11 @@
 #   ./run.sh slow    # as-published: record keyword is the catch-all `syntax_token`
 #   ./run.sh fixed   # record contextual keyword restored (default)
 #
-# Needs `antlr4-rust-gen` 0.25.0 on PATH — it must MATCH the runtime version
+# Needs `antlr4-rust-gen` 0.28.0 on PATH — it must MATCH the runtime version
 # pinned in Cargo.toml, or the generated modules call a different API than the
 # crate they link against (e.g. the 0.23 `SyntaxErrorEvent` change):
-#   cargo install antlr-rust-runtime --version 0.25.0 \
-#       --features codegen --bin antlr4-rust-gen --force
+#   cargo install antlr-rust-codegen --version 0.28.0 \
+#       --bin antlr4-rust-gen --force
 set -euo pipefail
 cd "$(dirname "$0")"
 

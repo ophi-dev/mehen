@@ -18,15 +18,15 @@ clap = { workspace = true }
 askama = "^0.16"
 serde_json = { workspace = true }
 tree-sitter = { workspace = true }
+antlr_rust_codegen = { workspace = true }
 # Kind-enum codegen reaches each grammar through the owning analyzer
 # crate's `__grammar_language()` accessor (see
 # `xtask/src/tree_sitter.rs::TARGETS`). The analyzer's grammar pin is
 # the single source of truth, so xtask deliberately does NOT depend on
 # `tree-sitter-c` or `tree-sitter-go` directly — that keeps the codegen
 # and the runtime parser locked to the same revision by construction.
-# Kotlin is ANTLR-backed (`xtask antlr generate kotlin`), which shells
-# out to external tools rather than linking a grammar crate, so it needs
-# no dependency here.
+# ANTLR codegen consumes vendored `.g4` files through the workspace-pinned
+# `antlr_rust_codegen` library above, so no language grammar crate is linked.
 mehen-c = { workspace = true }
 mehen-go = { workspace = true }
 

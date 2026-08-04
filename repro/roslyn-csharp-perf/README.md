@@ -10,8 +10,8 @@ Context: [`antlr-rust-runtime#248`](https://github.com/ophi-dev/antlr-rust-runti
 ## Quick start
 
 ```bash
-cargo install antlr-rust-runtime --version 0.25.0 \
-    --features codegen --bin antlr4-rust-gen --force
+cargo install antlr-rust-codegen --version 0.28.0 \
+    --bin antlr4-rust-gen --force
 
 ./run.sh slow     # as-published: record keyword is the catch-all `syntax_token`
 ./run.sh fixed    # record contextual keyword restored (default)

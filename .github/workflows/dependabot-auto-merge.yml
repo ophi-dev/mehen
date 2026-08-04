@@ -39,7 +39,7 @@ jobs:
           # PRs are classified correctly. release-please links a changelog
           # entry via the trailing "(#NN)", and a custom --subject replaces
           # GitHub's default subject entirely, so we re-add it by hand.
-          if printf '%s' "$NAMES" | grep -qiE '(^|,)[[:space:]]*(tree-sitter|oxc_|mago-|ruff_|sqruff-|pulldown-cmark|ra_ap_|antlr-rust-runtime)'; then
+          if printf '%s' "$NAMES" | grep -qiE '(^|,)[[:space:]]*(tree-sitter|oxc_|mago-|ruff_|sqruff-|pulldown-cmark|ra_ap_|antlr-rust-)'; then
             gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash \
               --subject "deps: ${TITLE#*: } (#${PR_NUMBER})"
           else

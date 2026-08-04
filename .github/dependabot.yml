@@ -28,3 +28,6 @@ updates:
       sqruff:
         patterns:
           - "sqruff-*"
+      antlr-rust:
+        patterns:
+          - "antlr-rust-*"

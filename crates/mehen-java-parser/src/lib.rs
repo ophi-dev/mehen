@@ -23,7 +23,7 @@
 //! The modules are produced by `cargo xtask antlr generate java` from the
 //! vendored grammar and checked in verbatim (see `src/generated/README.md`
 //! and `grammar/PROVENANCE.md`). `cargo xtask antlr check-generated` guards
-//! against drift in CI when the toolchain is available.
+//! against drift in CI.
 //!
 //! ## Semantic predicates — construct with hooks
 //!

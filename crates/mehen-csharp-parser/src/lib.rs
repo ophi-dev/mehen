@@ -23,14 +23,14 @@
 //! The generated modules are produced by `cargo xtask antlr generate csharp`
 //! and checked in verbatim (see `src/generated/README.md` and
 //! `grammar/PROVENANCE.md`). `cargo xtask antlr check-generated` guards against
-//! drift in CI when the toolchain is available.
+//! drift in CI.
 //!
 //! Generation has an extra step here: Roslyn publishes a *reference* grammar
 //! that ANTLR rejects as-is, so `grammar/prepare-grammar.py` derives a
 //! generatable lexer/parser pair from it first. Those derived `.g4` files are
 //! build artifacts (gitignored); the vendored `CSharp.Generated.g4` is the
 //! source of truth. The prep needs [`uv`](https://docs.astral.sh/uv/) in
-//! addition to `antlr4-rust-gen`.
+//! addition to the Rust toolchain.
 //!
 //! ## No hooks
 //!

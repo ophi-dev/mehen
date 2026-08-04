@@ -12,17 +12,18 @@ to the transform or produced by it:
 | `prepare-grammar.py` | the transform; a step of parser generation |
 | `CSharpLexer.g4`, `CSharpParser.g4`, `patterns.toml` | **derived** into a process-local scratch dir, gitignored here |
 
-`cargo run -p xtask -- antlr generate csharp` runs the transform and then
-`antlr4-rust-gen`, writing the Rust modules in `../src/generated/`. That needs
-[`uv`](https://docs.astral.sh/uv/) in addition to the generator; the script's PEP
-723 block pins the interpreter.
+`cargo run -p xtask -- antlr generate csharp` runs the transform and then the
+workspace-pinned `antlr-rust-codegen` library, writing the Rust modules in
+`../src/generated/`. The transform needs [`uv`](https://docs.astral.sh/uv/);
+the script's PEP 723 block pins the interpreter.
 
 The derived pair goes to a **process-local scratch directory**, and the generator
 runs there — not in this tree. Two xtask invocations in one checkout (a developer
 alongside CI, say) would otherwise each truncate and rewrite the same derived files
-while the other's generator was reading them. To inspect the derived grammar, run the
-script by hand: `uv run prepare-grammar.py CSharp.Generated.g4 --out-dir .`, which is
-also how you iterate on the transform.
+while the other's generator was reading them. To inspect the derived grammar, build
+xtask and pass that executable to the script's reachability callback:
+`cargo build -p xtask`, then
+`uv run prepare-grammar.py CSharp.Generated.g4 --out-dir . --xtask ../../../target/debug/xtask`.
 
 ## Source
 
@@ -163,16 +164,17 @@ it runs inside codegen, after harvesting, so pruning there still emits the 78 ju
 tokens (259 vs 181) and still mis-lexes.
 
 The split is therefore **analysis upstream, edit locally**. The prep no longer
-walks the grammar itself; it runs the generator as a reachability query and
-deletes exactly the rules reported:
+walks the grammar itself; it calls xtask's private, structured reachability
+query and deletes exactly the rules reported:
 
 ```text
-antlr4-rust-gen <parser>.g4 --entry-rule compilation_unit
+xtask antlr unreachable-rules <parser>.g4 --entry-rule compilation_unit
 ```
 
-`G4S078` is already a dry run — it needs neither `--prune-unreachable` nor a
-lexer nor an `--out-dir`, so the probe costs ~0.4 s and writes nothing. Iterated
-to a fixpoint, because removing a rule can orphan helpers only it called.
+The helper selects structured `G4S078` diagnostics and reads each exact rule-name
+byte span, so neither stderr nor human-readable diagnostic prose is an API.
+The query needs no lexer and is iterated to a fixpoint because removing a rule
+can orphan helpers only it called.
 
 This replaced a hand-rolled walker that scanned `\b[a-z_]\w*\b` over
 comment-stripped text. Both produced byte-identical output on this grammar, but
@@ -655,7 +657,7 @@ backslashes, and nested interpolated strings restoring the enclosing depth.
 
 | Tool | Version | Why |
 |---|---|---|
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.25.0` | Codegen; also computes rule reachability for the transform |
+| Rust runtime + codegen | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.28.0` | Runtime plus xtask-linked codegen and structured reachability |
 | [`uv`](https://docs.astral.sh/uv/) | any recent | Runs `prepare-grammar.py`; the script's PEP 723 block pins the interpreter |
 
 Unlike the other ANTLR targets, C# needs `uv`: its grammar is derived rather than
@@ -665,6 +667,5 @@ missing `uv` does not block Kotlin/Java regeneration.
 Regenerate with:
 
 ```bash
-cargo install antlr-rust-runtime --version 0.25.0 --features codegen --bin antlr4-rust-gen --force
 cargo run -p xtask -- antlr generate csharp
 ```

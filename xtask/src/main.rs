@@ -17,6 +17,7 @@ mod metric_contributions;
 mod tree_sitter;
 
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "xtask", about = "Mehen developer commands.")]
@@ -77,9 +78,6 @@ struct AntlrArgs {
 enum AntlrCommand {
     /// Regenerate the Rust lexer/parser modules for one ANTLR-backed
     /// language into its `src/generated/` dir, or `--all` for every one.
-    ///
-    /// Requires `antlr4-rust-gen` on PATH or in `MEHEN_ANTLR_RUST_GEN`.
-    /// See `xtask/src/antlr.rs`.
     Generate {
         /// Language slug (e.g. `kotlin`). Required unless `--all` is set.
         language: Option<String>,
@@ -88,10 +86,15 @@ enum AntlrCommand {
         all: bool,
     },
     /// Verify the checked-in generated modules match a fresh render from
-    /// the vendored grammar. Exits non-zero on drift. Skipped (exit 0)
-    /// when the external toolchain is unavailable, so CI only enforces
-    /// drift where the tools are installed.
+    /// the vendored grammar. Exits non-zero on drift.
     CheckGenerated,
+    /// Return parser rules unreachable from one entry rule.
+    #[command(hide = true)]
+    UnreachableRules {
+        grammar: PathBuf,
+        #[arg(long)]
+        entry_rule: String,
+    },
 }
 
 fn main() {
@@ -121,6 +124,15 @@ fn main() {
             AntlrCommand::CheckGenerated => {
                 if let Err(err) = run_antlr_check_generated() {
                     eprintln!("xtask antlr check-generated: {err}");
+                    std::process::exit(1);
+                }
+            }
+            AntlrCommand::UnreachableRules {
+                grammar,
+                entry_rule,
+            } => {
+                if let Err(err) = run_antlr_unreachable_rules(&grammar, &entry_rule) {
+                    eprintln!("xtask antlr unreachable-rules: {err}");
                     std::process::exit(1);
                 }
             }
@@ -219,25 +231,23 @@ fn run_antlr_generate(language: Option<&str>, all: bool) -> Result<(), String> {
 
 fn run_antlr_check_generated() -> Result<(), String> {
     let workspace = antlr::workspace_root().map_err(|e| e.to_string())?;
-    match antlr::check_generated(&workspace)? {
-        None => {
-            println!(
-                "skipped: antlr4-rust-gen unavailable (install it or set \
-                 MEHEN_ANTLR_RUST_GEN to enable the drift check)"
-            );
-            Ok(())
-        }
-        Some(drifted) if drifted.is_empty() => {
-            println!("ok: every generated ANTLR module matches the vendored grammar");
-            Ok(())
-        }
-        Some(drifted) => {
-            let names: Vec<_> = drifted.iter().map(|t| t.slug).collect();
-            Err(format!(
-                "drift detected for: {}. \
-                 Re-run `cargo xtask antlr generate --all` and commit the result.",
-                names.join(", ")
-            ))
-        }
+    let drifted = antlr::check_generated(&workspace)?;
+    if drifted.is_empty() {
+        println!("ok: every generated ANTLR module matches the vendored grammar");
+        Ok(())
+    } else {
+        let names: Vec<_> = drifted.iter().map(|t| t.slug).collect();
+        Err(format!(
+            "drift detected for: {}. \
+             Re-run `cargo xtask antlr generate --all` and commit the result.",
+            names.join(", ")
+        ))
     }
+}
+
+fn run_antlr_unreachable_rules(grammar: &Path, entry_rule: &str) -> Result<(), String> {
+    for rule in antlr::unreachable_rules(grammar, entry_rule)? {
+        println!("{rule}");
+    }
+    Ok(())
 }

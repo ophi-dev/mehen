@@ -46,7 +46,7 @@ A separate performance repair also lives here: Roslyn writes every type body as
 type (128 members: 22.5 s → 0.37 s once the braces are a balanced pair).
 
 This script is a **step of parser generation**, not a one-off: `cargo xtask antlr
-generate csharp` runs it before `antlr4-rust-gen`. Only the vendored
+generate csharp` runs it before the linked Rust code generator. Only the vendored
 `CSharp.Generated.g4` is checked in; the `CSharpLexer.g4` / `CSharpParser.g4` pair
 and `patterns.toml` it emits are gitignored build artifacts, so the upstream
 grammar stays the single source of truth exactly as the raw `.g4` does for Kotlin
@@ -62,20 +62,20 @@ mehen is the demonstrative consumer of antlr-rust-runtime, so pushing its
 
 Reachability is delegated, not reimplemented: the generator's `G4S078` analysis
 walks the real grammar AST, so it distinguishes a rule reference from a word
-inside an action, a label, or an argument list. Hence `antlr4-rust-gen` is a hard
-requirement (`--generator`, `$MEHEN_ANTLR_RUST_GEN`, or `PATH`) — see
-`unreachable_rules`.
+inside an action, a label, or an argument list. xtask exposes that analysis to
+this Python transform through a private `antlr unreachable-rules` helper backed
+by structured codegen diagnostics — see `unreachable_rules`.
 
 Usage:
-    uv run prepare-grammar.py CSharp.Generated.g4 --out-dir .
+    cargo build -p xtask
+    uv run prepare-grammar.py CSharp.Generated.g4 --out-dir . \
+        --xtask ../../../target/debug/xtask
 
 Running it by hand is only for iterating on the transform.
 """
 
 import argparse
-import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -953,28 +953,19 @@ ENTRY_RULE_ANCHORED = (
     "  ;\n"
 )
 
-# Matches the generator's `G4S078` warning line, e.g.
-#     warning[G4S078]: CSharpParser.g4:1160:0: parser rule xml_node is
-#     unreachable from entry rule compilation_unit
-UNREACHABLE_WARNING = re.compile(
-    r"^warning\[G4S078\]:.*?: parser rule ([A-Za-z_][A-Za-z_0-9]*) is unreachable\b",
-    re.M,
-)
-
-
-def unreachable_rules(src: str, entry: str, generator: str) -> list[str]:
+def unreachable_rules(src: str, entry: str, xtask: Path) -> list[str]:
     """Ask the generator which parser rules are unreachable from `entry`.
 
-    The reachability analysis is the generator's (runtime 0.24.0, upstream #262 /
-    #264): it walks the real grammar AST, so it distinguishes a rule reference
-    from a word inside an action, a label, or an argument list. An earlier
-    hand-rolled version here scanned `\\b[a-z_]\\w*\\b` over comment-stripped
-    text, which happened to agree on this grammar but is not correct in general —
-    and it produced a false positive on Kotlin's `script`.
+    The reachability analysis is `antlr-rust-codegen`'s (upstream #262 / #264):
+    it walks the real grammar AST, so it distinguishes a rule reference from a
+    word inside an action, a label, or an argument list. An earlier hand-rolled
+    version here scanned `\\b[a-z_]\\w*\\b` over comment-stripped text, which
+    happened to agree on this grammar but is not correct in general — and it
+    produced a false positive on Kotlin's `script`.
 
-    The `G4S078` warning is itself the dry run: it needs only `--entry-rule`, not
-    `--prune-unreachable`, and runs on the parser grammar alone with no
-    `--out-dir`, so this is a ~0.4 s query that writes nothing.
+    xtask consumes the generator's structured `G4S078` diagnostics and returns
+    only the exact rule-name spans, one per stdout line. The warning's display
+    text is deliberately not a protocol.
     """
     # ANTLR requires the filename to match the grammar declaration, and at this
     # point in the pipeline the source still carries its upstream name
@@ -989,24 +980,38 @@ def unreachable_rules(src: str, entry: str, generator: str) -> list[str]:
         # reachability pass does not need it, and dropping it keeps the probe to
         # a single self-contained file.
         probe.write_text(re.sub(r"^options \{[^}]*\}\n", "", src, flags=re.M))
-        result = subprocess.run(
-            [generator, probe.name, "--entry-rule", entry],
-            cwd=tmp,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    xtask,
+                    "antlr",
+                    "unreachable-rules",
+                    probe.name,
+                    "--entry-rule",
+                    entry,
+                ],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as error:
+            raise RuntimeError(f"failed to launch reachability helper {xtask}: {error}") from error
     # A hard generator failure here would silently look like "nothing is
     # unreachable", so surface it instead of pruning zero rules.
-    if result.returncode != 0 and not UNREACHABLE_WARNING.search(result.stderr):
+    if result.returncode != 0:
         raise RuntimeError(
-            f"reachability probe failed ({generator} exited {result.returncode}):\n"
+            f"reachability probe failed ({xtask} exited {result.returncode}):\n"
             f"{result.stderr.strip()[:2000]}"
         )
-    return sorted(set(UNREACHABLE_WARNING.findall(result.stderr)))
+    rules = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    invalid = [name for name in rules if not re.fullmatch(r"[a-z][A-Za-z_0-9]*", name)]
+    if invalid:
+        raise RuntimeError(f"reachability helper returned invalid rule names: {invalid!r}")
+    return sorted(set(rules))
 
 
-def prune_unreachable(src: str, entry: str, generator: str) -> tuple[str, list[str]]:
+def prune_unreachable(src: str, entry: str, xtask: Path) -> tuple[str, list[str]]:
     """Delete the rules the generator reports unreachable, to a fixpoint.
 
     Tokenizing the lexical wrapper rules (`decimal_integer_literal_token` →
@@ -1029,7 +1034,7 @@ def prune_unreachable(src: str, entry: str, generator: str) -> tuple[str, list[s
     generator reports one round at a time.
     """
     removed: list[str] = []
-    while dead := unreachable_rules(src, entry, generator):
+    while dead := unreachable_rules(src, entry, xtask):
         for name in dead:
             if match := rule_span(src, name):
                 src = src[: match.start()] + src[match.end() :]
@@ -1044,29 +1049,17 @@ def main() -> int:
     ap.add_argument("source", type=Path, help="upstream CSharp.Generated.g4")
     ap.add_argument("--out-dir", type=Path, default=Path("."))
     ap.add_argument(
-        "--generator",
-        default=None,
-        help=(
-            "antlr4-rust-gen as a path or a bare command name, used to compute "
-            "rule reachability (default: $MEHEN_ANTLR_RUST_GEN, else PATH)"
-        ),
+        "--xtask",
+        type=Path,
+        required=True,
+        help="path to the running xtask binary, used for structured rule reachability",
     )
     args = ap.parse_args()
 
-    # The generator owns the reachability analysis (see `unreachable_rules`), so
-    # it is a hard requirement rather than an optional accelerator — resolve it
-    # up front so a missing tool fails before any work is done.
-    #
-    # A bare command name is accepted (xtask passes one when the generator came
-    # from PATH rather than MEHEN_ANTLR_RUST_GEN), so resolve through `which`
-    # before rejecting: a name that is not an existing file may still be a
-    # perfectly good executable on PATH.
-    requested = args.generator or os.environ.get("MEHEN_ANTLR_RUST_GEN") or "antlr4-rust-gen"
-    generator = requested if Path(requested).is_file() else shutil.which(requested)
-    if not generator:
+    xtask = args.xtask.expanduser().resolve()
+    if not xtask.is_file():
         print(
-            f"error: {requested!r} not found; pass --generator, set "
-            "MEHEN_ANTLR_RUST_GEN, or put antlr4-rust-gen on PATH",
+            f"error: xtask helper {xtask} is not a file",
             file=sys.stderr,
         )
         return 1
@@ -1289,7 +1282,7 @@ def main() -> int:
 
     # -- 3b. Prune rules the tokenization orphaned ---------------------------
     try:
-        src, pruned = prune_unreachable(src, ENTRY_RULE, generator)
+        src, pruned = prune_unreachable(src, ENTRY_RULE, xtask)
     except RuntimeError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

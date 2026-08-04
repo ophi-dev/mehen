@@ -81,10 +81,11 @@ blocks without duplicating language logic.
 
 ## ANTLR-backed analyzers
 
-Kotlin, Java, and C# run through ANTLR v4 grammars generated to Rust ahead of time and checked in, so a
-normal `cargo build` never needs `antlr4-rust-gen`. The shared `mehen-antlr` crate carries the
-concerns every ANTLR analyzer needs but tree-sitter and the language-specific parsers handle
-differently:
+Kotlin, Java, and C# run through ANTLR v4 grammars generated to Rust ahead of time and checked in.
+A normal `cargo build` uses those modules without compiling codegen; `cargo xtask antlr generate`
+links the workspace-pinned `antlr-rust-codegen` crate directly. The shared `mehen-antlr` crate
+carries the concerns every ANTLR analyzer needs but tree-sitter and the language-specific parsers
+handle differently:
 
 - **Span conversion.** ANTLR reports positions in character offsets; mehen's spans are byte offsets.
   `mehen-antlr` converts once, centrally.

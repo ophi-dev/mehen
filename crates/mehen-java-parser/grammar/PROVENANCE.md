@@ -37,8 +37,8 @@ upstream's call in `antlr/grammars-v4`.
 Both steps need `--entry-rule compilationUnit`, which generation passes: without
 it the generator conservatively treats every top-level rule that reaches `EOF` as
 its own entry, so no rule can ever be unreachable. `--prune-unreachable` then
-removes exactly the reported set. Requires runtime 0.24.0 (upstream #262/#264);
-pruning saved ~19 KB of generated Rust here.
+removes exactly the reported set (upstream #262/#264); pruning saved ~19 KB of
+generated Rust here.
 
 ## Local patches
 
@@ -73,7 +73,7 @@ out of the grammar:
 
 | Tool | Version |
 |---|---|
-| Rust runtime + generator | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.25.0` |
+| Rust runtime + codegen | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.28.0` |
 
 ## Regenerating
 
@@ -81,14 +81,16 @@ Never hand-edit the files in `../src/generated/`. To regenerate after bumping
 the grammar or the runtime:
 
 ```bash
-cargo install antlr-rust-runtime --version 0.25.0 --features codegen --bin antlr4-rust-gen --force
 cargo run -p xtask -- antlr generate java
 ```
 
-That command runs:
+That command configures `antlr_rust_codegen::Builder` with the equivalent of:
 
-```bash
-antlr4-rust-gen JavaLexer.g4 JavaParser.g4 --out-dir ../src/generated
+```rust
+Builder::new()
+    .grammar("JavaLexer.g4")
+    .grammar("JavaParser.g4")
+    .out_dir("../src/generated")
 ```
 
 The analyzer parses via the generated `compilationUnit`

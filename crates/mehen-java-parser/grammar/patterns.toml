@@ -1,7 +1,8 @@
 version = 1
 
-# Semantic-helper lowerings for the grammars-v4 Java grammar (passed to
-# `antlr4-rust-gen --sem-patterns` by `cargo xtask antlr generate java`).
+# Semantic-helper lowerings for the grammars-v4 Java grammar (loaded through
+# `antlr_rust_codegen::Builder::semantic_patterns` by
+# `cargo xtask antlr generate java`).
 #
 # The grammar's `superClass = JavaParserBase` declares two `this.…()` helper
 # predicates whose reference implementation lives in the upstream Java class

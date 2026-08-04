@@ -2,32 +2,31 @@
 //!
 //! The ANTLR analogue of `xtask/src/tree_sitter.rs`. Where the tree-sitter
 //! generator renders a kind-enum from a linked grammar crate, the ANTLR path
-//! invokes **`antlr4-rust-gen`** (from `ophi-dev/antlr-rust-runtime`) directly
-//! over a vendored `.g4` grammar.
+//! calls the workspace-pinned `antlr-rust-codegen` library directly over a
+//! vendored `.g4` grammar.
 //!
 //! The generated modules are checked in verbatim under
 //! `crates/mehen-<lang>-parser/src/generated/` (see that dir's README). The
 //! generator emits lint and `rustfmt::skip` attributes inside each file, so
 //! the owning parser crate includes them as plain modules.
 //!
-//! Because this path needs the generator binary, which a normal `cargo build`
-//! does not require, the tool is discovered at run time and a missing tool
-//! yields a clear, actionable error.
-//! `check-generated` treats missing tools as "skipped" (exit 0) so the drift
-//! guard only runs where the toolchain is installed.
+//! The generator is an xtask-only dependency. A normal `cargo build` targets
+//! the CLI default member and uses the checked-in modules, while
+//! `check-generated` is always available without a separately installed binary.
 
+use antlr_rust_codegen::{Builder, Error as CodegenError, Severity, UnknownSemanticPolicy};
 use askama::Template;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
 
-/// The `antlr-rust-runtime` version the checked-in modules were generated
-/// against — must match the `antlr4_runtime` pin in the workspace
-/// `[workspace.dependencies]` (root `Cargo.toml`). Installing an *unpinned*
-/// `antlr4-rust-gen` would fetch the latest crate, which after a runtime
-/// release can regenerate modules that no longer match the pinned runtime and
-/// silently drift. Bump this in lockstep with that pin.
-const GENERATOR_VERSION: &str = "0.25.0";
+/// The codegen package version recorded in generated parser-crate docs.
+///
+/// `Cargo.toml` pins the codegen and runtime packages in lockstep. Reading the
+/// linked package's version removes the second hand-maintained version string
+/// that the old external-binary integration required.
+const CODEGEN_VERSION: &str = antlr_rust_codegen::VERSION;
 
 /// Askama model for a parser crate's generated `README.md`.
 ///
@@ -67,7 +66,7 @@ struct ReadmeTemplate<'a> {
     upstream_name: &'a str,
     /// Upstream grammar project URL.
     upstream_url: &'a str,
-    /// Pinned ANTLR Rust runtime + generator version.
+    /// Pinned ANTLR Rust runtime + codegen version.
     runtime_version: &'a str,
     /// Hand-written lexer hooks (port of the upstream `<Lang>LexerBase`),
     /// when the grammar needs one. Switches the README examples to
@@ -160,7 +159,7 @@ pub(crate) struct AntlrTarget {
     /// than a checked-in source. The script is invoked as
     ///
     /// ```text
-    /// python3 <script> <prep_source> --out-dir . --generator <antlr4-rust-gen>
+    /// uv run --script <script> <prep_source> --out-dir . --xtask <current-exe>
     /// ```
     ///
     /// with `current_dir` set to `grammar_dir`.
@@ -279,68 +278,6 @@ pub(crate) fn target_for(slug: &str) -> Option<&'static AntlrTarget> {
     TARGETS.iter().find(|t| t.slug == slug)
 }
 
-/// Locations of the external tools, resolved once.
-struct Toolchain {
-    /// How to invoke `antlr4-rust-gen` (either a bare command on PATH or an
-    /// explicit path).
-    rust_gen: PathBuf,
-    /// Whether `uv` is available, needed only by targets with a
-    /// [`AntlrTarget::prep_script`]. `uv run --script` reads the script's PEP 723
-    /// block to provision a matching interpreter, so the prep does not depend on
-    /// whichever `python3` happens to be on `PATH`.
-    has_uv: bool,
-}
-
-/// Discover the external toolchain from the environment.
-///
-/// - `MEHEN_ANTLR_RUST_GEN` → path to the `antlr4-rust-gen` binary; if unset,
-///   the binary is expected on `PATH` (install the matching generator via
-///   `cargo install antlr-rust-runtime --version <GENERATOR_VERSION>`).
-///
-/// Returns `Ok(None)` when a tool is missing so callers can choose to skip
-/// (check) or error (generate).
-fn discover_toolchain() -> Result<Option<Toolchain>, String> {
-    let rust_gen = match env::var_os("MEHEN_ANTLR_RUST_GEN") {
-        Some(p) => {
-            let path = PathBuf::from(p);
-            if !path.is_file() {
-                return Err(format!(
-                    "MEHEN_ANTLR_RUST_GEN points at `{}`, which is not a file",
-                    path.display()
-                ));
-            }
-            // Canonicalize now: the generator runs with `current_dir` set to the
-            // grammar directory, so a *relative* env path (e.g.
-            // `target/debug/antlr4-rust-gen`) validated here from the caller's
-            // cwd would otherwise fail to launch when re-resolved under
-            // `crates/<lang>-parser/grammar`. An absolute path keeps it stable
-            // across the cwd change.
-            fs::canonicalize(&path).map_err(|e| {
-                format!(
-                    "MEHEN_ANTLR_RUST_GEN points at `{}`, which could not be resolved: {e}",
-                    path.display()
-                )
-            })?
-        }
-        // A bare command name is resolved via PATH by the OS at spawn time, so
-        // it is unaffected by the generator's `current_dir`.
-        None => PathBuf::from("antlr4-rust-gen"),
-    };
-
-    // Probe now so a missing executable reads as "toolchain unavailable"
-    // (and skips `check-generated`) rather than as a hard process error.
-    if !can_launch(&rust_gen, "--help") {
-        return Ok(None);
-    }
-
-    // Probed rather than required: only C# has a prep script, so a missing `uv`
-    // must not make Kotlin/Java generation unavailable. `run_prep` turns it into
-    // an actionable error for the targets that need it.
-    let has_uv = can_launch("uv", "--version");
-
-    Ok(Some(Toolchain { rust_gen, has_uv }))
-}
-
 /// Whether `program arg` can be launched and exits without an I/O error
 /// (the program exists and is executable). The exit *status* is ignored —
 /// some tools return non-zero for `--help`/`-version` — we only care that
@@ -364,8 +301,9 @@ fn can_launch(program: impl AsRef<std::ffi::OsStr>, arg: &str) -> bool {
 ///
 /// The script is run through `uv run --script`, which reads its PEP 723 block to
 /// provision a matching interpreter rather than inheriting the ambient
-/// `python3`. It receives the resolved generator path because it delegates rule
-/// reachability to `antlr4-rust-gen` instead of reimplementing the analysis.
+/// `python3`. It receives this xtask executable's path because the transform
+/// delegates rule reachability to [`unreachable_rules`] instead of
+/// reimplementing the grammar analysis in Python.
 ///
 /// `out_dir` is a **process-local** scratch directory, not `grammar_dir`. Writing the
 /// derived pair into the shared grammar directory raced: `generate` and
@@ -374,27 +312,24 @@ fn can_launch(program: impl AsRef<std::ffi::OsStr>, arg: &str) -> bool {
 /// `CSharpLexer.g4` / `CSharpParser.g4` / `patterns.toml` while the other's generator
 /// was reading them — intermittent generation failures or false drift. The generated
 /// Rust output was already process-scoped; this closes the same gap for its input.
-fn run_prep(
-    grammar_dir: &Path,
-    out_dir: &Path,
-    target: &AntlrTarget,
-    tools: &Toolchain,
-) -> Result<(), String> {
+fn run_prep(grammar_dir: &Path, out_dir: &Path, target: &AntlrTarget) -> Result<(), String> {
     let (Some(script), Some(source)) = (target.prep_script, target.prep_source) else {
         return Ok(());
     };
-    if !tools.has_uv {
+    if !can_launch("uv", "--version") {
         return Err(format!(
             "`{}` needs a grammar-preparation step ({script}), which runs via `uv`.\n\
              Install it: https://docs.astral.sh/uv/getting-started/installation/",
             target.slug
         ));
     }
+    let xtask = env::current_exe()
+        .map_err(|e| format!("failed to resolve the running xtask executable: {e}"))?;
     let status = Command::new("uv")
         .args(["run", "--script", script, source, "--out-dir"])
         .arg(out_dir)
-        .arg("--generator")
-        .arg(&tools.rust_gen)
+        .arg("--xtask")
+        .arg(xtask)
         .current_dir(grammar_dir)
         .status()
         .map_err(|e| format!("failed to launch `uv run --script {script}`: {e}"))?;
@@ -418,23 +353,8 @@ fn scratch_dir(kind: &str, slug: &str) -> PathBuf {
     env::temp_dir().join(format!("mehen-antlr-{kind}-{slug}-{}", std::process::id()))
 }
 
-/// Human-readable instructions printed when the toolchain is unavailable.
-///
-/// Pins `--version` to [`GENERATOR_VERSION`] so following the hint installs the
-/// generator matching the workspace runtime pin, not whatever is latest on
-/// crates.io (an unpinned install can regenerate drifting modules after a
-/// runtime release).
-fn toolchain_help() -> String {
-    format!(
-        "ANTLR codegen needs `antlr4-rust-gen`: install it with \
-         `cargo install antlr-rust-runtime --version {GENERATOR_VERSION} \
-         --features codegen --bin antlr4-rust-gen`, \
-         or set MEHEN_ANTLR_RUST_GEN to its path"
-    )
-}
-
 /// PascalCase grammar name → the generated module's snake_case name
-/// (`KotlinLexer` → `kotlin_lexer`), matching what `antlr4-rust-gen` emits and
+/// (`KotlinLexer` → `kotlin_lexer`), matching what the code generator emits and
 /// what the parser crate's `lib.rs` declares. Handles acronym runs the usual
 /// way (`HTMLParser` → `html_parser`).
 fn to_snake_case(pascal: &str) -> String {
@@ -485,7 +405,7 @@ fn render_readme(target: &AntlrTarget, repo_url: &str) -> Result<String, String>
         sample_source: target.sample_source,
         upstream_name: target.upstream_name,
         upstream_url: target.upstream_url,
-        runtime_version: GENERATOR_VERSION,
+        runtime_version: CODEGEN_VERSION,
         lexer_hooks: target.lexer_hooks.map(HooksReadme::from_path),
         parser_hooks: target.parser_hooks.map(HooksReadme::from_path),
     };
@@ -504,19 +424,9 @@ fn repo_url() -> &'static str {
 
 /// Generate the Rust modules for one target into its `src/generated/` dir.
 pub(crate) fn generate(workspace: &Path, target: &AntlrTarget) -> Result<Vec<PathBuf>, String> {
-    let toolchain = discover_toolchain()?
-        .ok_or_else(|| format!("toolchain unavailable.\n{}", toolchain_help()))?;
-    generate_with(workspace, target, &toolchain)
-}
-
-fn generate_with(
-    workspace: &Path,
-    target: &AntlrTarget,
-    tools: &Toolchain,
-) -> Result<Vec<PathBuf>, String> {
     let generated_dir = target.generated_dir(workspace);
     fs::create_dir_all(&generated_dir).map_err(|e| e.to_string())?;
-    run_pipeline_into(workspace, target, tools, &generated_dir)?;
+    run_pipeline_into(workspace, target, &generated_dir)?;
 
     // Render the crate README from the shared template alongside the modules,
     // so every ANTLR parser crate ships consume-me docs that stay in step with
@@ -527,8 +437,8 @@ fn generate_with(
         .map_err(|e| format!("failed writing {}: {e}", readme_path.display()))?;
 
     // The generator writes one module per grammar (named after the grammar)
-    // plus a `semantics.json` sidecar; report every checked-in artifact, plus
-    // the rendered README.
+    // plus JSON sidecars; report every checked-in artifact and the rendered
+    // README.
     let mut written: Vec<PathBuf> = fs::read_dir(&generated_dir)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -540,29 +450,18 @@ fn generate_with(
 }
 
 /// Compare checked-in generated modules against a fresh render in a scratch
-/// dir. Returns the list of drifted targets. When the toolchain is missing,
-/// returns `Ok(None)` so the caller can report "skipped" rather than fail.
-pub(crate) fn check_generated(
-    workspace: &Path,
-) -> Result<Option<Vec<&'static AntlrTarget>>, String> {
-    let Some(tools) = discover_toolchain()? else {
-        return Ok(None);
-    };
-
+/// dir. Returns the list of drifted targets.
+pub(crate) fn check_generated(workspace: &Path) -> Result<Vec<&'static AntlrTarget>, String> {
     let mut drifted = Vec::new();
     for target in TARGETS {
-        if target_has_drift(workspace, target, &tools)? {
+        if target_has_drift(workspace, target)? {
             drifted.push(target);
         }
     }
-    Ok(Some(drifted))
+    Ok(drifted)
 }
 
-fn target_has_drift(
-    workspace: &Path,
-    target: &AntlrTarget,
-    tools: &Toolchain,
-) -> Result<bool, String> {
+fn target_has_drift(workspace: &Path, target: &AntlrTarget) -> Result<bool, String> {
     let generated_dir = target.generated_dir(workspace);
     // Snapshot the checked-in modules.
     let before = read_generated(&generated_dir)?;
@@ -574,7 +473,7 @@ fn target_has_drift(
     // Render straight into `scratch` to avoid mutating the checked-in files.
     // `run_pipeline_into` takes the output dir explicitly and never consults
     // `target.generated_dir()`, so the target can be passed as-is.
-    run_pipeline_into(workspace, target, tools, &scratch)?;
+    run_pipeline_into(workspace, target, &scratch)?;
 
     let after = read_generated(&scratch)?;
     let _ = fs::remove_dir_all(&scratch);
@@ -600,12 +499,7 @@ fn target_has_drift(
 /// semantic predicates were silently assumed true, so any grammar helper or
 /// option not covered by the target's `sem_patterns`/`option_hooks` fails
 /// generation instead of degrading parse fidelity.
-fn run_pipeline_into(
-    workspace: &Path,
-    target: &AntlrTarget,
-    tools: &Toolchain,
-    out_dir: &Path,
-) -> Result<(), String> {
+fn run_pipeline_into(workspace: &Path, target: &AntlrTarget, out_dir: &Path) -> Result<(), String> {
     let grammar_dir = workspace.join(target.grammar_dir);
 
     // A target with a preparation step derives its `.g4` pair (and `patterns.toml`)
@@ -626,19 +520,17 @@ fn run_pipeline_into(
         &grammar_dir,
         prep_dir.as_deref().unwrap_or(&grammar_dir),
         target,
-        tools,
     )?;
     // Where the generator resolves the `.g4` pair and `patterns.toml` from.
     let source_dir = prep_dir.as_deref().unwrap_or(&grammar_dir);
 
-    let mut cmd = Command::new(&tools.rust_gen);
-    cmd.arg(target.lexer_g4)
-        .arg(target.parser_g4)
-        .arg("--out-dir")
-        .arg(out_dir)
-        .arg("--sem-unknown")
-        .arg("error")
-        .arg("--require-full-semantics")
+    let mut builder = Builder::new()
+        .grammar(source_dir.join(target.lexer_g4))
+        .grammar(source_dir.join(target.parser_g4))
+        .library_directory(source_dir)
+        .out_dir(out_dir)
+        .unknown_semantics(UnknownSemanticPolicy::Error)
+        .require_full_semantics(true)
         // Declaring the entry rule turns on the `G4S078` unreachable-rule
         // analysis. Without it the generator treats every top-level rule that
         // reaches `EOF` as its own entry, so nothing can be unreachable.
@@ -650,27 +542,107 @@ fn run_pipeline_into(
         // generated API — acceptable here because these crates exist to serve
         // mehen's walkers, and `check-generated` catches any drift the day a
         // grammar update changes what is reachable.
-        .arg("--entry-rule")
-        .arg(target.grammar_entry_rule)
-        .arg("--prune-unreachable");
+        .entry_rule(target.grammar_entry_rule)
+        .prune_unreachable(true);
     if let Some(patterns) = target.sem_patterns {
-        cmd.arg("--sem-patterns").arg(source_dir.join(patterns));
+        builder = builder.semantic_patterns(source_dir.join(patterns));
     }
     for hook in target.option_hooks {
-        cmd.arg("--option-hook").arg(hook);
+        builder = builder.option_hook(*hook);
     }
-    let gen_status = cmd
-        .current_dir(source_dir)
-        .status()
-        .map_err(|e| format!("failed to launch antlr4-rust-gen: {e}"))?;
-    if !gen_status.success() {
-        return Err(format!("antlr4-rust-gen failed for `{}`", target.slug));
+    let generation = builder.generate().map_err(format_codegen_error)?;
+    for warning in generation.warnings() {
+        eprintln!("{warning}");
     }
     normalize_generated(out_dir)?;
     if let Some(dir) = &prep_dir {
         let _ = fs::remove_dir_all(dir);
     }
     Ok(())
+}
+
+/// Return parser rule names diagnosed as unreachable from `entry_rule`.
+///
+/// The C# preparation script calls this private helper while its grammar is
+/// still a single in-memory parser grammar. Structured `G4S078` diagnostics
+/// point exactly at each rule name, so the helper can return names without
+/// treating rendered warning prose as a protocol.
+pub(crate) fn unreachable_rules(grammar: &Path, entry_rule: &str) -> Result<Vec<String>, String> {
+    let source = fs::read_to_string(grammar).map_err(|e| {
+        format!(
+            "failed reading reachability probe {}: {e}",
+            grammar.display()
+        )
+    })?;
+    let scratch = scratch_dir("reachability", "probe");
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch)
+        .map_err(|e| format!("failed to create {}: {e}", scratch.display()))?;
+
+    let generation = Builder::new()
+        .grammar(grammar)
+        .library_directory(grammar.parent().unwrap_or_else(|| Path::new(".")))
+        .out_dir(&scratch)
+        .entry_rule(entry_rule)
+        .generate();
+    let _ = fs::remove_dir_all(&scratch);
+    let generation = generation.map_err(format_codegen_error)?;
+
+    let mut rules = generation
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code() == "G4S078")
+        .map(|diagnostic| {
+            let span = diagnostic.byte_span().ok_or_else(|| {
+                format!(
+                    "G4S078 diagnostic for {} has no source span",
+                    diagnostic.path().display()
+                )
+            })?;
+            let rule = source.get(span).ok_or_else(|| {
+                format!(
+                    "G4S078 diagnostic for {} has an invalid UTF-8 byte span",
+                    diagnostic.path().display()
+                )
+            })?;
+            if !is_rule_name(rule) {
+                return Err(format!(
+                    "G4S078 diagnostic subject `{rule}` is not a parser rule name"
+                ));
+            }
+            Ok(rule.to_owned())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    rules.sort();
+    rules.dedup();
+    Ok(rules)
+}
+
+fn is_rule_name(subject: &str) -> bool {
+    let mut chars = subject.chars();
+    chars.next().is_some_and(|ch| ch.is_ascii_lowercase())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn format_codegen_error(error: CodegenError) -> String {
+    let mut rendered = error.to_string();
+    for diagnostic in error.diagnostics() {
+        let severity = match diagnostic.severity() {
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+        };
+        let _ = write!(
+            rendered,
+            "\n{severity}[{}]: {}",
+            diagnostic.code(),
+            diagnostic.path().display()
+        );
+        if let (Some(line), Some(column)) = (diagnostic.line(), diagnostic.column()) {
+            let _ = write!(rendered, ":{line}:{column}");
+        }
+        let _ = write!(rendered, ": {}", diagnostic.message());
+    }
+    rendered
 }
 
 /// Whether `path` is a generated artifact that participates in the checked-in
@@ -688,9 +660,9 @@ fn is_generated_artifact(path: &Path) -> bool {
 
 /// Normalize each generated artifact's trailing newline to a single `\n`.
 ///
-/// The `.rs` modules and the `semantics.json` sidecar are treated alike so a
-/// freshly rendered tree compares byte-for-byte against the checked-in one
-/// regardless of whether a given tool appends a trailing newline.
+/// The `.rs` modules and JSON sidecars are treated alike so a freshly rendered
+/// tree compares byte-for-byte against the checked-in one regardless of whether
+/// a given tool appends a trailing newline.
 fn normalize_generated(dir: &Path) -> Result<(), String> {
     for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
@@ -708,8 +680,8 @@ fn normalize_generated(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Read every generated artifact (`*.rs` modules + `semantics.json`) in `dir`
-/// into a sorted `(name, contents)` list for comparison.
+/// Read every generated artifact (`*.rs` modules + JSON sidecars) in `dir` into
+/// a sorted `(name, contents)` list for comparison.
 fn read_generated(dir: &Path) -> Result<Vec<(String, String)>, String> {
     let mut entries: Vec<(String, String)> = fs::read_dir(dir)
         .map_err(|e| e.to_string())?
