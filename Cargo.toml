@@ -99,8 +99,8 @@ gix = { version = "^0.86", default-features = false, features = ["attributes", "
 # into xtask; normal `cargo build` uses the checked-in generated modules and
 # does not compile it. Keep the exact pins in lockstep, then regenerate with
 # `cargo xtask antlr generate --all` so generated source and runtime agree.
-antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.28.0" }
-antlr_rust_codegen = { package = "antlr-rust-codegen", version = "=0.28.0" }
+antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.29.0" }
+antlr_rust_codegen = { package = "antlr-rust-codegen", version = "=0.29.0" }
 
 tree-sitter = "=0.26.11"
 # Per-language grammars (`tree-sitter-c`, `tree-sitter-go`,

@@ -657,7 +657,7 @@ backslashes, and nested interpolated strings restoring the enclosing depth.
 
 | Tool | Version | Why |
 |---|---|---|
-| Rust runtime + codegen | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.28.0` | Runtime plus xtask-linked codegen and structured reachability |
+| Rust runtime + codegen | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.29.0` | Runtime plus xtask-linked codegen and structured reachability |
 | [`uv`](https://docs.astral.sh/uv/) | any recent | Runs `prepare-grammar.py`; the script's PEP 723 block pins the interpreter |
 
 Unlike the other ANTLR targets, C# needs `uv`: its grammar is derived rather than

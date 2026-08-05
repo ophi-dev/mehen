@@ -73,7 +73,7 @@ out of the grammar:
 
 | Tool | Version |
 |---|---|
-| Rust runtime + codegen | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.28.0` |
+| Rust runtime + codegen | [`ophi-dev/antlr-rust-runtime`](https://github.com/ophi-dev/antlr-rust-runtime) `v0.29.0` |
 
 ## Regenerating
 
