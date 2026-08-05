@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.8.1](https://github.com/ophi-dev/mehen/compare/v1.8.0...v1.8.1) (2026-08-05)
+
+
+### Parser & Grammar Updates
+
+* bump mago-syntax-core from 1.43.0 to 1.45.0 in the mago group ([#222](https://github.com/ophi-dev/mehen/issues/222)) ([1e1ec8c](https://github.com/ophi-dev/mehen/commit/1e1ec8ce6eaf9db56d9b48cef6f29a01f7aae5f7))
+* bump ra_ap_syntax from 0.0.344 to 0.0.345 ([#224](https://github.com/ophi-dev/mehen/issues/224)) ([4cf4f36](https://github.com/ophi-dev/mehen/commit/4cf4f36fc69d5f3334e3cc0ae79ec3a4dd559094))
+* bump the oxc group with 6 updates ([#221](https://github.com/ophi-dev/mehen/issues/221)) ([cb6fd54](https://github.com/ophi-dev/mehen/commit/cb6fd54daad22c11ac8795f3b58ec13a7e6a0722))
+
 ## [1.8.0](https://github.com/ophi-dev/mehen/compare/v1.7.0...v1.8.0) (2026-08-03)
 
 
