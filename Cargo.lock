@@ -53,7 +53,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -64,18 +64,19 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "antlr-rust-codegen"
-version = "0.28.0"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d95d86c9a70683b4aa027d7eb51dfae59f591a2a04878828c574de5e7bf337c6"
+checksum = "ce607fa0be414856aa2bc26aa1312bfc356bcc1a397bc32e8d6334399193552f"
 dependencies = [
  "antlr-rust-g4-parser",
  "antlr-rust-rs-parser",
  "antlr-rust-runtime",
+ "clap",
  "icu_casemap",
  "icu_properties",
  "intl",
@@ -85,27 +86,27 @@ dependencies = [
 
 [[package]]
 name = "antlr-rust-g4-parser"
-version = "0.28.0"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07e2a5ba40a0867ca257b5c324c47bf1cfe67a3140523bf7fe1da87a448fdb54"
+checksum = "0d177254db0f0363da99d0bc939e79ab6940ed34d5257f4a34e05a0d3b8a6064"
 dependencies = [
  "antlr-rust-runtime",
 ]
 
 [[package]]
 name = "antlr-rust-rs-parser"
-version = "0.28.0"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a875abf3dd0d0dfa6ecf5f446144b57eeed94bc0d734058143f575777acfbe6"
+checksum = "0ebe728f403b0caf40e1173446c730124261cba642deb98743e1c3e306aca5af"
 dependencies = [
  "antlr-rust-runtime",
 ]
 
 [[package]]
 name = "antlr-rust-runtime"
-version = "0.28.0"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7de82ee3be0656e4ec2643945c83671f536da7b9fe27eeaf76093a6d8966cd8"
+checksum = "e96ccc6b6a95bf3a23e9180ce30451afd7c1870c5dba806a0f3ba51e4bf0bca0"
 dependencies = [
  "memchr",
  "stacker",
@@ -766,7 +767,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2538,7 +2539,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3578,7 +3579,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3845,7 +3846,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3930,7 +3931,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4308,7 +4309,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

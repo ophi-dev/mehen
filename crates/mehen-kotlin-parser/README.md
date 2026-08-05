@@ -88,7 +88,7 @@ flat arena), so thread any parent-dependent context top-down as you walk.
 
 - **Upstream grammar:** [`Kotlin/kotlin-spec`](https://github.com/Kotlin/kotlin-spec)
 - **Vendored `.g4` files + any local patches:** [`grammar/`](grammar/) — see [`grammar/PROVENANCE.md`](grammar/PROVENANCE.md) for the exact commit
-- **ANTLR Rust runtime + codegen:** [`antlr-rust-runtime`](https://crates.io/crates/antlr-rust-runtime) / [`antlr-rust-codegen`](https://crates.io/crates/antlr-rust-codegen) `v0.28.0`
+- **ANTLR Rust runtime + codegen:** [`antlr-rust-runtime`](https://crates.io/crates/antlr-rust-runtime) / [`antlr-rust-codegen`](https://crates.io/crates/antlr-rust-codegen) `v0.29.0`
 
 ## License
 
