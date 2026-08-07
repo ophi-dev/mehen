@@ -11,6 +11,7 @@
 mod common;
 
 use common::analyze_clean;
+use mehen_core::MetricSpace;
 use mehen_report::metrics_json;
 
 #[test]
@@ -305,6 +306,70 @@ fn nom_and_nargs_count_a_primary_constructor() {
         assert_eq!(metrics_json::nom(&a.root.metrics).functions, 1.0);
         assert_eq!(metrics_json::nargs(&a.root.metrics).total_functions, 1.0);
     }
+}
+
+#[test]
+fn a_primary_constructor_owns_its_whole_header() {
+    // REGRESSION (#219). The synthetic primary-constructor space got NOM and NArgs —
+    // computed at the open — but none of the Halstead, LLOC, or ABC contributions of
+    // the syntax it owns, because the space was closed before the walk reached its
+    // subtree: those landed on the enclosing type instead. `class C(int x) : B(C.F(x))`
+    // is the primary spelling of `class C : B { public C(int x) : base(C.F(x)) { } }`,
+    // so the two forms must *split* their per-space numbers identically — in
+    // particular the base-constructor call's two ABC branches (the call itself plus
+    // the nested `C.F(x)` invocation) belong to the constructor, not the class.
+    //
+    // Compared over the whole space tree rather than just the constructor, so a
+    // partial fix cannot pass: widening the synthetic span so the post-walk byte
+    // routing moves LOC/Halstead would still leave the walk-time ABC branches on the
+    // type, and the class row here would show them.
+    let primary = analyze_clean(
+        "class C(int x) : B(C.F(x))
+         {
+             static int F(int x) { return x; }
+         }",
+    );
+    let explicit = analyze_clean(
+        "class C : B
+         {
+             public C(int x) : base(C.F(x)) { }
+             static int F(int x) { return x; }
+         }",
+    );
+
+    /// Flatten the tree into `(depth, kind, name, ABC branches, LLOC)` rows.
+    fn rows(root: &MetricSpace) -> Vec<(usize, String, Option<String>, f64, f64)> {
+        fn walk(
+            s: &MetricSpace,
+            depth: usize,
+            out: &mut Vec<(usize, String, Option<String>, f64, f64)>,
+        ) {
+            out.push((
+                depth,
+                s.kind.as_str().to_string(),
+                s.name.clone(),
+                metrics_json::abc(&s.metrics).branches,
+                metrics_json::loc(&s.metrics).lloc,
+            ));
+            for c in &s.spaces {
+                walk(c, depth + 1, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, 0, &mut out);
+        out
+    }
+    assert_eq!(rows(&primary.root), rows(&explicit.root));
+
+    // The constructor's Halstead must cover its whole header. The parameter list
+    // alone is `( int x )` — 3 operator occurrences, 1 operand — so anything
+    // beyond that is the base list: `: B(C.F(x))` adds `:`, `.`, and two `(`/`)`
+    // pairs (operators) plus `B`, `C`, `F`, `x` (operands).
+    let ctor = &primary.root.spaces[0].spaces[0];
+    assert_eq!(ctor.name.as_deref(), Some("C"));
+    let h = metrics_json::halstead(&ctor.metrics);
+    assert_eq!(h.big_n1, 9.0, "operators: ( int ) : . and 2 more ()-pairs");
+    assert_eq!(h.big_n2, 5.0, "operands: x B C F x");
 }
 
 #[test]
