@@ -128,7 +128,7 @@
 use mehen_antlr::runtime::token::Token;
 use mehen_antlr::runtime::{FromRuleNode, Node, RuleNodeView, TerminalNodeView};
 use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
-use mehen_core::{LineIndex, MetricSpace, SpaceKind};
+use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceKind};
 use mehen_metrics::{
     ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
     apply_state_to, finalize_state, merge_child_into_parent,
@@ -365,14 +365,15 @@ struct ChildHint {
     /// remains one operand *occurrence*.
     in_utf8_literal: bool,
     /// The enclosing type's name, set on the direct children of a declaration that
-    /// carries a **primary constructor** (`class C(int x)`) so the `parameter_list`
-    /// child can open the synthetic constructor space and be *named* for the type.
+    /// carries a **primary constructor** (`class C(int x)`), marking the
+    /// `parameter_list` child as the constructor's own declaration so
+    /// `classify_loc_rule` counts its logical line.
     ///
-    /// The space has to open when the walk reaches the list, not before it: Roslyn
-    /// synthesizes no `constructor_declaration` node, so the parameter list is the whole
-    /// of the constructor — and a space pushed and popped ahead of the traversal receives
-    /// none of the tokens inside it. That reported LLOC 0 and Halstead vocabulary 0 for
-    /// the primary form where the explicit spelling reported 1 and 8.
+    /// The synthetic space itself is opened by the *parent's* child loop in
+    /// `visit_children` — not per rule — because it has to stay open from the
+    /// `parameter_list` through the `base_list`: Roslyn synthesizes no
+    /// `constructor_declaration` node, so those two siblings together are the whole
+    /// of the constructor (parameters plus base-constructor call).
     ///
     /// `None` on any other node, which is what keeps a `delegate_declaration`'s or
     /// `extension_block_declaration`'s parameter list — neither of which constructs
@@ -722,9 +723,11 @@ impl Walker<'_> {
         ri: usize,
         hint: &ChildHint,
         container_before_open: Option<ContainerKind>,
-        // `Some` when this node is a type declaration carrying a primary constructor;
-        // threaded to its `parameter_list` child, which opens the synthetic space. Not
-        // inherited further — only the direct children see it.
+        // `Some` when this node is a type declaration carrying a primary constructor.
+        // Names the synthetic space this function opens around the `parameter_list` /
+        // `base_list` children, and is threaded to the direct children so
+        // `classify_loc_rule` can count the constructor's logical line at the
+        // `parameter_list`. Not inherited further — only the direct children see it.
         primary_ctor_name: Option<String>,
     ) {
         // `NodeChildren` is a cheap `Clone` slice-iterator, so it is re-walked
@@ -965,7 +968,42 @@ impl Walker<'_> {
             });
         let mut seen_operand = false;
 
+        // A **primary constructor**'s synthetic space lives across *two* sibling
+        // children: it opens when the loop reaches the `parameter_list` and closes
+        // after the `base_list` (or after the list itself when there is no base
+        // list) — before the constraint clauses and `{ member_declaration* }`,
+        // which belong to the type. It cannot hang on any single rule's
+        // open/close in `visit_rule`: opened eagerly at the type it received none
+        // of its own tokens, and scoped to the `parameter_list` alone it missed
+        // the base-constructor call — `class C(int x) : B(x)` left the `: B(x)`
+        // call's ABC branch and Halstead tokens on the *type*, where the explicit
+        // `: base(x)` spelling attributes them to the constructor (#219).
+        //
+        // `primary_ctor_close_rule` is resolved up front because the closer is
+        // only known from the declaration: `base_list` when present, else the
+        // `parameter_list` itself. `primary_ctor_cognitive` doubles as the
+        // is-open flag and the enclosing (type-scope) cognitive context to
+        // restore on close — the save/restore that `visit_rule` does per node,
+        // done manually here because the space's lifetime is not a node's.
+        let primary_ctor_close_rule = primary_ctor_name.as_ref().map(|_| {
+            if ctx.child_rule(cp::RULE_BASE_LIST).is_some() {
+                cp::RULE_BASE_LIST
+            } else {
+                cp::RULE_PARAMETER_LIST
+            }
+        });
+        let mut primary_ctor_cognitive: Option<CognitiveContext> = None;
+
         for child in ctx.children() {
+            let child_ri = child.as_rule().map(|r| r.rule_index());
+            if let Some(name) = primary_ctor_name.as_deref()
+                && child_ri == Some(cp::RULE_PARAMETER_LIST)
+                && primary_ctor_cognitive.is_none()
+                && let Some(params) = child.as_rule()
+            {
+                primary_ctor_cognitive = Some(self.cognitive);
+                self.open_primary_ctor_space(ctx, params, name);
+            }
             if isolate_elements {
                 self.current().cognitive.boolean_seq.last_op = None;
             }
@@ -1000,6 +1038,12 @@ impl Walker<'_> {
                 primary_ctor_name: primary_ctor_name.clone(),
             };
             self.visit(child, &child_hint);
+            if child_ri == primary_ctor_close_rule
+                && let Some(saved) = primary_ctor_cognitive.take()
+            {
+                self.close_space();
+                self.cognitive = saved;
+            }
         }
     }
 
@@ -1196,10 +1240,16 @@ impl Walker<'_> {
             // kinds here — `struct` and `record` are class-like for NPM, as
             // `open_type_space` already treats them.
             self.current().npm.record_method(ContainerKind::Class, true);
-            // The space itself opens when the walk *reaches* the parameter list, via
-            // `primary_ctor_name`. Pushing and popping it here instead — which is what
-            // this did — gave the constructor none of the tokens inside its own signature:
-            // LLOC 0 and Halstead vocabulary 0, against 1 and 8 for the explicit spelling.
+            // The space itself opens when the walk *reaches* the parameter list and
+            // stays open through the base list — see `open_primary_ctor_space` and the
+            // child loop in `visit_children`. Pushing and popping it here instead —
+            // which is what this did — gave the constructor none of the tokens inside
+            // its own signature: LLOC 0 and Halstead vocabulary 0, against 1 and 8 for
+            // the explicit spelling. And closing it at the end of the parameter list —
+            // the next shape this had — still left the base-constructor call's ABC
+            // branches and Halstead tokens on the *type*: in `class C(int x) : B(x)`
+            // the `: B(x)` is the primary spelling of `: base(x)`, which the explicit
+            // form attributes to the constructor.
             return name;
         }
         None
@@ -1274,30 +1324,11 @@ impl Walker<'_> {
                 self.open_function_space(ctx, ctx, hint, SpaceKind::Closure);
                 (true, None)
             }
-            // The synthetic space for a **primary constructor** (`class C(int x)`), opened
-            // at the parameter list because that IS the whole constructor — Roslyn
-            // synthesizes no `constructor_declaration` node. Opening it here rather than
-            // eagerly at the type is what gives it the tokens inside its own signature:
-            // pushed and popped ahead of the traversal, it reported LLOC 0 and Halstead
-            // vocabulary 0 against 1 and 8 for the explicit spelling.
-            //
-            // `primary_ctor_name` is `Some` only on the direct children of a declaration
-            // kind that actually supports one, so a `delegate`'s or extension block's
-            // parameter list — neither of which constructs anything — cannot reach here.
-            cp::RULE_PARAMETER_LIST if hint.primary_ctor_name.is_some() => {
-                let mut state = self.new_space_state(ctx);
-                state.nom.record_function();
-                state.nargs.record_function_args(count_parameters(ctx));
-                self.push_space(
-                    SpaceKind::Function,
-                    hint.primary_ctor_name.clone(),
-                    ctx,
-                    state,
-                    false,
-                );
-                self.enter_function_cognitive(false);
-                (true, None)
-            }
+            // A **primary constructor**'s synthetic space is NOT opened here: it has to
+            // stay open across two sibling children (`parameter_list` and `base_list`),
+            // which the one-rule-one-space shape of this function cannot express. It is
+            // opened and closed inside `visit_children`'s child loop instead — see
+            // `open_primary_ctor_space`.
             _ if opens_type_like(ri) => (true, self.open_type_space(ctx, ctx)),
             _ => (false, None),
         }
@@ -1338,12 +1369,75 @@ impl Walker<'_> {
         suppress_parent_wmc: bool,
     ) {
         let span = ctx_span(ctx, self.line_index, self.source_len);
+        self.push_space_at(kind, name, span, state, suppress_parent_wmc);
+    }
+
+    /// Open a space over an explicit `span` — for the one space whose extent is
+    /// not a single rule node: the primary constructor's, which runs from its
+    /// `parameter_list` through the end of its `base_list` (see
+    /// [`open_primary_ctor_space`]).
+    ///
+    /// [`open_primary_ctor_space`]: Walker::open_primary_ctor_space
+    fn push_space_at(
+        &mut self,
+        kind: SpaceKind,
+        name: Option<String>,
+        span: SourceSpan,
+        state: State,
+        suppress_parent_wmc: bool,
+    ) {
         let space_id = self.tree.open(kind.clone(), span, name);
         self.loc_routing
             .record_open(space_id, span.start_byte, span.end_byte);
         self.stack.push(state);
         self.kinds.push(kind);
         self.suppress_parent_wmc.push(suppress_parent_wmc);
+    }
+
+    /// Open the synthetic space for a **primary constructor**
+    /// (`class C(int x) : B(x)`). `type_ctx` is the type declaration carrying it;
+    /// `params` is its `parameter_list` child; `name` is the type's name, which
+    /// is the constructor's name exactly as for the explicit spelling.
+    ///
+    /// The span runs from the parameter list through the end of the base list
+    /// when one is present: Roslyn synthesizes no `constructor_declaration`
+    /// node, so that header IS the constructor — the parameters plus the
+    /// base-constructor call. Widening matters beyond reporting: post-walk LOC
+    /// routing is by byte range, so a comment inside the base call reaches the
+    /// constructor only if its range covers the `base_list`.
+    ///
+    /// Opened from `visit_children`'s child loop when the walk reaches the
+    /// `parameter_list`, and closed there after the `base_list` (or after the
+    /// parameter list itself when there is none) — the caller saves and restores
+    /// the cognitive context around that window.
+    fn open_primary_ctor_space(
+        &mut self,
+        type_ctx: RuleNodeView<'_>,
+        params: RuleNodeView<'_>,
+        name: &str,
+    ) {
+        let mut span = ctx_span(params, self.line_index, self.source_len);
+        if let Some(base) = type_ctx.child_rule(cp::RULE_BASE_LIST) {
+            let base_span = ctx_span(base, self.line_index, self.source_len);
+            span.end_byte = span.end_byte.max(base_span.end_byte);
+            span.end_line = span.end_line.max(base_span.end_line);
+        }
+        let mut state = State::new();
+        state.loc.set_span(
+            span.start_line.saturating_sub(1),
+            span.end_line.saturating_sub(1),
+            false,
+        );
+        state.nom.record_function();
+        state.nargs.record_function_args(count_parameters(params));
+        self.push_space_at(
+            SpaceKind::Function,
+            Some(name.to_owned()),
+            span,
+            state,
+            false,
+        );
+        self.enter_function_cognitive(false);
     }
 
     /// Reset the cognitive context when opening a type-like space. A type body
