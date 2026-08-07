@@ -504,6 +504,45 @@ COMBINATOR_KEYWORDS = ("and", "or", "not")
 VAR_PATTERN_ALT = "  | var_pattern\n"
 PATTERN_CONSTANT_ALT = "  | constant_pattern\n"
 
+# The `member_declaration` ordering hazard yet again, this time in `statement`,
+# whose alternatives are also alphabetical — so `expression_statement` precedes
+# `local_declaration_statement`, and a generic type in *local declaration*
+# position never reaches `type_argument_list` at all:
+#
+#     List<int> l;
+#
+# is viable as an expression statement — the chained comparison
+# `(List < int) > l` — and ANTLR takes the first viable alternative. So every
+# local whose type is generic parsed as an expression, its `<` and `>` scored as
+# two phantom ABC conditions, and LLOC gained a line (issue #218). The
+# `ChildHint::in_type_delimiter` fix from #212 cannot reach this: it keys on the
+# enclosing `type_argument_list`, and here the tokens never enter one. The same
+# type in field, parameter, or return position parsed correctly, which is why
+# this survived — and all 119 corpus files containing the shape parse with zero
+# diagnostics either way.
+#
+# Hoisting `local_declaration_statement` ahead of `expression_statement` is safe
+# because a declaration's shape — `type declarator (',' declarator)* ';'`, with
+# `variable_declarator` REQUIRING a leading `identifier_token` — is not viable
+# for any legal statement expression (ECMA-334 §13.7 limits those to invocation,
+# object creation, assignment, increment/decrement, and await): after `f(x)`,
+# `x = 1`, `x++`, or `new T()` no identifier follows, so the declaration path
+# dies in prediction and the expression alternative still wins. No predicate is
+# involved, so the record fix's committed-path wall does not apply.
+#
+# The one residual trade, same shape as `record`-as-a-return-type: `await t;`
+# with a BARE identifier operand. `await` is contextual and widened into
+# `identifier_token`, so that statement is genuinely ambiguous — a declaration
+# of `t` with type `await` — and the hoist picks the declaration, exactly as it
+# would for any `T t;`. Roslyn disambiguates semantically (is the enclosing
+# method async?), which a syntax-only grammar cannot. Real await operands are
+# overwhelmingly calls or member accesses (`await F()`, `await x.M()`), which
+# stay expressions; measured on the corpus, the hoist changed no diagnostics
+# (see PROVENANCE.md). `await (t);` and `_ = await t;` remain available
+# spellings.
+STATEMENT_LOCAL_DECLARATION_ALT = "  | local_declaration_statement\n"
+STATEMENT_EXPRESSION_ALT = "  | expression_statement\n"
+
 # `single_variable_designation` in its post-harvest tokenized form, and the
 # replacement that keeps every contextual keyword EXCEPT the combinators.
 DESIGNATION_RULE = "single_variable_designation\n  : identifier_token\n  ;"
@@ -1171,6 +1210,37 @@ def main() -> int:
         1,
     )
     print("hoisted var_pattern ahead of constant_pattern")
+
+    # -- 2d5. Prioritize local declarations over expression statements --------
+    # See STATEMENT_LOCAL_DECLARATION_ALT: `List<int> l;` parsed as a chained
+    # comparison expression, scoring two phantom ABC conditions per generic local.
+    statement_rule = rule_span(src, "statement")
+    if not statement_rule:
+        print("error: statement rule not found", file=sys.stderr)
+        return 1
+    body = statement_rule.group(1)
+    if (
+        STATEMENT_LOCAL_DECLARATION_ALT not in body
+        or STATEMENT_EXPRESSION_ALT not in body
+        or body.index(STATEMENT_EXPRESSION_ALT) > body.index(STATEMENT_LOCAL_DECLARATION_ALT)
+    ):
+        print(
+            "error: statement's expression/local-declaration alternatives changed upstream",
+            file=sys.stderr,
+        )
+        return 1
+    src = src.replace(
+        statement_rule.group(0),
+        "statement\n"
+        + body.replace(STATEMENT_LOCAL_DECLARATION_ALT, "").replace(
+            STATEMENT_EXPRESSION_ALT,
+            STATEMENT_LOCAL_DECLARATION_ALT + STATEMENT_EXPRESSION_ALT,
+            1,
+        )
+        + "  ;\n",
+        1,
+    )
+    print("hoisted local_declaration_statement ahead of expression_statement")
 
     # -- 2e. Accept binary integer literals ----------------------------------
     old, new = BINARY_LITERAL_FIX

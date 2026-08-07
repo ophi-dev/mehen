@@ -812,3 +812,79 @@ fn a_utf8_literal_is_a_distinct_operand_from_its_plain_twin() {
     // And the suffix still adds no occurrence, which is what the earlier fix established.
     assert_eq!(both_u8.big_n2, both_plain.big_n2);
 }
+
+#[test]
+fn a_generic_local_declaration_is_not_a_chained_comparison() {
+    // REGRESSION (#218). `statement`'s alternatives are alphabetical upstream, so
+    // `expression_statement` preceded `local_declaration_statement` and
+    // `List<int> l = new();` parsed as the chained comparison `(List < int) > l` —
+    // two phantom conditions per generic local, in a third of real C# files. The
+    // `in_type_delimiter` hint from #212 could not reach it: the tokens never
+    // entered a `type_argument_list` at all, so this was a parse fix (the prep now
+    // hoists the declaration alternative), not a walker fix. Pinned against the
+    // `var` spelling of the SAME declaration, so a partial fix cannot pass.
+    let declared =
+        abc("class C { static void F() { System.Collections.Generic.List<int> l = new(); } }");
+    let inferred =
+        abc("class C { static void F() { var l = new System.Collections.Generic.List<int>(); } }");
+    assert_eq!(declared.2, 0, "generic delimiters are not conditions");
+    assert_eq!(declared.2, inferred.2, "must match the `var` control");
+    assert_eq!(declared.0, 1, "the initializer is still one assignment");
+
+    // Independent of the initializer, and same score as the field spelling.
+    let bare = abc("class C { static void F() { System.Collections.Generic.List<int> l; } }");
+    let field = abc("class C { System.Collections.Generic.List<int> l; }");
+    assert_eq!(bare.2, 0);
+    assert_eq!(bare.2, field.2, "must match the field control");
+}
+
+#[test]
+fn a_stackalloc_target_type_is_not_a_comparison_either() {
+    // The shape that led to #218: `Span<int> s = stackalloc int[4];` scored two
+    // conditions. The allocation is still one branch, as `new int[4]` is.
+    let (a, b, c) = abc("class C { static void F() { System.Span<int> s = stackalloc int[4]; } }");
+    assert_eq!(c, 0);
+    assert_eq!(b, 1, "the stack allocation is still a branch");
+    assert_eq!(a, 1, "the initializer is still an assignment");
+}
+
+#[test]
+fn a_nullable_local_declaration_is_not_a_ternary() {
+    // Fixed by the same hoist: before it, `string? s = null;` took the expression
+    // path too, so the nullable type's `?` reached the token scan in expression
+    // position and scored a phantom condition.
+    let (_, _, c) = abc("class C { static void F() { string? s = null; } }");
+    assert_eq!(c, 0);
+}
+
+#[test]
+fn a_declarations_initializer_may_still_contain_a_real_comparison() {
+    // The hoist must not mute anything: the one genuine comparison in the
+    // initializer still counts, while the generic delimiters do not.
+    let (_, _, c) = abc("class C {
+             static void F(int w, int x) {
+                 System.Collections.Generic.List<bool> l = new() { w < x };
+             }
+         }");
+    assert_eq!(c, 1, "exactly the initializer's `<`, not the delimiters");
+}
+
+#[test]
+fn statement_expressions_still_parse_as_expressions() {
+    // The other side of the hoist: every legal statement-expression shape
+    // (ECMA-334 §13.7 — invocation, creation, assignment, increment, await) is
+    // not viable as a declaration, so each must keep its score. The assignment
+    // and increments score 1 A each; the calls score 1 B each.
+    let (a, b, _) = abc("class C {
+             static void G() { }
+             static void F(int i) {
+                 G();
+                 System.Console.WriteLine(i);
+                 i = 1;
+                 i++;
+                 i--;
+             }
+         }");
+    assert_eq!(a, 3, "one assignment plus two increments");
+    assert_eq!(b, 2, "two calls");
+}
