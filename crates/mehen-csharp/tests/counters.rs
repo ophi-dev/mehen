@@ -373,6 +373,37 @@ fn a_primary_constructor_owns_its_whole_header() {
 }
 
 #[test]
+fn a_primary_constructor_does_not_own_implemented_interfaces() {
+    // The guard on the whole-header fix above: only the base-constructor *call* is
+    // constructor syntax. An implemented interface in the same base list —
+    // `class C(int x) : B(x), IFoo` — belongs to the type, exactly as the explicit
+    // `class C : B, IFoo { public C(int x) : base(x) { } }` spelling attributes it.
+    // Closing the synthetic space at the end of the full `base_list` swept `IFoo`
+    // (and the `,`) into the constructor's Halstead.
+    let a = analyze_clean("class C(int x) : B(x), IFoo { }");
+    let ctor = &a.root.spaces[0].spaces[0];
+    assert_eq!(ctor.name.as_deref(), Some("C"));
+    // `( int x ) : B ( x )` and nothing after the call: were `, IFoo` included, N1
+    // would gain the `,` and N2 the `IFoo`.
+    let h = metrics_json::halstead(&ctor.metrics);
+    assert_eq!(h.big_n1, 6.0, "operators: ( int ) : ( ) — no `,`");
+    assert_eq!(h.big_n2, 3.0, "operands: x B x — no IFoo");
+    // The base call is still the constructor's ABC branch.
+    assert_eq!(metrics_json::abc(&ctor.metrics).branches, 1.0);
+
+    // With no base call at all, the base list is purely the type's: the
+    // constructor is just its parameter list, as for `struct S : IFoo` with an
+    // explicit constructor.
+    let a = analyze_clean("struct S(int x) : IFoo { }");
+    let ctor = &a.root.spaces[0].spaces[0];
+    assert_eq!(ctor.name.as_deref(), Some("S"));
+    let h = metrics_json::halstead(&ctor.metrics);
+    assert_eq!(h.big_n1, 3.0, "operators: ( int )");
+    assert_eq!(h.big_n2, 1.0, "operands: x — no IFoo, no `:`");
+    assert_eq!(metrics_json::abc(&ctor.metrics).branches, 0.0);
+}
+
+#[test]
 fn an_expression_bodied_return_is_an_exit() {
     // REGRESSION. `int F() => 1;` has no `return_statement` node, so NExit stayed 0
     // while the equivalent `int F() { return 1; }` reported 1 — and NExit's own

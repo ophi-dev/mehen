@@ -172,6 +172,7 @@ pub(crate) fn walk(
         kinds: vec![SpaceKind::Unit],
         suppress_parent_wmc: vec![false],
         cognitive: CognitiveContext::default(),
+        primary_ctor_close: None,
         loc_routing: SpaceRangeTracker::new(),
     };
 
@@ -393,6 +394,12 @@ struct Walker<'a> {
     /// counted there), not as a separate weighted method of the class.
     suppress_parent_wmc: Vec<bool>,
     cognitive: CognitiveContext,
+    /// A primary constructor's synthetic space is open and must close *inside*
+    /// the enclosing `base_list`, right after the base-call `base_type` — see
+    /// the close handoff in [`Walker::visit_children`]. Carries the enclosing
+    /// (type-scope) cognitive context to restore on close. `None` whenever no
+    /// such close is pending.
+    primary_ctor_close: Option<CognitiveContext>,
     loc_routing: SpaceRangeTracker,
 }
 
@@ -968,30 +975,40 @@ impl Walker<'_> {
             });
         let mut seen_operand = false;
 
-        // A **primary constructor**'s synthetic space lives across *two* sibling
-        // children: it opens when the loop reaches the `parameter_list` and closes
-        // after the `base_list` (or after the list itself when there is no base
-        // list) — before the constraint clauses and `{ member_declaration* }`,
-        // which belong to the type. It cannot hang on any single rule's
-        // open/close in `visit_rule`: opened eagerly at the type it received none
-        // of its own tokens, and scoped to the `parameter_list` alone it missed
-        // the base-constructor call — `class C(int x) : B(x)` left the `: B(x)`
-        // call's ABC branch and Halstead tokens on the *type*, where the explicit
-        // `: base(x)` spelling attributes them to the constructor (#219).
+        // A **primary constructor**'s synthetic space lives across sibling
+        // children: it opens when the loop reaches the `parameter_list` and
+        // closes after the base-constructor call — before any interface entries
+        // in the base list, the constraint clauses, and
+        // `{ member_declaration* }`, which all belong to the type. It cannot
+        // hang on any single rule's open/close in `visit_rule`: opened eagerly
+        // at the type it received none of its own tokens, and scoped to the
+        // `parameter_list` alone it missed the base-constructor call —
+        // `class C(int x) : B(x)` left the `: B(x)` call's ABC branch and
+        // Halstead tokens on the *type*, where the explicit `: base(x)`
+        // spelling attributes them to the constructor (#219).
         //
-        // `primary_ctor_close_rule` is resolved up front because the closer is
-        // only known from the declaration: `base_list` when present, else the
-        // `parameter_list` itself. `primary_ctor_cognitive` doubles as the
-        // is-open flag and the enclosing (type-scope) cognitive context to
-        // restore on close — the save/restore that `visit_rule` does per node,
-        // done manually here because the space's lifetime is not a node's.
-        let primary_ctor_close_rule = primary_ctor_name.as_ref().map(|_| {
-            if ctx.child_rule(cp::RULE_BASE_LIST).is_some() {
-                cp::RULE_BASE_LIST
-            } else {
-                cp::RULE_PARAMETER_LIST
-            }
-        });
+        // Where it closes depends on what the base list holds. `base_list` is
+        // `':' base_type (',' base_type)*`, and only its
+        // `primary_constructor_base_type` entry — the `B(x)` call — is
+        // constructor syntax; a `simple_base_type` is an implemented interface,
+        // which the explicit spelling attributes to the type. So:
+        //
+        // - base list with a base call (`: B(x)` or `: B(x), IFoo`): the space
+        //   stays open *into* the base list and closes right after the call's
+        //   `base_type` — a mid-subtree close this loop cannot perform, handed
+        //   off through `self.primary_ctor_close` to the `base_list`'s own
+        //   child loop below.
+        // - no base list, or interfaces only (`struct S(int x) : IFoo`): the
+        //   space closes here, after the `parameter_list` child.
+        //
+        // `primary_ctor_cognitive` doubles as the is-open flag and the
+        // enclosing (type-scope) cognitive context to restore on close — the
+        // save/restore that `visit_rule` does per node, done manually because
+        // the space's lifetime is not a node's.
+        let primary_ctor_closes_in_base_list = primary_ctor_name.is_some()
+            && ctx
+                .child_rule(cp::RULE_BASE_LIST)
+                .is_some_and(base_list_has_base_call);
         let mut primary_ctor_cognitive: Option<CognitiveContext> = None;
 
         for child in ctx.children() {
@@ -1038,8 +1055,28 @@ impl Walker<'_> {
                 primary_ctor_name: primary_ctor_name.clone(),
             };
             self.visit(child, &child_hint);
-            if child_ri == primary_ctor_close_rule
+            if child_ri == Some(cp::RULE_PARAMETER_LIST)
                 && let Some(saved) = primary_ctor_cognitive.take()
+            {
+                if primary_ctor_closes_in_base_list {
+                    // Keep the space open into the `base_list`; its child loop
+                    // (below, next iteration of this function one level deeper)
+                    // closes it after the base-constructor call.
+                    self.primary_ctor_close = Some(saved);
+                } else {
+                    self.close_space();
+                    self.cognitive = saved;
+                }
+            }
+            // The handed-off close: this is the `base_list`'s own child loop,
+            // and the child just visited is the base-call `base_type` — the last
+            // piece of the constructor. The remaining entries (`, IFoo`, …) are
+            // implemented interfaces and belong to the type, exactly as the
+            // explicit `class C : B, IFoo { public C(int x) : base(x) { } }`
+            // spelling attributes them.
+            if ri == cp::RULE_BASE_LIST
+                && child.as_rule().is_some_and(base_type_is_base_call)
+                && let Some(saved) = self.primary_ctor_close.take()
             {
                 self.close_space();
                 self.cognitive = saved;
@@ -1239,7 +1276,16 @@ impl Walker<'_> {
             // construction surface. The container is `Class` for all three declaration
             // kinds here — `struct` and `record` are class-like for NPM, as
             // `open_type_space` already treats them.
-            self.current().npm.record_method(ContainerKind::Class, true);
+            //
+            // Gated on the name because the synthetic space downstream is too: an
+            // unnamed declaration (error recovery — `name_from_identifier` found no
+            // identifier) returns `None`, so `visit_children` opens no space and the
+            // constructor's NOM/NArgs/LLOC are all dropped. Recording NPM anyway would
+            // report a public method that appears nowhere else — the constructor's
+            // metrics must be omitted or recorded *together*.
+            if name.is_some() {
+                self.current().npm.record_method(ContainerKind::Class, true);
+            }
             // The space itself opens when the walk *reaches* the parameter list and
             // stays open through the base list — see `open_primary_ctor_space` and the
             // child loop in `visit_children`. Pushing and popping it here instead —
@@ -1344,8 +1390,18 @@ impl Walker<'_> {
     ///
     /// [`maybe_open_space`]: Walker::maybe_open_space
     fn new_space_state(&self, ctx: RuleNodeView<'_>) -> State {
+        self.new_space_state_at(ctx_span(ctx, self.line_index, self.source_len))
+    }
+
+    /// Build a space's initial `State` from an explicit span — the span-source
+    /// half of [`new_space_state`], split out so the primary constructor's
+    /// widened span (see [`open_primary_ctor_space`]) shares the LOC span
+    /// convention rather than duplicating it.
+    ///
+    /// [`new_space_state`]: Walker::new_space_state
+    /// [`open_primary_ctor_space`]: Walker::open_primary_ctor_space
+    fn new_space_state_at(&self, span: SourceSpan) -> State {
         let mut state = State::new();
-        let span = ctx_span(ctx, self.line_index, self.source_len);
         state.loc.set_span(
             span.start_line.saturating_sub(1),
             span.end_line.saturating_sub(1),
@@ -1399,15 +1455,17 @@ impl Walker<'_> {
     /// `params` is its `parameter_list` child; `name` is the type's name, which
     /// is the constructor's name exactly as for the explicit spelling.
     ///
-    /// The span runs from the parameter list through the end of the base list
-    /// when one is present: Roslyn synthesizes no `constructor_declaration`
-    /// node, so that header IS the constructor — the parameters plus the
-    /// base-constructor call. Widening matters beyond reporting: post-walk LOC
-    /// routing is by byte range, so a comment inside the base call reaches the
-    /// constructor only if its range covers the `base_list`.
+    /// The span runs from the parameter list through the end of the
+    /// base-constructor call when the base list holds one: Roslyn synthesizes
+    /// no `constructor_declaration` node, so that header IS the constructor —
+    /// the parameters plus the base call. Interface entries after the call
+    /// (`, IFoo`) are the type's, so the span deliberately stops short of them.
+    /// Widening matters beyond reporting: post-walk LOC routing is by byte
+    /// range, so a comment inside the base call reaches the constructor only if
+    /// its range covers it.
     ///
     /// Opened from `visit_children`'s child loop when the walk reaches the
-    /// `parameter_list`, and closed there after the `base_list` (or after the
+    /// `parameter_list`, and closed there after the base call (or after the
     /// parameter list itself when there is none) — the caller saves and restores
     /// the cognitive context around that window.
     fn open_primary_ctor_space(
@@ -1417,17 +1475,19 @@ impl Walker<'_> {
         name: &str,
     ) {
         let mut span = ctx_span(params, self.line_index, self.source_len);
-        if let Some(base) = type_ctx.child_rule(cp::RULE_BASE_LIST) {
-            let base_span = ctx_span(base, self.line_index, self.source_len);
-            span.end_byte = span.end_byte.max(base_span.end_byte);
-            span.end_line = span.end_line.max(base_span.end_line);
+        if let Some(base_call) = type_ctx
+            .child_rule(cp::RULE_BASE_LIST)
+            .and_then(|base_list| {
+                base_list
+                    .child_rules(cp::RULE_BASE_TYPE)
+                    .find(|bt| base_type_is_base_call(*bt))
+            })
+        {
+            let call_span = ctx_span(base_call, self.line_index, self.source_len);
+            span.end_byte = span.end_byte.max(call_span.end_byte);
+            span.end_line = span.end_line.max(call_span.end_line);
         }
-        let mut state = State::new();
-        state.loc.set_span(
-            span.start_line.saturating_sub(1),
-            span.end_line.saturating_sub(1),
-            false,
-        );
+        let mut state = self.new_space_state_at(span);
         state.nom.record_function();
         state.nargs.record_function_args(count_parameters(params));
         self.push_space_at(
@@ -2288,6 +2348,26 @@ fn normalize_identifier(text: &str) -> SmolStr {
     }
     out.push_str(rest);
     SmolStr::new(out)
+}
+
+/// Whether a `base_type` entry is the **base-constructor call** of a primary
+/// constructor (`primary_constructor_base_type`: `B(x)`), as opposed to a
+/// `simple_base_type` (an implemented interface, or a base class without an
+/// argument list). Only the call is constructor syntax; everything else in the
+/// base list belongs to the type.
+fn base_type_is_base_call(base_type: RuleNodeView<'_>) -> bool {
+    base_type
+        .child_rule(cp::RULE_PRIMARY_CONSTRUCTOR_BASE_TYPE)
+        .is_some()
+}
+
+/// Whether a `base_list` contains a base-constructor call — i.e. whether a
+/// primary constructor's synthetic space must stay open into the list (see
+/// `visit_children`) rather than closing at the end of its `parameter_list`.
+fn base_list_has_base_call(base_list: RuleNodeView<'_>) -> bool {
+    base_list
+        .child_rules(cp::RULE_BASE_TYPE)
+        .any(base_type_is_base_call)
 }
 
 /// Rules that open a type-like metric space (see `maybe_open_space`).
