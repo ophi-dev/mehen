@@ -465,3 +465,21 @@ fn an_extension_block_contributes_a_logical_line() {
     // outer class + container + method + return = 4.
     assert_eq!(extension.lloc, 4.0);
 }
+
+#[test]
+fn a_generic_local_declaration_is_one_logical_line() {
+    // REGRESSION (#218). While `List<int> l = new();` parsed as a chained
+    // comparison expression (see the same-named fix in `abc.rs`), its logical-line
+    // count could drift from the equivalent declarations'. LLOC must not depend on
+    // which of the three spellings declares the local: class(1) + method(1) +
+    // declaration(1) = 3 for each.
+    for source in [
+        "class C { static void F() { System.Collections.Generic.List<int> l = new(); } }",
+        "class C { static void F() { var l = new System.Collections.Generic.List<int>(); } }",
+        "class C { static void F() { int l = 1; } }",
+        // And without an initializer — the misparse was independent of the `= …`.
+        "class C { static void F() { System.Collections.Generic.List<int> l; } }",
+    ] {
+        assert_eq!(loc(source).lloc, 3.0, "one declaration line: {source}");
+    }
+}

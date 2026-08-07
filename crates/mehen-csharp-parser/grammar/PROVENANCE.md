@@ -115,7 +115,7 @@ dump, never by an error count.
 | `compilation_unit` did not end in `EOF` | `class C { } } } }` was a clean parse; the tail was never read |
 | `incomplete_member` was reachable | `class C { int }` was a complete, error-free unit |
 | `switch_statement`'s parens independently optional | `switch value { … }` parsed, though only the *expression* form is paren-free |
-| a local generic declaration loses to the expression statement | `List<int> l;` reads as chained comparison — **open, issue #218** |
+| a local generic declaration loses to the expression statement | `List<int> l;` was the chained comparison `(List < int) > l` — two phantom ABC conditions in 119 of 322 corpus files (issue #218) |
 
 Ten *delete* code from the tree, nine *relabel* it, and eight accept
 source that is not valid C# at all. Every shape is invisible to an error count, which is why the metric tests carry the load here
@@ -594,6 +594,46 @@ Two follow-ons in the walker, both invisible while the misparse stood:
 `RULE_EXTENSION_BLOCK_DECLARATION` had to join the LLOC declaration allowlist (the
 container row went uncounted), and `opens_type_like` already listed it — that arm had
 simply been unreachable.
+
+### A local generic declaration vs. the expression statement
+
+The same alphabetical-order hazard one level down, in `statement` (issue #218).
+Upstream lists `expression_statement` before `local_declaration_statement`, and a
+generic type in *local declaration* position is viable as a chained comparison —
+`List<int> l;` reads as `(List < int) > l` — so ANTLR took the expression path with
+zero errors. The `<` and `>` scored two phantom ABC conditions per generic local, and
+Halstead saw the phantom expression structure (`n1=12 N1=14` against `n1=7 N1=7` for
+the identical type as a field). The `ChildHint::in_type_delimiter` fix that settled
+the field/parameter/return positions could not reach this one: it keys on the
+enclosing `type_argument_list`, and here the tokens never entered one — a parse
+problem, not a classification one. 119 of the 322 corpus files contain the shape, all
+parsing cleanly, which is why it survived.
+
+The fix is the hoist alone (`STATEMENT_LOCAL_DECLARATION_ALT`), and unlike `record`
+it needs no minted token, because the overlap is asymmetric: `variable_declarator`
+*requires* a leading `identifier_token`, and no legal statement expression — ECMA-334
+§13.7 limits those to invocation, creation, assignment, increment/decrement, and
+await — has an identifier after its type-viable prefix. `f(x)`, `x = 1`, `i++`,
+`new T()` all kill the declaration path in prediction, so the expression alternative
+still wins wherever it should. No predicate is involved, so the committed-path wall
+from the `record` hoist does not apply. Measured both ways on the corpus: the same 5
+directive-split files error either way, and all 153 files whose metrics moved moved
+in the correcting direction — conditions, cognitive, and cyclomatic down; the few
+`n1`/`N2` upticks are true recategorizations (`uint union = …`, whose old parse the
+`union` keyword had bent further).
+
+The hoist also settled two neighbours for free: `Span<int> s = stackalloc int[4];`
+(the finding that led here) and `string? s = null;`, whose nullable `?` scored a
+phantom condition through the same wrong path.
+
+The residual trade is `await t;` with a *bare identifier* operand — genuinely
+ambiguous C# that Roslyn resolves by asking whether the enclosing method is async,
+which a syntax-only grammar cannot. It now parses as a declaration of `t` with type
+`await`, exactly as `T t;` would. Qualified and call operands (`await x.M()`,
+`await F()`), which is what real awaits overwhelmingly are, keep the expression path
+— the corpus run confirmed zero diagnostic changes. `mehen-csharp-parser/tests/hooks.rs`
+pins both directions of the order, and `mehen-csharp/tests/{abc,loc}.rs` pin the
+metrics against the `var`, field, and `int` control spellings.
 
 ## Semantic helpers — no hooks anywhere
 

@@ -320,3 +320,76 @@ fn requiring_switch_parens_keeps_both_valid_forms() {
         0
     );
 }
+
+/// Which of `statement`'s two overlapping alternatives claimed the method's
+/// first statement: `Some(true)` for `local_declaration_statement`,
+/// `Some(false)` for `expression_statement`, `None` for neither.
+fn first_statement_is_declaration(source: &str) -> Option<bool> {
+    use antlr4_runtime::Node;
+    let lexer = CSharpLexer::new(InputStream::new(source));
+    let mut parser = CSharpParser::new(CommonTokenStream::new(lexer));
+    parser.remove_error_listeners();
+    let tree = parser
+        .compilation_unit()
+        .expect("entry rule must not hard-fail");
+    assert_eq!(parser.number_of_syntax_errors(), 0, "must parse: {source}");
+    let parsed = parser.into_parsed_file(tree);
+    fn walk(node: Node<'_>) -> Option<bool> {
+        if let Some(rule) = node.as_rule() {
+            match rule.rule_index() {
+                c_sharp_parser::RULE_LOCAL_DECLARATION_STATEMENT => return Some(true),
+                c_sharp_parser::RULE_EXPRESSION_STATEMENT => return Some(false),
+                _ => {}
+            }
+        }
+        node.children().find_map(walk)
+    }
+    walk(parsed.tree())
+}
+
+#[test]
+fn a_generic_local_declaration_is_not_an_expression_statement() {
+    // REGRESSION (#218). `statement`'s alternatives are alphabetical upstream, so
+    // `expression_statement` preceded `local_declaration_statement` — and
+    // `List<int> l;` is viable as the chained comparison `(List < int) > l`, so
+    // ANTLR took the expression path with ZERO errors. Same ordering hazard as
+    // `declaration_expression` and the `member_declaration` hoists; the prep now
+    // hoists the declaration alternative. An error count cannot catch this, hence
+    // the shape assertion. The metric consequences are pinned in
+    // `mehen-csharp/tests/{abc,loc}.rs`.
+    for source in [
+        "class C { void M() { List<int> l; } }",
+        "class C { void M() { List<int> l = new(); } }",
+        "class C { void M() { System.Span<int> s = stackalloc int[4]; } }",
+        "class C { void M() { Dictionary<string, List<int>> map = new(); } }",
+        "class C { void M() { string? s = null; } }",
+    ] {
+        assert_eq!(
+            first_statement_is_declaration(source),
+            Some(true),
+            "must be a local_declaration_statement: {source}"
+        );
+    }
+}
+
+#[test]
+fn statement_expressions_still_win_where_no_declaration_fits() {
+    // The other side of the hoist: every legal statement-expression shape
+    // (invocation, creation, assignment, increment/decrement, qualified await)
+    // is not viable as `type declarator ;`, so the declaration path must die in
+    // prediction and leave each an expression statement.
+    for source in [
+        "class C { void M() { F(x); } }",
+        "class C { void M(int i) { i = 1; } }",
+        "class C { void M(int i) { i++; } }",
+        "class C { void M() { new C(); } }",
+        "class C { void M() { obj.Method<int>(1); } }",
+        "class C { async System.Threading.Tasks.Task M() { await x.RunAsync(); } }",
+    ] {
+        assert_eq!(
+            first_statement_is_declaration(source),
+            Some(false),
+            "must be an expression_statement: {source}"
+        );
+    }
+}
