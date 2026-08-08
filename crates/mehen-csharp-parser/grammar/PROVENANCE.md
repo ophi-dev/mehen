@@ -631,7 +631,16 @@ ambiguous C# that Roslyn resolves by asking whether the enclosing method is asyn
 which a syntax-only grammar cannot. It now parses as a declaration of `t` with type
 `await`, exactly as `T t;` would. Qualified and call operands (`await x.M()`,
 `await F()`), which is what real awaits overwhelmingly are, keep the expression path
-— the corpus run confirmed zero diagnostic changes. `mehen-csharp-parser/tests/hooks.rs`
+— the corpus run confirmed zero diagnostic changes. An *indexed* operand
+(`await tasks[i];`) would have been a second trade — `tasks[i]` matches the
+declarator's optional `bracketed_argument_list` — but that one closes for free by
+mirroring ECMA-334, which gives locals their own bracket-less declarator (§13.6.2):
+the bracketed form is the fixed-size-buffer declarator (§23.8.2), a struct-field-only
+construct. The prep therefore points `local_declaration_statement` at a minted
+`local_variable_declaration` / `local_variable_declarator` pair with no bracket
+alternative, so the indexed await stays an expression while `fixed int data[4];`
+keeps its shape in field position — measured on the corpus, the split changed
+nothing at all. `mehen-csharp-parser/tests/hooks.rs`
 pins both directions of the order, and `mehen-csharp/tests/{abc,loc}.rs` pin the
 metrics against the `var`, field, and `int` control spellings.
 
