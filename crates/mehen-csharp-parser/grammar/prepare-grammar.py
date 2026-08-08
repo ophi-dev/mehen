@@ -540,8 +540,43 @@ PATTERN_CONSTANT_ALT = "  | constant_pattern\n"
 # stay expressions; measured on the corpus, the hoist changed no diagnostics
 # (see PROVENANCE.md). `await (t);` and `_ = await t;` remain available
 # spellings.
+#
+# `await tasks[i];` would be a SECOND trade — `tasks[i]` matches
+# `variable_declarator : identifier_token bracketed_argument_list? …` — but that
+# one is closed for free by mirroring ECMA-334, which gives locals their own
+# bracket-less `local_variable_declarator` (§13.6.2): the bracketed form is the
+# fixed-size-buffer declarator (§23.8.2), legal ONLY as a struct field. So the
+# statement is pointed at a minted local pair with no bracket alternative, the
+# indexed await stays an expression, and `fixed int data[4];` keeps its shape in
+# field position. (The invalid-C# local `int buf[4];` still parses silently —
+# the permissive expression hub reads it as an element access over a
+# declaration_expression — but it no longer takes the declaration path.)
 STATEMENT_LOCAL_DECLARATION_ALT = "  | local_declaration_statement\n"
 STATEMENT_EXPRESSION_ALT = "  | expression_statement\n"
+LOCAL_DECLARATION_STATEMENT_RULE = (
+    "local_declaration_statement\n"
+    "  : attribute_list* 'await'? 'using'? modifier* variable_declaration ';'\n  ;"
+)
+LOCAL_DECLARATION_STATEMENT_REWRITTEN = (
+    "local_declaration_statement\n"
+    "  : attribute_list* 'await'? 'using'? modifier* local_variable_declaration ';'\n  ;"
+)
+LOCAL_DECLARATOR_RULES = """
+
+// Minted pair for statement position (see STATEMENT_LOCAL_DECLARATION_ALT).
+// ECMA-334 gives locals a declarator with NO bracketed form — that alternative
+// is the fixed-size-buffer declarator, a struct-field-only construct — and the
+// distinction is load-bearing here: with brackets viable, the hoisted
+// declaration alternative would claim `await tasks[i];` (`await` as the type,
+// `tasks[i]` as a bracketed declarator).
+local_variable_declaration
+  : type local_variable_declarator (',' local_variable_declarator)*
+  ;
+
+local_variable_declarator
+  : identifier_token equals_value_clause?
+  ;
+"""
 
 # `single_variable_designation` in its post-harvest tokenized form, and the
 # replacement that keeps every contextual keyword EXCEPT the combinators.
@@ -1241,6 +1276,22 @@ def main() -> int:
         1,
     )
     print("hoisted local_declaration_statement ahead of expression_statement")
+
+    # The hoist's companion (see LOCAL_DECLARATOR_RULES): point the statement at a
+    # bracket-less declarator pair so `await tasks[i];` cannot read as a
+    # declaration. Field/event declarations keep `variable_declaration`, and with
+    # it the fixed-size-buffer declarator.
+    if LOCAL_DECLARATION_STATEMENT_RULE not in src:
+        print(
+            "error: local_declaration_statement shape changed upstream",
+            file=sys.stderr,
+        )
+        return 1
+    src = src.replace(
+        LOCAL_DECLARATION_STATEMENT_RULE, LOCAL_DECLARATION_STATEMENT_REWRITTEN, 1
+    )
+    src = src.rstrip() + "\n" + LOCAL_DECLARATOR_RULES
+    print("split the local declarator off the field declarator (no brackets)")
 
     # -- 2e. Accept binary integer literals ----------------------------------
     old, new = BINARY_LITERAL_FIX

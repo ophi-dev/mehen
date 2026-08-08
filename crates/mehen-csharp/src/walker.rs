@@ -2071,7 +2071,13 @@ impl Walker<'_> {
             // on the declaration rather than through a `variable_declarator` — so it
             // scored no assignment at all while the equivalent field
             // (`public int P = 5;`) scored one.
+            //
+            // `local_variable_declarator` is the statement-position declarator the
+            // prep mints so `await tasks[i];` cannot parse as a declaration (locals
+            // have no bracketed declarator in real C#); it initializes exactly as
+            // `variable_declarator` does.
             cp::RULE_VARIABLE_DECLARATOR
+            | cp::RULE_LOCAL_VARIABLE_DECLARATOR
             | cp::RULE_PARAMETER
             | cp::RULE_ENUM_MEMBER_DECLARATION
             | cp::RULE_PROPERTY_DECLARATION

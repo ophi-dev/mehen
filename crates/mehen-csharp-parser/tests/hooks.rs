@@ -377,7 +377,10 @@ fn statement_expressions_still_win_where_no_declaration_fits() {
     // The other side of the hoist: every legal statement-expression shape
     // (invocation, creation, assignment, increment/decrement, qualified await)
     // is not viable as `type declarator ;`, so the declaration path must die in
-    // prediction and leave each an expression statement.
+    // prediction and leave each an expression statement. The indexed await is
+    // here because locals get a bracket-less declarator: without that split,
+    // `tasks[i]` would match the fixed-size-buffer declarator shape and the
+    // statement would read as a declaration of `tasks[i]` with type `await`.
     for source in [
         "class C { void M() { F(x); } }",
         "class C { void M(int i) { i = 1; } }",
@@ -385,6 +388,7 @@ fn statement_expressions_still_win_where_no_declaration_fits() {
         "class C { void M() { new C(); } }",
         "class C { void M() { obj.Method<int>(1); } }",
         "class C { async System.Threading.Tasks.Task M() { await x.RunAsync(); } }",
+        "class C { async System.Threading.Tasks.Task M() { await tasks[i]; } }",
     ] {
         assert_eq!(
             first_statement_is_declaration(source),
@@ -392,4 +396,47 @@ fn statement_expressions_still_win_where_no_declaration_fits() {
             "must be an expression_statement: {source}"
         );
     }
+}
+
+#[test]
+fn the_hoists_residual_trade_is_a_bare_await_operand() {
+    // The DELIBERATE residual of the hoist, pinned so it stays a decision rather
+    // than drifting: `await t;` with a bare identifier operand is genuinely
+    // ambiguous — outside an async method it is a valid declaration of a local
+    // `t` whose type is named `await`, and Roslyn picks the await expression only
+    // by asking whether the enclosing method is async, which a syntax-only
+    // grammar cannot. The hoist resolves it to the declaration, exactly as it
+    // would for any `T t;`. A declarator cannot be qualified, called, or indexed
+    // (locals get the bracket-less declarator), so every other await operand
+    // shape stays an expression — asserted above.
+    assert_eq!(
+        first_statement_is_declaration(
+            "class C { async System.Threading.Tasks.Task M() { await t; } }"
+        ),
+        Some(true),
+        "the documented trade: a bare await operand reads as a declaration"
+    );
+}
+
+#[test]
+fn a_local_declarator_has_no_fixed_size_buffer_form() {
+    // The split that keeps `await tasks[i];` an expression must not reach field
+    // position: `fixed int data[4];` is the fixed-size-buffer declarator, legal
+    // only as a struct field, and it keeps the bracketed `variable_declarator`.
+    assert_eq!(
+        syntax_errors("unsafe struct S { public fixed int data[4]; }"),
+        0
+    );
+    // In statement position the bracketed form is not valid C# (CS0650), and the
+    // declaration path can no longer take it. It still parses silently — the
+    // permissive expression hub reads `int buf` as a declaration_expression and
+    // `[4]` as an element access, and tightening that is not worth carving up
+    // the inlined expression cycle for input no compiler accepts — but the
+    // assertion pins the mechanism: statement-position declarators are
+    // bracket-less.
+    assert_eq!(
+        first_statement_is_declaration("class C { void M() { int buf[4]; } }"),
+        Some(false),
+        "a bracketed declarator must not reach the local declaration path"
+    );
 }
