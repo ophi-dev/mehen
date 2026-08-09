@@ -1855,15 +1855,10 @@ impl Walker<'_> {
             // This previously called `boolean_seq.not_operator("!")`, which broke the
             // run and scored 2 where `mehen-java` scored 1 on identical logic. The
             // comment justifying it claimed parity with Kotlin — and `mehen-kotlin`
-            // does score 2 — but Kotlin is the deviation, not the reference:
+            // did score 2 — but Kotlin was the deviation, not the reference:
             // `mehen-java`'s `negation_does_not_break_boolean_run` cites *both* Sonar
             // implementations, SonarKotlin's included, for the correct behaviour.
-            //
-            // `mehen-kotlin` still has this bug and is deliberately left alone here:
-            // its `kotlin_negation_breaks_boolean_sequence` test asserts the opposite,
-            // so reconciling it means inverting a documented assertion in another
-            // language's suite. Tracked in issue #217, which measures the blast radius
-            // (exactly one failing test, no snapshots).
+            // `mehen-kotlin` was fixed in issue #217 and now agrees.
             _ => {}
         }
     }
