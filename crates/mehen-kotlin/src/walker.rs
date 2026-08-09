@@ -759,19 +759,23 @@ impl Walker<'_> {
             kp::RULE_STATEMENT | kp::RULE_ASSIGNMENT | kp::RULE_PROPERTY_DECLARATION => {
                 self.current().cognitive.boolean_seq.reset();
             }
-            // Prefix `!` (logical not) records a not-operator so a following
-            // same-kind boolean operator is not collapsed with the one
-            // before the negation (`a && !b && c` is +2). This is matched at
-            // the rule level — `prefixUnaryOperator` is logical `!`, whereas
-            // the postfix `!!` not-null assertion is `postfixUnaryOperator`
-            // and shares the same `EXCL_*` tokens but must NOT break a run.
-            kp::RULE_PREFIX_UNARY_OPERATOR
-                if kp::PrefixUnaryOperatorContext::from_rule_node(ctx)
-                    .and_then(|op| op.excl())
-                    .is_some() =>
-            {
-                self.current().cognitive.boolean_seq.not_operator("!");
-            }
+            // NOTE: the prefix `!` deliberately does NOTHING here.
+            //
+            // Both SonarJava (`CognitiveComplexityVisitor.flattenLogicalExpression`)
+            // and SonarKotlin (`CognitiveComplexity.flattenOperators`) flatten only
+            // the `&&`/`||` operators, treating a negated operand as a plain operand
+            // where flattening stops — the `!` is invisible to the run. So
+            // `a && !b && c` is a single `&&` run and costs exactly what
+            // `a && b && c` costs.
+            //
+            // This previously matched `RULE_PREFIX_UNARY_OPERATOR` (logical `!`)
+            // and called `boolean_seq.not_operator("!")`, which broke the run and
+            // scored 2 where every other analyzer — and SonarKotlin itself —
+            // scores 1 on identical logic. Fixed in issue #217. With no
+            // `not_operator` caller left in this walker, the postfix `!!`
+            // not-null assertion (`postfixUnaryOperator`, sharing the same
+            // `EXCL_*` tokens) cannot break a run either, which is what
+            // `kotlin_not_null_assertion_does_not_break_boolean_sequence` asserts.
             _ => {}
         }
     }

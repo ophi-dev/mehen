@@ -221,16 +221,20 @@ fn kotlin_nesting_preserved_after_nested_lambda() {
 }
 
 #[test]
-fn kotlin_negation_breaks_boolean_sequence() {
-    // `a && !b && c`: the prefix `!` separates the two `&&` runs, so the
-    // second `&&` is not collapsed with the first → +2, not +1.
+fn kotlin_negation_does_not_break_boolean_sequence() {
+    // A prefix `!` negation does NOT break a same-operator boolean run. Both
+    // SonarJava (`CognitiveComplexityVisitor.flattenLogicalExpression`) and
+    // SonarKotlin (`CognitiveComplexity.flattenOperators`) flatten only the
+    // `&&`/`||` operators and treat a negated operand as a plain operand where
+    // flattening stops — the `!` is invisible to the run. So `a && !b && c`
+    // is a single `&&` run → +1, exactly like `a && b && c` (issue #217).
     let a = analyze(
         "fun g(a: Boolean, b: Boolean, c: Boolean): Boolean {
              return a && !b && c
          }",
     );
     let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
-    assert_eq!(cog.sum, 2.0);
+    assert_eq!(cog.sum, 1.0, "negation must not break the run");
 }
 
 #[test]
@@ -249,9 +253,9 @@ fn kotlin_boolean_sequence_resets_between_call_statements() {
 }
 
 /// Regression: the postfix `!!` not-null assertion shares the `EXCL_*`
-/// tokens with the prefix `!` logical-not, but it must NOT break a boolean
-/// run. `a && b!! && c` collapses both `&&` into one run → +1 (contrast
-/// `a && !b && c` which is +2, see `kotlin_negation_breaks_boolean_sequence`).
+/// tokens with the prefix `!` logical-not; neither breaks a boolean run.
+/// `a && b!! && c` collapses both `&&` into one run → +1, same as
+/// `a && !b && c` (see `kotlin_negation_does_not_break_boolean_sequence`).
 #[test]
 fn kotlin_not_null_assertion_does_not_break_boolean_sequence() {
     let a = analyze(
