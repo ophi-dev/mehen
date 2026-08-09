@@ -239,10 +239,12 @@ impl Walker<'_> {
         }
 
         // Cognitive: `else` adds a flat +1 (covers `else if`); the boolean
-        // operators feed the sequence collapser. The prefix `!` not-operator
-        // is handled at the rule level (`prefixUnaryOperator`), not here —
-        // the `EXCL_*` tokens are shared with the postfix `!!` not-null
-        // assertion, which must NOT break a boolean run.
+        // operators feed the sequence collapser. The prefix `!` never feeds
+        // the collapser — a negated operand's logical subtree is instead
+        // isolated at the rule level in `visit_rule` (see the
+        // `is_logical_negation` boundary there). The `EXCL_*` tokens are
+        // shared with the postfix `!!` not-null assertion, which must not
+        // affect a boolean run at all.
         match tt {
             kp::ELSE => self.current().cognitive.increment_by_one(),
             kp::CONJ => self.current().cognitive.observe_boolean("&&"),
@@ -354,7 +356,15 @@ impl Walker<'_> {
         // continues across the call as if it were a single operand. This makes
         // `g(a && b) + g(c && d)` count +2 (two independent runs) while keeping
         // `a && g(x) && b` at +1 (one outer run, the call argument isolated).
-        let saved_bool = if ri == kp::RULE_VALUE_ARGUMENT {
+        //
+        // A logical negation (`!expr`) is the same kind of boundary: in
+        // SonarSource's tree flattening a negated operand is a leaf of the
+        // enclosing run — flattening stops there — so a logical subtree under
+        // `!` is its own run. Isolating it makes `a && !(b && c) && d` count
+        // +2 (outer run + inner run) while a scalar `!b` stays invisible
+        // (nothing inside to run, and the restored `last_op` lets the outer
+        // run continue): `a && !b && c` remains +1 (issue #217, PR #235).
+        let saved_bool = if ri == kp::RULE_VALUE_ARGUMENT || is_logical_negation(ctx, ri) {
             let prev = self.current().cognitive.boolean_seq.last_op.take();
             Some(prev)
         } else {
@@ -759,14 +769,18 @@ impl Walker<'_> {
             kp::RULE_STATEMENT | kp::RULE_ASSIGNMENT | kp::RULE_PROPERTY_DECLARATION => {
                 self.current().cognitive.boolean_seq.reset();
             }
-            // NOTE: the prefix `!` deliberately does NOTHING here.
+            // NOTE: the prefix `!` deliberately adds nothing here.
             //
             // Both SonarJava (`CognitiveComplexityVisitor.flattenLogicalExpression`)
             // and SonarKotlin (`CognitiveComplexity.flattenOperators`) flatten only
             // the `&&`/`||` operators, treating a negated operand as a plain operand
-            // where flattening stops — the `!` is invisible to the run. So
+            // where flattening *stops* — the `!` itself is invisible to the run, so
             // `a && !b && c` is a single `&&` run and costs exactly what
-            // `a && b && c` costs.
+            // `a && b && c` costs. But because flattening stops at the negated
+            // operand, a logical subtree beneath it (`!(b && c)`) is its own run.
+            // That boundary is enforced in `visit_rule`, which isolates the
+            // `boolean_seq` around a logical-negation operand exactly like a call
+            // argument (see `is_logical_negation`).
             //
             // This previously matched `RULE_PREFIX_UNARY_OPERATOR` (logical `!`)
             // and called `boolean_seq.not_operator("!")`, which broke the run and
@@ -895,6 +909,24 @@ impl Walker<'_> {
 // --------------------------------------------------------------------
 // Free helpers (top-down tree inspection — no parent pointers).
 // --------------------------------------------------------------------
+
+/// Is this node a `prefixUnaryExpression` carrying a logical-not prefix
+/// (`!expr`)? Matched at the rule level — `prefixUnaryOperator` is the
+/// logical `!`, whereas the postfix `!!` not-null assertion is
+/// `postfixUnaryOperator` and shares the same `EXCL_*` tokens but is not a
+/// negation. Used by [`Walker::visit_rule`] to isolate the negated operand's
+/// boolean-sequence context (see the comment there).
+fn is_logical_negation(ctx: RuleNodeView<'_>, ri: usize) -> bool {
+    ri == kp::RULE_PREFIX_UNARY_EXPRESSION
+        && kp::PrefixUnaryExpressionContext::from_rule_node(ctx).is_some_and(|expr| {
+            expr.unary_prefix_children().any(|prefix| {
+                prefix
+                    .prefix_unary_operator()
+                    .and_then(|op| op.excl())
+                    .is_some()
+            })
+        })
+}
 
 /// Index of the `else`-branch `controlStructureBody` child of an
 /// `ifExpression`, if present. The else body is the `controlStructureBody`

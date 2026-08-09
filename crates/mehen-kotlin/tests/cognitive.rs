@@ -237,6 +237,68 @@ fn kotlin_negation_does_not_break_boolean_sequence() {
     assert_eq!(cog.sum, 1.0, "negation must not break the run");
 }
 
+/// Regression (PR #235 review): a *logical subtree* under a negation is an
+/// independent boolean context, like a call argument. In SonarSource's tree
+/// flattening a negated operand is a leaf of the enclosing run — flattening
+/// stops there — so the inner run is scored separately, not collapsed into
+/// the outer one. `a && !(b && c) && d` is one outer `&&` run (+1) plus one
+/// inner `&&` run (+1) → 2. Making `!` a complete no-op would feed all three
+/// `&&` into the same `last_op` state and undercount this as 1.
+#[test]
+fn kotlin_negated_logical_subtree_is_a_separate_boolean_run() {
+    let a = analyze(
+        "fun g(a: Boolean, b: Boolean, c: Boolean, d: Boolean): Boolean {
+             return a && !(b && c) && d
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(cog.sum, 2.0, "inner run under `!` is a separate run");
+
+    // Leading form: `!(a && b) && c` — the negated subtree's `&&` and the
+    // outer `&&` are two runs → 2.
+    let a = analyze(
+        "fun g(a: Boolean, b: Boolean, c: Boolean): Boolean {
+             return !(a && b) && c
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(cog.sum, 2.0, "leading negated subtree is its own run");
+
+    // Same-kind operator on both sides of the boundary, `||` flavour:
+    // `a || !(b || c) || d` → outer `||` run + inner `||` run = 2.
+    let a = analyze(
+        "fun g(a: Boolean, b: Boolean, c: Boolean, d: Boolean): Boolean {
+             return a || !(b || c) || d
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(cog.sum, 2.0, "negated `||` subtree is its own run");
+
+    // Mixed kinds still count each alternation: `a && !(b || c) && d` is an
+    // outer `&&` run (+1) plus an inner `||` run (+1) → 2, and the isolation
+    // must not double-count the outer run's continuation after the operand.
+    let a = analyze(
+        "fun g(a: Boolean, b: Boolean, c: Boolean, d: Boolean): Boolean {
+             return a && !(b || c) && d
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(
+        cog.sum, 2.0,
+        "outer run continues across the negated operand"
+    );
+
+    // A *scalar* negation stays invisible: parenthesized single operand has
+    // no inner run, so `a && !(b) && c` is one run → 1, same as `a && !b && c`.
+    let a = analyze(
+        "fun g(a: Boolean, b: Boolean, c: Boolean): Boolean {
+             return a && !(b) && c
+         }",
+    );
+    let cog = mehen_report::metrics_json::cognitive(&a.root.metrics);
+    assert_eq!(cog.sum, 1.0, "scalar negation still does not break the run");
+}
+
 #[test]
 fn kotlin_boolean_sequence_resets_between_call_statements() {
     // Two standalone calls each carrying `&&`. The boolean sequence must
