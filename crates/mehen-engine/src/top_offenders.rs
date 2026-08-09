@@ -363,11 +363,23 @@ fn repo_relative_path(path: &Path, canonical_workdir: &Path) -> Option<PathBuf> 
         .map(Path::to_path_buf)
 }
 
-/// Discover the repository from the CWD and walk its history at
-/// `HEAD`, returning the history plus the canonicalized work-dir root.
-fn load_workdir_history()
--> Result<(mehen_git::RepositoryHistory, PathBuf), Box<dyn std::error::Error>> {
-    let repo = mehen_git::open_repo()?;
+/// Discover the repository *containing the analyzed paths* (not the
+/// process CWD — `mehen top-offenders -M history.… /other/repo/src`
+/// must load `/other/repo`'s history) and walk it at `HEAD`, returning
+/// the history plus the canonicalized work-dir root. All inputs are
+/// assumed to live in one repository: discovery starts from the first
+/// path, and files outside that work dir simply read the family as 0.
+fn load_history_for_paths(
+    paths: &[PathBuf],
+) -> Result<(mehen_git::RepositoryHistory, PathBuf), Box<dyn std::error::Error>> {
+    let root = paths.first().ok_or("at least one path is required")?;
+    let canonical_root = std::fs::canonicalize(root)?;
+    let discover_from = if canonical_root.is_dir() {
+        canonical_root.as_path()
+    } else {
+        canonical_root.parent().unwrap_or(canonical_root.as_path())
+    };
+    let repo = mehen_git::open_repo_at(discover_from)?;
     let workdir = repo
         .workdir()
         .ok_or("repository has no work dir (bare repository)")?
@@ -552,7 +564,7 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
     // meaningless without the repository walk, so failing to load it
     // is a hard error rather than a silent all-zeros column.
     let history = if crate::history_metrics::names_want_history(selectors.iter().map(|s| s.name)) {
-        match load_workdir_history() {
+        match load_history_for_paths(&opts.paths) {
             Ok(loaded) => Some(loaded),
             Err(e) => {
                 log::error!("history metrics unavailable: {e}");

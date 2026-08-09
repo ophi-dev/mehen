@@ -18,15 +18,17 @@
 //! (code-maat, PyDriller, `git log --no-merges --numstat`):
 //! merge commits are skipped and every other commit is diffed against
 //! its first parent (or the empty tree for root commits). Renames are
-//! not detected — a rename counts as a deletion plus an addition,
-//! consistent with [`crate::changed_files`].
+//! detected (git-style similarity tracking): a renamed file keeps its
+//! accumulated history under its head-relative path, and a pure rename
+//! churns no lines.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gix::diff::blob::{Algorithm, Diff, InternedInput};
-use gix::diff::tree::recorder::Change;
-use gix::objs::TreeRefIter;
+use gix::object::tree::diff::ChangeDetached;
+use gix::revision::walk::Sorting;
+use gix::traverse::commit::simple::CommitTimeOrder;
 
 use crate::GitError;
 
@@ -167,9 +169,18 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
 
     let mut files: HashMap<PathBuf, FileAccumulator> = HashMap::new();
     let mut first_commit_seconds = head_seconds;
+    // Rename identity: maps a historical path to the head-relative
+    // path it eventually became, so a renamed file accumulates one
+    // history entry instead of losing everything before the rename.
+    // The newest-first walk sees a rename before the older commits
+    // that touched its source path; values stored in the map are
+    // always fully resolved, and `resolve_alias` follows chains for
+    // multi-rename histories.
+    let mut aliases: HashMap<PathBuf, PathBuf> = HashMap::new();
 
     let walk = repo
         .rev_walk([head_commit.id])
+        .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
         .all()
         .map_err(|e| GitError::Internal(e.to_string()))?;
 
@@ -197,7 +208,13 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         let coupled_others = changes.len().saturating_sub(1) as u64;
 
         for change in &changes {
-            let acc = files.entry(change.path.clone()).or_default();
+            let path = resolve_alias(&aliases, &change.path);
+            if let Some(source) = &change.source_path
+                && *source != path
+            {
+                aliases.insert(source.clone(), path.clone());
+            }
+            let acc = files.entry(path).or_default();
             acc.commit_frequency += 1;
             acc.churn_added += change.added;
             acc.churn_removed += change.removed;
@@ -287,12 +304,44 @@ fn time_weighted_risk(bugfix_seconds: &[i64], first_seconds: i64, head_seconds: 
 /// A single file's change within one commit, with line-level churn.
 struct CommitFileChange {
     path: PathBuf,
+    /// The pre-rename path when this change is a rename (never set for
+    /// copies — a copy leaves the source's own history in place).
+    source_path: Option<PathBuf>,
     added: u64,
     removed: u64,
 }
 
+/// Resolve a historical path to its head-relative identity by
+/// following the rename-alias chain. Values in the map are stored
+/// fully resolved, so this usually terminates in one hop; the hop
+/// limit guards against pathological cycles.
+fn resolve_alias(aliases: &HashMap<PathBuf, PathBuf>, path: &Path) -> PathBuf {
+    let mut current = path;
+    for _ in 0..64 {
+        match aliases.get(current) {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+    current.to_path_buf()
+}
+
+/// Explicit rename-tracking configuration (equivalent to
+/// `git diff -M50%`), pinned here rather than read from repository /
+/// user configuration so history metrics stay deterministic across
+/// machines.
+fn rewrite_tracking() -> gix::diff::Rewrites {
+    gix::diff::Rewrites {
+        copies: None,
+        percentage: Some(0.5),
+        limit: 1000,
+        track_empty: false,
+    }
+}
+
 /// Diff `commit` against its first parent (or the empty tree for root
-/// commits) and compute line-level churn per changed blob.
+/// commits) with rename tracking, and compute line-level churn per
+/// changed blob.
 fn diff_against_first_parent(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
@@ -309,63 +358,56 @@ fn diff_against_first_parent(
                 .map_err(|e| internal(&e))?;
             Some(parent.tree().map_err(|e| internal(&e))?)
         }
+        // Root commit: `diff_tree_to_tree` treats `None` as the empty tree.
         None => None,
     };
-    let (parent_data, parent_kind) = match &parent_tree {
-        Some(tree) => (tree.data.as_slice(), tree.id.kind()),
-        // Root commit: diff against the empty tree.
-        None => ([].as_slice(), to_tree.id.kind()),
-    };
 
-    let mut recorder = gix::diff::tree::Recorder::default();
-    gix::diff::tree(
-        TreeRefIter::from_bytes(parent_data, parent_kind),
-        TreeRefIter::from_bytes(&to_tree.data, to_tree.id.kind()),
-        gix::diff::tree::State::default(),
-        repo.objects.clone(),
-        &mut recorder,
-    )
-    .map_err(|e| internal(&e))?;
+    let options = gix::diff::Options::default().with_rewrites(Some(rewrite_tracking()));
+    let records = repo
+        .diff_tree_to_tree(parent_tree.as_ref(), Some(&to_tree), options)
+        .map_err(|e| internal(&e))?;
 
-    let mut changes = Vec::with_capacity(recorder.records.len());
-    for change in recorder.records {
+    let mut changes = Vec::with_capacity(records.len());
+    for change in records {
         let file_change = match change {
-            Change::Addition {
+            ChangeDetached::Addition {
+                location,
                 entry_mode,
-                oid,
-                path,
+                id,
                 ..
             } => {
                 if !entry_mode.is_blob() {
                     continue;
                 }
                 CommitFileChange {
-                    path: PathBuf::from(path.to_string()),
-                    added: blob_line_count(repo, &oid)?,
+                    path: PathBuf::from(location.to_string()),
+                    source_path: None,
+                    added: blob_line_count(repo, &id)?,
                     removed: 0,
                 }
             }
-            Change::Deletion {
+            ChangeDetached::Deletion {
+                location,
                 entry_mode,
-                oid,
-                path,
+                id,
                 ..
             } => {
                 if !entry_mode.is_blob() {
                     continue;
                 }
                 CommitFileChange {
-                    path: PathBuf::from(path.to_string()),
+                    path: PathBuf::from(location.to_string()),
+                    source_path: None,
                     added: 0,
-                    removed: blob_line_count(repo, &oid)?,
+                    removed: blob_line_count(repo, &id)?,
                 }
             }
-            Change::Modification {
+            ChangeDetached::Modification {
+                location,
                 previous_entry_mode,
-                previous_oid,
+                previous_id,
                 entry_mode,
-                oid,
-                path,
+                id,
             } => {
                 // A modification can also change the entry's *type*
                 // (blob ↔ gitlink/symlink, e.g. a checked-in directory
@@ -377,14 +419,39 @@ fn diff_against_first_parent(
                 // the whole walk — the submodule's commit object lives
                 // in the submodule, not in this repository's odb.
                 let (added, removed) = match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
-                    (true, true) if previous_oid == oid => (0, 0), // mode-only change
-                    (true, true) => blob_line_diff(repo, &previous_oid, &oid)?,
-                    (true, false) => (0, blob_line_count(repo, &previous_oid)?),
-                    (false, true) => (blob_line_count(repo, &oid)?, 0),
+                    (true, true) if previous_id == id => (0, 0), // mode-only change
+                    (true, true) => blob_line_diff(repo, &previous_id, &id)?,
+                    (true, false) => (0, blob_line_count(repo, &previous_id)?),
+                    (false, true) => (blob_line_count(repo, &id)?, 0),
                     (false, false) => continue,
                 };
                 CommitFileChange {
-                    path: PathBuf::from(path.to_string()),
+                    path: PathBuf::from(location.to_string()),
+                    source_path: None,
+                    added,
+                    removed,
+                }
+            }
+            ChangeDetached::Rewrite {
+                source_location,
+                location,
+                diff,
+                entry_mode,
+                copy,
+                ..
+            } => {
+                if !entry_mode.is_blob() {
+                    continue;
+                }
+                // `diff` is `None` for a perfect rename — zero churn.
+                let (added, removed) = diff
+                    .map(|stats| (u64::from(stats.insertions), u64::from(stats.removals)))
+                    .unwrap_or((0, 0));
+                CommitFileChange {
+                    path: PathBuf::from(location.to_string()),
+                    // Copies keep the source's own history in place;
+                    // only true renames redirect it.
+                    source_path: (!copy).then(|| PathBuf::from(source_location.to_string())),
                     added,
                     removed,
                 }

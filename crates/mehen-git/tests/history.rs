@@ -294,3 +294,99 @@ fn blob_to_gitlink_type_change_does_not_fail_the_walk() {
     assert_eq!(dep.churn_removed, 2); // blob → gitlink counts as its deletion
     assert_eq!(dep.last_change_seconds, T_FEB);
 }
+
+#[test]
+fn renames_preserve_file_identity_and_history() {
+    // A rename must not split the file's history: the head-relative
+    // path keeps the pre-rename commits/churn/authors, a pure rename
+    // churns nothing, and a rename-with-edit churns only the edit.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    // pure.rs: 4 lines by alice, then renamed untouched by bob.
+    std::fs::write(
+        dir.path().join("pure.rs"),
+        "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "pure.rs"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "add pure"],
+        ALICE,
+        T_JAN,
+    );
+    git(
+        dir.path(),
+        &["mv", "pure.rs", "renamed_pure.rs"],
+        BOB,
+        T_FEB,
+    );
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename pure"],
+        BOB,
+        T_FEB,
+    );
+
+    // edited.rs: 10 lines by alice, then renamed *and* edited (2 lines
+    // rewritten) by bob — 80% similar, above the 50% threshold.
+    let lines: Vec<String> = (0..10).map(|i| format!("fn f{i}() {{}}")).collect();
+    std::fs::write(dir.path().join("edited.rs"), lines.join("\n") + "\n").unwrap();
+    git(dir.path(), &["add", "edited.rs"], ALICE, T_MAR);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "add edited"],
+        ALICE,
+        T_MAR,
+    );
+    let mut edited: Vec<String> = lines.clone();
+    edited[0] = "fn f0_changed() {}".to_string();
+    edited[9] = "fn f9_changed() {}".to_string();
+    std::fs::remove_file(dir.path().join("edited.rs")).unwrap();
+    std::fs::write(
+        dir.path().join("renamed_edited.rs"),
+        edited.join("\n") + "\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], BOB, T_APR);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename and tweak edited"],
+        BOB,
+        T_APR,
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // No stale entries under the pre-rename paths.
+    assert!(history.file(Path::new("pure.rs")).is_none());
+    assert!(history.file(Path::new("edited.rs")).is_none());
+
+    let pure = history
+        .file(Path::new("renamed_pure.rs"))
+        .expect("renamed_pure history");
+    // Pre-rename history is carried over; the pure rename churns nothing.
+    assert_eq!(pure.commit_frequency, 2);
+    assert_eq!(pure.churn_added, 4);
+    assert_eq!(pure.churn_removed, 0);
+    assert_eq!(pure.authors, 2); // alice (4 lines) + bob (0 lines)
+    assert!((pure.ownership - 1.0).abs() < 1e-9);
+    assert_eq!(pure.last_change_seconds, T_FEB);
+
+    let edited = history
+        .file(Path::new("renamed_edited.rs"))
+        .expect("renamed_edited history");
+    // Creation (10 lines) plus only the two rewritten lines.
+    assert_eq!(edited.commit_frequency, 2);
+    assert_eq!(edited.churn_added, 12);
+    assert_eq!(edited.churn_removed, 2);
+    assert_eq!(edited.last_change_seconds, T_APR);
+}

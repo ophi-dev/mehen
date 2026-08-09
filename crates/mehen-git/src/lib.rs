@@ -88,7 +88,14 @@ pub struct ChangedFile {
 /// Discover a git repository from the current working directory.
 /// Fails fast on shallow clones.
 pub fn open_repo() -> Result<gix::Repository, GitError> {
-    let repo = gix::discover(".").map_err(|_| GitError::RepoNotFound)?;
+    open_repo_at(Path::new("."))
+}
+
+/// Discover the git repository containing `path` (walking up from it,
+/// like `gix::discover`). Fails fast on shallow clones — history-based
+/// features need the full commit graph.
+pub fn open_repo_at(path: &Path) -> Result<gix::Repository, GitError> {
+    let repo = gix::discover(path).map_err(|_| GitError::RepoNotFound)?;
 
     if repo.is_shallow() {
         return Err(GitError::ShallowClone {

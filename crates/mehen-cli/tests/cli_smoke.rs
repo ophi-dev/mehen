@@ -641,3 +641,47 @@ fn diff_default_columns_include_history_hotspot_and_churn() {
     );
     assert!(stdout.contains("sample.py"), "row missing:\n{stdout}");
 }
+
+#[test]
+fn top_offenders_discovers_history_from_the_analyzed_paths() {
+    // `mehen top-offenders -M history.… /path/to/repo` must load
+    // *that* repository's history even when the process CWD is not
+    // inside it (or is inside a different repository).
+    let repo_dir = tempfile::tempdir().expect("repo tempdir");
+    init_git_repo(repo_dir.path());
+    write_python(repo_dir.path(), "tracked.py", "a = 1\n");
+    commit_all(repo_dir.path(), "one");
+    write_python(repo_dir.path(), "tracked.py", "a = 1\nb = 2\n");
+    commit_all(repo_dir.path(), "two");
+
+    let elsewhere = tempfile::tempdir().expect("non-repo tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(elsewhere.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            repo_dir.path().to_str().expect("UTF-8 temp path"),
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 1);
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("tracked.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}
