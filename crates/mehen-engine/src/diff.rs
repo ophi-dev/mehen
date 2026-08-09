@@ -29,6 +29,7 @@ use crate::ci;
 use crate::concurrent_files::mk_globset;
 use crate::detection::detect_language;
 use crate::git_attributes::GitAttributeFilter;
+use crate::history_metrics;
 use crate::metric_selector::{
     MetricSelector, Polarity as SelectorPolarity, default_selectors_for_language,
     parse_metric_selectors, read_metric as read_selector_metric,
@@ -80,6 +81,16 @@ impl RevisionGitAttributeFilters {
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
+    // Thresholds against `history.*` keys need the repository history
+    // at the head revision (thresholds are evaluated against the head
+    // analysis only). Walked lazily — the family is opt-in.
+    let head_history = if history_metrics::names_want_history(
+        input.thresholds.iter().map(|t| t.selector.key.as_str()),
+    ) {
+        Some(mehen_git::collect_history(repo, &input.to).map_err(DiffError::Git)?)
+    } else {
+        None
+    };
     let mut git_attribute_filters = RevisionGitAttributeFilters::new(repo, &input.from, &input.to)
         .map_err(|error| {
             DiffError::Git(GitError::Internal(format!(
@@ -178,9 +189,20 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         // blocking diagnostic on the head side are skipped — the
         // analysis is incomplete and folding a partial number into a
         // policy decision would be a false positive.
-        if let Some(analysis) = head_analysis.as_ref()
+        if let Some(analysis) = head_analysis.as_mut()
             && !has_blocking_diagnostic(&analysis.diagnostics)
         {
+            // Fold `history.*` into the head metric set first so
+            // history thresholds read real values.
+            if let Some(history) = head_history.as_ref()
+                && let Some(fh) = history.file(cf.path.as_path())
+            {
+                history_metrics::inject_history_metrics(
+                    &mut analysis.root.metrics,
+                    fh,
+                    history.head_seconds,
+                );
+            }
             evaluate_thresholds(&mut report, &utf8_path, &input.thresholds, analysis);
         }
 
@@ -380,8 +402,11 @@ pub struct DiffOpts {
     #[clap(long)]
     to: Option<String>,
     /// Comma-separated metrics to compare
-    /// (default: cyclomatic,cognitive,nom.functions,loc.lloc,mi.visual_studio).
+    /// (default: cognitive,abc,mi.visual_studio,history.hotspot,history.churn.relative).
     /// Prefix with + for higher-is-better, - for lower-is-better.
+    /// Namespaced keys (`sql.*`, `markdown.*`, `history.*`) are accepted
+    /// verbatim; `history.*` metrics (including two of the defaults)
+    /// trigger a git history walk of both revisions.
     #[clap(long, short = 'M', value_delimiter = ',')]
     metrics: Vec<String>,
     /// Repository-relative files or directories to compare.
@@ -487,6 +512,22 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // unchanged (Codex P2). `explicit_metrics` selects between the two modes.
     let explicit_metrics = !opts.metrics.is_empty();
     let selectors = parse_metric_selectors(&opts.metrics);
+    // History enrichment (`history.*`): repository-scope process
+    // metrics computed by one revision walk per side and folded into
+    // each file's metric set after static analysis. The walk costs one
+    // tree diff per commit, so it only runs when a history selector is
+    // actually requested. Both sides are walked so history columns
+    // carry real deltas (e.g. commits/churn gained between base and
+    // head) instead of comparing against a phantom zero baseline.
+    let histories: Option<(mehen_git::RepositoryHistory, mehen_git::RepositoryHistory)> =
+        if history_metrics::names_want_history(selectors.iter().map(|s| s.name)) {
+            Some((
+                mehen_git::collect_history(&repo, &from_ref)?,
+                mehen_git::collect_history(&repo, &to_ref)?,
+            ))
+        } else {
+            None
+        };
     let mut git_attribute_filters = opts
         .ignore_git_attributes
         .then(|| RevisionGitAttributeFilters::new(&repo, &from_ref, &to_ref))
@@ -607,7 +648,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             Some(analysis.root)
         };
 
-        let baseline_space: Option<MetricSpace> = if is_new {
+        let mut baseline_space: Option<MetricSpace> = if is_new {
             None
         } else {
             match mehen_git::read_blob(&repo, &from_ref, &cf.path) {
@@ -620,7 +661,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        let current_space: Option<MetricSpace> = if is_deleted {
+        let mut current_space: Option<MetricSpace> = if is_deleted {
             None
         } else {
             match mehen_git::read_blob(&repo, &to_ref, &cf.path) {
@@ -632,6 +673,25 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         };
+
+        // Fold the `history.*` family into each side's metric set, each
+        // against its own revision's history and head-relative "now".
+        if let Some((base_history, head_history)) = histories.as_ref() {
+            for (space, history) in [
+                (baseline_space.as_mut(), base_history),
+                (current_space.as_mut(), head_history),
+            ] {
+                if let Some(space) = space
+                    && let Some(fh) = history.file(&cf.path)
+                {
+                    history_metrics::inject_history_metrics(
+                        &mut space.metrics,
+                        fh,
+                        history.head_seconds,
+                    );
+                }
+            }
+        }
 
         let metric_diffs: Vec<MetricDiff> = file_selectors
             .iter()
@@ -1263,6 +1323,48 @@ binary.md binary
         assert_eq!(paths, vec!["kept.md"]);
     }
 
+    #[test]
+    fn analyze_diff_evaluates_history_thresholds_against_head_history() {
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("hot.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "history-base"]);
+
+        std::fs::write(dir.path().join("hot.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
+        git_ok(dir.path(), &["tag", "history-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![Threshold::new(
+            "history.commit_frequency".parse().unwrap(),
+            1.0,
+            Polarity::HigherIsWorse,
+        )];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "history-base".to_string(),
+                to: "history-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        // hot.py was touched by 2 commits at head — above the limit of 1.
+        assert_eq!(report.threshold_violations.len(), 1);
+        let v = &report.threshold_violations[0];
+        assert_eq!(v.path, "hot.py");
+        assert_eq!(v.evaluation.actual, 2.0);
+        assert!(v.evaluation.violated);
+    }
+
     fn analysis_with_diagnostics(diagnostics: Vec<ParseDiagnostic>) -> LanguageAnalysis {
         LanguageAnalysis {
             language: Language::Rust,
@@ -1494,13 +1596,15 @@ binary.md binary
 
     #[test]
     fn test_parse_metric_selectors_defaults() {
+        // The §9.4 default comment set: one column per orthogonal
+        // dimension plus the two change-risk history signals.
         let selectors = parse_metric_selectors(&[]);
         assert_eq!(selectors.len(), 5);
-        assert_eq!(selectors[0].name, "cyclomatic");
-        assert_eq!(selectors[1].name, "cognitive");
-        assert_eq!(selectors[2].name, "nom.functions");
-        assert_eq!(selectors[3].name, "loc.lloc");
-        assert_eq!(selectors[4].name, "mi.visual_studio");
+        assert_eq!(selectors[0].name, "cognitive");
+        assert_eq!(selectors[1].name, "abc");
+        assert_eq!(selectors[2].name, "mi.visual_studio");
+        assert_eq!(selectors[3].name, "history.hotspot");
+        assert_eq!(selectors[4].name, "history.churn.relative");
     }
 
     #[test]

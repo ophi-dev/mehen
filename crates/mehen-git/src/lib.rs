@@ -10,6 +10,10 @@
 
 #![deny(unsafe_code)]
 
+mod history;
+
+pub use history::{FileHistory, RepositoryHistory, collect_history};
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 

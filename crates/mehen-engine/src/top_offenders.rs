@@ -256,7 +256,7 @@ fn suffixed_lookup(
 
 use std::cmp::Ordering;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Mutex;
 use std::thread::available_parallelism;
@@ -282,7 +282,9 @@ pub struct TopOffendersOpts {
     /// `-` for lower-is-better. Without a prefix the metric's default polarity
     /// is used. Known names: `cyclomatic`, `cognitive`, `nom.functions`,
     /// `loc.lloc`, `mi.original`, `mi.sei`, `mi.visual_studio`,
-    /// `halstead.volume`, `abc`.
+    /// `halstead.volume`, `abc`. Namespaced keys (`sql.*`, `markdown.*`,
+    /// `history.*`) are accepted verbatim; `history.*` metrics require a git
+    /// repository and trigger a history walk of `HEAD`.
     #[clap(
         long = "metric",
         short = 'M',
@@ -343,7 +345,36 @@ struct TopOffendersCfg {
     selectors: Vec<CliMetricSelector>,
     language_override: Option<Language>,
     registry: Arc<AnalyzerRegistry>,
+    /// Repository history at `HEAD` plus the canonicalized work-dir
+    /// root for path mapping — present only when a `history.*` metric
+    /// was requested.
+    history: Option<(mehen_git::RepositoryHistory, PathBuf)>,
     results: Arc<Mutex<Vec<FileOffender>>>,
+}
+
+/// Map a walked filesystem path to its repository-relative form so it
+/// can be looked up in the history map (which is keyed the way git
+/// reports paths). Returns `None` for paths outside the work dir.
+fn repo_relative_path(path: &Path, canonical_workdir: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path)
+        .ok()?
+        .strip_prefix(canonical_workdir)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+/// Discover the repository from the CWD and walk its history at
+/// `HEAD`, returning the history plus the canonicalized work-dir root.
+fn load_workdir_history()
+-> Result<(mehen_git::RepositoryHistory, PathBuf), Box<dyn std::error::Error>> {
+    let repo = mehen_git::open_repo()?;
+    let workdir = repo
+        .workdir()
+        .ok_or("repository has no work dir (bare repository)")?
+        .to_path_buf();
+    let canonical_workdir = std::fs::canonicalize(&workdir)?;
+    let history = mehen_git::collect_history(&repo, "HEAD")?;
+    Ok((history, canonical_workdir))
 }
 
 fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
@@ -371,10 +402,25 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
     };
 
     let source = SourceFile::new(utf8_path, language, text);
-    let analysis = match analyzer.analyze(&source, &mehen_core::AnalysisConfig::default()) {
+    let mut analysis = match analyzer.analyze(&source, &mehen_core::AnalysisConfig::default()) {
         Ok(a) => a,
         Err(_) => return Ok(()),
     };
+
+    // Fold the `history.*` family into the metric set so history
+    // selectors rank on real values. Files without recorded history
+    // (untracked, outside the work dir) read the family as 0.0.
+    if let Some((history, workdir)) = cfg.history.as_ref()
+        && let Some(fh) = repo_relative_path(&path, workdir)
+            .as_deref()
+            .and_then(|rel| history.file(rel))
+    {
+        crate::history_metrics::inject_history_metrics(
+            &mut analysis.root.metrics,
+            fh,
+            history.head_seconds,
+        );
+    }
 
     let metrics: Vec<CliMetricValue> = cfg
         .selectors
@@ -502,6 +548,21 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
     let include = mk_globset(opts.include);
     let exclude = mk_globset(opts.exclude);
 
+    // A `history.*` metric was explicitly requested: the ranking is
+    // meaningless without the repository walk, so failing to load it
+    // is a hard error rather than a silent all-zeros column.
+    let history = if crate::history_metrics::names_want_history(selectors.iter().map(|s| s.name)) {
+        match load_workdir_history() {
+            Ok(loaded) => Some(loaded),
+            Err(e) => {
+                log::error!("history metrics unavailable: {e}");
+                process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     let results: Arc<Mutex<Vec<FileOffender>>> = Arc::new(Mutex::new(Vec::new()));
     let registry = Arc::new(AnalyzerRegistry::default_set());
 
@@ -509,6 +570,7 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
         selectors: selectors.clone(),
         language_override,
         registry,
+        history,
         results: results.clone(),
     };
 

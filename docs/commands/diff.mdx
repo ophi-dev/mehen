@@ -17,7 +17,7 @@ mehen diff [OPTIONS]
 | `--from <FROM>` | Base revision to compare from. |
 | `--to <TO>` | Head revision to compare to. |
 | `-p, --paths <PATHS>...` | Repository-relative files or directories to compare. |
-| `-M, --metrics <METRICS>` | Comma-separated metrics. When omitted, defaults are resolved **per file language**: source-code files use `cyclomatic,cognitive,nom.functions,loc.lloc,mi.visual_studio`; SQL files use `sql.change_risk_score,sql.maintainability_index,sql.review_burden_index,sql.cognitive_complexity,sql.loc.code`. An explicit list applies to every file. Prefix with `+` for higher-is-better, `-` for lower-is-better. |
+| `-M, --metrics <METRICS>` | Comma-separated metrics. When omitted, defaults are resolved **per file language**: source-code files use `cognitive,abc,mi.visual_studio,history.hotspot,history.churn.relative`; SQL files use `sql.change_risk_score,sql.maintainability_index,sql.review_burden_index,sql.cognitive_complexity,sql.loc.code`. An explicit list applies to every file. Prefix with `+` for higher-is-better, `-` for lower-is-better. `history.*` metrics (including two of the defaults) walk the repository history of both revisions, so they need a full clone (`fetch-depth: 0`). |
 | `-I, --include <INCLUDE>...` | Glob to include files. |
 | `-X, --exclude <EXCLUDE>...` | Glob to exclude files. |
 | `-O, --output-format <OUTPUT_FORMAT>` | `markdown` or `json`. |
@@ -84,6 +84,16 @@ default metrics. Every row populates only the columns its analyzer publishes;
 columns from another language render as `–`. This keeps SQL changes visible in
 the default GitHub Action path — without it, SQL files would be measured only
 against source-code metrics they never emit and silently drop out as unchanged.
+
+The source-code default columns follow a one-column-per-dimension design:
+**Cognitive** (control-flow understandability), **ABC** (computational volume),
+**MI** (the one deliberate composite rollup), **Hotspot**
+(`history.hotspot` = cognitive complexity × commit frequency — is this a
+fragile, frequently-touched file?), and **Churn** (`history.churn.relative` —
+how much of the file recent history has moved, normalized by its size). The
+two history columns are computed by walking the git history of each compared
+revision. All columns are review-prioritization signals, not quality verdicts:
+a rising number flags *where to look*, not *that the code is bad*.
 
 ## `--fail-on` thresholds
 

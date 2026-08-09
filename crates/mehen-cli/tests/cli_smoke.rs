@@ -464,3 +464,180 @@ global-only.py linguist-vendored
         ]
     );
 }
+
+#[test]
+fn diff_reports_history_metrics_for_both_sides() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "sample.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "history-base"]);
+
+    write_python(dir.path(), "sample.py", "x = 1\ny = 2\nz = 3\nw = 4\n");
+    commit_all(dir.path(), "fix: append two lines");
+    git_ok(dir.path(), &["tag", "history-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "history-base",
+            "--to",
+            "history-head",
+            "--metrics",
+            "history.commit_frequency,history.churn.abs,history.bugfix_commits",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"].as_str(), Some("sample.py"));
+
+    let metric = |name: &str| -> (f64, f64) {
+        let m = files[0]["metrics"]
+            .as_array()
+            .expect("metrics array")
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing metric {name}"));
+        (
+            m["current"].as_f64().expect("current"),
+            m["baseline"].as_f64().expect("baseline"),
+        )
+    };
+
+    // Head history: 2 commits, 2+2 lines added; base history: 1 commit,
+    // 2 lines. Only the head commit message matches the bug-fix
+    // heuristic.
+    assert_eq!(metric("history.commit_frequency"), (2.0, 1.0));
+    assert_eq!(metric("history.churn.abs"), (4.0, 2.0));
+    assert_eq!(metric("history.bugfix_commits"), (1.0, 0.0));
+}
+
+#[test]
+fn top_offenders_ranks_by_history_metrics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    // busy.py is touched by three commits, calm.py by one.
+    write_python(dir.path(), "busy.py", "a = 1\n");
+    write_python(dir.path(), "calm.py", "b = 1\n");
+    commit_all(dir.path(), "initial");
+    write_python(dir.path(), "busy.py", "a = 1\na2 = 2\n");
+    commit_all(dir.path(), "grow busy");
+    write_python(dir.path(), "busy.py", "a = 1\na2 = 2\na3 = 3\n");
+    commit_all(dir.path(), "grow busy more");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 2);
+    // Worst first: busy.py with 3 commits, then calm.py with 1.
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("busy.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(3.0));
+    assert!(
+        offenders[1]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("calm.py")
+    );
+    assert_eq!(offenders[1]["metrics"][0]["value"].as_f64(), Some(1.0));
+}
+
+#[test]
+fn diff_default_columns_include_history_hotspot_and_churn() {
+    // Research foundation §9.4: the default PR-comment set is
+    // Cognitive, ABC, MI, Hotspot, Churn — the last two computed from
+    // the git history walk without any explicit `--metrics`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(
+        dir.path(),
+        "sample.py",
+        "def foo(x):\n    if x:\n        return 1\n    return 2\n",
+    );
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "default-base"]);
+
+    write_python(
+        dir.path(),
+        "sample.py",
+        "def foo(x):\n    if x:\n        return 1\n    if x > 2:\n        return 3\n    return 2\n",
+    );
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "default-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "default-base",
+            "--to",
+            "default-head",
+            "--output-format",
+            "markdown",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(
+        stdout.contains("| File | Cognitive | ABC | MI | Hotspot | Churn |"),
+        "expected the §9.4 default column header, got:\n{stdout}"
+    );
+    assert!(stdout.contains("sample.py"), "row missing:\n{stdout}");
+}
