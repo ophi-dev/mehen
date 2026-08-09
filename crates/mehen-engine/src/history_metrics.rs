@@ -51,11 +51,23 @@ pub(crate) fn inject_history_metrics(
             .map(|v| v.as_f64())
             .unwrap_or(0.0)
     };
+    // Composite inputs come from whichever family the analyzer
+    // publishes: the shared source-code suite (`loc.sloc`,
+    // `cognitive.sum`) or SQL's own namespace (`sql.loc.code`,
+    // `sql.cognitive_complexity`). Without the SQL fallback, relative
+    // churn would silently equal absolute churn and every SQL hotspot
+    // would read zero (Codex P2).
+    let read_first = |keys: &[&str]| {
+        keys.iter()
+            .map(|key| read(metrics, key))
+            .find(|&v| v != 0.0)
+            .unwrap_or(0.0)
+    };
     // Relative churn normalizes by the file's current size; a file
-    // whose analyzer published no (or zero) SLOC falls back to a
-    // denominator of 1 so the value stays finite and deterministic.
-    let sloc = read(metrics, keys::LOC_SLOC).max(1.0);
-    let cognitive_sum = read(metrics, "cognitive.sum");
+    // whose analyzer published no (or zero) code-line count falls back
+    // to a denominator of 1 so the value stays finite and deterministic.
+    let sloc = read_first(&[keys::LOC_SLOC, "sql.loc.code"]).max(1.0);
+    let cognitive_sum = read_first(&["cognitive.sum", "sql.cognitive_complexity"]);
 
     let churn_abs = file.churn_abs();
     metrics.insert(keys::HISTORY_CHURN_ABS, churn_abs);
@@ -142,5 +154,20 @@ mod tests {
         inject_history_metrics(&mut metrics, &sample_history(), 0);
         assert_eq!(read(&metrics, keys::HISTORY_CHURN_RELATIVE), 40.0);
         assert_eq!(read(&metrics, keys::HISTORY_HOTSPOT), 0.0);
+    }
+
+    #[test]
+    fn sql_files_use_their_own_namespace_for_composites() {
+        // The SQL analyzer publishes `sql.loc.code` / `sql.cognitive_complexity`
+        // instead of `loc.sloc` / `cognitive.sum`; the composites must read
+        // those so SQL relative churn and hotspots aren't degenerate.
+        let mut metrics = MetricSet::default();
+        metrics.insert("sql.loc.code", 10.0);
+        metrics.insert("sql.cognitive_complexity", 5.0);
+        inject_history_metrics(&mut metrics, &sample_history(), 0);
+        // 40 churned lines over 10 SQL code lines.
+        assert_eq!(read(&metrics, keys::HISTORY_CHURN_RELATIVE), 4.0);
+        // sql.cognitive_complexity (5) × commit_frequency (4).
+        assert_eq!(read(&metrics, keys::HISTORY_HOTSPOT), 20.0);
     }
 }

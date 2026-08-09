@@ -512,22 +512,6 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // unchanged (Codex P2). `explicit_metrics` selects between the two modes.
     let explicit_metrics = !opts.metrics.is_empty();
     let selectors = parse_metric_selectors(&opts.metrics);
-    // History enrichment (`history.*`): repository-scope process
-    // metrics computed by one revision walk per side and folded into
-    // each file's metric set after static analysis. The walk costs one
-    // tree diff per commit, so it only runs when a history selector is
-    // actually requested. Both sides are walked so history columns
-    // carry real deltas (e.g. commits/churn gained between base and
-    // head) instead of comparing against a phantom zero baseline.
-    let histories: Option<(mehen_git::RepositoryHistory, mehen_git::RepositoryHistory)> =
-        if history_metrics::names_want_history(selectors.iter().map(|s| s.name)) {
-            Some((
-                mehen_git::collect_history(&repo, &from_ref)?,
-                mehen_git::collect_history(&repo, &to_ref)?,
-            ))
-        } else {
-            None
-        };
     let mut git_attribute_filters = opts
         .ignore_git_attributes
         .then(|| RevisionGitAttributeFilters::new(&repo, &from_ref, &to_ref))
@@ -569,6 +553,41 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
 
         filtered.push((cf, utf8_path, language));
     }
+
+    // History enrichment (`history.*`): repository-scope process
+    // metrics computed by one revision walk per side and folded into
+    // each file's metric set after static analysis. The walk costs one
+    // tree diff per commit, so it runs only when a file that survived
+    // filtering will actually read a history selector: any source file
+    // under an explicit history-bearing `--metrics` list, or any file
+    // whose *language defaults* include the history columns (SQL has
+    // its own history-free defaults, and Markdown files use the
+    // separate documentation pipeline — a SQL-only or docs-only diff
+    // must not pay for two full-history walks it never reads).
+    // Both sides are walked so history columns carry real deltas
+    // (e.g. commits/churn gained between base and head) instead of
+    // comparing against a phantom zero baseline.
+    let file_wants_history =
+        |(_, _, language): &(mehen_git::ChangedFile, Utf8PathBuf, Language)| {
+            if explicit_metrics {
+                history_metrics::names_want_history(selectors.iter().map(|s| s.name))
+            } else {
+                history_metrics::names_want_history(
+                    crate::metric_selector::default_metrics_for_language(*language)
+                        .iter()
+                        .copied(),
+                )
+            }
+        };
+    let histories: Option<(mehen_git::RepositoryHistory, mehen_git::RepositoryHistory)> =
+        if filtered.iter().any(file_wants_history) {
+            Some((
+                mehen_git::collect_history(&repo, &from_ref)?,
+                mehen_git::collect_history(&repo, &to_ref)?,
+            ))
+        } else {
+            None
+        };
 
     // 4. Compute metrics for each file via the per-language analyzer
     //    registry. The legacy `langs::get_function_spaces` pipeline is no
@@ -1811,11 +1830,12 @@ binary.md binary
         assert!(diff.all_unchanged());
     }
 
-    #[test]
-    fn test_resolve_refs_explicit() {
-        let opts = DiffOpts {
-            from: Some("abc".to_string()),
-            to: Some("def".to_string()),
+    /// `DiffOpts` fixture for ref-resolution tests — only `from`/`to`
+    /// vary; everything else is the clap default.
+    fn resolve_refs_opts(from: Option<&str>, to: Option<&str>) -> DiffOpts {
+        DiffOpts {
+            from: from.map(str::to_string),
+            to: to.map(str::to_string),
             metrics: vec![],
             paths: vec![],
             include: vec![],
@@ -1824,7 +1844,12 @@ binary.md binary
             show_unchanged: false,
             ignore_git_attributes: true,
             fail_on: vec![],
-        };
+        }
+    }
+
+    #[test]
+    fn test_resolve_refs_explicit() {
+        let opts = resolve_refs_opts(Some("abc"), Some("def"));
         let (from, to) = resolve_refs(&opts, &None);
         assert_eq!(from, "abc");
         assert_eq!(to, "def");
@@ -1832,18 +1857,7 @@ binary.md binary
 
     #[test]
     fn test_resolve_refs_no_ci() {
-        let opts = DiffOpts {
-            from: None,
-            to: None,
-            metrics: vec![],
-            paths: vec![],
-            include: vec![],
-            exclude: vec![],
-            output_format: None,
-            show_unchanged: false,
-            ignore_git_attributes: true,
-            fail_on: vec![],
-        };
+        let opts = resolve_refs_opts(None, None);
         let (from, to) = resolve_refs(&opts, &None);
         assert_eq!(from, "main");
         assert_eq!(to, "HEAD");
@@ -1860,18 +1874,7 @@ binary.md binary
             pr_number: Some(42),
             repository: Some("owner/repo".to_string()),
         };
-        let opts = DiffOpts {
-            from: None,
-            to: None,
-            metrics: vec![],
-            paths: vec![],
-            include: vec![],
-            exclude: vec![],
-            output_format: None,
-            show_unchanged: false,
-            ignore_git_attributes: true,
-            fail_on: vec![],
-        };
+        let opts = resolve_refs_opts(None, None);
         let (from, to) = resolve_refs(&opts, &Some(ctx));
         assert_eq!(from, "origin/develop");
         assert_eq!(to, "abc123");
@@ -1888,18 +1891,7 @@ binary.md binary
             pr_number: None,
             repository: Some("owner/repo".to_string()),
         };
-        let opts = DiffOpts {
-            from: None,
-            to: None,
-            metrics: vec![],
-            paths: vec![],
-            include: vec![],
-            exclude: vec![],
-            output_format: None,
-            show_unchanged: false,
-            ignore_git_attributes: true,
-            fail_on: vec![],
-        };
+        let opts = resolve_refs_opts(None, None);
         let (from, to) = resolve_refs(&opts, &Some(ctx));
         assert_eq!(from, "HEAD~1");
         assert_eq!(to, "def456");

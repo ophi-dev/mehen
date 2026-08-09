@@ -55,8 +55,8 @@ matches it, so a deliberately targeted file can still be measured.
 `halstead.volume`, `abc`, the git history family (`history.churn.abs`, `history.churn.relative`,
 `history.age_months`, `history.authors`, `history.minor_contributors`, `history.ownership`,
 `history.commit_frequency`, `history.hotspot`, `history.sum_of_coupling`, `history.twr`,
-`history.bugfix_commits` — these require running inside a git repository and walk the history of
-`HEAD`), plus the full Markdown family from
+`history.bugfix_commits` — these require a full, non-shallow git clone (e.g. a CI checkout with
+`fetch-depth: 0`) and walk the history of `HEAD`), plus the full Markdown family from
 [Markdown metrics](/metrics/markdown/overview).
 
 ## Polarity

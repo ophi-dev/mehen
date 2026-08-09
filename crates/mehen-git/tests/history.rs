@@ -237,3 +237,60 @@ fn oversized_changesets_do_not_contribute_to_coupling() {
     assert_eq!(hub.commit_frequency, 2);
     assert_eq!(hub.churn_added, 2);
 }
+
+#[test]
+fn blob_to_gitlink_type_change_does_not_fail_the_walk() {
+    // A checked-in file replaced by a submodule produces a
+    // `Modification` whose new mode is a gitlink (commit) pointing at
+    // an object that only exists in the submodule. Reading it as a
+    // blob would fail the whole walk; it must count as the old blob's
+    // deletion instead.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(dir.path().join("dep"), "line one\nline two\n").unwrap();
+    git(dir.path(), &["add", "dep"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "vendor dep"],
+        ALICE,
+        T_JAN,
+    );
+
+    // Replace the blob with a gitlink to a commit absent from this
+    // repository's object database (the normal submodule situation).
+    std::fs::remove_file(dir.path().join("dep")).unwrap();
+    git(dir.path(), &["rm", "-q", "--cached", "dep"], ALICE, T_FEB);
+    git(
+        dir.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1111111111111111111111111111111111111111,dep",
+        ],
+        ALICE,
+        T_FEB,
+    );
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "switch dep to submodule"],
+        ALICE,
+        T_FEB,
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").expect("walk must survive gitlink type change");
+
+    let dep = history.file(Path::new("dep")).expect("dep history");
+    assert_eq!(dep.commit_frequency, 2);
+    assert_eq!(dep.churn_added, 2); // initial blob
+    assert_eq!(dep.churn_removed, 2); // blob → gitlink counts as its deletion
+    assert_eq!(dep.last_change_seconds, T_FEB);
+}

@@ -367,12 +367,22 @@ fn diff_against_first_parent(
                 oid,
                 path,
             } => {
-                // Mode-only or non-blob changes (e.g. submodule bumps)
-                // churn no lines.
-                if !entry_mode.is_blob() && !previous_entry_mode.is_blob() {
-                    continue;
-                }
-                let (added, removed) = blob_line_diff(repo, &previous_oid, &oid)?;
+                // A modification can also change the entry's *type*
+                // (blob ↔ gitlink/symlink, e.g. a checked-in directory
+                // replaced by a submodule). Only blob-to-blob changes
+                // can be line-diffed; a one-sided blob change counts as
+                // that blob's addition/deletion, and non-blob-only
+                // changes (mode bumps, submodule pointer updates) churn
+                // no lines. Reading a gitlink OID as a blob would fail
+                // the whole walk — the submodule's commit object lives
+                // in the submodule, not in this repository's odb.
+                let (added, removed) = match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
+                    (true, true) if previous_oid == oid => (0, 0), // mode-only change
+                    (true, true) => blob_line_diff(repo, &previous_oid, &oid)?,
+                    (true, false) => (0, blob_line_count(repo, &previous_oid)?),
+                    (false, true) => (blob_line_count(repo, &oid)?, 0),
+                    (false, false) => continue,
+                };
                 CommitFileChange {
                     path: PathBuf::from(path.to_string()),
                     added,
