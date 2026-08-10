@@ -432,3 +432,62 @@ fn changed_files_joins_rename_pairs() {
     assert_eq!(cf.status, mehen_git::ChangeStatus::Modified);
     assert_eq!(cf.source_path.as_deref(), Some(Path::new("before.rs")));
 }
+
+#[test]
+fn changed_files_reports_type_changes_from_the_blob_side() {
+    // A blob replaced by a gitlink must surface as the blob's
+    // *deletion*, not a `Modified` row whose baseline/head reads would
+    // hit a gitlink OID absent from the superproject odb.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(dir.path().join("dep.py"), "d = 1\nd2 = 2\n").unwrap();
+    git(dir.path(), &["add", "dep.py"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "vendor dep"],
+        ALICE,
+        T_JAN,
+    );
+    git(dir.path(), &["tag", "type-base"], ALICE, T_JAN);
+
+    std::fs::remove_file(dir.path().join("dep.py")).unwrap();
+    git(
+        dir.path(),
+        &["rm", "-q", "--cached", "dep.py"],
+        ALICE,
+        T_FEB,
+    );
+    git(
+        dir.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1111111111111111111111111111111111111111,dep.py",
+        ],
+        ALICE,
+        T_FEB,
+    );
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "switch dep to submodule"],
+        ALICE,
+        T_FEB,
+    );
+    git(dir.path(), &["tag", "type-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "type-base", "type-head").unwrap();
+
+    assert_eq!(changed.len(), 1, "one blob-side entry: {changed:?}");
+    assert_eq!(changed[0].path, Path::new("dep.py"));
+    assert_eq!(changed[0].status, mehen_git::ChangeStatus::Deleted);
+    assert!(changed[0].source_path.is_none());
+}

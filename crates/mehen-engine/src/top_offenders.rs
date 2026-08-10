@@ -8,7 +8,7 @@
 //! the requested metric selectors. Per the rewrite plan §2.4:
 //! deterministic sorted output, ties broken by subsequent selectors.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
@@ -352,30 +352,105 @@ struct TopOffendersCfg {
     results: Arc<Mutex<Vec<FileOffender>>>,
 }
 
-/// `HEAD` histories for every repository containing an input root,
-/// keyed by canonicalized work-dir. Input roots may span repositories
-/// (`mehen top-offenders -M history.… repo-a/src repo-b/src`); each
-/// analyzed file is matched to the *innermost* containing work dir so
-/// nested repositories passed as roots resolve to their own history.
+/// Lazily discovered `HEAD` histories, one per repository work dir.
+///
+/// Each analyzed file is mapped to its *innermost* containing
+/// repository by discovering from the file's (symlink-preserving,
+/// canonicalized) parent directory, so nested repositories found
+/// during traversal read their own history instead of zeros.
+/// Discovery results and walked histories are cached; repositories
+/// that cannot be opened or walked (e.g. a shallow nested clone) read
+/// the family as absent.
 struct RepoHistories {
-    entries: Vec<(PathBuf, mehen_git::RepositoryHistory)>,
+    state: Mutex<RepoHistoriesState>,
+}
+
+#[derive(Default)]
+struct RepoHistoriesState {
+    /// Canonical parent dir → canonical work dir (`None`: not in a
+    /// repository, or discovery failed).
+    dir_to_workdir: HashMap<PathBuf, Option<PathBuf>>,
+    /// Canonical work dir → walked `HEAD` history (`None`: walk failed).
+    histories: HashMap<PathBuf, Option<mehen_git::RepositoryHistory>>,
 }
 
 impl RepoHistories {
-    /// The per-file history entry for one analyzed file: match the
-    /// longest (innermost) containing work dir, then look the
-    /// repo-relative path up. Returns the entry with that repository's
-    /// deterministic "now"; files outside every known work dir (or
-    /// untracked ones) read the family as absent.
-    fn file(&self, file_path: &Path) -> Option<(&mehen_git::FileHistory, i64)> {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(RepoHistoriesState::default()),
+        }
+    }
+
+    /// Eagerly load the repository containing an explicitly analyzed
+    /// root, propagating errors — a requested history ranking must not
+    /// silently be all zeros because a root isn't in a (full) clone.
+    ///
+    /// A file or symlink root discovers from its *lexical* parent so a
+    /// tracked symlink pointing outside its repository still resolves
+    /// to the repository that tracks it.
+    fn load_root(&self, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let metadata = std::fs::symlink_metadata(root)
+            .map_err(|e| format!("cannot resolve path {}: {e}", root.display()))?;
+        let discover_from = if metadata.is_dir() {
+            std::fs::canonicalize(root)?
+        } else {
+            let parent = match root.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => Path::new("."),
+            };
+            std::fs::canonicalize(parent)?
+        };
+        let repo = mehen_git::open_repo_at(&discover_from)?;
+        let workdir = repo
+            .workdir()
+            .ok_or("repository has no work dir (bare repository)")?
+            .to_path_buf();
+        let canonical_workdir = std::fs::canonicalize(&workdir)?;
+        let mut state = self.state.lock().expect("repo histories mutex poisoned");
+        state
+            .dir_to_workdir
+            .insert(discover_from, Some(canonical_workdir.clone()));
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            state.histories.entry(canonical_workdir)
+        {
+            let history = mehen_git::collect_history(&repo, "HEAD")?;
+            entry.insert(Some(history));
+        }
+        Ok(())
+    }
+
+    /// The per-file history entry and that repository's deterministic
+    /// "now" for one analyzed file. Untracked files and files outside
+    /// every discoverable repository read as absent.
+    fn file(&self, file_path: &Path) -> Option<(mehen_git::FileHistory, i64)> {
         let canonical = canonical_file_path(file_path)?;
-        let (workdir, history) = self
-            .entries
-            .iter()
-            .filter(|(workdir, _)| canonical.starts_with(workdir))
-            .max_by_key(|(workdir, _)| workdir.as_os_str().len())?;
-        let relative = canonical.strip_prefix(workdir).ok()?;
-        history.file(relative).map(|fh| (fh, history.head_seconds))
+        let parent = canonical.parent()?.to_path_buf();
+        let mut state = self.state.lock().ok()?;
+        let workdir = match state.dir_to_workdir.get(&parent) {
+            Some(cached) => cached.clone(),
+            None => {
+                let discovered = mehen_git::open_repo_at(&parent)
+                    .ok()
+                    .and_then(|repo| repo.workdir().and_then(|wd| std::fs::canonicalize(wd).ok()));
+                state.dir_to_workdir.insert(parent, discovered.clone());
+                discovered
+            }
+        }?;
+        if !state.histories.contains_key(&workdir) {
+            let walked = mehen_git::open_repo_at(&workdir).ok().and_then(|repo| {
+                mehen_git::collect_history(&repo, "HEAD")
+                    .map_err(|e| {
+                        log::warn!("history walk failed for {}: {e}", workdir.display());
+                    })
+                    .ok()
+            });
+            state.histories.insert(workdir.clone(), walked);
+        }
+        let history = state.histories.get(&workdir)?.as_ref()?;
+        let relative = canonical.strip_prefix(&workdir).ok()?;
+        history
+            .file(relative)
+            .map(|fh| (fh.clone(), history.head_seconds))
     }
 }
 
@@ -391,37 +466,6 @@ fn canonical_file_path(path: &Path) -> Option<PathBuf> {
         _ => Path::new("."),
     };
     Some(std::fs::canonicalize(parent).ok()?.join(file_name))
-}
-
-/// Discover the repository containing *each analyzed root* (not the
-/// process CWD — `mehen top-offenders -M history.… /other/repo/src`
-/// must load `/other/repo`'s history) and walk each at `HEAD`.
-/// Roots sharing a work dir are walked once.
-fn load_histories_for_paths(
-    paths: &[PathBuf],
-) -> Result<RepoHistories, Box<dyn std::error::Error>> {
-    let mut entries: Vec<(PathBuf, mehen_git::RepositoryHistory)> = Vec::new();
-    for root in paths {
-        let canonical_root = std::fs::canonicalize(root)
-            .map_err(|e| format!("cannot resolve path {}: {e}", root.display()))?;
-        let discover_from = if canonical_root.is_dir() {
-            canonical_root.as_path()
-        } else {
-            canonical_root.parent().unwrap_or(canonical_root.as_path())
-        };
-        let repo = mehen_git::open_repo_at(discover_from)?;
-        let workdir = repo
-            .workdir()
-            .ok_or("repository has no work dir (bare repository)")?
-            .to_path_buf();
-        let canonical_workdir = std::fs::canonicalize(&workdir)?;
-        if entries.iter().any(|(known, _)| *known == canonical_workdir) {
-            continue;
-        }
-        let history = mehen_git::collect_history(&repo, "HEAD")?;
-        entries.push((canonical_workdir, history));
-    }
-    Ok(RepoHistories { entries })
 }
 
 fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
@@ -462,7 +506,7 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
     {
         crate::history_metrics::inject_history_metrics(
             &mut analysis.root.metrics,
-            fh,
+            &fh,
             head_seconds,
         );
     }
@@ -597,13 +641,14 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
     // meaningless without the repository walk, so failing to load it
     // is a hard error rather than a silent all-zeros column.
     let history = if crate::history_metrics::names_want_history(selectors.iter().map(|s| s.name)) {
-        match load_histories_for_paths(&opts.paths) {
-            Ok(loaded) => Some(loaded),
-            Err(e) => {
-                log::error!("history metrics unavailable: {e}");
+        let histories = RepoHistories::new();
+        for root in &opts.paths {
+            if let Err(e) = histories.load_root(root) {
+                log::error!("history metrics unavailable for {}: {e}", root.display());
                 process::exit(1);
             }
         }
+        Some(histories)
     } else {
         None
     };

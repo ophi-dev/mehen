@@ -869,3 +869,56 @@ fn top_offenders_does_not_borrow_history_through_symlinks() {
     assert_eq!(by_name("real.py"), 2.0);
     assert_eq!(by_name("alias.py"), 0.0);
 }
+
+#[test]
+fn top_offenders_loads_history_for_nested_repositories() {
+    // A nested repository discovered *during traversal* (not passed as
+    // its own root) must read its own history, not zeros from the
+    // outer repository.
+    let outer = tempfile::tempdir().expect("outer repo");
+    init_git_repo(outer.path());
+    write_python(outer.path(), "outer.py", "o = 1\n");
+    commit_all(outer.path(), "outer one");
+
+    let nested_dir = outer.path().join("vendor").join("inner");
+    std::fs::create_dir_all(&nested_dir).expect("nested dir");
+    init_git_repo(&nested_dir);
+    write_python(&nested_dir, "inner.py", "i = 1\n");
+    commit_all(&nested_dir, "inner one");
+    write_python(&nested_dir, "inner.py", "i = 1\nj = 2\n");
+    commit_all(&nested_dir, "inner two");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(outer.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    let by_name = |suffix: &str| -> f64 {
+        offenders
+            .iter()
+            .find(|o| o["path"].as_str().expect("path").ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing {suffix} in {offenders:?}"))["metrics"][0]["value"]
+            .as_f64()
+            .expect("value")
+    };
+    // inner.py reads the nested repository's 2 commits (outer sees it
+    // as untracked); outer.py reads its own single commit.
+    assert_eq!(by_name("inner.py"), 2.0);
+    assert_eq!(by_name("outer.py"), 1.0);
+}

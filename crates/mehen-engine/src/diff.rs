@@ -78,9 +78,66 @@ impl RevisionGitAttributeFilters {
     }
 }
 
+/// Split rename pairs whose two sides fall on different sides of a
+/// reporting boundary back into a deletion + addition.
+///
+/// A joined rename row is keyed by its *destination*, so a rename to
+/// an unsupported extension (`src/foo.py` → `archive/foo.txt`) or out
+/// of the selected `--paths` scope would silently swallow the source
+/// file's disappearance — and a rename *across languages*
+/// (`.py` → `.rs`) would analyze the old blob with the new language's
+/// analyzer. A rename is kept joined only when both sides are selected
+/// and detect as the same language; otherwise each eligible side is
+/// reported on its own.
+fn split_boundary_renames(
+    changed: Vec<mehen_git::ChangedFile>,
+    selected: &dyn Fn(&Path) -> bool,
+) -> Vec<mehen_git::ChangedFile> {
+    let language_of = |p: &Path| {
+        Utf8PathBuf::try_from(p.to_path_buf())
+            .ok()
+            .and_then(|p| detect_language(&p))
+    };
+    let mut out = Vec::with_capacity(changed.len());
+    for cf in changed {
+        let Some(source) = cf.source_path.clone() else {
+            out.push(cf);
+            continue;
+        };
+        let dest_ok = selected(&cf.path);
+        let src_ok = selected(&source);
+        let dest_lang = language_of(&cf.path);
+        let src_lang = language_of(&source);
+        if dest_ok && src_ok && dest_lang.is_some() && dest_lang == src_lang {
+            out.push(cf);
+            continue;
+        }
+        if src_ok && src_lang.is_some() {
+            out.push(mehen_git::ChangedFile {
+                path: source,
+                status: ChangeStatus::Deleted,
+                source_path: None,
+            });
+        }
+        if dest_ok && dest_lang.is_some() {
+            out.push(mehen_git::ChangedFile {
+                path: cf.path,
+                status: ChangeStatus::Added,
+                source_path: None,
+            });
+        }
+    }
+    out
+}
+
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
+    let changed = split_boundary_renames(changed, &|p: &Path| {
+        Utf8PathBuf::try_from(p.to_path_buf())
+            .map(|utf8| path_is_selected(&utf8, &input.paths))
+            .unwrap_or(false)
+    });
     // Thresholds against `history.*` keys need the repository history
     // at the head revision (thresholds are evaluated against the head
     // analysis only). Walked lazily — the family is opt-in.
@@ -507,6 +564,13 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     let include = mk_globset(opts.include);
     let exclude = mk_globset(opts.exclude);
     let paths = normalize_path_filters(&opts.paths);
+    // Rename pairs straddling a path/language boundary fall back to a
+    // deletion + addition so neither side silently disappears.
+    let changed = split_boundary_renames(changed, &|p: &Path| {
+        legacy_path_is_selected(p, &paths)
+            && (include.is_empty() || include.is_match(p))
+            && (exclude.is_empty() || !exclude.is_match(p))
+    });
     // When the caller passes explicit `--metric` names, that one list applies
     // to every file. With no `--metric`, defaults are resolved *per file's
     // language*: SQL files publish only `sql.*` keys, so the source-code
@@ -769,10 +833,12 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         for cf in &markdown_files {
             let is_deleted = cf.status == ChangeStatus::Deleted;
             let is_candidate_new = cf.status == ChangeStatus::Added;
+            // Renamed docs carry the baseline under their old path.
+            let base_path = cf.source_path.as_deref().unwrap_or(cf.path.as_path());
             let base_metrics = if is_candidate_new {
                 None
             } else {
-                match mehen_git::read_blob(&repo, &from_ref, &cf.path) {
+                match mehen_git::read_blob(&repo, &from_ref, base_path) {
                     Ok(Some(bytes)) => Some(mehen_markdown::analyze_markdown(
                         &String::from_utf8_lossy(&bytes),
                         &cf.path,
@@ -1393,6 +1459,73 @@ binary.md binary
         assert_eq!(v.path, "hot.py");
         assert_eq!(v.evaluation.actual, 2.0);
         assert!(v.evaluation.violated);
+    }
+
+    #[test]
+    fn split_boundary_renames_keeps_same_language_in_scope_renames_joined() {
+        let rename = mehen_git::ChangedFile {
+            path: PathBuf::from("src/after.py"),
+            status: ChangeStatus::Modified,
+            source_path: Some(PathBuf::from("src/before.py")),
+        };
+        let out = split_boundary_renames(vec![rename], &|_| true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, PathBuf::from("src/after.py"));
+        assert_eq!(out[0].status, ChangeStatus::Modified);
+        assert_eq!(
+            out[0].source_path.as_deref(),
+            Some(Path::new("src/before.py"))
+        );
+    }
+
+    #[test]
+    fn split_boundary_renames_reports_rename_to_unsupported_extension_as_deletion() {
+        // src/foo.py -> archive/foo.txt: the destination has no
+        // detectable language, so the Python file's disappearance must
+        // still be reported as a deletion instead of vanishing.
+        let rename = mehen_git::ChangedFile {
+            path: PathBuf::from("archive/foo.txt"),
+            status: ChangeStatus::Modified,
+            source_path: Some(PathBuf::from("src/foo.py")),
+        };
+        let out = split_boundary_renames(vec![rename], &|_| true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, PathBuf::from("src/foo.py"));
+        assert_eq!(out[0].status, ChangeStatus::Deleted);
+        assert!(out[0].source_path.is_none());
+    }
+
+    #[test]
+    fn split_boundary_renames_splits_cross_language_renames() {
+        // A .py -> .rs rename must not analyze the Python baseline
+        // with the Rust analyzer: both sides are reported separately.
+        let rename = mehen_git::ChangedFile {
+            path: PathBuf::from("src/port.rs"),
+            status: ChangeStatus::Modified,
+            source_path: Some(PathBuf::from("src/port.py")),
+        };
+        let out = split_boundary_renames(vec![rename], &|_| true);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].path, PathBuf::from("src/port.py"));
+        assert_eq!(out[0].status, ChangeStatus::Deleted);
+        assert_eq!(out[1].path, PathBuf::from("src/port.rs"));
+        assert_eq!(out[1].status, ChangeStatus::Added);
+    }
+
+    #[test]
+    fn split_boundary_renames_reports_rename_out_of_selected_scope_as_deletion() {
+        // With `--paths src`, a rename src/keep.py -> attic/keep.py
+        // must report the file leaving the scope.
+        let rename = mehen_git::ChangedFile {
+            path: PathBuf::from("attic/keep.py"),
+            status: ChangeStatus::Modified,
+            source_path: Some(PathBuf::from("src/keep.py")),
+        };
+        let selected = |p: &Path| p.starts_with("src");
+        let out = split_boundary_renames(vec![rename], &selected);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, PathBuf::from("src/keep.py"));
+        assert_eq!(out[0].status, ChangeStatus::Deleted);
     }
 
     fn analysis_with_diagnostics(diagnostics: Vec<ParseDiagnostic>) -> LanguageAnalysis {

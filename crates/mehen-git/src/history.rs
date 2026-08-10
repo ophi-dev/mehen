@@ -157,6 +157,11 @@ struct FileAccumulator {
 /// per modified blob; results depend only on the repository state at
 /// `rev`.
 pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHistory, GitError> {
+    // Pin the diff algorithm so rename-similarity classification (and
+    // thus per-file identity and churn) never depends on user/machine
+    // git configuration.
+    let repo = crate::pinned_diff_repo(repo)?;
+    let repo = &repo;
     let head_id = repo
         .rev_parse_single(rev)
         .map_err(|_| GitError::RefNotFound(rev.to_string()))?;

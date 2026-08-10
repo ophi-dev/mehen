@@ -107,50 +107,110 @@ pub fn open_repo_at(path: &Path) -> Result<gix::Repository, GitError> {
     Ok(repo)
 }
 
+/// Clone the repository handle and pin `diff.algorithm` to `histogram`
+/// so rename-similarity classification (and its line statistics) never
+/// depends on user or machine git configuration —
+/// `Repository::diff_tree_to_tree` builds its resource cache from
+/// `diff.algorithm`, and near the 50% boundary a different algorithm
+/// can flip whether a pair counts as a rename.
+pub(crate) fn pinned_diff_repo(repo: &gix::Repository) -> Result<gix::Repository, GitError> {
+    let mut repo = repo.clone();
+    {
+        let mut config = repo.config_snapshot_mut();
+        config
+            .set_value(&gix::config::tree::Diff::ALGORITHM, "histogram")
+            .map_err(|e| GitError::Internal(e.to_string()))?;
+    }
+    Ok(repo)
+}
+
 /// List files changed between two revisions via tree-to-tree diff with
-/// git-style rename tracking (`-M50%`, pinned for determinism). A
-/// renamed file is reported once as `Modified` under its new path with
-/// [`ChangedFile::source_path`] set, instead of a deletion + addition
-/// pair with full-value metric deltas.
+/// git-style rename tracking (`-M50%` with a pinned diff algorithm, for
+/// determinism). A renamed file is reported once as `Modified` under
+/// its new path with [`ChangedFile::source_path`] set, instead of a
+/// deletion + addition pair with full-value metric deltas.
+///
+/// Only blob entries are reported: directories, symlinks, and gitlinks
+/// (submodules) carry no analyzable text. An entry changing *type*
+/// across the revisions is reported from the blob side — a file
+/// replaced by a submodule is that file's deletion, and vice versa.
 pub fn changed_files(
     repo: &gix::Repository,
     from: &str,
     to: &str,
 ) -> Result<Vec<ChangedFile>, GitError> {
-    let from_tree = resolve_tree(repo, from)?;
-    let to_tree = resolve_tree(repo, to)?;
+    let repo = pinned_diff_repo(repo)?;
+    let from_tree = resolve_tree(&repo, from)?;
+    let to_tree = resolve_tree(&repo, to)?;
 
     let options = gix::diff::Options::default().with_rewrites(Some(history::rewrite_tracking()));
     let records = repo
         .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), options)
         .map_err(|e| GitError::Internal(e.to_string()))?;
 
-    let files = records
-        .into_iter()
-        .map(|change| {
-            use gix::object::tree::diff::ChangeDetached;
-            match change {
-                ChangeDetached::Addition { location, .. } => ChangedFile {
+    let mut files = Vec::with_capacity(records.len());
+    for change in records {
+        use gix::object::tree::diff::ChangeDetached;
+        let file = match change {
+            ChangeDetached::Addition {
+                location,
+                entry_mode,
+                ..
+            } => {
+                if !entry_mode.is_blob() {
+                    continue;
+                }
+                ChangedFile {
                     path: PathBuf::from(location.to_string()),
                     status: ChangeStatus::Added,
                     source_path: None,
-                },
-                ChangeDetached::Deletion { location, .. } => ChangedFile {
+                }
+            }
+            ChangeDetached::Deletion {
+                location,
+                entry_mode,
+                ..
+            } => {
+                if !entry_mode.is_blob() {
+                    continue;
+                }
+                ChangedFile {
                     path: PathBuf::from(location.to_string()),
                     status: ChangeStatus::Deleted,
                     source_path: None,
-                },
-                ChangeDetached::Modification { location, .. } => ChangedFile {
+                }
+            }
+            ChangeDetached::Modification {
+                location,
+                previous_entry_mode,
+                entry_mode,
+                ..
+            } => {
+                // A type change is reported from the blob side so
+                // downstream blob reads never touch a gitlink OID
+                // (the submodule's commit object is not in this
+                // repository's odb).
+                let status = match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
+                    (true, true) => ChangeStatus::Modified,
+                    (true, false) => ChangeStatus::Deleted,
+                    (false, true) => ChangeStatus::Added,
+                    (false, false) => continue,
+                };
+                ChangedFile {
                     path: PathBuf::from(location.to_string()),
-                    status: ChangeStatus::Modified,
+                    status,
                     source_path: None,
-                },
-                ChangeDetached::Rewrite {
-                    source_location,
-                    location,
-                    copy,
-                    ..
-                } => ChangedFile {
+                }
+            }
+            ChangeDetached::Rewrite {
+                source_location,
+                source_entry_mode,
+                location,
+                entry_mode,
+                copy,
+                ..
+            } => match (source_entry_mode.is_blob(), entry_mode.is_blob()) {
+                (true, true) => ChangedFile {
                     path: PathBuf::from(location.to_string()),
                     status: if copy {
                         // A copy's source still exists unchanged; only
@@ -161,9 +221,21 @@ pub fn changed_files(
                     },
                     source_path: (!copy).then(|| PathBuf::from(source_location.to_string())),
                 },
-            }
-        })
-        .collect();
+                (true, false) if !copy => ChangedFile {
+                    path: PathBuf::from(source_location.to_string()),
+                    status: ChangeStatus::Deleted,
+                    source_path: None,
+                },
+                (false, true) => ChangedFile {
+                    path: PathBuf::from(location.to_string()),
+                    status: ChangeStatus::Added,
+                    source_path: None,
+                },
+                _ => continue,
+            },
+        };
+        files.push(file);
+    }
 
     Ok(files)
 }
