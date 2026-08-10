@@ -20,7 +20,7 @@
 //! by a submodule is that file's deletion, and vice versa.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gix::diff::blob::{Algorithm, Diff, InternedInput, sources::byte_lines};
 use gix::diff::tree::recorder::Change;
@@ -47,6 +47,12 @@ const FUZZY_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 /// Total bytes the fuzzy pass may materialize per tree diff. Applied
 /// in sorted path order, so truncation under pressure is deterministic.
 const FUZZY_TOTAL_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// Total bytes the break-rewrite scan may materialize per tree diff,
+/// separate from (and shaped like) the fuzzy budget. Spent in path
+/// order, so truncation under pressure is deterministic; modifications
+/// beyond the budget simply stay `Modified`.
+const BREAK_TOTAL_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
 
 /// Maximum span length for the similarity chunking (git's spanhash
 /// uses the same bound): spans end at a newline or at 64 bytes,
@@ -188,28 +194,35 @@ pub(crate) fn changes_between_trees(
     // nothing here.
     let mut broken_pairs: Vec<(PathBuf, gix::ObjectId, gix::ObjectId)> = Vec::new();
     let consider_breaking = !added.is_empty() || !deleted.is_empty();
+    // Path order keeps budget truncation deterministic.
+    modified.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut break_budget = BREAK_TOTAL_BYTE_BUDGET;
     for (path, previous_oid, oid) in modified {
-        if consider_breaking
-            && previous_oid != oid
-            && blob_size(repo, &previous_oid)? <= FUZZY_MAX_BLOB_BYTES
-            && blob_size(repo, &oid)? <= FUZZY_MAX_BLOB_BYTES
-        {
-            let old_data = read_blob_data(repo, &previous_oid)?;
-            let new_data = read_blob_data(repo, &oid)?;
-            if spanhash_similarity(&old_data, &new_data) < RENAME_SIMILARITY {
-                let pair = broken_pairs.len();
-                broken_pairs.push((path.clone(), previous_oid, oid));
-                deleted.push(RenameSide {
-                    path: path.clone(),
-                    oid: previous_oid,
-                    broken: Some(pair),
-                });
-                added.push(RenameSide {
-                    path,
-                    oid,
-                    broken: Some(pair),
-                });
-                continue;
+        if consider_breaking && previous_oid != oid {
+            let old_size = blob_size(repo, &previous_oid)?;
+            let new_size = blob_size(repo, &oid)?;
+            let within_caps = old_size <= FUZZY_MAX_BLOB_BYTES
+                && new_size <= FUZZY_MAX_BLOB_BYTES
+                && old_size.saturating_add(new_size) <= break_budget;
+            if within_caps {
+                break_budget -= old_size + new_size;
+                let old_data = read_blob_data(repo, &previous_oid)?;
+                let new_data = read_blob_data(repo, &oid)?;
+                if spanhash_similarity(&old_data, &new_data) < RENAME_SIMILARITY {
+                    let pair = broken_pairs.len();
+                    broken_pairs.push((path.clone(), previous_oid, oid));
+                    deleted.push(RenameSide {
+                        path: path.clone(),
+                        oid: previous_oid,
+                        broken: Some(pair),
+                    });
+                    added.push(RenameSide {
+                        path,
+                        oid,
+                        broken: Some(pair),
+                    });
+                    continue;
+                }
             }
         }
         changes.push(TreeChange::Modified {
@@ -241,40 +254,58 @@ fn detect_renames(
     added.sort_by(|a, b| a.path.cmp(&b.path));
     deleted.sort_by(|a, b| a.path.cmp(&b.path));
 
-    // Exact pass: identical blob content is a certain rename. Sorted
-    // path order on both sides keeps repeated content deterministic.
+    // Exact pass: identical blob content is a certain rename. When an
+    // OID has several candidates on either side (e.g. two identical
+    // files swapped between directories), pairs are chosen by *path
+    // affinity* — matching basenames, then shared directory components
+    // — so `src/foo.rs → tests/foo.rs` beats `src/foo.rs → src/bar.rs`
+    // and the destinations don't inherit each other's lineage. Path
+    // tie-breaks keep the outcome deterministic.
     let mut deleted_by_oid: HashMap<gix::ObjectId, Vec<usize>> = HashMap::new();
     for (index, side) in deleted.iter().enumerate() {
         deleted_by_oid.entry(side.oid).or_default().push(index);
     }
-    // Indices into `deleted` grow with path order; take from the front.
-    for candidates in deleted_by_oid.values_mut() {
-        candidates.reverse();
-    }
 
     let mut deleted_taken = vec![false; deleted.len()];
-    let mut remaining_added: Vec<RenameSide> = Vec::new();
-    for side in added {
+    let mut added_taken = vec![false; added.len()];
+    for (added_index, side) in added.iter().enumerate() {
+        let Some(candidates) = deleted_by_oid.get(&side.oid) else {
+            continue;
+        };
         // A broken half must not "rename" onto its own other half.
-        let paired = deleted_by_oid.get_mut(&side.oid).and_then(|candidates| {
-            let position = candidates.iter().rposition(|&index| {
-                deleted[index].broken.is_none() || deleted[index].broken != side.broken
-            })?;
-            Some(candidates.remove(position))
-        });
-        match paired {
-            Some(deleted_index) => {
-                deleted_taken[deleted_index] = true;
-                changes.push(TreeChange::Renamed {
-                    path: side.path,
-                    source_path: deleted[deleted_index].path.clone(),
-                    previous_oid: deleted[deleted_index].oid,
-                    oid: side.oid,
-                });
-            }
-            None => remaining_added.push(side),
+        let best = candidates
+            .iter()
+            .copied()
+            .filter(|&deleted_index| {
+                !deleted_taken[deleted_index]
+                    && (deleted[deleted_index].broken.is_none()
+                        || deleted[deleted_index].broken != side.broken)
+            })
+            .max_by(|&a, &b| {
+                path_affinity(&deleted[a].path, &side.path)
+                    .cmp(&path_affinity(&deleted[b].path, &side.path))
+                    // Prefer the lexicographically *smaller* source on
+                    // an affinity tie (max_by keeps the later maximum,
+                    // so compare paths reversed).
+                    .then_with(|| deleted[b].path.cmp(&deleted[a].path))
+            });
+        if let Some(deleted_index) = best {
+            deleted_taken[deleted_index] = true;
+            added_taken[added_index] = true;
+            changes.push(TreeChange::Renamed {
+                path: side.path.clone(),
+                source_path: deleted[deleted_index].path.clone(),
+                previous_oid: deleted[deleted_index].oid,
+                oid: side.oid,
+            });
         }
     }
+    let mut remaining_added: Vec<RenameSide> = added
+        .into_iter()
+        .zip(added_taken)
+        .filter(|(_, taken)| !taken)
+        .map(|(side, _)| side)
+        .collect();
     let mut remaining_deleted: Vec<RenameSide> = deleted
         .into_iter()
         .zip(deleted_taken)
@@ -405,6 +436,28 @@ fn detect_renames(
     }
 
     Ok(())
+}
+
+/// Deterministic path-affinity score for pairing identical blobs:
+/// a matching basename dominates, then shared leading directory
+/// components, then shared trailing components.
+fn path_affinity(a: &Path, b: &Path) -> u64 {
+    let mut score = 0u64;
+    if a.file_name().is_some() && a.file_name() == b.file_name() {
+        score += 1 << 32;
+    }
+    let prefix = a
+        .components()
+        .zip(b.components())
+        .take_while(|(x, y)| x == y)
+        .count() as u64;
+    let suffix = a
+        .components()
+        .rev()
+        .zip(b.components().rev())
+        .take_while(|(x, y)| x == y)
+        .count() as u64;
+    score + prefix * 1024 + suffix
 }
 
 /// A blob materialized for the fuzzy pass.

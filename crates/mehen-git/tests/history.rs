@@ -900,3 +900,105 @@ fn heavily_rewritten_files_stay_modified_when_nothing_pairs() {
     assert_eq!(config[0].status, mehen_git::ChangeStatus::Modified);
     assert!(config[0].source_path.is_none());
 }
+
+#[test]
+fn identical_blob_renames_pair_by_path_affinity() {
+    // Two identical files swapped between directories: src/foo.rs →
+    // tests/foo.rs and tests/bar.rs → src/bar.rs. Pairing by
+    // lexicographic order would cross the lineages; path affinity
+    // (matching basenames) must keep each file with its own history.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    let same_content = "fn shared() {}\nfn helper() {}\n";
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+    std::fs::write(dir.path().join("src/foo.rs"), same_content).unwrap();
+    std::fs::write(dir.path().join("tests/bar.rs"), same_content).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "swap-base"], ALICE, T_JAN);
+
+    git(
+        dir.path(),
+        &["mv", "src/foo.rs", "tests/foo.rs"],
+        ALICE,
+        T_FEB,
+    );
+    git(
+        dir.path(),
+        &["mv", "tests/bar.rs", "src/bar.rs"],
+        ALICE,
+        T_FEB,
+    );
+    git(dir.path(), &["commit", "-q", "-m", "swap"], ALICE, T_FEB);
+    git(dir.path(), &["tag", "swap-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "swap-base", "swap-head").unwrap();
+
+    let source_of = |dest: &str| -> String {
+        changed
+            .iter()
+            .find(|cf| cf.path == Path::new(dest))
+            .unwrap_or_else(|| panic!("missing {dest} in {changed:?}"))
+            .source_path
+            .as_ref()
+            .expect("rename must carry a source")
+            .display()
+            .to_string()
+    };
+    assert_eq!(source_of("tests/foo.rs"), "src/foo.rs");
+    assert_eq!(source_of("src/bar.rs"), "tests/bar.rs");
+}
+
+#[test]
+fn binary_revisions_of_source_paths_churn_zero_lines() {
+    // A sub-cap binary revision (NUL bytes) of a tracked source path
+    // must not count its bytes as added/removed source lines.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(dir.path().join("gen.rs"), "fn text() {}\nfn more() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "text"], ALICE, T_JAN);
+
+    // Binary interlude: NUL-containing generated revision.
+    std::fs::write(dir.path().join("gen.rs"), b"\x00\x01\x02binary\ngarbage\n").unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "binary blob"],
+        ALICE,
+        T_FEB,
+    );
+
+    // Back to parseable text.
+    std::fs::write(dir.path().join("gen.rs"), "fn text() {}\n").unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "text again"],
+        ALICE,
+        T_MAR,
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+    let generated = history.file(Path::new("gen.rs")).expect("gen history");
+    assert_eq!(generated.commit_frequency, 3);
+    // Only the initial text creation (2 lines) counts as added source;
+    // both binary-involving diffs churn zero (numstat-style).
+    assert_eq!(generated.churn_added, 2);
+    assert_eq!(generated.churn_removed, 0);
+}

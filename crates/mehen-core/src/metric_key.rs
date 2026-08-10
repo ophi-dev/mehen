@@ -81,11 +81,13 @@ pub mod keys {
     /// `MetricSpace` by the shared walker.
     pub const COGNITIVE_SUM: &str = "cognitive.sum";
 
-    // SQL-analyzer-owned keys referenced by the engine's history
-    // composites (relative churn and hotspot read the SQL equivalents
-    // of `loc.sloc` / `cognitive.sum` for SQL files).
+    // SQL- and Markdown-analyzer-owned keys referenced by the engine's
+    // history composites (relative churn and hotspot read each
+    // language family's equivalents of `loc.sloc` / `cognitive.sum`).
     pub const SQL_LOC_CODE: &str = "sql.loc.code";
     pub const SQL_COGNITIVE_COMPLEXITY: &str = "sql.cognitive_complexity";
+    pub const MARKDOWN_LOC_TLOC: &str = "markdown.loc.tloc";
+    pub const MARKDOWN_COGNITIVE_COMPLEXITY: &str = "markdown.complexity.cognitive_complexity";
 
     // Git history process metrics (`history.*` family, research
     // foundation §6). Repository-scope: published by the engine's

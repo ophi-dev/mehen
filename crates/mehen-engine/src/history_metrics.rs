@@ -53,10 +53,12 @@ pub(crate) fn inject_history_metrics(
     };
     // Composite inputs come from whichever family the analyzer
     // publishes: the shared source-code suite (`loc.sloc`,
-    // `cognitive.sum`) or SQL's own namespace (`sql.loc.code`,
-    // `sql.cognitive_complexity`). Without the SQL fallback, relative
-    // churn would silently equal absolute churn and every SQL hotspot
-    // would read zero (Codex P2).
+    // `cognitive.sum`), SQL's namespace (`sql.loc.code`,
+    // `sql.cognitive_complexity`), or Markdown's
+    // (`markdown.loc.tloc`,
+    // `markdown.complexity.cognitive_complexity`). Without the
+    // fallbacks, relative churn would silently equal absolute churn
+    // and every SQL/Markdown hotspot would read zero (Codex P2).
     let read_first = |keys: &[&str]| {
         keys.iter()
             .map(|key| read(metrics, key))
@@ -66,8 +68,12 @@ pub(crate) fn inject_history_metrics(
     // Relative churn normalizes by the file's current size; a file
     // whose analyzer published no (or zero) code-line count falls back
     // to a denominator of 1 so the value stays finite and deterministic.
-    let sloc = read_first(&[keys::LOC_SLOC, keys::SQL_LOC_CODE]).max(1.0);
-    let cognitive_sum = read_first(&[keys::COGNITIVE_SUM, keys::SQL_COGNITIVE_COMPLEXITY]);
+    let sloc = read_first(&[keys::LOC_SLOC, keys::SQL_LOC_CODE, keys::MARKDOWN_LOC_TLOC]).max(1.0);
+    let cognitive_sum = read_first(&[
+        keys::COGNITIVE_SUM,
+        keys::SQL_COGNITIVE_COMPLEXITY,
+        keys::MARKDOWN_COGNITIVE_COMPLEXITY,
+    ]);
 
     let churn_abs = file.churn_abs();
     metrics.insert(keys::HISTORY_CHURN_ABS, churn_abs);
@@ -169,5 +175,21 @@ mod tests {
         assert_eq!(read(&metrics, keys::HISTORY_CHURN_RELATIVE), 4.0);
         // sql.cognitive_complexity (5) × commit_frequency (4).
         assert_eq!(read(&metrics, keys::HISTORY_HOTSPOT), 20.0);
+    }
+
+    #[test]
+    fn markdown_files_use_their_own_namespace_for_composites() {
+        // The Markdown analyzer publishes `markdown.loc.tloc` /
+        // `markdown.complexity.cognitive_complexity`; the composites
+        // must read those so a Markdown top-offenders ranking isn't
+        // degenerate.
+        let mut metrics = MetricSet::default();
+        metrics.insert("markdown.loc.tloc", 20.0);
+        metrics.insert("markdown.complexity.cognitive_complexity", 3.0);
+        inject_history_metrics(&mut metrics, &sample_history(), 0);
+        // 40 churned lines over 20 Markdown text lines.
+        assert_eq!(read(&metrics, keys::HISTORY_CHURN_RELATIVE), 2.0);
+        // markdown cognitive (3) × commit_frequency (4).
+        assert_eq!(read(&metrics, keys::HISTORY_HOTSPOT), 12.0);
     }
 }
