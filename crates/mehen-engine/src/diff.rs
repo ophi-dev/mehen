@@ -676,21 +676,23 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         mehen_git::RepositoryHistory,
     )> = if filtered.iter().any(file_wants_history) {
         // The head walk is a hard requirement — it feeds every
-        // history column. The *baseline* walk tolerates an
-        // unresolvable revision: the payload fallback for a
-        // force-push keeps diffing with `from_ref` pointing at a
-        // commit that no longer exists locally, and aborting the
-        // whole run there would make history-bearing defaults
-        // unusable exactly when the payload path is needed.
-        // Baseline history columns then read as an empty baseline.
+        // history column. The *baseline* walk tolerates exactly one
+        // failure mode: an unresolvable revision (the payload fallback
+        // for a force-push keeps diffing with `from_ref` pointing at a
+        // commit that no longer exists locally). Baseline history
+        // columns then read as an empty baseline. Any other walk
+        // failure (corrupt or missing historical objects) still aborts
+        // — emitting full-history deltas from incomplete repository
+        // data would be silent garbage.
         let base_history = match mehen_git::collect_history(&repo, &from_ref) {
             Ok(history) => Some(history),
-            Err(e) => {
+            Err(GitError::RefNotFound(rev)) => {
                 log::warn!(
-                    "baseline history unavailable for {from_ref}: {e}; history columns compare against an empty baseline"
+                    "baseline history unavailable ({rev} does not resolve locally); history columns compare against an empty baseline"
                 );
                 None
             }
+            Err(e) => return Err(e.into()),
         };
         Some((base_history, mehen_git::collect_history(&repo, &to_ref)?))
     } else {
@@ -1144,24 +1146,20 @@ fn get_changed_files(
     ci_ctx: &Option<ci::CiContext>,
 ) -> Result<Vec<mehen_git::ChangedFile>, GitError> {
     // For push events, the payload's folded per-path statuses (PR #95)
-    // are a *fallback*: the real tree diff over the full push range
-    // (the payload's `before` SHA is the base ref) is strictly more
-    // accurate — it carries rename identity (including break-rewrite
-    // recovery when a renamed file's old path was reused), correct
-    // type-change handling, and blob-only filtering. The payload is
-    // used only when the refs no longer resolve locally (e.g. a
-    // force-push discarded the `before` commit).
+    // are a *fallback*: the real tree diff over the full push range is
+    // strictly more accurate — it carries rename identity (including
+    // break-rewrite recovery when a renamed file's old path was
+    // reused), correct type-change handling, and blob-only filtering.
+    // That applies to branch creations too: `resolve_refs` supplies
+    // the first pushed commit's parent there, so a resolvable baseline
+    // still yields a full-range tree diff with rename identity the
+    // payload can never express. The payload is used only when the
+    // refs don't resolve locally (a force-push discarded the `before`
+    // commit, or the branch's first commit is a root commit).
     if let Some(ctx) = ci_ctx
         && ctx.event_name == "push"
         && let Some(ref files) = ctx.changed_files
     {
-        // A branch-creation push has no pre-push tip: any locally
-        // resolvable `from` (the `HEAD~1` fallback) would cover only
-        // the final commit, silently dropping files changed earlier in
-        // the new branch. The folded payload is authoritative there.
-        if ctx.branch_created {
-            return Ok(files.clone());
-        }
         return Ok(match mehen_git::changed_files(repo, from, to) {
             Ok(tree_diff) => tree_diff,
             Err(e) => {
@@ -1734,14 +1732,19 @@ binary.md binary
     }
 
     #[test]
-    fn branch_creation_pushes_use_the_payload_even_when_refs_resolve() {
-        // A branch-creation push has no pre-push tip; the HEAD~1
-        // fallback resolves but covers only the final commit, so the
-        // folded payload (spanning every commit of the new branch)
-        // must win.
+    fn branch_creation_pushes_prefer_the_full_range_tree_diff() {
+        // With `resolve_refs` supplying the first pushed commit's
+        // parent as the baseline, a branch-creation push gets a
+        // full-range tree diff (which carries rename identity the
+        // payload can never express). The payload — deliberately
+        // incomplete here — must lose when the baseline resolves.
         let dir = tempfile::tempdir().unwrap();
         git_ok(dir.path(), &["init", "-q", "-b", "main"]);
         git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("base.py"), "base = 0\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "main base"]);
+        // The "pushed branch": two commits on top of main.
         std::fs::write(dir.path().join("first.py"), "a = 1\n").unwrap();
         git_ok(dir.path(), &["add", "-A"]);
         git_ok(dir.path(), &["commit", "-q", "-m", "one"]);
@@ -1750,27 +1753,21 @@ binary.md binary
         git_ok(dir.path(), &["commit", "-q", "-m", "two"]);
 
         let repo = gix::discover(dir.path()).unwrap();
-        let mut ctx = push_ctx(vec![
-            mehen_git::ChangedFile {
-                path: PathBuf::from("first.py"),
-                status: ChangeStatus::Added,
-                source_path: None,
-            },
-            mehen_git::ChangedFile {
-                path: PathBuf::from("second.py"),
-                status: ChangeStatus::Added,
-                source_path: None,
-            },
-        ]);
+        let mut ctx = push_ctx(vec![mehen_git::ChangedFile {
+            path: PathBuf::from("first.py"),
+            status: ChangeStatus::Added,
+            source_path: None,
+        }]);
         ctx.branch_created = true;
-        // HEAD~1..HEAD resolves but would only cover second.py.
-        let out = get_changed_files(&repo, "HEAD~1", "HEAD", &Some(ctx)).unwrap();
+        // The baseline resolve_refs would supply: first pushed
+        // commit's parent = HEAD~2 here.
+        let out = get_changed_files(&repo, "HEAD~2", "HEAD", &Some(ctx)).unwrap();
         let mut paths: Vec<&str> = out.iter().filter_map(|f| f.path.to_str()).collect();
         paths.sort_unstable();
         assert_eq!(
             paths,
             vec!["first.py", "second.py"],
-            "branch creation must keep every payload commit's files"
+            "the resolvable full-range tree diff must win over the payload"
         );
     }
 

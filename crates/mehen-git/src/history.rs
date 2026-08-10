@@ -173,6 +173,11 @@ struct FileAccumulator {
     /// the renamed lineage — it must not be folded into the rename
     /// destination.
     newest_is_deletion: bool,
+    /// Whether any accumulated change *created* the file. Required for
+    /// the delete-then-recreate identity split: a true re-creation
+    /// begins with an addition, while parallel-branch edits walked
+    /// before an unrelated branch's deletion are modifications only.
+    has_addition: bool,
 }
 
 impl FileAccumulator {
@@ -191,6 +196,7 @@ impl FileAccumulator {
         self.last_change_seconds = self.last_change_seconds.max(other.last_change_seconds);
         self.sum_of_coupling += other.sum_of_coupling;
         self.bugfix_seconds.extend(other.bugfix_seconds);
+        self.has_addition |= other.has_addition;
     }
 }
 
@@ -277,15 +283,18 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             .filter_map(|change| change.source_path.as_ref())
             .collect();
 
-        // ── Phase 2: a deletion *older* than already-accumulated
-        // changes to the same (unaliased) path cuts the lineage: the
-        // newer changes belong to a file re-created at that path, and
-        // this deletion plus everything older belongs to the dead
-        // prior occupant.
+        // ── Phase 2: a deletion *older* than an already-accumulated
+        // *re-creation* of the same (unaliased) path cuts the lineage:
+        // the newer changes belong to a file re-created at that path,
+        // and this deletion plus everything older belongs to the dead
+        // prior occupant. The newer accumulation must contain an
+        // actual addition — a parallel branch's *edits* walked before
+        // an unrelated branch's deletion (merge retained the file) are
+        // modifications only and must not split the identity.
         for (change, target) in changes.iter().zip(targets.iter_mut()) {
             if change.is_deletion
                 && !aliases.contains_key(&change.path)
-                && files.contains_key(&change.path)
+                && files.get(&change.path).is_some_and(|acc| acc.has_addition)
             {
                 tombstones += 1;
                 let tombstone = tombstone_path(tombstones);
@@ -354,6 +363,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 // First (newest-walked) change for this path.
                 acc.newest_is_deletion = change.is_deletion;
             }
+            acc.has_addition |= change.is_addition;
             acc.commit_frequency += 1;
             acc.churn_added += change.added;
             acc.churn_removed += change.removed;
@@ -465,6 +475,11 @@ struct CommitFileChange {
     /// post-rename path reuse apart from parallel-branch lineage
     /// edits — see the stranded-accumulator merge).
     is_deletion: bool,
+    /// Whether this change *created* the file (a tree-diff addition).
+    /// A delete-then-recreate boundary requires the newer occupant to
+    /// have actually been created after the deletion; parallel-branch
+    /// edits are modifications and must not trigger a split.
+    is_addition: bool,
 }
 
 /// Whether `path` names an entry in the walked rev's tree.
@@ -536,6 +551,7 @@ fn diff_against_first_parent(
                 added: blob_line_count(repo, &oid)?,
                 removed: 0,
                 is_deletion: false,
+                is_addition: true,
             },
             TreeChange::Deleted { path, oid } => CommitFileChange {
                 path,
@@ -543,6 +559,7 @@ fn diff_against_first_parent(
                 added: 0,
                 removed: blob_line_count(repo, &oid)?,
                 is_deletion: true,
+                is_addition: false,
             },
             TreeChange::Modified {
                 path,
@@ -562,6 +579,7 @@ fn diff_against_first_parent(
                     added,
                     removed,
                     is_deletion: false,
+                    is_addition: false,
                 }
             }
             TreeChange::Renamed {
@@ -582,6 +600,7 @@ fn diff_against_first_parent(
                     added,
                     removed,
                     is_deletion: false,
+                    is_addition: false,
                 }
             }
         };

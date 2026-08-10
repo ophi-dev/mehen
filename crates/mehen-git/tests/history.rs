@@ -1478,3 +1478,86 @@ fn open_repo_at_reports_repo_not_found_only_outside_repositories() {
         other => panic!("expected RepoNotFound outside a repository, got {other:?}"),
     }
 }
+
+#[test]
+fn parallel_branch_deletion_does_not_split_a_surviving_lineage() {
+    // One branch edits x.rs (later timestamp) while another deletes it
+    // (earlier timestamp); the merge keeps the file. The newest-first
+    // walk sees the edit before the deletion — that deletion must not
+    // be mistaken for a delete-then-recreate boundary, or the shared
+    // creation and older edits would be fenced off the survivor.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(
+        dir.path().join("x.rs"),
+        "fn one() {}\nfn two() {}\nfn three() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "x.rs"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "add x"], ALICE, T_JAN);
+
+    // Side branch deletes x.rs at T_FEB (earlier timestamp).
+    git(dir.path(), &["checkout", "-q", "-b", "side"], BOB, T_FEB);
+    git(dir.path(), &["rm", "-q", "x.rs"], BOB, T_FEB);
+    git(dir.path(), &["commit", "-q", "-m", "drop x"], BOB, T_FEB);
+
+    // Main edits x.rs at T_MAR (later timestamp, walked first).
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, T_MAR);
+    std::fs::write(
+        dir.path().join("x.rs"),
+        "fn one_edited() {}\nfn two() {}\nfn three() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "edit x"], ALICE, T_MAR);
+
+    // Merge keeps main's edited file (resolve the delete/modify
+    // conflict in favor of the surviving file).
+    let merge = std::process::Command::new("git")
+        .current_dir(dir.path())
+        .args(["merge", "--no-commit", "side"])
+        .env("GIT_AUTHOR_NAME", ALICE.0)
+        .env("GIT_AUTHOR_EMAIL", ALICE.1)
+        .env("GIT_COMMITTER_NAME", ALICE.0)
+        .env("GIT_COMMITTER_EMAIL", ALICE.1)
+        .env("GIT_AUTHOR_DATE", format!("{T_APR} +0000"))
+        .env("GIT_COMMITTER_DATE", format!("{T_APR} +0000"))
+        .output()
+        .expect("failed to run git merge");
+    // The delete/modify conflict is expected; keep the modified file.
+    drop(merge);
+    git(
+        dir.path(),
+        &["checkout", "HEAD", "--", "x.rs"],
+        ALICE,
+        T_APR,
+    );
+    git(dir.path(), &["add", "x.rs"], ALICE, T_APR);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "merge side keeping x"],
+        ALICE,
+        T_APR,
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    let x = history.file(Path::new("x.rs")).expect("x.rs history");
+    // The survivor keeps its creation and edit; the parallel-branch
+    // deletion touch is also attributed here (it is lineage, not a
+    // boundary). Crucially the creation's 3 added lines survive.
+    assert!(
+        x.churn_added >= 4,
+        "creation (3) + edit (1) must survive, got {}",
+        x.churn_added
+    );
+    assert!(x.commit_frequency >= 3);
+    assert_eq!(x.last_change_seconds, T_MAR);
+}
