@@ -31,7 +31,8 @@ use gix::traverse::commit::simple::CommitTimeOrder;
 
 use crate::GitError;
 use crate::tree_changes::{
-    TreeChange, changes_between_trees, count_lines, line_diff_counts, read_blob_data,
+    TreeChange, blob_size, changes_between_trees, count_lines, is_binary, line_diff_counts,
+    read_blob_data,
 };
 
 /// Average Gregorian month in seconds (30.436875 days), used to express
@@ -494,19 +495,24 @@ fn diff_against_first_parent(
 }
 
 /// Number of lines in a blob (a trailing fragment without `\n` counts
-/// as a line). Oversized blobs count zero lines without being loaded
-/// (numstat-style binary handling).
+/// as a line). Oversized and binary blobs count zero lines
+/// (numstat-style binary handling); oversized ones are never loaded.
 fn blob_line_count(repo: &gix::Repository, oid: &gix::ObjectId) -> Result<u64, GitError> {
     if blob_size(repo, oid)? > MAX_CHURN_BLOB_BYTES {
         return Ok(0);
     }
     let data = read_blob_data(repo, oid)?;
+    if is_binary(&data) {
+        return Ok(0);
+    }
     Ok(count_lines(&data))
 }
 
 /// Line-level (added, removed) counts between two blob versions. Pairs
-/// with an oversized side churn zero lines without loading either blob
-/// (numstat-style binary handling).
+/// with an oversized or binary side churn zero lines — mirroring
+/// `git log --numstat`, which reports `-` for binary files, so e.g. a
+/// NUL-containing generated revision doesn't count its bytes as
+/// "source lines" churned. Oversized blobs are never loaded.
 fn blob_line_diff(
     repo: &gix::Repository,
     old: &gix::ObjectId,
@@ -518,15 +524,10 @@ fn blob_line_diff(
     }
     let old_data = read_blob_data(repo, old)?;
     let new_data = read_blob_data(repo, new)?;
+    if is_binary(&old_data) || is_binary(&new_data) {
+        return Ok((0, 0));
+    }
     Ok(line_diff_counts(&old_data, &new_data))
-}
-
-/// A blob's size from its object header, without loading the payload.
-fn blob_size(repo: &gix::Repository, oid: &gix::ObjectId) -> Result<u64, GitError> {
-    Ok(repo
-        .find_header(*oid)
-        .map_err(|e| GitError::Internal(e.to_string()))?
-        .size())
 }
 
 /// Committer timestamp in seconds since the Unix epoch.

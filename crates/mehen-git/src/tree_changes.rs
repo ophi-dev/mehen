@@ -39,21 +39,24 @@ const RENAME_SIMILARITY: f64 = 0.5;
 const RENAME_FUZZY_LIMIT: usize = 10_000;
 
 /// Blobs larger than this never enter the fuzzy pass — a replaced
-/// multi-gigabyte binary must not be materialized and line-diffed just
-/// to rule out a rename. Sizes are checked via object headers before
-/// any data is loaded. Exact renames still match at any size.
+/// multi-gigabyte binary must not be materialized and diffed just to
+/// rule out a rename. Sizes are checked via object headers before any
+/// data is loaded. Exact renames still match at any size.
 const FUZZY_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Total bytes the fuzzy pass may materialize per tree diff. Applied
 /// in sorted path order, so truncation under pressure is deterministic.
 const FUZZY_TOTAL_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
 
-/// Blobs at or below this size get a byte-level similarity fallback
-/// when line-level similarity misses: a *one-line* file with any edit
-/// has zero common lines regardless of how many bytes survived, so
-/// line granularity alone would break renames of single-line sources
-/// (minified bundles, one-liner configs).
-const BYTE_SIMILARITY_MAX_BLOB_BYTES: usize = 256 * 1024;
+/// Maximum span length for the similarity chunking (git's spanhash
+/// uses the same bound): spans end at a newline or at 64 bytes,
+/// whichever comes first, so similarity is byte-weighted, robust to
+/// line insertions, and meaningful for single-line files.
+const SIMILARITY_SPAN_BYTES: usize = 64;
+
+/// Binary detection window: git treats content with a NUL byte in the
+/// first 8000 bytes as binary.
+const BINARY_SNIFF_BYTES: usize = 8000;
 
 /// One file-level change between two trees, blob entries only.
 pub(crate) enum TreeChange {
@@ -80,6 +83,17 @@ pub(crate) enum TreeChange {
     },
 }
 
+/// One side of a potential rename pair, tagged with the broken
+/// modification it came from (if any) so unpaired halves can be
+/// reassembled.
+struct RenameSide {
+    path: PathBuf,
+    oid: gix::ObjectId,
+    /// Index into the broken-pairs table when this side came from a
+    /// completely rewritten same-path modification (git `-B`).
+    broken: Option<usize>,
+}
+
 /// Diff two trees (blob entries only, renames joined). `parent` of
 /// `None` means the empty tree (root commits).
 pub(crate) fn changes_between_trees(
@@ -102,8 +116,9 @@ pub(crate) fn changes_between_trees(
     )
     .map_err(|e| GitError::Internal(e.to_string()))?;
 
-    let mut added: Vec<(PathBuf, gix::ObjectId)> = Vec::new();
-    let mut deleted: Vec<(PathBuf, gix::ObjectId)> = Vec::new();
+    let mut added: Vec<RenameSide> = Vec::new();
+    let mut deleted: Vec<RenameSide> = Vec::new();
+    let mut modified: Vec<(PathBuf, gix::ObjectId, gix::ObjectId)> = Vec::new();
     let mut changes: Vec<TreeChange> = Vec::new();
 
     for change in recorder.records {
@@ -115,7 +130,11 @@ pub(crate) fn changes_between_trees(
                 ..
             } => {
                 if entry_mode.is_blob() {
-                    added.push((PathBuf::from(path.to_string()), oid));
+                    added.push(RenameSide {
+                        path: PathBuf::from(path.to_string()),
+                        oid,
+                        broken: None,
+                    });
                 }
             }
             Change::Deletion {
@@ -125,7 +144,11 @@ pub(crate) fn changes_between_trees(
                 ..
             } => {
                 if entry_mode.is_blob() {
-                    deleted.push((PathBuf::from(path.to_string()), oid));
+                    deleted.push(RenameSide {
+                        path: PathBuf::from(path.to_string()),
+                        oid,
+                        broken: None,
+                    });
                 }
             }
             Change::Modification {
@@ -141,11 +164,7 @@ pub(crate) fn changes_between_trees(
                 // repository's odb).
                 let path = PathBuf::from(path.to_string());
                 match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
-                    (true, true) => changes.push(TreeChange::Modified {
-                        path,
-                        previous_oid,
-                        oid,
-                    }),
+                    (true, true) => modified.push((path, previous_oid, oid)),
                     (true, false) => changes.push(TreeChange::Deleted {
                         path,
                         oid: previous_oid,
@@ -157,30 +176,76 @@ pub(crate) fn changes_between_trees(
         }
     }
 
-    detect_renames(repo, &mut changes, added, deleted)?;
+    // Break-rewrite pass (git `-B`): a same-path modification whose
+    // two sides are completely dissimilar is really "the old file left
+    // and something new took its path" — e.g. `a.rs` renamed to `b.rs`
+    // and an unrelated new `a.rs` created within the compared range,
+    // which the endpoint tree walk collapses into `Modified(a.rs)` +
+    // `Added(b.rs)`. Breaking the modification lets rename detection
+    // pair the old content with its true destination; unpaired halves
+    // are reassembled afterwards. Only worth attempting when there is
+    // something to pair with — the common all-modifications diff pays
+    // nothing here.
+    let mut broken_pairs: Vec<(PathBuf, gix::ObjectId, gix::ObjectId)> = Vec::new();
+    let consider_breaking = !added.is_empty() || !deleted.is_empty();
+    for (path, previous_oid, oid) in modified {
+        if consider_breaking
+            && previous_oid != oid
+            && blob_size(repo, &previous_oid)? <= FUZZY_MAX_BLOB_BYTES
+            && blob_size(repo, &oid)? <= FUZZY_MAX_BLOB_BYTES
+        {
+            let old_data = read_blob_data(repo, &previous_oid)?;
+            let new_data = read_blob_data(repo, &oid)?;
+            if spanhash_similarity(&old_data, &new_data) < RENAME_SIMILARITY {
+                let pair = broken_pairs.len();
+                broken_pairs.push((path.clone(), previous_oid, oid));
+                deleted.push(RenameSide {
+                    path: path.clone(),
+                    oid: previous_oid,
+                    broken: Some(pair),
+                });
+                added.push(RenameSide {
+                    path,
+                    oid,
+                    broken: Some(pair),
+                });
+                continue;
+            }
+        }
+        changes.push(TreeChange::Modified {
+            path,
+            previous_oid,
+            oid,
+        });
+    }
+
+    detect_renames(repo, &mut changes, added, deleted, &broken_pairs)?;
 
     Ok(changes)
 }
 
 /// Pair deletions with additions into [`TreeChange::Renamed`] entries:
-/// first exact (identical blob), then fuzzy (line similarity ≥ 50%)
-/// within the fixed pair budget. Unpaired entries are appended as
-/// plain additions/deletions. Ordering and tie-breaks are by path so
+/// first exact (identical blob), then fuzzy (spanhash similarity
+/// ≥ 50%) within the fixed pair budget. Broken modification halves
+/// that pair with nothing are reassembled into their original
+/// [`TreeChange::Modified`]; every other unpaired entry is appended as
+/// a plain addition/deletion. Ordering and tie-breaks are by path so
 /// results are stable regardless of walk order.
 fn detect_renames(
     repo: &gix::Repository,
     changes: &mut Vec<TreeChange>,
-    mut added: Vec<(PathBuf, gix::ObjectId)>,
-    mut deleted: Vec<(PathBuf, gix::ObjectId)>,
+    mut added: Vec<RenameSide>,
+    mut deleted: Vec<RenameSide>,
+    broken_pairs: &[(PathBuf, gix::ObjectId, gix::ObjectId)],
 ) -> Result<(), GitError> {
-    added.sort_by(|a, b| a.0.cmp(&b.0));
-    deleted.sort_by(|a, b| a.0.cmp(&b.0));
+    added.sort_by(|a, b| a.path.cmp(&b.path));
+    deleted.sort_by(|a, b| a.path.cmp(&b.path));
 
     // Exact pass: identical blob content is a certain rename. Sorted
     // path order on both sides keeps repeated content deterministic.
     let mut deleted_by_oid: HashMap<gix::ObjectId, Vec<usize>> = HashMap::new();
-    for (index, (_, oid)) in deleted.iter().enumerate() {
-        deleted_by_oid.entry(*oid).or_default().push(index);
+    for (index, side) in deleted.iter().enumerate() {
+        deleted_by_oid.entry(side.oid).or_default().push(index);
     }
     // Indices into `deleted` grow with path order; take from the front.
     for candidates in deleted_by_oid.values_mut() {
@@ -188,27 +253,33 @@ fn detect_renames(
     }
 
     let mut deleted_taken = vec![false; deleted.len()];
-    let mut remaining_added: Vec<(PathBuf, gix::ObjectId)> = Vec::new();
-    for (path, oid) in added {
-        let paired = deleted_by_oid.get_mut(&oid).and_then(Vec::pop);
+    let mut remaining_added: Vec<RenameSide> = Vec::new();
+    for side in added {
+        // A broken half must not "rename" onto its own other half.
+        let paired = deleted_by_oid.get_mut(&side.oid).and_then(|candidates| {
+            let position = candidates.iter().rposition(|&index| {
+                deleted[index].broken.is_none() || deleted[index].broken != side.broken
+            })?;
+            Some(candidates.remove(position))
+        });
         match paired {
             Some(deleted_index) => {
                 deleted_taken[deleted_index] = true;
                 changes.push(TreeChange::Renamed {
-                    path,
-                    source_path: deleted[deleted_index].0.clone(),
-                    previous_oid: deleted[deleted_index].1,
-                    oid,
+                    path: side.path,
+                    source_path: deleted[deleted_index].path.clone(),
+                    previous_oid: deleted[deleted_index].oid,
+                    oid: side.oid,
                 });
             }
-            None => remaining_added.push((path, oid)),
+            None => remaining_added.push(side),
         }
     }
-    let mut remaining_deleted: Vec<(PathBuf, gix::ObjectId)> = deleted
-        .iter()
-        .zip(deleted_taken.iter())
-        .filter(|(_, taken)| !**taken)
-        .map(|((path, oid), _)| (path.clone(), *oid))
+    let mut remaining_deleted: Vec<RenameSide> = deleted
+        .into_iter()
+        .zip(deleted_taken)
+        .filter(|(_, taken)| !taken)
+        .map(|(side, _)| side)
         .collect();
 
     // Fuzzy pass: content similarity, best match first; ties break by
@@ -238,6 +309,14 @@ fn detect_renames(
             let Some(old_blob) = old_blob else { continue };
             for (added_index, new_blob) in added_blobs.iter().enumerate() {
                 let Some(new_blob) = new_blob else { continue };
+                // A broken half must not "rename" onto its own other
+                // half — they were just judged dissimilar anyway.
+                if remaining_deleted[deleted_index].broken.is_some()
+                    && remaining_deleted[deleted_index].broken
+                        == remaining_added[added_index].broken
+                {
+                    continue;
+                }
                 if let Some(similarity) = blob_similarity(old_blob, new_blob) {
                     candidates.push((similarity, deleted_index, added_index));
                 }
@@ -245,8 +324,12 @@ fn detect_renames(
         }
         candidates.sort_by(|a, b| {
             b.0.total_cmp(&a.0)
-                .then_with(|| remaining_deleted[a.1].0.cmp(&remaining_deleted[b.1].0))
-                .then_with(|| remaining_added[a.2].0.cmp(&remaining_added[b.2].0))
+                .then_with(|| {
+                    remaining_deleted[a.1]
+                        .path
+                        .cmp(&remaining_deleted[b.1].path)
+                })
+                .then_with(|| remaining_added[a.2].path.cmp(&remaining_added[b.2].path))
         });
 
         let mut added_taken = vec![false; remaining_added.len()];
@@ -258,10 +341,10 @@ fn detect_renames(
             added_taken[added_index] = true;
             deleted_taken[deleted_index] = true;
             changes.push(TreeChange::Renamed {
-                path: remaining_added[added_index].0.clone(),
-                source_path: remaining_deleted[deleted_index].0.clone(),
-                previous_oid: remaining_deleted[deleted_index].1,
-                oid: remaining_added[added_index].1,
+                path: remaining_added[added_index].path.clone(),
+                source_path: remaining_deleted[deleted_index].path.clone(),
+                previous_oid: remaining_deleted[deleted_index].oid,
+                oid: remaining_added[added_index].oid,
             });
         }
         remaining_added = remaining_added
@@ -278,20 +361,55 @@ fn detect_renames(
             .collect();
     }
 
-    for (path, oid) in remaining_added {
-        changes.push(TreeChange::Added { path, oid });
+    // Reassemble broken pairs whose halves both went unpaired — the
+    // break was speculative and the entry is still just a (heavily
+    // rewritten) modification.
+    let mut reassembled = vec![false; broken_pairs.len()];
+    {
+        let unpaired_deleted: std::collections::HashSet<usize> = remaining_deleted
+            .iter()
+            .filter_map(|side| side.broken)
+            .collect();
+        for side in &remaining_added {
+            if let Some(pair) = side.broken
+                && unpaired_deleted.contains(&pair)
+            {
+                let (path, previous_oid, oid) = &broken_pairs[pair];
+                changes.push(TreeChange::Modified {
+                    path: path.clone(),
+                    previous_oid: *previous_oid,
+                    oid: *oid,
+                });
+                reassembled[pair] = true;
+            }
+        }
     }
-    for (path, oid) in remaining_deleted {
-        changes.push(TreeChange::Deleted { path, oid });
+
+    for side in remaining_added {
+        if side.broken.is_some_and(|pair| reassembled[pair]) {
+            continue;
+        }
+        changes.push(TreeChange::Added {
+            path: side.path,
+            oid: side.oid,
+        });
+    }
+    for side in remaining_deleted {
+        if side.broken.is_some_and(|pair| reassembled[pair]) {
+            continue;
+        }
+        changes.push(TreeChange::Deleted {
+            path: side.path,
+            oid: side.oid,
+        });
     }
 
     Ok(())
 }
 
-/// A blob materialized for the fuzzy pass, with its line count.
+/// A blob materialized for the fuzzy pass.
 struct FuzzyBlob {
     data: Vec<u8>,
-    lines: u64,
 }
 
 /// Materialize each entry's blob for similarity testing, or `None`
@@ -302,80 +420,108 @@ struct FuzzyBlob {
 /// (path-sorted) order, keeping budget truncation deterministic.
 fn load_fuzzy_blobs(
     repo: &gix::Repository,
-    entries: &[(PathBuf, gix::ObjectId)],
+    entries: &[RenameSide],
     budget: u64,
 ) -> Result<Vec<Option<FuzzyBlob>>, GitError> {
     let mut remaining = budget;
     let mut blobs = Vec::with_capacity(entries.len());
-    for (_, oid) in entries {
-        let size = repo
-            .find_header(*oid)
-            .map_err(|e| GitError::Internal(e.to_string()))?
-            .size();
+    for side in entries {
+        let size = blob_size(repo, &side.oid)?;
         if size > FUZZY_MAX_BLOB_BYTES || size > remaining {
             blobs.push(None);
             continue;
         }
         remaining -= size;
-        let data = read_blob_data(repo, oid)?;
-        let lines = count_lines(&data);
-        blobs.push(Some(FuzzyBlob { data, lines }));
+        let data = read_blob_data(repo, &side.oid)?;
+        blobs.push(Some(FuzzyBlob { data }));
     }
     Ok(blobs)
 }
 
+/// A blob's size from its object header, without loading the payload.
+pub(crate) fn blob_size(repo: &gix::Repository, oid: &gix::ObjectId) -> Result<u64, GitError> {
+    Ok(repo
+        .find_header(*oid)
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .size())
+}
+
 /// Content similarity in `[0, 1]`, or `None` below the rename
 /// threshold.
-///
-/// Primary measure: surviving lines over the longer side. When that
-/// misses and both blobs are small enough, a byte-level diff decides
-/// instead — a *one-line* file with any edit has zero common lines, so
-/// line granularity alone would never recognize renames of single-line
-/// sources (minified bundles, one-liner configs).
 fn blob_similarity(old: &FuzzyBlob, new: &FuzzyBlob) -> Option<f64> {
-    let longest_lines = old.lines.max(new.lines);
-    if longest_lines == 0 {
+    if old.data.is_empty() && new.data.is_empty() {
         // Two empty blobs carry no identity signal (git's rename
         // tracking skips empty files too).
         return None;
     }
-    let (_, removals) = line_diff_counts(&old.data, &new.data);
-    let common = old.lines.saturating_sub(removals);
-    let line_similarity = common as f64 / longest_lines as f64;
-    if line_similarity >= RENAME_SIMILARITY {
-        return Some(line_similarity);
-    }
-
-    let longest_bytes = old.data.len().max(new.data.len());
-    if longest_bytes > 0 && longest_bytes <= BYTE_SIMILARITY_MAX_BLOB_BYTES {
-        let input = InternedInput::new(ByteTokens(&old.data), ByteTokens(&new.data));
-        let diff = Diff::compute(Algorithm::Histogram, &input);
-        let common_bytes = (old.data.len() as u64).saturating_sub(u64::from(diff.count_removals()));
-        let byte_similarity = common_bytes as f64 / longest_bytes as f64;
-        if byte_similarity >= RENAME_SIMILARITY {
-            return Some(byte_similarity);
-        }
-    }
-
-    None
+    let similarity = spanhash_similarity(&old.data, &new.data);
+    (similarity >= RENAME_SIMILARITY).then_some(similarity)
 }
 
-/// Byte-granularity token source for the similarity fallback (the
-/// vendored imara-diff tokenizes `&[u8]` by *lines*, which is exactly
-/// what the fallback must not do).
-struct ByteTokens<'a>(&'a [u8]);
-
-impl<'a> gix::diff::blob::TokenSource for ByteTokens<'a> {
-    type Token = u8;
-    type Tokenizer = std::iter::Copied<std::slice::Iter<'a, u8>>;
-
-    fn tokenize(&self) -> Self::Tokenizer {
-        self.0.iter().copied()
+/// Byte-weighted content similarity following git's spanhash design:
+/// both payloads are split into spans terminated by `\n` or at 64
+/// bytes, and similarity is the byte volume of the multiset span
+/// intersection over the larger payload. Weighting by *bytes* (not
+/// physical lines) means one shared boilerplate line cannot outvote a
+/// huge rewritten line, and long single-line files still compare
+/// meaningfully through their 64-byte sub-spans.
+fn spanhash_similarity(old: &[u8], new: &[u8]) -> f64 {
+    let longest = old.len().max(new.len());
+    if longest == 0 {
+        return 0.0;
     }
-
-    fn estimate_tokens(&self) -> u32 {
-        u32::try_from(self.0.len()).unwrap_or(u32::MAX)
+    // Multiset of span hashes, weighted by total span bytes.
+    let mut available: HashMap<u64, u64> = HashMap::new();
+    for span in spans(old) {
+        *available.entry(fnv1a(span)).or_insert(0) += span.len() as u64;
     }
+    let mut common: u64 = 0;
+    for span in spans(new) {
+        if let Some(bytes) = available.get_mut(&fnv1a(span)) {
+            let take = (span.len() as u64).min(*bytes);
+            *bytes -= take;
+            common += take;
+        }
+    }
+    common as f64 / longest as f64
+}
+
+/// Split a payload into spans ending at `\n` or [`SIMILARITY_SPAN_BYTES`].
+fn spans(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut rest = data;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let end = match rest
+            .iter()
+            .take(SIMILARITY_SPAN_BYTES)
+            .position(|&b| b == b'\n')
+        {
+            Some(newline) => newline + 1,
+            None => SIMILARITY_SPAN_BYTES.min(rest.len()),
+        };
+        let (span, tail) = rest.split_at(end);
+        rest = tail;
+        Some(span)
+    })
+}
+
+/// FNV-1a — a fixed, dependency-free hash so span classification never
+/// varies across platforms, Rust releases, or process runs.
+fn fnv1a(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Whether content is binary by git's heuristic: a NUL byte within the
+/// first 8000 bytes.
+pub(crate) fn is_binary(data: &[u8]) -> bool {
+    data.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0)
 }
 
 /// Line-level (added, removed) counts between two blob payloads using
@@ -438,14 +584,14 @@ mod tests {
     fn fuzzy(data: &[u8]) -> FuzzyBlob {
         FuzzyBlob {
             data: data.to_vec(),
-            lines: count_lines(data),
         }
     }
 
     #[test]
-    fn blob_similarity_falls_back_to_bytes_for_single_line_files() {
+    fn blob_similarity_recognizes_edited_single_line_files() {
         // A long one-line file with a small edit has zero common
-        // *lines*; the byte-level fallback must still recognize it.
+        // *physical lines*; the byte-weighted spanhash similarity must
+        // still recognize it through its 64-byte sub-spans.
         let old = format!("export const x = [{}];", "1, ".repeat(200));
         let new = old.replace("const x", "const y");
         let similarity = blob_similarity(&fuzzy(old.as_bytes()), &fuzzy(new.as_bytes()))
@@ -463,5 +609,27 @@ mod tests {
     #[test]
     fn blob_similarity_ignores_empty_blobs() {
         assert_eq!(blob_similarity(&fuzzy(b""), &fuzzy(b"")), None);
+    }
+
+    #[test]
+    fn spanhash_similarity_is_byte_weighted_not_line_weighted() {
+        // One tiny shared boilerplate line plus a huge fully rewritten
+        // line: line-weighted similarity would report 50% (1 of 2
+        // lines shared) and join the pair; byte weighting must reject
+        // it because nearly all *content* changed.
+        let shared = "# generated\n";
+        let old = format!("{shared}{}\n", "A".repeat(4000));
+        let new = format!("{shared}{}\n", "B".repeat(4000));
+        let similarity = spanhash_similarity(old.as_bytes(), new.as_bytes());
+        assert!(
+            similarity < RENAME_SIMILARITY,
+            "a rewritten dominant line must not pass: {similarity}"
+        );
+    }
+
+    #[test]
+    fn is_binary_detects_nul_in_sniff_window() {
+        assert!(is_binary(b"PK\x03\x04\x00binary"));
+        assert!(!is_binary(b"plain text\nwith lines\n"));
     }
 }

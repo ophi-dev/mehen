@@ -786,3 +786,117 @@ fn deletion_only_commits_do_not_create_minor_contributors() {
     assert_eq!(code.churn_added, 10);
     assert_eq!(code.churn_removed, 4);
 }
+
+#[test]
+fn changed_files_recovers_renames_hidden_behind_path_reuse() {
+    // Between base and head, a.rs was renamed to b.rs and an unrelated
+    // new a.rs was created. The endpoint tree diff sees Modified(a.rs)
+    // + Added(b.rs); break-rewrite detection must recover the real
+    // shape: b.rs is the rename of the old a.rs, the new a.rs is an
+    // addition.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    let original: Vec<String> = (0..8).map(|i| format!("fn original_{i}() {{}}")).collect();
+    std::fs::write(dir.path().join("a.rs"), original.join("\n") + "\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "add a"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "reuse-base"], ALICE, T_JAN);
+
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, T_FEB);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename a"],
+        ALICE,
+        T_FEB,
+    );
+
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "const REPLACEMENT: &str = \"totally unrelated\";\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "a.rs"], BOB, T_MAR);
+    git(dir.path(), &["commit", "-q", "-m", "new a"], BOB, T_MAR);
+    git(dir.path(), &["tag", "reuse-head"], ALICE, T_MAR);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "reuse-base", "reuse-head").unwrap();
+
+    let mut summary: Vec<(String, mehen_git::ChangeStatus, Option<String>)> = changed
+        .iter()
+        .map(|cf| {
+            (
+                cf.path.display().to_string(),
+                cf.status,
+                cf.source_path.as_ref().map(|p| p.display().to_string()),
+            )
+        })
+        .collect();
+    summary.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "a.rs".to_string(),
+                mehen_git::ChangeStatus::Added,
+                None // the new a.rs is genuinely new content
+            ),
+            (
+                "b.rs".to_string(),
+                mehen_git::ChangeStatus::Modified,
+                Some("a.rs".to_string()) // carries the old lineage
+            ),
+        ]
+    );
+}
+
+#[test]
+fn heavily_rewritten_files_stay_modified_when_nothing_pairs() {
+    // A same-path full rewrite with no rename candidates around must
+    // stay a single Modified row (the speculative break-rewrite is
+    // reassembled), not degrade into a deletion + addition.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(dir.path().join("config.rs"), "fn old_world() {}\n").unwrap();
+    // An unrelated addition so the break pass is actually exercised
+    // (it is skipped entirely when there is nothing to pair with).
+    std::fs::write(dir.path().join("unrelated.txt"), "notes\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "rewrite-base"], ALICE, T_JAN);
+
+    std::fs::write(
+        dir.path().join("config.rs"),
+        "const COMPLETELY_DIFFERENT: u32 = 42;\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("second.txt"), "more notes\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_FEB);
+    git(dir.path(), &["commit", "-q", "-m", "rewrite"], ALICE, T_FEB);
+    git(dir.path(), &["tag", "rewrite-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "rewrite-base", "rewrite-head").unwrap();
+
+    let config: Vec<_> = changed
+        .iter()
+        .filter(|cf| cf.path == Path::new("config.rs"))
+        .collect();
+    assert_eq!(config.len(), 1, "one row for config.rs: {changed:?}");
+    assert_eq!(config[0].status, mehen_git::ChangeStatus::Modified);
+    assert!(config[0].source_path.is_none());
+}
