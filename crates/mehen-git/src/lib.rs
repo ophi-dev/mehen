@@ -17,9 +17,6 @@ pub use history::{FileHistory, RepositoryHistory, collect_history};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use gix::diff::tree::recorder::Change;
-use gix::objs::TreeRefIter;
-
 /// Collapses any trailing run of `\n` / `\r` into a single `\n`.
 ///
 /// When a blob has *no* trailing newline (or is empty), the buffer is
@@ -83,6 +80,10 @@ pub enum ChangeStatus {
 pub struct ChangedFile {
     pub path: PathBuf,
     pub status: ChangeStatus,
+    /// The pre-rename path when this change is a rename detected
+    /// between the two revisions (`status` is then `Modified`).
+    /// Callers should read the baseline side from this path.
+    pub source_path: Option<PathBuf>,
 }
 
 /// Discover a git repository from the current working directory.
@@ -106,7 +107,11 @@ pub fn open_repo_at(path: &Path) -> Result<gix::Repository, GitError> {
     Ok(repo)
 }
 
-/// List files changed between two revisions via tree-to-tree diff.
+/// List files changed between two revisions via tree-to-tree diff with
+/// git-style rename tracking (`-M50%`, pinned for determinism). A
+/// renamed file is reported once as `Modified` under its new path with
+/// [`ChangedFile::source_path`] set, instead of a deletion + addition
+/// pair with full-value metric deltas.
 pub fn changed_files(
     repo: &gix::Repository,
     from: &str,
@@ -115,32 +120,48 @@ pub fn changed_files(
     let from_tree = resolve_tree(repo, from)?;
     let to_tree = resolve_tree(repo, to)?;
 
-    let mut recorder = gix::diff::tree::Recorder::default();
-    gix::diff::tree(
-        TreeRefIter::from_bytes(&from_tree.data, from_tree.id.kind()),
-        TreeRefIter::from_bytes(&to_tree.data, to_tree.id.kind()),
-        gix::diff::tree::State::default(),
-        repo.objects.clone(),
-        &mut recorder,
-    )
-    .map_err(|e| GitError::Internal(e.to_string()))?;
+    let options = gix::diff::Options::default().with_rewrites(Some(history::rewrite_tracking()));
+    let records = repo
+        .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), options)
+        .map_err(|e| GitError::Internal(e.to_string()))?;
 
-    let files = recorder
-        .records
+    let files = records
         .into_iter()
         .map(|change| {
-            let (path, status) = match change {
-                Change::Addition { path, .. } => {
-                    (PathBuf::from(path.to_string()), ChangeStatus::Added)
-                }
-                Change::Deletion { path, .. } => {
-                    (PathBuf::from(path.to_string()), ChangeStatus::Deleted)
-                }
-                Change::Modification { path, .. } => {
-                    (PathBuf::from(path.to_string()), ChangeStatus::Modified)
-                }
-            };
-            ChangedFile { path, status }
+            use gix::object::tree::diff::ChangeDetached;
+            match change {
+                ChangeDetached::Addition { location, .. } => ChangedFile {
+                    path: PathBuf::from(location.to_string()),
+                    status: ChangeStatus::Added,
+                    source_path: None,
+                },
+                ChangeDetached::Deletion { location, .. } => ChangedFile {
+                    path: PathBuf::from(location.to_string()),
+                    status: ChangeStatus::Deleted,
+                    source_path: None,
+                },
+                ChangeDetached::Modification { location, .. } => ChangedFile {
+                    path: PathBuf::from(location.to_string()),
+                    status: ChangeStatus::Modified,
+                    source_path: None,
+                },
+                ChangeDetached::Rewrite {
+                    source_location,
+                    location,
+                    copy,
+                    ..
+                } => ChangedFile {
+                    path: PathBuf::from(location.to_string()),
+                    status: if copy {
+                        // A copy's source still exists unchanged; only
+                        // the destination is new content to review.
+                        ChangeStatus::Added
+                    } else {
+                        ChangeStatus::Modified
+                    },
+                    source_path: (!copy).then(|| PathBuf::from(source_location.to_string())),
+                },
+            }
         })
         .collect();
 

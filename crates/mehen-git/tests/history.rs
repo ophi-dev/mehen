@@ -390,3 +390,45 @@ fn renames_preserve_file_identity_and_history() {
     assert_eq!(edited.churn_removed, 2);
     assert_eq!(edited.last_change_seconds, T_APR);
 }
+
+#[test]
+fn changed_files_joins_rename_pairs() {
+    // A rename between `from` and `to` must surface as one `Modified`
+    // entry carrying `source_path`, not a deletion + addition pair —
+    // otherwise diff consumers lose the baseline for both metric and
+    // history comparison.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(
+        dir.path().join("before.rs"),
+        "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "rename-base"], ALICE, T_JAN);
+
+    git(dir.path(), &["mv", "before.rs", "after.rs"], ALICE, T_FEB);
+    git(dir.path(), &["commit", "-q", "-m", "rename"], ALICE, T_FEB);
+    git(dir.path(), &["tag", "rename-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "rename-base", "rename-head").unwrap();
+
+    assert_eq!(
+        changed.len(),
+        1,
+        "rename must be a single entry: {changed:?}"
+    );
+    let cf = &changed[0];
+    assert_eq!(cf.path, Path::new("after.rs"));
+    assert_eq!(cf.status, mehen_git::ChangeStatus::Modified);
+    assert_eq!(cf.source_path.as_deref(), Some(Path::new("before.rs")));
+}

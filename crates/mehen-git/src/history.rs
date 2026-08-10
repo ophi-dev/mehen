@@ -330,7 +330,7 @@ fn resolve_alias(aliases: &HashMap<PathBuf, PathBuf>, path: &Path) -> PathBuf {
 /// `git diff -M50%`), pinned here rather than read from repository /
 /// user configuration so history metrics stay deterministic across
 /// machines.
-fn rewrite_tracking() -> gix::diff::Rewrites {
+pub(crate) fn rewrite_tracking() -> gix::diff::Rewrites {
     gix::diff::Rewrites {
         copies: None,
         percentage: Some(0.5),
@@ -471,7 +471,9 @@ fn blob_line_count(repo: &gix::Repository, oid: &gix::ObjectId) -> Result<u64, G
 }
 
 /// Line-level (added, removed) counts between two blob versions using
-/// the histogram diff algorithm.
+/// the histogram diff algorithm. The inputs are tokenized into byte
+/// lines explicitly so churn is always counted in lines, matching
+/// `blob_line_count` and the rename-tracking `DiffLineStats`.
 fn blob_line_diff(
     repo: &gix::Repository,
     old: &gix::ObjectId,
@@ -479,7 +481,10 @@ fn blob_line_diff(
 ) -> Result<(u64, u64), GitError> {
     let old_data = read_blob_data(repo, old)?;
     let new_data = read_blob_data(repo, new)?;
-    let input = InternedInput::new(old_data.as_slice(), new_data.as_slice());
+    let input = InternedInput::new(
+        gix::diff::blob::sources::byte_lines(&old_data),
+        gix::diff::blob::sources::byte_lines(&new_data),
+    );
     let diff = Diff::compute(Algorithm::Histogram, &input);
     Ok((
         u64::from(diff.count_additions()),

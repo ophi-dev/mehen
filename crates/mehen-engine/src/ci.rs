@@ -154,7 +154,12 @@ fn extract_push_changed_files(payload: &serde_json::Value) -> Option<Vec<Changed
     } else {
         let mut sorted: Vec<ChangedFile> = by_path
             .into_iter()
-            .map(|(path, status)| ChangedFile { path, status })
+            .map(|(path, status)| ChangedFile {
+                path,
+                status,
+                // GitHub push payloads carry no rename information.
+                source_path: None,
+            })
             .collect();
         sorted.sort_by(|a, b| a.path.cmp(&b.path));
         Some(sorted)

@@ -136,7 +136,9 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         let base_text = if cf.status == ChangeStatus::Added {
             None
         } else {
-            mehen_git::read_blob(repo, &input.from, &cf.path)
+            // Renamed files carry the baseline under their old path.
+            let base_path = cf.source_path.as_deref().unwrap_or(cf.path.as_path());
+            mehen_git::read_blob(repo, &input.from, base_path)
                 .map_err(DiffError::Git)?
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         };
@@ -374,6 +376,12 @@ struct FileDiff {
     metrics: Vec<MetricDiff>,
     is_new: bool,
     is_deleted: bool,
+    /// Head-side function count read directly from the analysis (not
+    /// from the selected columns — the default set no longer includes
+    /// `nom.functions`), kept out of the JSON payload. Drives the
+    /// biggest-files-first report ordering.
+    #[serde(skip)]
+    functions: i64,
 }
 
 impl FileDiff {
@@ -383,13 +391,7 @@ impl FileDiff {
 
     /// Sort key: total function count descending, then path ascending.
     fn sort_key(&self) -> (std::cmp::Reverse<i64>, PathBuf) {
-        let functions = self
-            .metrics
-            .iter()
-            .find(|m| m.name == "nom.functions")
-            .map(|m| m.current as i64)
-            .unwrap_or(0);
-        (std::cmp::Reverse(functions), self.path.clone())
+        (std::cmp::Reverse(self.functions), self.path.clone())
     }
 }
 
@@ -614,6 +616,9 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     for (cf, utf8_path, language) in &filtered {
         let is_deleted = cf.status == ChangeStatus::Deleted;
         let is_new = cf.status == ChangeStatus::Added;
+        // Renamed files carry the baseline under their old path — both
+        // the baseline blob and the baseline history live there.
+        let base_path = cf.source_path.as_deref().unwrap_or(cf.path.as_path());
 
         let analyzer = match registry.analyzer_for(*language) {
             Some(a) => a,
@@ -670,7 +675,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         let mut baseline_space: Option<MetricSpace> = if is_new {
             None
         } else {
-            match mehen_git::read_blob(&repo, &from_ref, &cf.path) {
+            match mehen_git::read_blob(&repo, &from_ref, base_path) {
                 Ok(Some(bytes)) => analyze(bytes, "baseline"),
                 Ok(None) => None,
                 Err(e) => {
@@ -695,13 +700,14 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
 
         // Fold the `history.*` family into each side's metric set, each
         // against its own revision's history and head-relative "now".
+        // The baseline side of a renamed file reads its old path.
         if let Some((base_history, head_history)) = histories.as_ref() {
-            for (space, history) in [
-                (baseline_space.as_mut(), base_history),
-                (current_space.as_mut(), head_history),
+            for (space, history, path) in [
+                (baseline_space.as_mut(), base_history, base_path),
+                (current_space.as_mut(), head_history, cf.path.as_path()),
             ] {
                 if let Some(space) = space
-                    && let Some(fh) = history.file(&cf.path)
+                    && let Some(fh) = history.file(path)
                 {
                     history_metrics::inject_history_metrics(
                         &mut space.metrics,
@@ -741,6 +747,11 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             metrics: metric_diffs,
             is_new: is_new && baseline_space.is_none(),
             is_deleted,
+            functions: current_space
+                .as_ref()
+                .and_then(|s| s.metrics.get(&mehen_core::MetricKey::new("nom.functions")))
+                .map(|v| v.as_f64() as i64)
+                .unwrap_or(0),
         });
     }
 
@@ -1826,6 +1837,7 @@ binary.md binary
             }],
             is_new: false,
             is_deleted: false,
+            functions: 0,
         };
         assert!(diff.all_unchanged());
     }
@@ -2124,6 +2136,7 @@ src/archive.txt binary
             metrics: vec![],
             is_new: false,
             is_deleted: false,
+            functions: 0,
         }];
         let res = print_json(&diffs, None);
         assert!(res.is_ok(), "valid input must serialize cleanly");

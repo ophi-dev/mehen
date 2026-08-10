@@ -685,3 +685,187 @@ fn top_offenders_discovers_history_from_the_analyzed_paths() {
     );
     assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
 }
+
+#[test]
+fn diff_joins_rename_pairs_and_carries_baseline_history() {
+    // A renamed file must appear once, compared against its old path's
+    // metrics and history — not as a deleted row plus a 🆕 row whose
+    // entire accumulated history shows up as a fresh delta.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "before.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "rename-base"]);
+
+    git_ok(dir.path(), &["mv", "before.py", "after.py"]);
+    write_python(dir.path(), "after.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "rename and extend");
+    git_ok(dir.path(), &["tag", "rename-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "rename-base",
+            "--to",
+            "rename-head",
+            "--metrics",
+            "loc.lloc,history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    // One joined row for the rename — not before.py deleted + after.py new.
+    assert_eq!(files.len(), 1, "expected one joined rename row: {files:?}");
+    assert_eq!(files[0]["path"].as_str(), Some("after.py"));
+    assert_eq!(files[0]["is_new"].as_bool(), Some(false));
+    assert_eq!(files[0]["is_deleted"].as_bool(), Some(false));
+
+    let metric = |name: &str| -> (f64, f64) {
+        let m = files[0]["metrics"]
+            .as_array()
+            .expect("metrics array")
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing metric {name}"));
+        (
+            m["current"].as_f64().expect("current"),
+            m["baseline"].as_f64().expect("baseline"),
+        )
+    };
+    // Static baseline comes from the old path (2 lines → 3 lines).
+    assert_eq!(metric("loc.lloc"), (3.0, 2.0));
+    // History baseline is the old path's history (1 commit → 2 commits,
+    // with the rename walk carrying identity across the rename).
+    assert_eq!(metric("history.commit_frequency"), (2.0, 1.0));
+}
+
+#[test]
+fn top_offenders_loads_history_for_every_repository_root() {
+    // Input roots spanning two repositories must each read their own
+    // repository's history rather than the first root's.
+    let repo_a = tempfile::tempdir().expect("repo a");
+    init_git_repo(repo_a.path());
+    write_python(repo_a.path(), "a.py", "a = 1\n");
+    commit_all(repo_a.path(), "one");
+    write_python(repo_a.path(), "a.py", "a = 1\nb = 2\n");
+    commit_all(repo_a.path(), "two");
+    write_python(repo_a.path(), "a.py", "a = 1\nb = 2\nc = 3\n");
+    commit_all(repo_a.path(), "three");
+
+    let repo_b = tempfile::tempdir().expect("repo b");
+    init_git_repo(repo_b.path());
+    write_python(repo_b.path(), "b.py", "b = 1\n");
+    commit_all(repo_b.path(), "only");
+
+    let elsewhere = tempfile::tempdir().expect("non-repo tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(elsewhere.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            repo_a.path().to_str().expect("UTF-8 temp path"),
+            repo_b.path().to_str().expect("UTF-8 temp path"),
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 2);
+    // a.py (3 commits in repo A) ranks above b.py (1 commit in repo B) —
+    // and b.py reads its own repo's history, not zero.
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("a.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(3.0));
+    assert!(
+        offenders[1]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("b.py")
+    );
+    assert_eq!(offenders[1]["metrics"][0]["value"].as_f64(), Some(1.0));
+}
+
+#[cfg(unix)]
+#[test]
+fn top_offenders_does_not_borrow_history_through_symlinks() {
+    // A tracked symlink `alias.py -> real.py` must keep its own
+    // (empty) history: canonicalizing the full path would resolve the
+    // final component and enrich the alias row with the target file's
+    // churn and commit count.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    write_python(dir.path(), "real.py", "r = 1\n");
+    commit_all(dir.path(), "one");
+    write_python(dir.path(), "real.py", "r = 1\ns = 2\n");
+    commit_all(dir.path(), "two");
+    std::os::unix::fs::symlink("real.py", dir.path().join("alias.py")).expect("symlink");
+    commit_all(dir.path(), "add alias symlink");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    let by_name = |suffix: &str| -> f64 {
+        offenders
+            .iter()
+            .find(|o| o["path"].as_str().expect("path").ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing {suffix} in {offenders:?}"))["metrics"][0]["value"]
+            .as_f64()
+            .expect("value")
+    };
+    // real.py has two content commits; the alias symlink has none of
+    // them (symlinks are non-blob entries in the history walk).
+    assert_eq!(by_name("real.py"), 2.0);
+    assert_eq!(by_name("alias.py"), 0.0);
+}
