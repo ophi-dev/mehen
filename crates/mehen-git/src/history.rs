@@ -219,10 +219,11 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         .tree()
         .map_err(|e| GitError::Internal(e.to_string()))?;
 
-    let mut files: HashMap<PathBuf, FileAccumulator> = HashMap::new();
+    let mut files: HashMap<FileIdentity, FileAccumulator> = HashMap::new();
     let mut first_commit_seconds = head_seconds;
-    // Rename identity: maps a historical path to the head-relative
-    // path it eventually became, so a renamed file accumulates one
+    // Rename identity: maps a historical path to the identity it
+    // eventually became (a head-relative path, or a tombstone for a
+    // dead prior occupant), so a renamed file accumulates one
     // history entry instead of losing everything before the rename.
     // The newest-first walk sees a rename before the older commits
     // that touched its source path; values stored in the map are
@@ -232,7 +233,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
     // to a dead prior occupant of that path, and are redirected to a
     // per-boundary tombstone identity so the surviving file never
     // inherits them.
-    let mut aliases: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut aliases: HashMap<PathBuf, FileIdentity> = HashMap::new();
     let mut tombstones: usize = 0;
 
     // Date-order traversal (`git rev-list --date-order`): commits come
@@ -278,7 +279,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // ── Phase 1: resolve every change against the *pre-commit*
         // alias map, so same-commit rename cycles (an a↔b swap) don't
         // resolve through each other's just-installed aliases.
-        let mut targets: Vec<PathBuf> = changes
+        let mut targets: Vec<FileIdentity> = changes
             .iter()
             .map(|change| resolve_alias(&aliases, &change.path))
             .collect();
@@ -302,10 +303,12 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         for (change, target) in changes.iter().zip(targets.iter_mut()) {
             if change.is_deletion
                 && !aliases.contains_key(&change.path)
-                && files.get(&change.path).is_some_and(|acc| acc.has_addition)
+                && files
+                    .get(&FileIdentity::Path(change.path.clone()))
+                    .is_some_and(|acc| acc.has_addition)
             {
                 tombstones += 1;
-                let tombstone = tombstone_path(tombstones);
+                let tombstone = FileIdentity::Tombstone(tombstones);
                 aliases.insert(change.path.clone(), tombstone.clone());
                 *target = tombstone;
             }
@@ -317,12 +320,12 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             let Some(source) = &change.source_path else {
                 continue;
             };
-            if source == target {
+            if matches!(target, FileIdentity::Path(p) if p == source) {
                 // A rename returning to its own identity (a→b→a):
                 // reconnect the lineage by dropping a stale destination
                 // boundary, so pre-rename commits flow to the survivor
                 // again instead of a tombstone.
-                if aliases.get(source).is_some_and(|t| is_tombstone(t)) {
+                if matches!(aliases.get(source), Some(FileIdentity::Tombstone(_))) {
                     aliases.remove(source);
                 }
                 continue;
@@ -334,7 +337,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // rename explains where the fenced-off occupant actually
             // went (it was renamed away before the newer occupant
             // arrived).
-            if aliases.get(source).is_some_and(|t| !is_tombstone(t)) {
+            if matches!(aliases.get(source), Some(FileIdentity::Path(_))) {
                 continue;
             }
             // The alias redirects the *older* commits that are walked
@@ -347,9 +350,12 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // at the walked rev — or whose newer accumulation ended in
             // a deletion — is a distinct file re-created after the
             // rename, and its history must stay its own.
+            let source_id = FileIdentity::Path(source.clone());
             let stranded_is_lineage = !path_exists_at_head(&head_tree, source)?
-                && files.get(source).is_some_and(|acc| !acc.newest_is_deletion);
-            if stranded_is_lineage && let Some(stranded) = files.remove(source) {
+                && files
+                    .get(&source_id)
+                    .is_some_and(|acc| !acc.newest_is_deletion);
+            if stranded_is_lineage && let Some(stranded) = files.remove(&source_id) {
                 files.entry(target.clone()).or_default().merge(stranded);
             }
             // Destination identity boundary: older direct changes to
@@ -359,7 +365,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // are a live lineage this commit moves elsewhere.
             if !commit_sources.contains(&change.path) {
                 tombstones += 1;
-                aliases.insert(change.path.clone(), tombstone_path(tombstones));
+                aliases.insert(change.path.clone(), FileIdentity::Tombstone(tombstones));
             }
         }
 
@@ -395,7 +401,14 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
 
     let files = files
         .into_iter()
-        .map(|(path, acc)| (path, finalize_file(acc, first_commit_seconds, head_seconds)))
+        .filter_map(|(identity, acc)| match identity {
+            FileIdentity::Path(path) => {
+                Some((path, finalize_file(acc, first_commit_seconds, head_seconds)))
+            }
+            // Dead prior occupants: their fenced-off accumulations
+            // exist only so live lineages don't inherit them.
+            FileIdentity::Tombstone(_) => None,
+        })
         .collect();
 
     Ok(RepositoryHistory {
@@ -498,17 +511,16 @@ fn path_exists_at_head(head_tree: &gix::Tree<'_>, path: &Path) -> Result<bool, G
         .is_some())
 }
 
-/// A synthetic identity for a dead prior occupant of a rename
-/// destination. Starts with a control byte so it can never collide
-/// with a real repository path; entries accumulated under it are
-/// simply never looked up.
-fn tombstone_path(counter: usize) -> PathBuf {
-    PathBuf::from(format!("\u{1}tombstone\u{1}{counter}"))
-}
-
-/// Whether an alias target is a tombstone (see [`tombstone_path`]).
-fn is_tombstone(path: &Path) -> bool {
-    path.as_os_str().to_string_lossy().starts_with('\u{1}')
+/// The identity a historical change accumulates under: a real
+/// head-relative path, or a synthetic tombstone standing in for a dead
+/// prior occupant of a rename destination (or of a delete-then-
+/// recreate boundary). A dedicated variant rather than a sentinel
+/// `PathBuf`: Git permits arbitrary bytes in filenames on some
+/// platforms, so no in-namespace sentinel can be collision-free.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum FileIdentity {
+    Path(PathBuf),
+    Tombstone(usize),
 }
 
 /// Resolve a historical path to its head-relative identity.
@@ -519,11 +531,11 @@ fn is_tombstone(path: &Path) -> bool {
 /// tombstone) that cut off a prior occupant's older changes — chasing
 /// chains through such a boundary would misroute a lineage into a
 /// tombstone.
-fn resolve_alias(aliases: &HashMap<PathBuf, PathBuf>, path: &Path) -> PathBuf {
+fn resolve_alias(aliases: &HashMap<PathBuf, FileIdentity>, path: &Path) -> FileIdentity {
     aliases
         .get(path)
         .cloned()
-        .unwrap_or_else(|| path.to_path_buf())
+        .unwrap_or_else(|| FileIdentity::Path(path.to_path_buf()))
 }
 
 /// Diff `commit` against its first parent (or the empty tree for root

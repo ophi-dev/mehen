@@ -1561,3 +1561,83 @@ fn parallel_branch_deletion_does_not_split_a_surviving_lineage() {
     assert!(x.commit_frequency >= 3);
     assert_eq!(x.last_change_seconds, T_MAR);
 }
+
+/// Tombstone identities live outside the path namespace: a real
+/// repository file whose name matches the old in-namespace sentinel
+/// (`\x01tombstone\x011`) must keep its own history even when the walk
+/// fences off a dead prior occupant with tombstone #1.
+#[test]
+#[cfg(unix)]
+fn tombstones_cannot_collide_with_real_control_byte_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let weird = "\u{1}tombstone\u{1}1";
+    git(
+        dir.path(),
+        &["init", "-q", "-b", "main"],
+        ALICE,
+        1_700_000_000,
+    );
+
+    // c1: the control-byte-named file, plus a prior occupant of the
+    // future rename destination, plus the future rename source.
+    std::fs::write(dir.path().join(weird), "fn w0() {}\nfn w1() {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("dest.rs"),
+        "fn d0() {}\nfn d1() {}\nfn d2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("old.rs"), "fn o0() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, 1_700_000_000);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "init"],
+        ALICE,
+        1_700_000_000,
+    );
+
+    // c2: edit the control-byte file; remove the prior occupant.
+    std::fs::write(
+        dir.path().join(weird),
+        "fn w0() {}\nfn w1() {}\nfn w2() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["rm", "-q", "dest.rs"], BOB, 1_700_100_000);
+    git(dir.path(), &["add", "-A"], BOB, 1_700_100_000);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "edit and drop"],
+        BOB,
+        1_700_100_000,
+    );
+
+    // c3: rename onto the freed path — installs a destination
+    // boundary, which allocates tombstone #1.
+    git(
+        dir.path(),
+        &["mv", "old.rs", "dest.rs"],
+        ALICE,
+        1_700_200_000,
+    );
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename"],
+        ALICE,
+        1_700_200_000,
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // The control-byte file saw exactly its own two commits; with the
+    // old sentinel scheme the fenced-off `dest.rs` occupant (creation
+    // + deletion) would have been merged into it.
+    let weird_history = history.file(Path::new(weird)).unwrap();
+    assert_eq!(weird_history.commit_frequency, 2);
+    assert_eq!(weird_history.churn_added, 3);
+    assert_eq!(weird_history.churn_removed, 0);
+
+    // The survivor carries the rename-source lineage only.
+    let dest = history.file(Path::new("dest.rs")).unwrap();
+    assert_eq!(dest.commit_frequency, 2);
+    assert_eq!(dest.churn_added, 1);
+}
