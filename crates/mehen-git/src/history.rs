@@ -167,6 +167,12 @@ struct FileAccumulator {
     sum_of_coupling: u64,
     /// Committer timestamps of bug-fixing commits, for TWR.
     bugfix_seconds: Vec<i64>,
+    /// Whether the *newest walked* change to this path removed the
+    /// file. A stranded accumulator whose lineage ended in deletion is
+    /// a dead post-rename path reuse, not a parallel branch's edits to
+    /// the renamed lineage — it must not be folded into the rename
+    /// destination.
+    newest_is_deletion: bool,
 }
 
 impl FileAccumulator {
@@ -265,19 +271,25 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 // walked after this rename (the pre-rename lineage).
                 aliases.insert(source.clone(), path.clone());
                 // Anything already accumulated under the source path
-                // is *newer* than the rename. If the source no longer
-                // exists at the walked rev, those are a parallel
-                // branch's edits to the renamed lineage — fold them
-                // into the surviving identity. If it does exist, the
-                // path was re-created as a distinct file afterwards
-                // and its accumulator must stay its own.
-                if !path_exists_at_head(&head_tree, source)?
-                    && let Some(stranded) = files.remove(source)
-                {
+                // is *newer* than the rename. Fold it into the
+                // surviving identity only when it belongs to the
+                // renamed lineage (a parallel branch's edits): a
+                // source path that still exists at the walked rev — or
+                // whose newer accumulation ended in a deletion — is a
+                // distinct file re-created after the rename, and its
+                // history must stay its own.
+                let stranded_is_lineage = !path_exists_at_head(&head_tree, source)?
+                    && files.get(source).is_some_and(|acc| !acc.newest_is_deletion);
+                if stranded_is_lineage && let Some(stranded) = files.remove(source) {
                     files.entry(path.clone()).or_default().merge(stranded);
                 }
             }
+            let newly_tracked = !files.contains_key(&path);
             let acc = files.entry(path).or_default();
+            if newly_tracked {
+                // First (newest-walked) change for this path.
+                acc.newest_is_deletion = change.is_deletion;
+            }
             acc.commit_frequency += 1;
             acc.churn_added += change.added;
             acc.churn_removed += change.removed;
@@ -385,6 +397,10 @@ struct CommitFileChange {
     source_path: Option<PathBuf>,
     added: u64,
     removed: u64,
+    /// Whether this change removed the file (used to tell a dead
+    /// post-rename path reuse apart from parallel-branch lineage
+    /// edits — see the stranded-accumulator merge).
+    is_deletion: bool,
 }
 
 /// Whether `path` names an entry in the walked rev's tree.
@@ -442,12 +458,14 @@ fn diff_against_first_parent(
                 source_path: None,
                 added: blob_line_count(repo, &oid)?,
                 removed: 0,
+                is_deletion: false,
             },
             TreeChange::Deleted { path, oid } => CommitFileChange {
                 path,
                 source_path: None,
                 added: 0,
                 removed: blob_line_count(repo, &oid)?,
+                is_deletion: true,
             },
             TreeChange::Modified {
                 path,
@@ -466,6 +484,7 @@ fn diff_against_first_parent(
                     source_path: None,
                     added,
                     removed,
+                    is_deletion: false,
                 }
             }
             TreeChange::Renamed {
@@ -485,6 +504,7 @@ fn diff_against_first_parent(
                     source_path: Some(source_path),
                     added,
                     removed,
+                    is_deletion: false,
                 }
             }
         };

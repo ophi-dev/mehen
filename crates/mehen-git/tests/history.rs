@@ -1002,3 +1002,164 @@ fn binary_revisions_of_source_paths_churn_zero_lines() {
     assert_eq!(generated.churn_added, 2);
     assert_eq!(generated.churn_removed, 0);
 }
+
+#[test]
+fn dead_path_reuse_after_rename_stays_out_of_the_lineage() {
+    // a.rs is renamed to b.rs; later an unrelated a.rs is created and
+    // deleted again before head. The temporary file's history must not
+    // be folded into b.rs even though a.rs is absent from the head
+    // tree.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn one() {}\nfn two() {}\nfn three() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "a.rs"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "add a"], ALICE, T_JAN);
+
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, T_FEB);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename a"],
+        ALICE,
+        T_FEB,
+    );
+
+    // Temporary unrelated reuse of the a.rs path, dead before head.
+    std::fs::write(dir.path().join("a.rs"), "fn temporary() {}\n").unwrap();
+    git(dir.path(), &["add", "a.rs"], BOB, T_MAR);
+    git(dir.path(), &["commit", "-q", "-m", "temp a"], BOB, T_MAR);
+    git(dir.path(), &["rm", "-q", "a.rs"], BOB, T_APR);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "remove temp a"],
+        BOB,
+        T_APR,
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // b.rs carries only its own lineage: creation + rename by alice.
+    let b = history.file(Path::new("b.rs")).expect("b.rs history");
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 3);
+    assert_eq!(b.churn_removed, 0);
+    assert_eq!(b.authors, 1, "bob's dead temp file must not leak in");
+    assert_eq!(b.last_change_seconds, T_FEB);
+}
+
+#[test]
+fn empty_blob_additions_and_deletions_do_not_pair_as_renames() {
+    // Deleting an empty old/a.rs while independently adding an empty
+    // new/b.rs must stay a deletion + addition: an empty blob carries
+    // no identity signal, and pairing would hand the new path the old
+    // path's baseline and history.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::create_dir_all(dir.path().join("old")).unwrap();
+    std::fs::write(dir.path().join("old/a.rs"), "").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "empty-base"], ALICE, T_JAN);
+
+    std::fs::remove_file(dir.path().join("old/a.rs")).unwrap();
+    std::fs::create_dir_all(dir.path().join("new")).unwrap();
+    std::fs::write(dir.path().join("new/b.rs"), "").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_FEB);
+    git(dir.path(), &["commit", "-q", "-m", "shuffle"], ALICE, T_FEB);
+    git(dir.path(), &["tag", "empty-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "empty-base", "empty-head").unwrap();
+
+    let mut summary: Vec<(String, mehen_git::ChangeStatus)> = changed
+        .iter()
+        .map(|cf| (cf.path.display().to_string(), cf.status))
+        .collect();
+    summary.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        summary,
+        vec![
+            ("new/b.rs".to_string(), mehen_git::ChangeStatus::Added),
+            ("old/a.rs".to_string(), mehen_git::ChangeStatus::Deleted),
+        ],
+        "empty blobs must not pair as renames"
+    );
+    assert!(changed.iter().all(|cf| cf.source_path.is_none()));
+}
+
+#[test]
+fn exact_rename_pairs_use_global_affinity_ranking() {
+    // Identical blobs: deletions at src/a/foo.rs + tests/b/foo.rs,
+    // additions at new/foo.rs + src/c/foo.rs. A greedy per-destination
+    // match in lexical order would give new/foo.rs the src/a source;
+    // global ranking must assign the strongly prefix-matching
+    // src/a/foo.rs → src/c/foo.rs pair first.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    let same_content = "fn identical_everywhere() {}\n";
+    for parent in ["src/a", "tests/b"] {
+        std::fs::create_dir_all(dir.path().join(parent)).unwrap();
+        std::fs::write(dir.path().join(parent).join("foo.rs"), same_content).unwrap();
+    }
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "affinity-base"], ALICE, T_JAN);
+
+    for parent in ["src/a", "tests/b"] {
+        std::fs::remove_file(dir.path().join(parent).join("foo.rs")).unwrap();
+    }
+    for parent in ["new", "src/c"] {
+        std::fs::create_dir_all(dir.path().join(parent)).unwrap();
+        std::fs::write(dir.path().join(parent).join("foo.rs"), same_content).unwrap();
+    }
+    git(dir.path(), &["add", "-A"], ALICE, T_FEB);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "reshuffle"],
+        ALICE,
+        T_FEB,
+    );
+    git(dir.path(), &["tag", "affinity-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "affinity-base", "affinity-head").unwrap();
+
+    let source_of = |dest: &str| -> String {
+        changed
+            .iter()
+            .find(|cf| cf.path == Path::new(dest))
+            .unwrap_or_else(|| panic!("missing {dest} in {changed:?}"))
+            .source_path
+            .as_ref()
+            .expect("rename must carry a source")
+            .display()
+            .to_string()
+    };
+    assert_eq!(source_of("src/c/foo.rs"), "src/a/foo.rs");
+    assert_eq!(source_of("new/foo.rs"), "tests/b/foo.rs");
+}

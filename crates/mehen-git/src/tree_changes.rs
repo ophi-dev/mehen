@@ -256,49 +256,98 @@ fn detect_renames(
 
     // Exact pass: identical blob content is a certain rename. When an
     // OID has several candidates on either side (e.g. two identical
-    // files swapped between directories), pairs are chosen by *path
-    // affinity* — matching basenames, then shared directory components
-    // — so `src/foo.rs → tests/foo.rs` beats `src/foo.rs → src/bar.rs`
-    // and the destinations don't inherit each other's lineage. Path
-    // tie-breaks keep the outcome deterministic.
+    // files swapped between directories), all candidate pairs are
+    // ranked *globally* by path affinity — matching basenames, then
+    // shared directory components — exactly like the fuzzy pass, so an
+    // early destination can never consume a source that a later
+    // destination matches more strongly. Path tie-breaks keep the
+    // outcome deterministic. Empty blobs carry no identity signal and
+    // never participate (mirroring the fuzzy pass and git's
+    // `track_empty: false` default).
+    let empty_blob = gix::ObjectId::empty_blob(repo.object_hash());
     let mut deleted_by_oid: HashMap<gix::ObjectId, Vec<usize>> = HashMap::new();
     for (index, side) in deleted.iter().enumerate() {
-        deleted_by_oid.entry(side.oid).or_default().push(index);
+        if side.oid != empty_blob {
+            deleted_by_oid.entry(side.oid).or_default().push(index);
+        }
     }
 
-    let mut deleted_taken = vec![false; deleted.len()];
-    let mut added_taken = vec![false; added.len()];
+    let mut exact_candidates: Vec<(u64, usize, usize)> = Vec::new();
+    let mut exact_overflow = false;
     for (added_index, side) in added.iter().enumerate() {
+        if side.oid == empty_blob {
+            continue;
+        }
         let Some(candidates) = deleted_by_oid.get(&side.oid) else {
             continue;
         };
-        // A broken half must not "rename" onto its own other half.
-        let best = candidates
-            .iter()
-            .copied()
-            .filter(|&deleted_index| {
-                !deleted_taken[deleted_index]
-                    && (deleted[deleted_index].broken.is_none()
-                        || deleted[deleted_index].broken != side.broken)
-            })
-            .max_by(|&a, &b| {
-                path_affinity(&deleted[a].path, &side.path)
-                    .cmp(&path_affinity(&deleted[b].path, &side.path))
-                    // Prefer the lexicographically *smaller* source on
-                    // an affinity tie (max_by keeps the later maximum,
-                    // so compare paths reversed).
-                    .then_with(|| deleted[b].path.cmp(&deleted[a].path))
-            });
-        if let Some(deleted_index) = best {
-            deleted_taken[deleted_index] = true;
-            added_taken[added_index] = true;
-            changes.push(TreeChange::Renamed {
-                path: side.path.clone(),
-                source_path: deleted[deleted_index].path.clone(),
-                previous_oid: deleted[deleted_index].oid,
-                oid: side.oid,
-            });
+        for &deleted_index in candidates {
+            // A broken half must not "rename" onto its own other half.
+            if deleted[deleted_index].broken.is_some()
+                && deleted[deleted_index].broken == side.broken
+            {
+                continue;
+            }
+            exact_candidates.push((
+                path_affinity(&deleted[deleted_index].path, &side.path),
+                deleted_index,
+                added_index,
+            ));
+            if exact_candidates.len() > RENAME_FUZZY_LIMIT {
+                exact_overflow = true;
+                break;
+            }
         }
+        if exact_overflow {
+            break;
+        }
+    }
+    if exact_overflow {
+        // Pathological same-content fan-out (thousands of identical
+        // files churned at once): degrade to positional pairing in
+        // path order rather than ranking millions of pairs. Still
+        // deterministic; still exact-content renames.
+        exact_candidates.clear();
+        let mut added_by_oid: HashMap<gix::ObjectId, Vec<usize>> = HashMap::new();
+        for (index, side) in added.iter().enumerate() {
+            if side.oid != empty_blob {
+                added_by_oid.entry(side.oid).or_default().push(index);
+            }
+        }
+        for (oid, added_indices) in added_by_oid {
+            let Some(deleted_indices) = deleted_by_oid.get(&oid) else {
+                continue;
+            };
+            for (&deleted_index, &added_index) in deleted_indices.iter().zip(added_indices.iter()) {
+                if deleted[deleted_index].broken.is_some()
+                    && deleted[deleted_index].broken == added[added_index].broken
+                {
+                    continue;
+                }
+                exact_candidates.push((0, deleted_index, added_index));
+            }
+        }
+    }
+    exact_candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| deleted[a.1].path.cmp(&deleted[b.1].path))
+            .then_with(|| added[a.2].path.cmp(&added[b.2].path))
+    });
+
+    let mut deleted_taken = vec![false; deleted.len()];
+    let mut added_taken = vec![false; added.len()];
+    for (_, deleted_index, added_index) in exact_candidates {
+        if deleted_taken[deleted_index] || added_taken[added_index] {
+            continue;
+        }
+        deleted_taken[deleted_index] = true;
+        added_taken[added_index] = true;
+        changes.push(TreeChange::Renamed {
+            path: added[added_index].path.clone(),
+            source_path: deleted[deleted_index].path.clone(),
+            previous_oid: deleted[deleted_index].oid,
+            oid: added[added_index].oid,
+        });
     }
     let mut remaining_added: Vec<RenameSide> = added
         .into_iter()
