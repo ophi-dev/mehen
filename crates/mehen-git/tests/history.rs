@@ -491,3 +491,76 @@ fn changed_files_reports_type_changes_from_the_blob_side() {
     assert_eq!(changed[0].status, mehen_git::ChangeStatus::Deleted);
     assert!(changed[0].source_path.is_none());
 }
+
+#[test]
+fn parallel_branch_edits_before_a_rename_are_merged_into_the_survivor() {
+    // Branches diverge after a.rs is created; the side branch edits
+    // a.rs with a *later* timestamp than main's rename to b.rs. The
+    // newest-first walk therefore accumulates the edit under a.rs
+    // before it learns about the rename — that stranded accumulator
+    // must be folded into b.rs, not left behind.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "a.rs"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "add a"], ALICE, T_JAN);
+
+    // Side branch: edit a.rs at T_MAR (after main's rename time).
+    git(dir.path(), &["checkout", "-q", "-b", "side"], BOB, T_MAR);
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0_edited() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "edit a"], BOB, T_MAR);
+
+    // Main: rename a.rs -> b.rs at T_FEB (before the side edit's time).
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, T_FEB);
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, T_FEB);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename a"],
+        ALICE,
+        T_FEB,
+    );
+
+    // Merge (git's own rename detection applies the edit to b.rs).
+    git(
+        dir.path(),
+        &[
+            "merge",
+            "-q",
+            "--no-edit",
+            "-m",
+            "merge side branch",
+            "side",
+        ],
+        ALICE,
+        T_APR,
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // No stranded entry under the pre-rename path.
+    assert!(history.file(Path::new("a.rs")).is_none());
+
+    let b = history.file(Path::new("b.rs")).expect("b.rs history");
+    // Creation (4 lines, alice) + side edit (+1/−1, bob) + rename (0).
+    assert_eq!(b.commit_frequency, 3);
+    assert_eq!(b.churn_added, 5);
+    assert_eq!(b.churn_removed, 1);
+    assert_eq!(b.authors, 2);
+    assert_eq!(b.last_change_seconds, T_MAR);
+}

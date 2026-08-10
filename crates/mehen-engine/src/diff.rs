@@ -82,16 +82,20 @@ impl RevisionGitAttributeFilters {
 /// reporting boundary back into a deletion + addition.
 ///
 /// A joined rename row is keyed by its *destination*, so a rename to
-/// an unsupported extension (`src/foo.py` → `archive/foo.txt`) or out
-/// of the selected `--paths` scope would silently swallow the source
-/// file's disappearance — and a rename *across languages*
-/// (`.py` → `.rs`) would analyze the old blob with the new language's
-/// analyzer. A rename is kept joined only when both sides are selected
-/// and detect as the same language; otherwise each eligible side is
-/// reported on its own.
+/// an unsupported extension (`src/foo.py` → `archive/foo.txt`), out
+/// of the selected `--paths` scope, or into git-attribute-excluded
+/// territory (destination `linguist-generated` at head) would silently
+/// swallow the source file's disappearance — and a rename *across
+/// languages* (`.py` → `.rs`) would analyze the old blob with the new
+/// language's analyzer. A rename is kept joined only when both sides
+/// are selected, detect as the same language, and are
+/// attribute-eligible at their own revision (source at base,
+/// destination at head); otherwise each eligible side is reported on
+/// its own.
 fn split_boundary_renames(
     changed: Vec<mehen_git::ChangedFile>,
     selected: &dyn Fn(&Path) -> bool,
+    mut attribute_filters: Option<&mut RevisionGitAttributeFilters>,
 ) -> Vec<mehen_git::ChangedFile> {
     let language_of = |p: &Path| {
         Utf8PathBuf::try_from(p.to_path_buf())
@@ -104,8 +108,25 @@ fn split_boundary_renames(
             out.push(cf);
             continue;
         };
-        let dest_ok = selected(&cf.path);
-        let src_ok = selected(&source);
+        // Attribute eligibility is per-side and per-revision: the
+        // source lived at base, the destination lives at head. An IO
+        // failure reading attributes keeps the row joined; the main
+        // filter loop surfaces the error for rows that remain.
+        let (src_attr_ok, dest_attr_ok) = match attribute_filters.as_deref_mut() {
+            Some(filters) => (
+                !filters
+                    .base
+                    .excludes_relative_path(&source)
+                    .unwrap_or(false),
+                !filters
+                    .head
+                    .excludes_relative_path(&cf.path)
+                    .unwrap_or(false),
+            ),
+            None => (true, true),
+        };
+        let dest_ok = selected(&cf.path) && dest_attr_ok;
+        let src_ok = selected(&source) && src_attr_ok;
         let dest_lang = language_of(&cf.path);
         let src_lang = language_of(&source);
         if dest_ok && src_ok && dest_lang.is_some() && dest_lang == src_lang {
@@ -133,11 +154,22 @@ fn split_boundary_renames(
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
-    let changed = split_boundary_renames(changed, &|p: &Path| {
-        Utf8PathBuf::try_from(p.to_path_buf())
-            .map(|utf8| path_is_selected(&utf8, &input.paths))
-            .unwrap_or(false)
-    });
+    let mut git_attribute_filters = RevisionGitAttributeFilters::new(repo, &input.from, &input.to)
+        .map_err(|error| {
+            DiffError::Git(GitError::Internal(format!(
+                "failed to configure Git attribute filtering for {}..{}: {error}",
+                input.from, input.to
+            )))
+        })?;
+    let changed = split_boundary_renames(
+        changed,
+        &|p: &Path| {
+            Utf8PathBuf::try_from(p.to_path_buf())
+                .map(|utf8| path_is_selected(&utf8, &input.paths))
+                .unwrap_or(false)
+        },
+        Some(&mut git_attribute_filters),
+    );
     // Thresholds against `history.*` keys need the repository history
     // at the head revision (thresholds are evaluated against the head
     // analysis only). Walked lazily — the family is opt-in.
@@ -148,13 +180,6 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
     } else {
         None
     };
-    let mut git_attribute_filters = RevisionGitAttributeFilters::new(repo, &input.from, &input.to)
-        .map_err(|error| {
-            DiffError::Git(GitError::Internal(format!(
-                "failed to configure Git attribute filtering for {}..{}: {error}",
-                input.from, input.to
-            )))
-        })?;
 
     let mut report = DiffReport {
         schema_version: "1.0".to_string(),
@@ -564,13 +589,21 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     let include = mk_globset(opts.include);
     let exclude = mk_globset(opts.exclude);
     let paths = normalize_path_filters(&opts.paths);
-    // Rename pairs straddling a path/language boundary fall back to a
-    // deletion + addition so neither side silently disappears.
-    let changed = split_boundary_renames(changed, &|p: &Path| {
-        legacy_path_is_selected(p, &paths)
-            && (include.is_empty() || include.is_match(p))
-            && (exclude.is_empty() || !exclude.is_match(p))
-    });
+    let mut git_attribute_filters = opts
+        .ignore_git_attributes
+        .then(|| RevisionGitAttributeFilters::new(&repo, &from_ref, &to_ref))
+        .transpose()?;
+    // Rename pairs straddling a path/language/attribute boundary fall
+    // back to a deletion + addition so neither side silently disappears.
+    let changed = split_boundary_renames(
+        changed,
+        &|p: &Path| {
+            legacy_path_is_selected(p, &paths)
+                && (include.is_empty() || include.is_match(p))
+                && (exclude.is_empty() || !exclude.is_match(p))
+        },
+        git_attribute_filters.as_mut(),
+    );
     // When the caller passes explicit `--metric` names, that one list applies
     // to every file. With no `--metric`, defaults are resolved *per file's
     // language*: SQL files publish only `sql.*` keys, so the source-code
@@ -578,10 +611,6 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // unchanged (Codex P2). `explicit_metrics` selects between the two modes.
     let explicit_metrics = !opts.metrics.is_empty();
     let selectors = parse_metric_selectors(&opts.metrics);
-    let mut git_attribute_filters = opts
-        .ignore_git_attributes
-        .then(|| RevisionGitAttributeFilters::new(&repo, &from_ref, &to_ref))
-        .transpose()?;
 
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let analysis_config = AnalysisConfig::default();
@@ -839,9 +868,17 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 None
             } else {
                 match mehen_git::read_blob(&repo, &from_ref, base_path) {
+                    // Analyze the baseline *as its old path*: Markdown
+                    // link/grounding metrics resolve relative
+                    // references from the file's location, so a
+                    // renamed doc's baseline must be evaluated from
+                    // the directory it actually lived in — otherwise a
+                    // link broken only by the move looks broken in the
+                    // baseline too and `--fail-on new-broken-link`
+                    // misses the regression.
                     Ok(Some(bytes)) => Some(mehen_markdown::analyze_markdown(
                         &String::from_utf8_lossy(&bytes),
-                        &cf.path,
+                        base_path,
                     )),
                     Ok(None) => None,
                     Err(e) => {
@@ -1468,7 +1505,7 @@ binary.md binary
             status: ChangeStatus::Modified,
             source_path: Some(PathBuf::from("src/before.py")),
         };
-        let out = split_boundary_renames(vec![rename], &|_| true);
+        let out = split_boundary_renames(vec![rename], &|_| true, None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, PathBuf::from("src/after.py"));
         assert_eq!(out[0].status, ChangeStatus::Modified);
@@ -1488,7 +1525,7 @@ binary.md binary
             status: ChangeStatus::Modified,
             source_path: Some(PathBuf::from("src/foo.py")),
         };
-        let out = split_boundary_renames(vec![rename], &|_| true);
+        let out = split_boundary_renames(vec![rename], &|_| true, None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, PathBuf::from("src/foo.py"));
         assert_eq!(out[0].status, ChangeStatus::Deleted);
@@ -1504,7 +1541,7 @@ binary.md binary
             status: ChangeStatus::Modified,
             source_path: Some(PathBuf::from("src/port.py")),
         };
-        let out = split_boundary_renames(vec![rename], &|_| true);
+        let out = split_boundary_renames(vec![rename], &|_| true, None);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].path, PathBuf::from("src/port.py"));
         assert_eq!(out[0].status, ChangeStatus::Deleted);
@@ -1522,10 +1559,61 @@ binary.md binary
             source_path: Some(PathBuf::from("src/keep.py")),
         };
         let selected = |p: &Path| p.starts_with("src");
-        let out = split_boundary_renames(vec![rename], &selected);
+        let out = split_boundary_renames(vec![rename], &selected, None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, PathBuf::from("src/keep.py"));
         assert_eq!(out[0].status, ChangeStatus::Deleted);
+    }
+
+    #[test]
+    fn split_boundary_renames_splits_when_destination_is_attribute_excluded() {
+        // A rename whose destination becomes `linguist-generated` at
+        // head must still report the analyzable source's deletion —
+        // keeping the pair joined would let the head-side attribute
+        // check drop the whole row.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("hand_written.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "attr-rename-base"]);
+
+        git_ok(dir.path(), &["mv", "hand_written.py", "generated.py"]);
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "generated.py linguist-generated\n",
+        )
+        .unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "generate"]);
+        git_ok(dir.path(), &["tag", "attr-rename-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "attr-rename-base".to_string(),
+                to: "attr-rename-head".to_string(),
+                paths: Vec::new(),
+                thresholds: Vec::new(),
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        let paths: Vec<&str> = report.files.iter().map(|f| f.path.as_str()).collect();
+        // The source's deletion is reported; the attribute-excluded
+        // destination is not.
+        assert!(
+            paths.contains(&"hand_written.py"),
+            "source deletion must survive: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"generated.py"),
+            "attribute-excluded destination must be dropped: {paths:?}"
+        );
     }
 
     fn analysis_with_diagnostics(diagnostics: Vec<ParseDiagnostic>) -> LanguageAnalysis {

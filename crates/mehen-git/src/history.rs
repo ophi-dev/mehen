@@ -150,6 +150,24 @@ struct FileAccumulator {
     bugfix_seconds: Vec<i64>,
 }
 
+impl FileAccumulator {
+    /// Fold another accumulator into this one — used when a rename is
+    /// discovered *after* the walk already accumulated changes under
+    /// the source path (a parallel branch's later-timestamp commit can
+    /// precede the rename in the newest-first order).
+    fn merge(&mut self, other: FileAccumulator) {
+        self.commit_frequency += other.commit_frequency;
+        self.churn_added += other.churn_added;
+        self.churn_removed += other.churn_removed;
+        for (author, lines) in other.author_lines {
+            *self.author_lines.entry(author).or_insert(0) += lines;
+        }
+        self.last_change_seconds = self.last_change_seconds.max(other.last_change_seconds);
+        self.sum_of_coupling += other.sum_of_coupling;
+        self.bugfix_seconds.extend(other.bugfix_seconds);
+    }
+}
+
 /// Walk the full history reachable from `rev` (first-parent diffs,
 /// merges skipped) and accumulate per-file process statistics.
 ///
@@ -218,6 +236,13 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 && *source != path
             {
                 aliases.insert(source.clone(), path.clone());
+                // A parallel branch's later-timestamp commit can be
+                // walked before this rename and accumulate under the
+                // source path; fold that stranded accumulator into the
+                // surviving identity so no history is lost.
+                if let Some(stranded) = files.remove(source) {
+                    files.entry(path.clone()).or_default().merge(stranded);
+                }
             }
             let acc = files.entry(path).or_default();
             acc.commit_frequency += 1;
