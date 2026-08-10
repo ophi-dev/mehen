@@ -224,8 +224,13 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
     // The newest-first walk sees a rename before the older commits
     // that touched its source path; values stored in the map are
     // always fully resolved, and `resolve_alias` follows chains for
-    // multi-rename histories.
+    // multi-rename histories. Rename destinations also get a
+    // *boundary*: older direct changes to the destination path belong
+    // to a dead prior occupant of that path, and are redirected to a
+    // per-boundary tombstone identity so the surviving file never
+    // inherits them.
     let mut aliases: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut tombstones: usize = 0;
 
     let walk = repo
         .rev_walk([head_commit.id])
@@ -283,6 +288,16 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 if stranded_is_lineage && let Some(stranded) = files.remove(source) {
                     files.entry(path.clone()).or_default().merge(stranded);
                 }
+                // Destination identity boundary: any *older* direct
+                // change to the destination path (walked after this
+                // rename) belongs to a dead prior occupant of that
+                // path — e.g. an old `b.rs` deleted before an
+                // unrelated `a.rs` was renamed onto its path. Redirect
+                // those to a tombstone so the surviving file's history
+                // starts at its own lineage. (The rename's own change
+                // was resolved before this insertion.)
+                tombstones += 1;
+                aliases.insert(change.path.clone(), tombstone_path(tombstones));
             }
             let newly_tracked = !files.contains_key(&path);
             let acc = files.entry(path).or_default();
@@ -411,19 +426,27 @@ fn path_exists_at_head(head_tree: &gix::Tree<'_>, path: &Path) -> Result<bool, G
         .is_some())
 }
 
-/// Resolve a historical path to its head-relative identity by
-/// following the rename-alias chain. Values in the map are stored
-/// fully resolved, so this usually terminates in one hop; the hop
-/// limit guards against pathological cycles.
+/// A synthetic identity for a dead prior occupant of a rename
+/// destination. Starts with a control byte so it can never collide
+/// with a real repository path; entries accumulated under it are
+/// simply never looked up.
+fn tombstone_path(counter: usize) -> PathBuf {
+    PathBuf::from(format!("\u{1}tombstone\u{1}{counter}"))
+}
+
+/// Resolve a historical path to its head-relative identity.
+///
+/// A *single* lookup, deliberately not chain-following: every value in
+/// the map is stored fully resolved at insertion time, and rename
+/// destinations later gain terminal *boundary* entries (path →
+/// tombstone) that cut off a prior occupant's older changes — chasing
+/// chains through such a boundary would misroute a lineage into a
+/// tombstone.
 fn resolve_alias(aliases: &HashMap<PathBuf, PathBuf>, path: &Path) -> PathBuf {
-    let mut current = path;
-    for _ in 0..64 {
-        match aliases.get(current) {
-            Some(next) => current = next,
-            None => break,
-        }
-    }
-    current.to_path_buf()
+    aliases
+        .get(path)
+        .cloned()
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// Diff `commit` against its first parent (or the empty tree for root

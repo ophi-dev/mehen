@@ -1119,72 +1119,31 @@ fn get_changed_files(
     to: &str,
     ci_ctx: &Option<ci::CiContext>,
 ) -> Result<Vec<mehen_git::ChangedFile>, GitError> {
-    // For push events with changed_files from payload, use those
-    // directly. The CI extractor folds per-commit `added` / `modified`
-    // / `removed` into a final per-path `ChangeStatus` so the diff
-    // downstream renders new/deleted files correctly (PR #95
-    // `pullrequestreview-4318662855`).
+    // For push events, the payload's folded per-path statuses (PR #95)
+    // are a *fallback*: the real tree diff over the full push range
+    // (the payload's `before` SHA is the base ref) is strictly more
+    // accurate — it carries rename identity (including break-rewrite
+    // recovery when a renamed file's old path was reused), correct
+    // type-change handling, and blob-only filtering. The payload is
+    // used only when the refs no longer resolve locally (e.g. a
+    // force-push discarded the `before` commit).
     if let Some(ctx) = ci_ctx
         && ctx.event_name == "push"
         && let Some(ref files) = ctx.changed_files
     {
-        return Ok(recover_payload_renames(repo, from, to, files.clone()));
+        return Ok(match mehen_git::changed_files(repo, from, to) {
+            Ok(tree_diff) => tree_diff,
+            Err(e) => {
+                log::warn!(
+                    "falling back to the push payload's changed files ({from}..{to} not diffable locally: {e})"
+                );
+                files.clone()
+            }
+        });
     }
 
     mehen_git::changed_files(repo, from, to)
 }
-
-/// GitHub push payloads expose a rename as `removed` + `added` with no
-/// source identity, so the new row would compare against a zero
-/// baseline (and, with history metrics, a full-history spike). Recover
-/// rename pairs from the real revision tree diff: when it joins a
-/// payload deletion + addition into one rename, replace the pair with
-/// the joined entry. The payload passes through untouched when the
-/// tree diff is unavailable (e.g. force-pushed refs that no longer
-/// resolve) or reports no renames.
-fn recover_payload_renames(
-    repo: &gix::Repository,
-    from: &str,
-    to: &str,
-    files: Vec<mehen_git::ChangedFile>,
-) -> Vec<mehen_git::ChangedFile> {
-    let Ok(tree_diff) = mehen_git::changed_files(repo, from, to) else {
-        return files;
-    };
-    let renames: std::collections::HashMap<PathBuf, PathBuf> = tree_diff
-        .into_iter()
-        .filter_map(|cf| cf.source_path.map(|source| (cf.path, source)))
-        .collect();
-    if renames.is_empty() {
-        return files;
-    }
-
-    let deleted_paths: std::collections::HashSet<PathBuf> = files
-        .iter()
-        .filter(|f| f.status == ChangeStatus::Deleted)
-        .map(|f| f.path.clone())
-        .collect();
-    let mut consumed_sources: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(files.len());
-    for file in &files {
-        if file.status == ChangeStatus::Added
-            && let Some(source) = renames.get(&file.path)
-            && deleted_paths.contains(source)
-        {
-            consumed_sources.insert(source.clone());
-            out.push(mehen_git::ChangedFile {
-                path: file.path.clone(),
-                status: ChangeStatus::Modified,
-                source_path: Some(source.clone()),
-            });
-        } else {
-            out.push(file.clone());
-        }
-    }
-    out.retain(|f| !(f.status == ChangeStatus::Deleted && consumed_sources.contains(&f.path)));
-    out
-}
-
 fn normalize_path_filters(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
         .iter()
@@ -1673,11 +1632,27 @@ binary.md binary
         );
     }
 
+    /// A push-shaped [`ci::CiContext`] carrying a folded payload list.
+    fn push_ctx(files: Vec<mehen_git::ChangedFile>) -> ci::CiContext {
+        ci::CiContext {
+            provider: ci::CiProvider::GitHubActions,
+            event_name: "push".to_string(),
+            base_ref: None,
+            head_sha: None,
+            before_sha: None,
+            changed_files: Some(files),
+            pr_number: None,
+            repository: None,
+        }
+    }
+
     #[test]
-    fn recover_payload_renames_joins_push_payload_rename_pairs() {
-        // A GitHub push payload reports a rename as removed + added;
-        // the real tree diff must re-join the pair so the diff
-        // compares against the old path's baseline.
+    fn push_events_prefer_the_tree_diff_over_the_payload() {
+        // A GitHub push payload reports a rename as removed + added
+        // (and a reused source path as Modified) with no rename
+        // identity. When the refs resolve locally, the real tree diff
+        // must win so the diff compares against the old path's
+        // baseline instead of a zero baseline / full-history spike.
         let dir = tempfile::tempdir().unwrap();
         git_ok(dir.path(), &["init", "-q", "-b", "main"]);
         git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
@@ -1690,7 +1665,7 @@ binary.md binary
         git_ok(dir.path(), &["tag", "payload-head"]);
 
         let repo = gix::discover(dir.path()).unwrap();
-        let payload = vec![
+        let ctx = Some(push_ctx(vec![
             mehen_git::ChangedFile {
                 path: PathBuf::from("before.py"),
                 status: ChangeStatus::Deleted,
@@ -1701,16 +1676,16 @@ binary.md binary
                 status: ChangeStatus::Added,
                 source_path: None,
             },
-        ];
-        let out = recover_payload_renames(&repo, "payload-base", "payload-head", payload);
-        assert_eq!(out.len(), 1, "pair must join: {out:?}");
+        ]));
+        let out = get_changed_files(&repo, "payload-base", "payload-head", &ctx).unwrap();
+        assert_eq!(out.len(), 1, "tree diff joins the rename: {out:?}");
         assert_eq!(out[0].path, PathBuf::from("after.py"));
         assert_eq!(out[0].status, ChangeStatus::Modified);
         assert_eq!(out[0].source_path.as_deref(), Some(Path::new("before.py")));
     }
 
     #[test]
-    fn recover_payload_renames_passes_payload_through_when_refs_unresolvable() {
+    fn push_events_fall_back_to_the_payload_when_refs_unresolvable() {
         let dir = tempfile::tempdir().unwrap();
         git_ok(dir.path(), &["init", "-q", "-b", "main"]);
         let repo = gix::discover(dir.path()).unwrap();
@@ -1719,7 +1694,8 @@ binary.md binary
             status: ChangeStatus::Added,
             source_path: None,
         }];
-        let out = recover_payload_renames(&repo, "no-such-ref", "also-missing", payload.clone());
+        let ctx = Some(push_ctx(payload.clone()));
+        let out = get_changed_files(&repo, "no-such-ref", "also-missing", &ctx).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, payload[0].path);
     }

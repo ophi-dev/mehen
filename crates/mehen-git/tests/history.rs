@@ -1163,3 +1163,59 @@ fn exact_rename_pairs_use_global_affinity_ranking() {
     assert_eq!(source_of("src/c/foo.rs"), "src/a/foo.rs");
     assert_eq!(source_of("new/foo.rs"), "tests/b/foo.rs");
 }
+
+#[test]
+fn prior_occupants_of_a_rename_destination_stay_out_of_the_lineage() {
+    // An old b.rs existed and was deleted; later an unrelated a.rs is
+    // renamed onto the b.rs path. The current b.rs must carry only the
+    // a.rs lineage — not the dead prior occupant's commits.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    // Prior occupant of b.rs, by bob, dead by T_FEB.
+    std::fs::write(dir.path().join("b.rs"), "fn prior() {}\nfn occupant() {}\n").unwrap();
+    git(dir.path(), &["add", "b.rs"], BOB, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "old b"], BOB, T_JAN);
+    git(dir.path(), &["rm", "-q", "b.rs"], BOB, T_FEB);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "drop old b"],
+        BOB,
+        T_FEB,
+    );
+
+    // Unrelated a.rs lineage by alice, renamed onto the b.rs path.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn one() {}\nfn two() {}\nfn three() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "a.rs"], ALICE, T_MAR);
+    git(dir.path(), &["commit", "-q", "-m", "add a"], ALICE, T_MAR);
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, T_APR);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename a onto b"],
+        ALICE,
+        T_APR,
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    let b = history.file(Path::new("b.rs")).expect("b.rs history");
+    // Only the a.rs lineage: creation + rename, alice alone; bob's
+    // dead prior occupant (2 commits, 2 added + 2 removed lines) must
+    // not leak into the surviving file.
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 3);
+    assert_eq!(b.churn_removed, 0);
+    assert_eq!(b.authors, 1, "prior occupant's author must not leak in");
+    assert_eq!(b.last_change_seconds, T_APR);
+}

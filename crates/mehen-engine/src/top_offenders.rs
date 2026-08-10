@@ -408,8 +408,9 @@ struct TopOffendersCfg {
     registry: Arc<AnalyzerRegistry>,
     /// Per-repository histories at `HEAD` for every repository the
     /// input roots belong to — present only when a `history.*` metric
-    /// was requested.
-    history: Option<RepoHistories>,
+    /// was requested. Shared with the orchestrator, which drains
+    /// recorded lazy-discovery failures after the run.
+    history: Option<Arc<RepoHistories>>,
     results: Arc<Mutex<Vec<FileOffender>>>,
 }
 
@@ -760,7 +761,7 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
                 process::exit(1);
             }
         }
-        Some(histories)
+        Some(Arc::new(histories))
     } else {
         None
     };
@@ -772,7 +773,7 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
         selectors: selectors.clone(),
         language_override,
         registry,
-        history,
+        history: history.clone(),
         results: results.clone(),
     };
 
@@ -786,6 +787,24 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
     if let Err(e) = ConcurrentRunner::new(num_jobs, act_on_file).run(cfg, files_data) {
         log::error!("{e}");
         process::exit(1);
+    }
+
+    // A history metric was explicitly requested; a repository whose
+    // history could not be loaded during lazy discovery (e.g. a
+    // shallow nested clone found mid-traversal) means part of the
+    // ranking silently ran on absent history — that must fail the
+    // command, matching the eager root-load semantics.
+    if let Some(histories) = history.as_ref() {
+        let failures = histories.take_failures();
+        if !failures.is_empty() {
+            for (location, message) in &failures {
+                log::error!(
+                    "history metrics unavailable for {}: {message}",
+                    location.display()
+                );
+            }
+            process::exit(1);
+        }
     }
 
     let mut offenders = Arc::try_unwrap(results)
