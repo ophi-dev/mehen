@@ -52,7 +52,11 @@ pub fn analyze_diff(input: DiffInput) -> Result<DiffReport, DiffError> {
 }
 
 struct RevisionGitAttributeFilters {
-    base: GitAttributeFilter,
+    /// `None` when the base revision doesn't resolve locally (the
+    /// push-payload fallback after a force-push): baseline attributes
+    /// are unavailable, and deleted rows are then not attribute-
+    /// filtered rather than aborting the whole run.
+    base: Option<GitAttributeFilter>,
     head: GitAttributeFilter,
 }
 
@@ -62,19 +66,44 @@ impl RevisionGitAttributeFilters {
         from: &str,
         to: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let base = if repo.rev_parse_single(from).is_ok() {
+            Some(GitAttributeFilter::from_revision(repo, from)?)
+        } else {
+            log::warn!(
+                "baseline Git attributes unavailable ({from} does not resolve locally); deleted files are not attribute-filtered"
+            );
+            None
+        };
         Ok(Self {
-            base: GitAttributeFilter::from_revision(repo, from)?,
+            base,
             head: GitAttributeFilter::from_revision(repo, to)?,
         })
     }
 
     fn excludes(&mut self, file: &mehen_git::ChangedFile) -> std::io::Result<bool> {
         let filter = if file.status == ChangeStatus::Deleted {
-            &mut self.base
+            match self.base.as_mut() {
+                Some(base) => base,
+                None => return Ok(false),
+            }
         } else {
             &mut self.head
         };
         filter.excludes_relative_path(&file.path)
+    }
+
+    /// Whether the base revision excludes `path`, for rename-source
+    /// eligibility. `None` baseline attributes exclude nothing.
+    fn base_excludes(&mut self, path: &Path) -> std::io::Result<bool> {
+        match self.base.as_mut() {
+            Some(base) => base.excludes_relative_path(path),
+            None => Ok(false),
+        }
+    }
+
+    /// Whether the head revision excludes `path`.
+    fn head_excludes(&mut self, path: &Path) -> std::io::Result<bool> {
+        self.head.excludes_relative_path(path)
     }
 }
 
@@ -96,7 +125,7 @@ fn split_boundary_renames(
     changed: Vec<mehen_git::ChangedFile>,
     selected: &dyn Fn(&Path) -> bool,
     mut attribute_filters: Option<&mut RevisionGitAttributeFilters>,
-) -> Vec<mehen_git::ChangedFile> {
+) -> std::io::Result<Vec<mehen_git::ChangedFile>> {
     let language_of = |p: &Path| {
         Utf8PathBuf::try_from(p.to_path_buf())
             .ok()
@@ -109,19 +138,14 @@ fn split_boundary_renames(
             continue;
         };
         // Attribute eligibility is per-side and per-revision: the
-        // source lived at base, the destination lives at head. An IO
-        // failure reading attributes keeps the row joined; the main
-        // filter loop surfaces the error for rows that remain.
+        // source lived at base, the destination lives at head. Lookup
+        // failures propagate — treating an unreadable historical
+        // `.gitattributes` as "eligible" would silently bypass source
+        // exclusions and compute metrics from incomplete data.
         let (src_attr_ok, dest_attr_ok) = match attribute_filters.as_deref_mut() {
             Some(filters) => (
-                !filters
-                    .base
-                    .excludes_relative_path(&source)
-                    .unwrap_or(false),
-                !filters
-                    .head
-                    .excludes_relative_path(&cf.path)
-                    .unwrap_or(false),
+                !filters.base_excludes(&source)?,
+                !filters.head_excludes(&cf.path)?,
             ),
             None => (true, true),
         };
@@ -135,7 +159,7 @@ fn split_boundary_renames(
         }
         if src_ok && src_lang.is_some() {
             out.push(mehen_git::ChangedFile {
-                path: source,
+                path: source.clone(),
                 status: ChangeStatus::Deleted,
                 source_path: None,
             });
@@ -144,11 +168,16 @@ fn split_boundary_renames(
             out.push(mehen_git::ChangedFile {
                 path: cf.path,
                 status: ChangeStatus::Added,
-                source_path: None,
+                // The static baseline must not cross the boundary (an
+                // `Added` row reads no baseline blob), but the rename
+                // identity is preserved so *history* enrichment can
+                // still compare against the source lineage instead of
+                // manufacturing a full-history spike.
+                source_path: Some(source),
             });
         }
     }
-    out
+    Ok(out)
 }
 
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
@@ -169,7 +198,12 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
                 .unwrap_or(false)
         },
         Some(&mut git_attribute_filters),
-    );
+    )
+    .map_err(|error| {
+        DiffError::Git(GitError::Internal(format!(
+            "failed to read Git attributes while splitting renames: {error}"
+        )))
+    })?;
     // Thresholds against `history.*` keys need the repository history
     // at the head revision (thresholds are evaluated against the head
     // analysis only). Walked lazily — the family is opt-in.
@@ -603,7 +637,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     };
     // Rename pairs straddling a path/language/attribute boundary fall
     // back to a deletion + addition so neither side silently disappears.
-    let changed = split_boundary_renames(changed, &is_selected, git_attribute_filters.as_mut());
+    let changed = split_boundary_renames(changed, &is_selected, git_attribute_filters.as_mut())?;
     // When the caller passes explicit `--metric` names, that one list applies
     // to every file. With no `--metric`, defaults are resolved *per file's
     // language*: SQL files publish only `sql.*` keys, so the source-code
@@ -809,7 +843,28 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         // Fold the `history.*` family into each side's metric set, each
         // against its own revision's history and head-relative "now".
         // The baseline side of a renamed file reads its old path.
+        // The 🆕 flag is fixed *before* any baseline synthesis below —
+        // it reflects blob availability, not history availability.
+        let is_new_row = is_new && baseline_space.is_none();
         if let Some((base_history, head_history)) = histories.as_ref() {
+            // A split rename (`Added` row carrying `source_path`, e.g.
+            // a cross-language `a.py → a.rs`) has no baseline *blob*,
+            // but its baseline *history* is the source lineage. Give
+            // it an empty synthetic baseline space so history columns
+            // compare against real values instead of manufacturing a
+            // full-history spike; static columns still read 0 there.
+            if baseline_space.is_none()
+                && cf.source_path.is_some()
+                && base_history
+                    .as_ref()
+                    .is_some_and(|history| history.file(base_path).is_some())
+            {
+                baseline_space = Some(MetricSpace::new(
+                    mehen_core::SpaceId(0),
+                    mehen_core::SpaceKind::Unit,
+                    mehen_core::SourceSpan::empty(),
+                ));
+            }
             let mut sides: Vec<(
                 Option<&mut MetricSpace>,
                 &mehen_git::RepositoryHistory,
@@ -850,7 +905,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                     baseline,
                     delta: current - baseline,
                     polarity: sel.polarity,
-                    is_new: is_new && baseline_space.is_none(),
+                    is_new: is_new_row,
                     is_deleted,
                 }
             })
@@ -859,7 +914,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         diffs.push(FileDiff {
             path: cf.path.clone(),
             metrics: metric_diffs,
-            is_new: is_new && baseline_space.is_none(),
+            is_new: is_new_row,
             is_deleted,
             functions: current_space
                 .as_ref()
@@ -1550,7 +1605,8 @@ binary.md binary
             status: ChangeStatus::Modified,
             source_path: Some(PathBuf::from("src/before.py")),
         };
-        let out = split_boundary_renames(vec![rename], &|_| true, None);
+        let out =
+            split_boundary_renames(vec![rename], &|_| true, None).expect("no attribute filters");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, PathBuf::from("src/after.py"));
         assert_eq!(out[0].status, ChangeStatus::Modified);
@@ -1570,7 +1626,8 @@ binary.md binary
             status: ChangeStatus::Modified,
             source_path: Some(PathBuf::from("src/foo.py")),
         };
-        let out = split_boundary_renames(vec![rename], &|_| true, None);
+        let out =
+            split_boundary_renames(vec![rename], &|_| true, None).expect("no attribute filters");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, PathBuf::from("src/foo.py"));
         assert_eq!(out[0].status, ChangeStatus::Deleted);
@@ -1586,7 +1643,8 @@ binary.md binary
             status: ChangeStatus::Modified,
             source_path: Some(PathBuf::from("src/port.py")),
         };
-        let out = split_boundary_renames(vec![rename], &|_| true, None);
+        let out =
+            split_boundary_renames(vec![rename], &|_| true, None).expect("no attribute filters");
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].path, PathBuf::from("src/port.py"));
         assert_eq!(out[0].status, ChangeStatus::Deleted);
@@ -1604,7 +1662,8 @@ binary.md binary
             source_path: Some(PathBuf::from("src/keep.py")),
         };
         let selected = |p: &Path| p.starts_with("src");
-        let out = split_boundary_renames(vec![rename], &selected, None);
+        let out =
+            split_boundary_renames(vec![rename], &selected, None).expect("no attribute filters");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, PathBuf::from("src/keep.py"));
         assert_eq!(out[0].status, ChangeStatus::Deleted);
@@ -1669,7 +1728,6 @@ binary.md binary
             base_ref: None,
             head_sha: None,
             before_sha: None,
-            branch_created: false,
             first_commit_sha: None,
             changed_files: Some(files),
             pr_number: None,
@@ -1753,12 +1811,11 @@ binary.md binary
         git_ok(dir.path(), &["commit", "-q", "-m", "two"]);
 
         let repo = gix::discover(dir.path()).unwrap();
-        let mut ctx = push_ctx(vec![mehen_git::ChangedFile {
+        let ctx = push_ctx(vec![mehen_git::ChangedFile {
             path: PathBuf::from("first.py"),
             status: ChangeStatus::Added,
             source_path: None,
         }]);
-        ctx.branch_created = true;
         // The baseline resolve_refs would supply: first pushed
         // commit's parent = HEAD~2 here.
         let out = get_changed_files(&repo, "HEAD~2", "HEAD", &Some(ctx)).unwrap();
@@ -2259,7 +2316,6 @@ binary.md binary
             base_ref: Some("develop".to_string()),
             head_sha: Some("abc123".to_string()),
             before_sha: None,
-            branch_created: false,
             first_commit_sha: None,
             changed_files: None,
             pr_number: Some(42),
@@ -2279,7 +2335,6 @@ binary.md binary
             base_ref: None,
             head_sha: Some("def456".to_string()),
             before_sha: None,
-            branch_created: false,
             first_commit_sha: None,
             changed_files: None,
             pr_number: None,
@@ -2302,7 +2357,6 @@ binary.md binary
             base_ref: None,
             head_sha: Some("def456".to_string()),
             before_sha: Some("abc999".to_string()),
-            branch_created: false,
             first_commit_sha: None,
             changed_files: None,
             pr_number: None,
@@ -2325,7 +2379,6 @@ binary.md binary
             base_ref: None,
             head_sha: Some("def456".to_string()),
             before_sha: None,
-            branch_created: true,
             first_commit_sha: Some("f1r5t".to_string()),
             changed_files: None,
             pr_number: None,

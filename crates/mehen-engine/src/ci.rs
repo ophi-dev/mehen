@@ -22,11 +22,6 @@ pub struct CiContext {
     /// for a multi-commit push (`HEAD~1` would only cover the final
     /// commit). `None` when absent or all-zeros (branch creation).
     pub before_sha: Option<String>,
-    /// For `push` events, whether the push *created* the branch (the
-    /// payload's `before` is the all-zeros SHA). There is no pre-push
-    /// tip to diff against, so the folded payload list is the
-    /// authoritative changed-file set.
-    pub branch_created: bool,
     /// For `push` events, the SHA of the *first* pushed commit. Its
     /// parent is the analysis baseline for branch-creation pushes,
     /// where the payload carries no usable `before` revision.
@@ -62,7 +57,6 @@ fn detect_github_actions() -> Option<CiContext> {
     let mut changed_files = None;
     let mut pr_number = None;
     let mut before_sha = None;
-    let mut branch_created = false;
     let mut first_commit_sha = None;
 
     if let Ok(event_path) = std::env::var("GITHUB_EVENT_PATH")
@@ -73,15 +67,11 @@ fn detect_github_actions() -> Option<CiContext> {
             "push" => {
                 changed_files = extract_push_changed_files(&payload);
                 // The all-zeros SHA marks a branch creation — there is
-                // no pre-push tip to diff against.
-                let before = payload.get("before").and_then(|b| b.as_str());
-                branch_created = payload
-                    .get("created")
-                    .and_then(|c| c.as_bool())
-                    .unwrap_or_else(|| {
-                        before.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c == '0'))
-                    });
-                before_sha = before
+                // no pre-push tip; `first_commit_sha`'s parent becomes
+                // the baseline instead.
+                before_sha = payload
+                    .get("before")
+                    .and_then(|b| b.as_str())
                     .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '0'))
                     .map(str::to_string);
                 first_commit_sha = payload
@@ -124,7 +114,6 @@ fn detect_github_actions() -> Option<CiContext> {
         base_ref,
         head_sha,
         before_sha,
-        branch_created,
         first_commit_sha,
         changed_files,
         pr_number,
