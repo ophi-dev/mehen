@@ -26,9 +26,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gix::revision::walk::Sorting;
-use gix::traverse::commit::simple::CommitTimeOrder;
-
 use crate::GitError;
 use crate::tree_changes::{
     TreeChange, blob_size, changes_between_trees, count_lines, is_binary, line_diff_counts,
@@ -238,11 +235,20 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
     let mut aliases: HashMap<PathBuf, PathBuf> = HashMap::new();
     let mut tombstones: usize = 0;
 
-    let walk = repo
-        .rev_walk([head_commit.id])
-        .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
-        .all()
-        .map_err(|e| GitError::Internal(e.to_string()))?;
+    // Date-order traversal (`git rev-list --date-order`): commits come
+    // newest-first by timestamp, but crucially *no parent is emitted
+    // before all of its children* — the rename-alias machinery depends
+    // on seeing every descendant (and its renames) before an ancestor,
+    // which plain commit-time ordering cannot guarantee when clock
+    // skew makes an ancestor's timestamp newer than a descendant's.
+    let walk = gix::traverse::commit::topo::Builder::from_iters(
+        repo.objects.clone(),
+        [head_commit.id],
+        None::<Vec<gix::ObjectId>>,
+    )
+    .sorting(gix::traverse::commit::topo::Sorting::DateOrder)
+    .build()
+    .map_err(|e| GitError::Internal(e.to_string()))?;
 
     for info in walk {
         let info = info.map_err(|e| GitError::Internal(e.to_string()))?;
@@ -253,8 +259,10 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             continue;
         }
 
-        let commit = info
-            .object()
+        let commit = repo
+            .find_object(info.id)
+            .map_err(|e| GitError::Internal(e.to_string()))?
+            .peel_to_commit()
             .map_err(|e| GitError::Internal(e.to_string()))?;
         let seconds = commit_seconds(&commit)?;
         first_commit_seconds = first_commit_seconds.min(seconds);

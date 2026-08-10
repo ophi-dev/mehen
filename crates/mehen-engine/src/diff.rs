@@ -107,6 +107,16 @@ impl RevisionGitAttributeFilters {
     }
 }
 
+/// The result of [`split_boundary_renames`]: the adjusted change list
+/// plus the split-rename *deletion* rows whose lineage history is
+/// already carried by their paired destination row — injecting the
+/// source lineage into those deletions too would count it twice
+/// (a `+1` on the destination and a full `-N` on the source).
+struct SplitChanges {
+    files: Vec<mehen_git::ChangedFile>,
+    history_suppressed_deletions: std::collections::HashSet<PathBuf>,
+}
+
 /// Split rename pairs whose two sides fall on different sides of a
 /// reporting boundary back into a deletion + addition.
 ///
@@ -125,13 +135,14 @@ fn split_boundary_renames(
     changed: Vec<mehen_git::ChangedFile>,
     selected: &dyn Fn(&Path) -> bool,
     mut attribute_filters: Option<&mut RevisionGitAttributeFilters>,
-) -> std::io::Result<Vec<mehen_git::ChangedFile>> {
+) -> std::io::Result<SplitChanges> {
     let language_of = |p: &Path| {
         Utf8PathBuf::try_from(p.to_path_buf())
             .ok()
             .and_then(|p| detect_language(&p))
     };
     let mut out = Vec::with_capacity(changed.len());
+    let mut history_suppressed_deletions = std::collections::HashSet::new();
     for cf in changed {
         let Some(source) = cf.source_path.clone() else {
             out.push(cf);
@@ -157,14 +168,23 @@ fn split_boundary_renames(
             out.push(cf);
             continue;
         }
-        if src_ok && src_lang.is_some() {
+        let emit_source = src_ok && src_lang.is_some();
+        let emit_dest = dest_ok && dest_lang.is_some();
+        if emit_source {
+            // When the paired destination row is also emitted, it
+            // carries the lineage history (via its retained
+            // `source_path`); the deletion row then reports the file
+            // *leaving this path* for static metrics only.
+            if emit_dest {
+                history_suppressed_deletions.insert(source.clone());
+            }
             out.push(mehen_git::ChangedFile {
                 path: source.clone(),
                 status: ChangeStatus::Deleted,
                 source_path: None,
             });
         }
-        if dest_ok && dest_lang.is_some() {
+        if emit_dest {
             out.push(mehen_git::ChangedFile {
                 path: cf.path,
                 status: ChangeStatus::Added,
@@ -177,7 +197,10 @@ fn split_boundary_renames(
             });
         }
     }
-    Ok(out)
+    Ok(SplitChanges {
+        files: out,
+        history_suppressed_deletions,
+    })
 }
 
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
@@ -203,7 +226,10 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         DiffError::Git(GitError::Internal(format!(
             "failed to read Git attributes while splitting renames: {error}"
         )))
-    })?;
+    })?
+    // Thresholds evaluate the head analysis only; deleted rows have no
+    // head side, so the deletion history suppression is irrelevant here.
+    .files;
     // Thresholds against `history.*` keys need the repository history
     // at the head revision (thresholds are evaluated against the head
     // analysis only). Walked lazily — the family is opt-in.
@@ -637,7 +663,10 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     };
     // Rename pairs straddling a path/language/attribute boundary fall
     // back to a deletion + addition so neither side silently disappears.
-    let changed = split_boundary_renames(changed, &is_selected, git_attribute_filters.as_mut())?;
+    let SplitChanges {
+        files: changed,
+        history_suppressed_deletions,
+    } = split_boundary_renames(changed, &is_selected, git_attribute_filters.as_mut())?;
     // When the caller passes explicit `--metric` names, that one list applies
     // to every file. With no `--metric`, defaults are resolved *per file's
     // language*: SQL files publish only `sql.*` keys, so the source-code
@@ -870,7 +899,15 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 &mehen_git::RepositoryHistory,
                 &Path,
             )> = Vec::with_capacity(2);
-            if let Some(base_history) = base_history.as_ref() {
+            // A split-rename deletion row's lineage is already carried
+            // by its paired destination row — injecting it here too
+            // would double-count the history (a +1 on the destination
+            // and a full -N on the source).
+            let deletion_history_suppressed =
+                is_deleted && history_suppressed_deletions.contains(&cf.path);
+            if let Some(base_history) = base_history.as_ref()
+                && !deletion_history_suppressed
+            {
                 sides.push((baseline_space.as_mut(), base_history, base_path));
             }
             sides.push((current_space.as_mut(), head_history, cf.path.as_path()));
@@ -1215,15 +1252,27 @@ fn get_changed_files(
         && ctx.event_name == "push"
         && let Some(ref files) = ctx.changed_files
     {
-        return Ok(match mehen_git::changed_files(repo, from, to) {
-            Ok(tree_diff) => tree_diff,
-            Err(e) => {
-                log::warn!(
-                    "falling back to the push payload's changed files ({from}..{to} not diffable locally: {e})"
-                );
-                files.clone()
-            }
-        });
+        // An *empty* fold is authoritative: the push changed nothing
+        // net (add-then-remove), or a branch was created pointing at a
+        // commit that already existed — either way a ref-range diff
+        // (e.g. the `HEAD~1` last resort) would misreport the tip's
+        // last commit as this push's changes.
+        if files.is_empty() {
+            return Ok(files.clone());
+        }
+        // The payload fallback exists for exactly one failure mode:
+        // the push *baseline* not resolving locally (a force-push
+        // discarded the `before` commit, or a created branch's first
+        // commit is a root commit). Any other tree-diff failure —
+        // corrupt or missing objects in a resolvable range — must
+        // propagate rather than silently degrade to the payload's
+        // rename-less, type-change-less view.
+        if repo.rev_parse_single(from).is_err() {
+            log::warn!(
+                "falling back to the push payload's changed files ({from} does not resolve locally)"
+            );
+            return Ok(files.clone());
+        }
     }
 
     mehen_git::changed_files(repo, from, to)
@@ -1605,8 +1654,9 @@ binary.md binary
             status: ChangeStatus::Modified,
             source_path: Some(PathBuf::from("src/before.py")),
         };
-        let out =
-            split_boundary_renames(vec![rename], &|_| true, None).expect("no attribute filters");
+        let out = split_boundary_renames(vec![rename], &|_| true, None)
+            .expect("no attribute filters")
+            .files;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, PathBuf::from("src/after.py"));
         assert_eq!(out[0].status, ChangeStatus::Modified);
@@ -1626,8 +1676,9 @@ binary.md binary
             status: ChangeStatus::Modified,
             source_path: Some(PathBuf::from("src/foo.py")),
         };
-        let out =
-            split_boundary_renames(vec![rename], &|_| true, None).expect("no attribute filters");
+        let out = split_boundary_renames(vec![rename], &|_| true, None)
+            .expect("no attribute filters")
+            .files;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, PathBuf::from("src/foo.py"));
         assert_eq!(out[0].status, ChangeStatus::Deleted);
@@ -1643,8 +1694,9 @@ binary.md binary
             status: ChangeStatus::Modified,
             source_path: Some(PathBuf::from("src/port.py")),
         };
-        let out =
-            split_boundary_renames(vec![rename], &|_| true, None).expect("no attribute filters");
+        let out = split_boundary_renames(vec![rename], &|_| true, None)
+            .expect("no attribute filters")
+            .files;
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].path, PathBuf::from("src/port.py"));
         assert_eq!(out[0].status, ChangeStatus::Deleted);
@@ -1662,8 +1714,9 @@ binary.md binary
             source_path: Some(PathBuf::from("src/keep.py")),
         };
         let selected = |p: &Path| p.starts_with("src");
-        let out =
-            split_boundary_renames(vec![rename], &selected, None).expect("no attribute filters");
+        let out = split_boundary_renames(vec![rename], &selected, None)
+            .expect("no attribute filters")
+            .files;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, PathBuf::from("src/keep.py"));
         assert_eq!(out[0].status, ChangeStatus::Deleted);
@@ -1787,6 +1840,30 @@ binary.md binary
         let out = get_changed_files(&repo, "no-such-ref", "also-missing", &ctx).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, payload[0].path);
+    }
+
+    #[test]
+    fn empty_push_payloads_are_authoritative_even_when_refs_resolve() {
+        // A push whose fold is empty (add-then-remove, or a branch
+        // created at an existing commit) changed nothing — the
+        // resolvable HEAD~1 range would misreport the tip's last
+        // commit as this push's changes.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("existing.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("tip.py"), "y = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "two"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let ctx = Some(push_ctx(Vec::new()));
+        // HEAD~1..HEAD resolves and would report tip.py; the empty
+        // payload must win.
+        let out = get_changed_files(&repo, "HEAD~1", "HEAD", &ctx).unwrap();
+        assert!(out.is_empty(), "empty payload is authoritative: {out:?}");
     }
 
     #[test]
