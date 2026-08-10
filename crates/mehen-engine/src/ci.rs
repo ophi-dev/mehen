@@ -27,6 +27,10 @@ pub struct CiContext {
     /// tip to diff against, so the folded payload list is the
     /// authoritative changed-file set.
     pub branch_created: bool,
+    /// For `push` events, the SHA of the *first* pushed commit. Its
+    /// parent is the analysis baseline for branch-creation pushes,
+    /// where the payload carries no usable `before` revision.
+    pub first_commit_sha: Option<String>,
     /// Files changed by the CI event, with the change status folded
     /// across the commits in that event. For GitHub `push` events the
     /// per-commit `added` / `modified` / `removed` arrays are walked in
@@ -59,6 +63,7 @@ fn detect_github_actions() -> Option<CiContext> {
     let mut pr_number = None;
     let mut before_sha = None;
     let mut branch_created = false;
+    let mut first_commit_sha = None;
 
     if let Ok(event_path) = std::env::var("GITHUB_EVENT_PATH")
         && let Ok(data) = std::fs::read_to_string(&event_path)
@@ -78,6 +83,13 @@ fn detect_github_actions() -> Option<CiContext> {
                     });
                 before_sha = before
                     .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '0'))
+                    .map(str::to_string);
+                first_commit_sha = payload
+                    .get("commits")
+                    .and_then(|c| c.as_array())
+                    .and_then(|commits| commits.first())
+                    .and_then(|commit| commit.get("id"))
+                    .and_then(|id| id.as_str())
                     .map(str::to_string);
             }
             "pull_request" => {
@@ -113,6 +125,7 @@ fn detect_github_actions() -> Option<CiContext> {
         head_sha,
         before_sha,
         branch_created,
+        first_commit_sha,
         changed_files,
         pr_number,
         repository,

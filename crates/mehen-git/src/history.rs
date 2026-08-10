@@ -261,46 +261,95 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // file in the changeset.
         let coupled_others = changes.len().saturating_sub(1) as u64;
 
-        for change in &changes {
-            let path = resolve_alias(&aliases, &change.path);
-            if let Some(source) = &change.source_path
-                && *source != path
-                // First-visited (newest) rename wins when parallel
-                // branches renamed the same source differently —
-                // deterministic, though the losing lineage keeps only
-                // its own direct commits (path-keyed history cannot
-                // split one source between two destinations).
-                && !aliases.contains_key(source)
+        // ── Phase 1: resolve every change against the *pre-commit*
+        // alias map, so same-commit rename cycles (an a↔b swap) don't
+        // resolve through each other's just-installed aliases.
+        let mut targets: Vec<PathBuf> = changes
+            .iter()
+            .map(|change| resolve_alias(&aliases, &change.path))
+            .collect();
+        // Paths that are rename *sources* in this commit: a swap's
+        // destination is simultaneously a source, and its older
+        // changes are a lineage this commit moves elsewhere — not a
+        // dead prior occupant to fence off.
+        let commit_sources: std::collections::HashSet<&PathBuf> = changes
+            .iter()
+            .filter_map(|change| change.source_path.as_ref())
+            .collect();
+
+        // ── Phase 2: a deletion *older* than already-accumulated
+        // changes to the same (unaliased) path cuts the lineage: the
+        // newer changes belong to a file re-created at that path, and
+        // this deletion plus everything older belongs to the dead
+        // prior occupant.
+        for (change, target) in changes.iter().zip(targets.iter_mut()) {
+            if change.is_deletion
+                && !aliases.contains_key(&change.path)
+                && files.contains_key(&change.path)
             {
-                // The alias redirects the *older* commits that are
-                // walked after this rename (the pre-rename lineage).
-                aliases.insert(source.clone(), path.clone());
-                // Anything already accumulated under the source path
-                // is *newer* than the rename. Fold it into the
-                // surviving identity only when it belongs to the
-                // renamed lineage (a parallel branch's edits): a
-                // source path that still exists at the walked rev — or
-                // whose newer accumulation ended in a deletion — is a
-                // distinct file re-created after the rename, and its
-                // history must stay its own.
-                let stranded_is_lineage = !path_exists_at_head(&head_tree, source)?
-                    && files.get(source).is_some_and(|acc| !acc.newest_is_deletion);
-                if stranded_is_lineage && let Some(stranded) = files.remove(source) {
-                    files.entry(path.clone()).or_default().merge(stranded);
+                tombstones += 1;
+                let tombstone = tombstone_path(tombstones);
+                aliases.insert(change.path.clone(), tombstone.clone());
+                *target = tombstone;
+            }
+        }
+
+        // ── Phase 3: install rename aliases, boundaries, and stranded
+        // merges (all against the phase-1 resolutions).
+        for (change, target) in changes.iter().zip(targets.iter()) {
+            let Some(source) = &change.source_path else {
+                continue;
+            };
+            if source == target {
+                // A rename returning to its own identity (a→b→a):
+                // reconnect the lineage by dropping a stale destination
+                // boundary, so pre-rename commits flow to the survivor
+                // again instead of a tombstone.
+                if aliases.get(source).is_some_and(|t| is_tombstone(t)) {
+                    aliases.remove(source);
                 }
-                // Destination identity boundary: any *older* direct
-                // change to the destination path (walked after this
-                // rename) belongs to a dead prior occupant of that
-                // path — e.g. an old `b.rs` deleted before an
-                // unrelated `a.rs` was renamed onto its path. Redirect
-                // those to a tombstone so the surviving file's history
-                // starts at its own lineage. (The rename's own change
-                // was resolved before this insertion.)
+                continue;
+            }
+            // First-visited (newest) rename wins when parallel branches
+            // renamed the same source differently — deterministic,
+            // though the losing lineage keeps only its own direct
+            // commits. A *tombstone* alias is reclaimable, though: this
+            // rename explains where the fenced-off occupant actually
+            // went (it was renamed away before the newer occupant
+            // arrived).
+            if aliases.get(source).is_some_and(|t| !is_tombstone(t)) {
+                continue;
+            }
+            // The alias redirects the *older* commits that are walked
+            // after this rename (the pre-rename lineage).
+            aliases.insert(source.clone(), target.clone());
+            // Anything already accumulated under the source path is
+            // *newer* than the rename. Fold it into the surviving
+            // identity only when it belongs to the renamed lineage (a
+            // parallel branch's edits): a source path that still exists
+            // at the walked rev — or whose newer accumulation ended in
+            // a deletion — is a distinct file re-created after the
+            // rename, and its history must stay its own.
+            let stranded_is_lineage = !path_exists_at_head(&head_tree, source)?
+                && files.get(source).is_some_and(|acc| !acc.newest_is_deletion);
+            if stranded_is_lineage && let Some(stranded) = files.remove(source) {
+                files.entry(target.clone()).or_default().merge(stranded);
+            }
+            // Destination identity boundary: older direct changes to
+            // the destination path belong to a dead prior occupant —
+            // unless the destination is itself a rename source in this
+            // same commit (a swap), in which case its older changes
+            // are a live lineage this commit moves elsewhere.
+            if !commit_sources.contains(&change.path) {
                 tombstones += 1;
                 aliases.insert(change.path.clone(), tombstone_path(tombstones));
             }
-            let newly_tracked = !files.contains_key(&path);
-            let acc = files.entry(path).or_default();
+        }
+
+        // ── Phase 4: accumulate.
+        for (change, target) in changes.iter().zip(targets.iter()) {
+            let newly_tracked = !files.contains_key(target);
+            let acc = files.entry(target.clone()).or_default();
             if newly_tracked {
                 // First (newest-walked) change for this path.
                 acc.newest_is_deletion = change.is_deletion;
@@ -432,6 +481,11 @@ fn path_exists_at_head(head_tree: &gix::Tree<'_>, path: &Path) -> Result<bool, G
 /// simply never looked up.
 fn tombstone_path(counter: usize) -> PathBuf {
     PathBuf::from(format!("\u{1}tombstone\u{1}{counter}"))
+}
+
+/// Whether an alias target is a tombstone (see [`tombstone_path`]).
+fn is_tombstone(path: &Path) -> bool {
+    path.as_os_str().to_string_lossy().starts_with('\u{1}')
 }
 
 /// Resolve a historical path to its head-relative identity.

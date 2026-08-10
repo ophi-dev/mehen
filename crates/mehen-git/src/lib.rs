@@ -96,8 +96,22 @@ pub fn open_repo() -> Result<gix::Repository, GitError> {
 /// Discover the git repository containing `path` (walking up from it,
 /// like `gix::discover`). Fails fast on shallow clones — history-based
 /// features need the full commit graph.
+///
+/// Only genuine "there is no repository here" outcomes map to
+/// [`GitError::RepoNotFound`]; discovery/open *failures* (inaccessible
+/// directories, malformed metadata, trust errors) surface as
+/// [`GitError::Internal`] so callers can tell "not a repo" apart from
+/// "a repo we couldn't read".
 pub fn open_repo_at(path: &Path) -> Result<gix::Repository, GitError> {
-    let repo = gix::discover(path).map_err(|_| GitError::RepoNotFound)?;
+    let repo = gix::discover(path).map_err(|e| match &e {
+        gix::discover::Error::Discover(
+            gix::discover::upwards::Error::NoGitRepository { .. }
+            | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. }
+            | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. }
+            | gix::discover::upwards::Error::NoTrustedGitRepository { .. },
+        ) => GitError::RepoNotFound,
+        _ => GitError::Internal(e.to_string()),
+    })?;
 
     if repo.is_shallow() {
         return Err(GitError::ShallowClone {

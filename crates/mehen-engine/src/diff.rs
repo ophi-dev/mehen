@@ -671,15 +671,31 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 )
             }
         };
-    let histories: Option<(mehen_git::RepositoryHistory, mehen_git::RepositoryHistory)> =
-        if filtered.iter().any(file_wants_history) {
-            Some((
-                mehen_git::collect_history(&repo, &from_ref)?,
-                mehen_git::collect_history(&repo, &to_ref)?,
-            ))
-        } else {
-            None
+    let histories: Option<(
+        Option<mehen_git::RepositoryHistory>,
+        mehen_git::RepositoryHistory,
+    )> = if filtered.iter().any(file_wants_history) {
+        // The head walk is a hard requirement — it feeds every
+        // history column. The *baseline* walk tolerates an
+        // unresolvable revision: the payload fallback for a
+        // force-push keeps diffing with `from_ref` pointing at a
+        // commit that no longer exists locally, and aborting the
+        // whole run there would make history-bearing defaults
+        // unusable exactly when the payload path is needed.
+        // Baseline history columns then read as an empty baseline.
+        let base_history = match mehen_git::collect_history(&repo, &from_ref) {
+            Ok(history) => Some(history),
+            Err(e) => {
+                log::warn!(
+                    "baseline history unavailable for {from_ref}: {e}; history columns compare against an empty baseline"
+                );
+                None
+            }
         };
+        Some((base_history, mehen_git::collect_history(&repo, &to_ref)?))
+    } else {
+        None
+    };
 
     // 4. Compute metrics for each file via the per-language analyzer
     //    registry. The legacy `langs::get_function_spaces` pipeline is no
@@ -792,10 +808,16 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         // against its own revision's history and head-relative "now".
         // The baseline side of a renamed file reads its old path.
         if let Some((base_history, head_history)) = histories.as_ref() {
-            for (space, history, path) in [
-                (baseline_space.as_mut(), base_history, base_path),
-                (current_space.as_mut(), head_history, cf.path.as_path()),
-            ] {
+            let mut sides: Vec<(
+                Option<&mut MetricSpace>,
+                &mehen_git::RepositoryHistory,
+                &Path,
+            )> = Vec::with_capacity(2);
+            if let Some(base_history) = base_history.as_ref() {
+                sides.push((baseline_space.as_mut(), base_history, base_path));
+            }
+            sides.push((current_space.as_mut(), head_history, cf.path.as_path()));
+            for (space, history, path) in sides {
                 if let Some(space) = space
                     && let Some(fh) = history.file(path)
                 {
@@ -1091,11 +1113,13 @@ fn resolve_refs(opts: &DiffOpts, ci_ctx: &Option<ci::CiContext>) -> (String, Str
                 // *before* the push (the payload's `before` SHA), not
                 // just the final commit's parent — otherwise renames
                 // and baselines from earlier commits in the push are
-                // invisible. `HEAD~1` remains the fallback when the
-                // payload is unavailable or the branch was just created.
+                // invisible. A branch-creation push has no `before`;
+                // the parent of the *first pushed commit* is the right
+                // baseline there. `HEAD~1` remains the last resort.
                 "push" => ctx
                     .before_sha
                     .clone()
+                    .or_else(|| ctx.first_commit_sha.as_ref().map(|sha| format!("{sha}~1")))
                     .unwrap_or_else(|| "HEAD~1".to_string()),
                 "pull_request" | "merge_group" => ctx
                     .base_ref
@@ -1648,6 +1672,7 @@ binary.md binary
             head_sha: None,
             before_sha: None,
             branch_created: false,
+            first_commit_sha: None,
             changed_files: Some(files),
             pr_number: None,
             repository: None,
@@ -2238,6 +2263,7 @@ binary.md binary
             head_sha: Some("abc123".to_string()),
             before_sha: None,
             branch_created: false,
+            first_commit_sha: None,
             changed_files: None,
             pr_number: Some(42),
             repository: Some("owner/repo".to_string()),
@@ -2257,6 +2283,7 @@ binary.md binary
             head_sha: Some("def456".to_string()),
             before_sha: None,
             branch_created: false,
+            first_commit_sha: None,
             changed_files: None,
             pr_number: None,
             repository: Some("owner/repo".to_string()),
@@ -2279,6 +2306,7 @@ binary.md binary
             head_sha: Some("def456".to_string()),
             before_sha: Some("abc999".to_string()),
             branch_created: false,
+            first_commit_sha: None,
             changed_files: None,
             pr_number: None,
             repository: Some("owner/repo".to_string()),
@@ -2286,6 +2314,29 @@ binary.md binary
         let opts = resolve_refs_opts(None, None);
         let (from, to) = resolve_refs(&opts, &Some(ctx));
         assert_eq!(from, "abc999");
+        assert_eq!(to, "def456");
+    }
+
+    #[test]
+    fn test_resolve_refs_branch_creation_uses_first_pushed_parent() {
+        // Branch creation has no `before`; the parent of the first
+        // pushed commit is the right analysis baseline so files
+        // changed only in earlier pushed commits still show deltas.
+        let ctx = ci::CiContext {
+            provider: ci::CiProvider::GitHubActions,
+            event_name: "push".to_string(),
+            base_ref: None,
+            head_sha: Some("def456".to_string()),
+            before_sha: None,
+            branch_created: true,
+            first_commit_sha: Some("f1r5t".to_string()),
+            changed_files: None,
+            pr_number: None,
+            repository: Some("owner/repo".to_string()),
+        };
+        let opts = resolve_refs_opts(None, None);
+        let (from, to) = resolve_refs(&opts, &Some(ctx));
+        assert_eq!(from, "f1r5t~1");
         assert_eq!(to, "def456");
     }
 

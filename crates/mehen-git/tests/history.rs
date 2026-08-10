@@ -1268,3 +1268,213 @@ fn same_commit_content_swaps_are_reported_as_renames() {
     assert_eq!(source_of("first.rs"), "second.rs");
     assert_eq!(source_of("second.rs"), "first.rs");
 }
+
+#[test]
+fn delete_then_recreate_without_rename_splits_the_lineage() {
+    // x.rs is written and edited by bob, deleted, then an unrelated
+    // x.rs is created by alice. The current file must not inherit the
+    // dead prior occupant's churn, authors, or commit count.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(dir.path().join("x.rs"), "fn old() {}\n").unwrap();
+    git(dir.path(), &["add", "x.rs"], BOB, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "old x"], BOB, T_JAN);
+    std::fs::write(dir.path().join("x.rs"), "fn old() {}\nfn more() {}\n").unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow old x"],
+        BOB,
+        T_FEB,
+    );
+    git(dir.path(), &["rm", "-q", "x.rs"], BOB, T_MAR);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "drop old x"],
+        BOB,
+        T_MAR,
+    );
+
+    std::fs::write(dir.path().join("x.rs"), "const NEW_WORLD: u8 = 1;\n").unwrap();
+    git(dir.path(), &["add", "x.rs"], ALICE, T_APR);
+    git(dir.path(), &["commit", "-q", "-m", "new x"], ALICE, T_APR);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+    let x = history.file(Path::new("x.rs")).expect("x.rs history");
+    assert_eq!(x.commit_frequency, 1);
+    assert_eq!(x.churn_added, 1);
+    assert_eq!(x.churn_removed, 0);
+    assert_eq!(x.authors, 1, "bob's dead occupant must not leak in");
+    assert_eq!(x.last_change_seconds, T_APR);
+}
+
+#[test]
+fn same_commit_swaps_keep_each_lineage_with_its_content() {
+    // first.rs and second.rs exchange contents in one commit. Each
+    // current path must carry the history of the content now living
+    // there — and neither may end up empty or double-counted.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    // first.rs: 2 commits by alice; second.rs: 1 commit by bob.
+    std::fs::write(dir.path().join("first.rs"), "fn first() {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("second.rs"),
+        "const SECOND: &str = \"other\";\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    std::fs::write(
+        dir.path().join("first.rs"),
+        "fn first() {}\nfn first_more() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow first"],
+        ALICE,
+        T_FEB,
+    );
+
+    // Swap contents in one commit (as `git mv` via a temp name would).
+    let first_content = std::fs::read(dir.path().join("first.rs")).unwrap();
+    let second_content = std::fs::read(dir.path().join("second.rs")).unwrap();
+    std::fs::write(dir.path().join("first.rs"), &second_content).unwrap();
+    std::fs::write(dir.path().join("second.rs"), &first_content).unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "swap"], BOB, T_MAR);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // second.rs now hosts the old first.rs content: 2 pre-swap commits
+    // + the swap = 3, with both authors.
+    let second = history.file(Path::new("second.rs")).expect("second");
+    assert_eq!(second.commit_frequency, 3);
+    assert_eq!(second.authors, 2);
+    // first.rs now hosts the old second.rs content: 1 pre-swap commit
+    // + the swap = 2.
+    let first = history.file(Path::new("first.rs")).expect("first");
+    assert_eq!(first.commit_frequency, 2);
+    assert_eq!(first.authors, 2);
+}
+
+#[test]
+fn renaming_back_to_an_old_path_reconnects_the_lineage() {
+    // a.rs → b.rs → a.rs: the file returns to its original path. The
+    // destination boundary installed by the return rename must not
+    // fence off the file's own pre-rename history.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn one() {}\nfn two() {}\nfn three() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "a.rs"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "add a"], ALICE, T_JAN);
+
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, T_FEB);
+    git(dir.path(), &["commit", "-q", "-m", "to b"], ALICE, T_FEB);
+
+    git(dir.path(), &["mv", "b.rs", "a.rs"], BOB, T_MAR);
+    git(dir.path(), &["commit", "-q", "-m", "back to a"], BOB, T_MAR);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    let a = history.file(Path::new("a.rs")).expect("a.rs history");
+    // Full lineage: creation + both renames.
+    assert_eq!(a.commit_frequency, 3);
+    assert_eq!(a.churn_added, 3, "the original creation must survive");
+    assert_eq!(a.authors, 2);
+    assert_eq!(a.last_change_seconds, T_MAR);
+    assert!(history.file(Path::new("b.rs")).is_none());
+}
+
+#[test]
+fn edited_swaps_are_recovered_as_renames() {
+    // Two files exchange paths *and* each picks up a small edit in the
+    // same commit — no exact OID cross-match exists, but each new blob
+    // is far more similar to the other path's baseline than to its
+    // own. Both must be reported as renames.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    let alpha: Vec<String> = (0..10).map(|i| format!("fn alpha_{i}() {{}}")).collect();
+    let omega: Vec<String> = (0..10)
+        .map(|i| format!("const OMEGA_{i}: u8 = {i};"))
+        .collect();
+    std::fs::write(dir.path().join("alpha.rs"), alpha.join("\n") + "\n").unwrap();
+    std::fs::write(dir.path().join("omega.rs"), omega.join("\n") + "\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "edited-swap-base"], ALICE, T_JAN);
+
+    // Swap the contents and edit one line on each side.
+    let mut alpha_edited = alpha.clone();
+    alpha_edited[0] = "fn alpha_0_edited() {}".to_string();
+    let mut omega_edited = omega.clone();
+    omega_edited[0] = "const OMEGA_0_EDITED: u8 = 0;".to_string();
+    std::fs::write(dir.path().join("alpha.rs"), omega_edited.join("\n") + "\n").unwrap();
+    std::fs::write(dir.path().join("omega.rs"), alpha_edited.join("\n") + "\n").unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "edited swap"],
+        ALICE,
+        T_FEB,
+    );
+    git(dir.path(), &["tag", "edited-swap-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "edited-swap-base", "edited-swap-head").unwrap();
+
+    let source_of = |dest: &str| -> String {
+        changed
+            .iter()
+            .find(|cf| cf.path == Path::new(dest))
+            .unwrap_or_else(|| panic!("missing {dest} in {changed:?}"))
+            .source_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("{dest} must be a rename in {changed:?}"))
+            .display()
+            .to_string()
+    };
+    assert_eq!(source_of("alpha.rs"), "omega.rs");
+    assert_eq!(source_of("omega.rs"), "alpha.rs");
+}
+
+#[test]
+fn open_repo_at_reports_repo_not_found_only_outside_repositories() {
+    let dir = tempfile::tempdir().unwrap();
+    match mehen_git::open_repo_at(dir.path()) {
+        Err(mehen_git::GitError::RepoNotFound) => {}
+        other => panic!("expected RepoNotFound outside a repository, got {other:?}"),
+    }
+}

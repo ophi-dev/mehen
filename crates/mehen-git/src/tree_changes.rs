@@ -64,6 +64,13 @@ const SIMILARITY_SPAN_BYTES: usize = 64;
 /// first 8000 bytes as binary.
 const BINARY_SNIFF_BYTES: usize = 8000;
 
+/// Commits with at most this many modifications (and no additions or
+/// deletions) still get the break-rewrite scan, so *edited* swaps —
+/// two files exchanging paths with edits in the same commit, leaving
+/// no exact OID cross-match — are recovered as renames. Bulk
+/// modifications-only commits above the limit skip the scan entirely.
+const SWAP_SCAN_MAX_MODIFICATIONS: usize = 8;
+
 /// One file-level change between two trees, blob entries only.
 pub(crate) enum TreeChange {
     Added {
@@ -210,16 +217,23 @@ pub(crate) fn changes_between_trees(
         .map(|(_, _, oid)| *oid)
         .collect();
     let has_loose_ends = !added.is_empty() || !deleted.is_empty();
+    // Small all-modifications commits may hide *edited* swaps with no
+    // exact OID cross-signal; scan them too (bounded by the count
+    // limit and the byte budget). Bulk commits skip the speculative
+    // scan unless an exact cross-match or loose end justifies it.
+    let small_swap_scan =
+        !has_loose_ends && modified.len() >= 2 && modified.len() <= SWAP_SCAN_MAX_MODIFICATIONS;
     // Path order keeps budget truncation deterministic.
     modified.sort_by(|a, b| a.0.cmp(&b.0));
     let mut break_budget = BREAK_TOTAL_BYTE_BUDGET;
     for (path, previous_oid, oid) in modified {
         // Worth breaking only when something could pair with a half:
         // an unpaired addition/deletion, or another modification whose
-        // blob content this one exactly exchanged with.
+        // blob content this one exactly exchanged with, or a small
+        // enough all-modifications commit to probe for edited swaps.
         let cross_matched =
             modified_new_oids.contains(&previous_oid) || modified_previous_oids.contains(&oid);
-        if (has_loose_ends || cross_matched) && previous_oid != oid {
+        if (has_loose_ends || cross_matched || small_swap_scan) && previous_oid != oid {
             let old_size = blob_size(repo, &previous_oid)?;
             let new_size = blob_size(repo, &oid)?;
             let within_caps = old_size <= FUZZY_MAX_BLOB_BYTES
