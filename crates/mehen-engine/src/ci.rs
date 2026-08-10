@@ -175,21 +175,22 @@ fn extract_push_changed_files(payload: &serde_json::Value) -> Option<Vec<Changed
         }
     }
 
-    if by_path.is_empty() {
-        None
-    } else {
-        let mut sorted: Vec<ChangedFile> = by_path
-            .into_iter()
-            .map(|(path, status)| ChangedFile {
-                path,
-                status,
-                // GitHub push payloads carry no rename information.
-                source_path: None,
-            })
-            .collect();
-        sorted.sort_by(|a, b| a.path.cmp(&b.path));
-        Some(sorted)
-    }
+    // An *empty* fold is meaningful and distinct from an unavailable
+    // payload (`commits` missing entirely → `None` above): a push
+    // whose commits add a file and then remove it changes nothing, and
+    // callers must not fall back to a ref-range diff that would
+    // misreport the final commit's deletion.
+    let mut sorted: Vec<ChangedFile> = by_path
+        .into_iter()
+        .map(|(path, status)| ChangedFile {
+            path,
+            status,
+            // GitHub push payloads carry no rename information.
+            source_path: None,
+        })
+        .collect();
+    sorted.sort_by(|a, b| a.path.cmp(&b.path));
+    Some(sorted)
 }
 
 #[cfg(test)]
@@ -248,17 +249,19 @@ mod tests {
     }
 
     /// A file added then removed in the same push is a no-op against
-    /// the base — drop it entirely so the diff doesn't fight with a
-    /// path that no longer exists at either end.
+    /// the base — the fold is *empty* (`Some(vec![])`), which callers
+    /// must honor rather than falling back to a ref-range diff that
+    /// would misreport the final commit's deletion.
     #[test]
-    fn test_extract_push_add_then_remove_is_dropped() {
+    fn test_extract_push_add_then_remove_folds_to_empty() {
         let payload = serde_json::json!({
             "commits": [
                 {"added": ["src/scratch.rs"], "modified": [], "removed": []},
                 {"added": [], "modified": [], "removed": ["src/scratch.rs"]}
             ]
         });
-        assert!(extract_push_changed_files(&payload).is_none());
+        let files = extract_push_changed_files(&payload).expect("payload is available");
+        assert!(files.is_empty(), "add-then-remove folds to nothing");
     }
 
     /// A file modified then removed across the push is `Deleted` at
@@ -303,10 +306,14 @@ mod tests {
 
     #[test]
     fn test_extract_push_empty_commits() {
+        // An empty commits array is still an *available* payload with
+        // nothing changed — distinct from a payload with no `commits`
+        // key at all.
         let payload = serde_json::json!({
             "commits": []
         });
-        assert!(extract_push_changed_files(&payload).is_none());
+        let files = extract_push_changed_files(&payload).expect("payload is available");
+        assert!(files.is_empty());
     }
 
     #[test]
