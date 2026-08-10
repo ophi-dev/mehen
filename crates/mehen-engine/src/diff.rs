@@ -1131,6 +1131,13 @@ fn get_changed_files(
         && ctx.event_name == "push"
         && let Some(ref files) = ctx.changed_files
     {
+        // A branch-creation push has no pre-push tip: any locally
+        // resolvable `from` (the `HEAD~1` fallback) would cover only
+        // the final commit, silently dropping files changed earlier in
+        // the new branch. The folded payload is authoritative there.
+        if ctx.branch_created {
+            return Ok(files.clone());
+        }
         return Ok(match mehen_git::changed_files(repo, from, to) {
             Ok(tree_diff) => tree_diff,
             Err(e) => {
@@ -1640,6 +1647,7 @@ binary.md binary
             base_ref: None,
             head_sha: None,
             before_sha: None,
+            branch_created: false,
             changed_files: Some(files),
             pr_number: None,
             repository: None,
@@ -1698,6 +1706,47 @@ binary.md binary
         let out = get_changed_files(&repo, "no-such-ref", "also-missing", &ctx).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, payload[0].path);
+    }
+
+    #[test]
+    fn branch_creation_pushes_use_the_payload_even_when_refs_resolve() {
+        // A branch-creation push has no pre-push tip; the HEAD~1
+        // fallback resolves but covers only the final commit, so the
+        // folded payload (spanning every commit of the new branch)
+        // must win.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("first.py"), "a = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("second.py"), "b = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "two"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let mut ctx = push_ctx(vec![
+            mehen_git::ChangedFile {
+                path: PathBuf::from("first.py"),
+                status: ChangeStatus::Added,
+                source_path: None,
+            },
+            mehen_git::ChangedFile {
+                path: PathBuf::from("second.py"),
+                status: ChangeStatus::Added,
+                source_path: None,
+            },
+        ]);
+        ctx.branch_created = true;
+        // HEAD~1..HEAD resolves but would only cover second.py.
+        let out = get_changed_files(&repo, "HEAD~1", "HEAD", &Some(ctx)).unwrap();
+        let mut paths: Vec<&str> = out.iter().filter_map(|f| f.path.to_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec!["first.py", "second.py"],
+            "branch creation must keep every payload commit's files"
+        );
     }
 
     fn analysis_with_diagnostics(diagnostics: Vec<ParseDiagnostic>) -> LanguageAnalysis {
@@ -2188,6 +2237,7 @@ binary.md binary
             base_ref: Some("develop".to_string()),
             head_sha: Some("abc123".to_string()),
             before_sha: None,
+            branch_created: false,
             changed_files: None,
             pr_number: Some(42),
             repository: Some("owner/repo".to_string()),
@@ -2206,6 +2256,7 @@ binary.md binary
             base_ref: None,
             head_sha: Some("def456".to_string()),
             before_sha: None,
+            branch_created: false,
             changed_files: None,
             pr_number: None,
             repository: Some("owner/repo".to_string()),
@@ -2227,6 +2278,7 @@ binary.md binary
             base_ref: None,
             head_sha: Some("def456".to_string()),
             before_sha: Some("abc999".to_string()),
+            branch_created: false,
             changed_files: None,
             pr_number: None,
             repository: Some("owner/repo".to_string()),

@@ -1219,3 +1219,52 @@ fn prior_occupants_of_a_rename_destination_stay_out_of_the_lineage() {
     assert_eq!(b.authors, 1, "prior occupant's author must not leak in");
     assert_eq!(b.last_change_seconds, T_APR);
 }
+
+#[test]
+fn same_commit_content_swaps_are_reported_as_renames() {
+    // Swapping two files through a temporary name leaves the endpoint
+    // tree with two dissimilar Modified entries and no additions or
+    // deletions; the exact cross-match of their blobs must still be
+    // recovered as a pair of renames.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    let first = "fn first_impl() {}\nfn first_helper() {}\n";
+    let second = "const SECOND: &str = \"completely different\";\n";
+    std::fs::write(dir.path().join("first.rs"), first).unwrap();
+    std::fs::write(dir.path().join("second.rs"), second).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "content-swap-base"], ALICE, T_JAN);
+
+    // Swap the contents (as `git mv` through a temp name would).
+    std::fs::write(dir.path().join("first.rs"), second).unwrap();
+    std::fs::write(dir.path().join("second.rs"), first).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_FEB);
+    git(dir.path(), &["commit", "-q", "-m", "swap"], ALICE, T_FEB);
+    git(dir.path(), &["tag", "content-swap-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed =
+        mehen_git::changed_files(&repo, "content-swap-base", "content-swap-head").unwrap();
+
+    let source_of = |dest: &str| -> String {
+        changed
+            .iter()
+            .find(|cf| cf.path == Path::new(dest))
+            .unwrap_or_else(|| panic!("missing {dest} in {changed:?}"))
+            .source_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("{dest} must be a rename in {changed:?}"))
+            .display()
+            .to_string()
+    };
+    assert_eq!(source_of("first.rs"), "second.rs");
+    assert_eq!(source_of("second.rs"), "first.rs");
+}

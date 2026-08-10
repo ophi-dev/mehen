@@ -193,12 +193,33 @@ pub(crate) fn changes_between_trees(
     // something to pair with — the common all-modifications diff pays
     // nothing here.
     let mut broken_pairs: Vec<(PathBuf, gix::ObjectId, gix::ObjectId)> = Vec::new();
-    let consider_breaking = !added.is_empty() || !deleted.is_empty();
+    // Two same-commit modifications can also hide a rename: swapping
+    // two files through a temporary name leaves only two dissimilar
+    // `Modified` entries whose blobs *cross-match exactly*. Detect the
+    // exact cross-signal from OIDs alone (no blob loads) so such
+    // modifications become break candidates even when the diff has no
+    // standalone additions or deletions.
+    let modified_previous_oids: std::collections::HashSet<gix::ObjectId> = modified
+        .iter()
+        .filter(|(_, previous_oid, oid)| previous_oid != oid)
+        .map(|(_, previous_oid, _)| *previous_oid)
+        .collect();
+    let modified_new_oids: std::collections::HashSet<gix::ObjectId> = modified
+        .iter()
+        .filter(|(_, previous_oid, oid)| previous_oid != oid)
+        .map(|(_, _, oid)| *oid)
+        .collect();
+    let has_loose_ends = !added.is_empty() || !deleted.is_empty();
     // Path order keeps budget truncation deterministic.
     modified.sort_by(|a, b| a.0.cmp(&b.0));
     let mut break_budget = BREAK_TOTAL_BYTE_BUDGET;
     for (path, previous_oid, oid) in modified {
-        if consider_breaking && previous_oid != oid {
+        // Worth breaking only when something could pair with a half:
+        // an unpaired addition/deletion, or another modification whose
+        // blob content this one exactly exchanged with.
+        let cross_matched =
+            modified_new_oids.contains(&previous_oid) || modified_previous_oids.contains(&oid);
+        if (has_loose_ends || cross_matched) && previous_oid != oid {
             let old_size = blob_size(repo, &previous_oid)?;
             let new_size = blob_size(repo, &oid)?;
             let within_caps = old_size <= FUZZY_MAX_BLOB_BYTES
