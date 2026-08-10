@@ -17,6 +17,11 @@ pub struct CiContext {
     pub event_name: String,
     pub base_ref: Option<String>,
     pub head_sha: Option<String>,
+    /// For `push` events, the payload's `before` revision — the tip of
+    /// the branch before the push. This is the correct diff baseline
+    /// for a multi-commit push (`HEAD~1` would only cover the final
+    /// commit). `None` when absent or all-zeros (branch creation).
+    pub before_sha: Option<String>,
     /// Files changed by the CI event, with the change status folded
     /// across the commits in that event. For GitHub `push` events the
     /// per-commit `added` / `modified` / `removed` arrays are walked in
@@ -47,6 +52,7 @@ fn detect_github_actions() -> Option<CiContext> {
         .filter(|s| !s.is_empty());
     let mut changed_files = None;
     let mut pr_number = None;
+    let mut before_sha = None;
 
     if let Ok(event_path) = std::env::var("GITHUB_EVENT_PATH")
         && let Ok(data) = std::fs::read_to_string(&event_path)
@@ -55,6 +61,13 @@ fn detect_github_actions() -> Option<CiContext> {
         match event_name.as_str() {
             "push" => {
                 changed_files = extract_push_changed_files(&payload);
+                // The all-zeros SHA marks a branch creation — there is
+                // no pre-push tip to diff against.
+                before_sha = payload
+                    .get("before")
+                    .and_then(|b| b.as_str())
+                    .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '0'))
+                    .map(str::to_string);
             }
             "pull_request" => {
                 if let Some(pr) = payload.get("pull_request") {
@@ -87,6 +100,7 @@ fn detect_github_actions() -> Option<CiContext> {
         event_name,
         base_ref,
         head_sha,
+        before_sha,
         changed_files,
         pr_number,
         repository,

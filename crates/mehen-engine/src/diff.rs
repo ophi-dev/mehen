@@ -1087,7 +1087,16 @@ fn resolve_refs(opts: &DiffOpts, ci_ctx: &Option<ci::CiContext>) -> (String, Str
             .from
             .clone()
             .unwrap_or_else(|| match ctx.event_name.as_str() {
-                "push" => "HEAD~1".to_string(),
+                // A multi-commit push must diff against the branch tip
+                // *before* the push (the payload's `before` SHA), not
+                // just the final commit's parent — otherwise renames
+                // and baselines from earlier commits in the push are
+                // invisible. `HEAD~1` remains the fallback when the
+                // payload is unavailable or the branch was just created.
+                "push" => ctx
+                    .before_sha
+                    .clone()
+                    .unwrap_or_else(|| "HEAD~1".to_string()),
                 "pull_request" | "merge_group" => ctx
                     .base_ref
                     .as_ref()
@@ -2202,6 +2211,7 @@ binary.md binary
             event_name: "pull_request".to_string(),
             base_ref: Some("develop".to_string()),
             head_sha: Some("abc123".to_string()),
+            before_sha: None,
             changed_files: None,
             pr_number: Some(42),
             repository: Some("owner/repo".to_string()),
@@ -2219,6 +2229,7 @@ binary.md binary
             event_name: "push".to_string(),
             base_ref: None,
             head_sha: Some("def456".to_string()),
+            before_sha: None,
             changed_files: None,
             pr_number: None,
             repository: Some("owner/repo".to_string()),
@@ -2226,6 +2237,27 @@ binary.md binary
         let opts = resolve_refs_opts(None, None);
         let (from, to) = resolve_refs(&opts, &Some(ctx));
         assert_eq!(from, "HEAD~1");
+        assert_eq!(to, "def456");
+    }
+
+    #[test]
+    fn test_resolve_refs_github_push_uses_payload_before_sha() {
+        // A multi-commit push must diff against the branch tip before
+        // the push, not just the final commit's parent — otherwise
+        // renames/baselines from earlier commits in the push vanish.
+        let ctx = ci::CiContext {
+            provider: ci::CiProvider::GitHubActions,
+            event_name: "push".to_string(),
+            base_ref: None,
+            head_sha: Some("def456".to_string()),
+            before_sha: Some("abc999".to_string()),
+            changed_files: None,
+            pr_number: None,
+            repository: Some("owner/repo".to_string()),
+        };
+        let opts = resolve_refs_opts(None, None);
+        let (from, to) = resolve_refs(&opts, &Some(ctx));
+        assert_eq!(from, "abc999");
         assert_eq!(to, "def456");
     }
 

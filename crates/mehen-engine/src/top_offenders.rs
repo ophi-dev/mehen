@@ -59,8 +59,10 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     // out other files once `max_results` is applied.
     //
     // All roots share one normalized walk, then each result is mapped back
-    // through the first matching input root. Canonical keys also collapse
-    // symlink aliases that have different walked paths but the same target.
+    // through the first matching input root. Canonical keys collapse
+    // different *spellings* of one path (overlapping roots, directory
+    // symlinks) but keep a tracked symlink distinct from its target —
+    // each is its own repository entry with its own history.
     let mut seen: HashSet<Utf8PathBuf> = HashSet::new();
 
     for entry in walk_paths(&input.paths, &input.include, &input.exclude) {
@@ -127,6 +129,23 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         entries.truncate(input.max_results);
     }
 
+    // Lazily discovered repositories whose history was unavailable
+    // (e.g. a shallow nested clone) must be visible to callers — their
+    // files were ranked on absent history, not a real zero.
+    if let Some(histories) = histories.as_ref() {
+        for (location, message) in histories.take_failures() {
+            analysis_errors.push(AnalysisErrorRecord {
+                path: Utf8PathBuf::from_path_buf(location.clone())
+                    .unwrap_or_else(|_| Utf8PathBuf::from(location.to_string_lossy().into_owned())),
+                side: DiffSide::Head,
+                diagnostics: vec![ParseDiagnostic::warning(
+                    "engine.history_unavailable",
+                    format!("history metrics unavailable: {message}"),
+                )],
+            });
+        }
+    }
+
     TopOffendersReport {
         schema_version: "1.0".to_string(),
         selectors: input.selectors.iter().map(|s| s.to_string()).collect(),
@@ -135,10 +154,14 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     }
 }
 
+/// Dedup key across overlapping roots and directory symlinks: the
+/// *parent* is canonicalized but the final component is preserved, so
+/// two spellings of one file collapse while a tracked symlink and its
+/// target remain distinct entries (each with its own history — see
+/// `canonical_file_path`).
 fn canonical_key(path: &Utf8PathBuf) -> Utf8PathBuf {
-    std::fs::canonicalize(path.as_std_path())
-        .ok()
-        .and_then(|path| Utf8PathBuf::try_from(path).ok())
+    canonical_file_path(path.as_std_path())
+        .and_then(|canonical| Utf8PathBuf::from_path_buf(canonical).ok())
         .unwrap_or_else(|| path.clone())
 }
 
@@ -410,6 +433,11 @@ struct RepoHistoriesState {
     dir_to_workdir: HashMap<PathBuf, Option<PathBuf>>,
     /// Canonical work dir → walked `HEAD` history (`None`: walk failed).
     histories: HashMap<PathBuf, Option<mehen_git::RepositoryHistory>>,
+    /// Lazily discovered repositories that exist but whose history is
+    /// unavailable (shallow nested clone, walk failure). Recorded once
+    /// per location so callers can surface them instead of silently
+    /// ranking those files on zero-valued history.
+    failures: Vec<(PathBuf, String)>,
 }
 
 impl RepoHistories {
@@ -478,9 +506,21 @@ impl RepoHistories {
         let workdir = match cached_workdir {
             Some(cached) => cached,
             None => {
-                let discovered = mehen_git::open_repo_at(&parent)
-                    .ok()
-                    .and_then(|repo| repo.workdir().and_then(|wd| std::fs::canonicalize(wd).ok()));
+                // A directory outside any repository is a normal case
+                // (RepoNotFound stays silent); a repository that
+                // exists but can't be used — e.g. a shallow nested
+                // clone — is a real failure that must not silently
+                // read as zero history.
+                let discovered = match mehen_git::open_repo_at(&parent) {
+                    Ok(repo) => repo.workdir().and_then(|wd| std::fs::canonicalize(wd).ok()),
+                    Err(mehen_git::GitError::RepoNotFound) => None,
+                    Err(e) => {
+                        log::warn!("history unavailable under {}: {e}", parent.display());
+                        let mut state = self.state.lock().expect("repo histories mutex poisoned");
+                        state.failures.push((parent.clone(), e.to_string()));
+                        None
+                    }
+                };
                 let mut state = self.state.lock().expect("repo histories mutex poisoned");
                 state
                     .dir_to_workdir
@@ -495,13 +535,17 @@ impl RepoHistories {
             state.histories.contains_key(&workdir)
         };
         if !walked {
-            let history = mehen_git::open_repo_at(&workdir).ok().and_then(|repo| {
-                mehen_git::collect_history(&repo, "HEAD")
-                    .map_err(|e| {
-                        log::warn!("history walk failed for {}: {e}", workdir.display());
-                    })
-                    .ok()
-            });
+            let history = match mehen_git::open_repo_at(&workdir)
+                .and_then(|repo| mehen_git::collect_history(&repo, "HEAD"))
+            {
+                Ok(history) => Some(history),
+                Err(e) => {
+                    log::warn!("history walk failed for {}: {e}", workdir.display());
+                    let mut state = self.state.lock().expect("repo histories mutex poisoned");
+                    state.failures.push((workdir.clone(), e.to_string()));
+                    None
+                }
+            };
             let mut state = self.state.lock().expect("repo histories mutex poisoned");
             state.histories.entry(workdir.clone()).or_insert(history);
         }
@@ -512,6 +556,13 @@ impl RepoHistories {
         history
             .file(relative)
             .map(|fh| (fh.clone(), history.head_seconds))
+    }
+
+    /// Drain the recorded lazy-discovery failures (repositories that
+    /// exist but whose history was unavailable).
+    fn take_failures(&self) -> Vec<(PathBuf, String)> {
+        let mut state = self.state.lock().expect("repo histories mutex poisoned");
+        std::mem::take(&mut state.failures)
     }
 }
 
@@ -1246,7 +1297,7 @@ binary.py binary
 
     #[cfg(unix)]
     #[test]
-    fn rank_top_offenders_dedupes_symlink_aliases() {
+    fn rank_top_offenders_keeps_symlink_aliases_distinct() {
         use std::os::unix::fs::symlink;
 
         use mehen_core::{AnalysisConfig, TopOffendersInput};
@@ -1265,10 +1316,22 @@ binary.py binary
         };
         let report = rank_top_offenders(input);
 
+        // A tracked symlink is its own repository entry with its own
+        // (empty) history — collapsing it into its target would make
+        // history rankings depend on traversal order and diverge from
+        // the CLI path, which reports both identities. Dedup still
+        // collapses different *spellings* of one path (overlapping
+        // roots, directory symlinks) via parent canonicalization.
+        let mut names: Vec<&str> = report
+            .entries
+            .iter()
+            .filter_map(|e| e.path.file_name())
+            .collect();
+        names.sort_unstable();
         assert_eq!(
-            report.entries.len(),
-            1,
-            "a file and its symlink alias must be ranked once"
+            names,
+            vec!["alias.py", "source.py"],
+            "a file and its symlink alias are distinct identities"
         );
     }
 

@@ -56,6 +56,14 @@ const MINOR_CONTRIBUTOR_SHARE: f64 = 0.05;
 const TWR_STEEPNESS: f64 = 12.0;
 const TWR_OMEGA: f64 = 12.0;
 
+/// Blobs larger than this are never materialized for churn counting;
+/// they contribute zero lines, mirroring `git log --numstat`, which
+/// reports `-` (no line counts) for binary files. Sizes are checked
+/// via object headers, so a historically modified multi-gigabyte
+/// binary costs two header reads per touching commit instead of
+/// exhausting memory.
+const MAX_CHURN_BLOB_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Deterministic per-file history statistics, finalized over the full
 /// walk. Raw counts are exposed alongside derived ratios so callers can
 /// build composites (e.g. hotspot = complexity × [`Self::commit_frequency`]).
@@ -486,21 +494,39 @@ fn diff_against_first_parent(
 }
 
 /// Number of lines in a blob (a trailing fragment without `\n` counts
-/// as a line).
+/// as a line). Oversized blobs count zero lines without being loaded
+/// (numstat-style binary handling).
 fn blob_line_count(repo: &gix::Repository, oid: &gix::ObjectId) -> Result<u64, GitError> {
+    if blob_size(repo, oid)? > MAX_CHURN_BLOB_BYTES {
+        return Ok(0);
+    }
     let data = read_blob_data(repo, oid)?;
     Ok(count_lines(&data))
 }
 
-/// Line-level (added, removed) counts between two blob versions.
+/// Line-level (added, removed) counts between two blob versions. Pairs
+/// with an oversized side churn zero lines without loading either blob
+/// (numstat-style binary handling).
 fn blob_line_diff(
     repo: &gix::Repository,
     old: &gix::ObjectId,
     new: &gix::ObjectId,
 ) -> Result<(u64, u64), GitError> {
+    if blob_size(repo, old)? > MAX_CHURN_BLOB_BYTES || blob_size(repo, new)? > MAX_CHURN_BLOB_BYTES
+    {
+        return Ok((0, 0));
+    }
     let old_data = read_blob_data(repo, old)?;
     let new_data = read_blob_data(repo, new)?;
     Ok(line_diff_counts(&old_data, &new_data))
+}
+
+/// A blob's size from its object header, without loading the payload.
+fn blob_size(repo: &gix::Repository, oid: &gix::ObjectId) -> Result<u64, GitError> {
+    Ok(repo
+        .find_header(*oid)
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .size())
 }
 
 /// Committer timestamp in seconds since the Unix epoch.
