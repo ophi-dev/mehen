@@ -696,3 +696,93 @@ fn reused_source_path_keeps_its_own_history_after_a_rename() {
     assert_eq!(b.churn_added, 3);
     assert_eq!(b.last_change_seconds, T_FEB);
 }
+
+#[test]
+fn single_line_file_renames_with_edits_stay_joined() {
+    // A one-line file has zero common *lines* after any edit; the
+    // byte-level similarity fallback must still join the rename so the
+    // diff keeps its baseline and history keeps its lineage.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    let one_liner = format!("export const table = [{}];", "1, ".repeat(100));
+    std::fs::write(dir.path().join("bundle.js"), &one_liner).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "oneline-base"], ALICE, T_JAN);
+
+    // Rename plus a small in-line edit.
+    std::fs::remove_file(dir.path().join("bundle.js")).unwrap();
+    std::fs::write(
+        dir.path().join("bundle.min.js"),
+        one_liner.replace("const table", "const lookup"),
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_FEB);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename bundle"],
+        ALICE,
+        T_FEB,
+    );
+    git(dir.path(), &["tag", "oneline-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "oneline-base", "oneline-head").unwrap();
+    assert_eq!(changed.len(), 1, "one-line rename joins: {changed:?}");
+    assert_eq!(changed[0].path, Path::new("bundle.min.js"));
+    assert_eq!(changed[0].status, mehen_git::ChangeStatus::Modified);
+    assert_eq!(
+        changed[0].source_path.as_deref(),
+        Some(Path::new("bundle.js"))
+    );
+}
+
+#[test]
+fn deletion_only_commits_do_not_create_minor_contributors() {
+    // bob's only touch is deleting lines: he counts as an author but
+    // must not appear as a sub-5% minor contributor, and ownership
+    // stays with the writer.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    let lines: Vec<String> = (0..10).map(|i| format!("fn f{i}() {{}}")).collect();
+    std::fs::write(dir.path().join("code.rs"), lines.join("\n") + "\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "write it"],
+        ALICE,
+        T_JAN,
+    );
+
+    // bob deletes the last four functions, adds nothing.
+    std::fs::write(dir.path().join("code.rs"), lines[..6].join("\n") + "\n").unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "prune dead code"],
+        BOB,
+        T_FEB,
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+    let code = history.file(Path::new("code.rs")).expect("code history");
+    assert_eq!(code.authors, 2); // alice wrote, bob touched
+    assert_eq!(code.minor_contributors, 0); // bob wrote nothing — not "minor"
+    assert!((code.ownership - 1.0).abs() < 1e-9); // alice owns all added lines
+    assert_eq!(code.churn_added, 10);
+    assert_eq!(code.churn_removed, 4);
+}

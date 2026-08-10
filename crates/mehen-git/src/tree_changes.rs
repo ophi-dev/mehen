@@ -38,6 +38,23 @@ const RENAME_SIMILARITY: f64 = 0.5;
 /// bulk-restructuring commits quadratically expensive.
 const RENAME_FUZZY_LIMIT: usize = 10_000;
 
+/// Blobs larger than this never enter the fuzzy pass — a replaced
+/// multi-gigabyte binary must not be materialized and line-diffed just
+/// to rule out a rename. Sizes are checked via object headers before
+/// any data is loaded. Exact renames still match at any size.
+const FUZZY_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Total bytes the fuzzy pass may materialize per tree diff. Applied
+/// in sorted path order, so truncation under pressure is deterministic.
+const FUZZY_TOTAL_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// Blobs at or below this size get a byte-level similarity fallback
+/// when line-level similarity misses: a *one-line* file with any edit
+/// has zero common lines regardless of how many bytes survived, so
+/// line granularity alone would break renames of single-line sources
+/// (minified bundles, one-liner configs).
+const BYTE_SIMILARITY_MAX_BLOB_BYTES: usize = 256 * 1024;
+
 /// One file-level change between two trees, blob entries only.
 pub(crate) enum TreeChange {
     Added {
@@ -194,29 +211,34 @@ fn detect_renames(
         .map(|((path, oid), _)| (path.clone(), *oid))
         .collect();
 
-    // Fuzzy pass: line-level similarity, best match first; ties break
-    // by source then destination path.
+    // Fuzzy pass: content similarity, best match first; ties break by
+    // source then destination path. Blobs are materialized at most
+    // once each, and only when they clear the per-blob size cap and
+    // the total byte budget (checked via object headers first).
     if !remaining_added.is_empty()
         && !remaining_deleted.is_empty()
         && remaining_added.len() * remaining_deleted.len() <= RENAME_FUZZY_LIMIT
     {
+        let deleted_blobs = load_fuzzy_blobs(repo, &remaining_deleted, FUZZY_TOTAL_BYTE_BUDGET)?;
+        // The added side spends whatever budget the deleted side left,
+        // keeping the total bounded even when both sides are large.
+        let deleted_bytes: u64 = deleted_blobs
+            .iter()
+            .flatten()
+            .map(|blob| blob.data.len() as u64)
+            .sum();
+        let added_blobs = load_fuzzy_blobs(
+            repo,
+            &remaining_added,
+            FUZZY_TOTAL_BYTE_BUDGET.saturating_sub(deleted_bytes),
+        )?;
+
         let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
-        for (deleted_index, (_, old_oid)) in remaining_deleted.iter().enumerate() {
-            let old_data = read_blob_data(repo, old_oid)?;
-            let old_lines = count_lines(&old_data);
-            for (added_index, (_, new_oid)) in remaining_added.iter().enumerate() {
-                let new_data = read_blob_data(repo, new_oid)?;
-                let new_lines = count_lines(&new_data);
-                let longest = old_lines.max(new_lines);
-                if longest == 0 {
-                    // Two empty blobs carry no identity signal (git's
-                    // rename tracking skips empty files too).
-                    continue;
-                }
-                let (_, removals) = line_diff_counts(&old_data, &new_data);
-                let common = old_lines.saturating_sub(removals);
-                let similarity = common as f64 / longest as f64;
-                if similarity >= RENAME_SIMILARITY {
+        for (deleted_index, old_blob) in deleted_blobs.iter().enumerate() {
+            let Some(old_blob) = old_blob else { continue };
+            for (added_index, new_blob) in added_blobs.iter().enumerate() {
+                let Some(new_blob) = new_blob else { continue };
+                if let Some(similarity) = blob_similarity(old_blob, new_blob) {
                     candidates.push((similarity, deleted_index, added_index));
                 }
             }
@@ -264,6 +286,96 @@ fn detect_renames(
     }
 
     Ok(())
+}
+
+/// A blob materialized for the fuzzy pass, with its line count.
+struct FuzzyBlob {
+    data: Vec<u8>,
+    lines: u64,
+}
+
+/// Materialize each entry's blob for similarity testing, or `None`
+/// when the blob exceeds the per-blob cap or the remaining byte
+/// budget. Sizes come from object headers, so an oversized blob (a
+/// replaced multi-gigabyte binary) is never loaded into memory just to
+/// rule out a rename. Entries are visited in the caller's
+/// (path-sorted) order, keeping budget truncation deterministic.
+fn load_fuzzy_blobs(
+    repo: &gix::Repository,
+    entries: &[(PathBuf, gix::ObjectId)],
+    budget: u64,
+) -> Result<Vec<Option<FuzzyBlob>>, GitError> {
+    let mut remaining = budget;
+    let mut blobs = Vec::with_capacity(entries.len());
+    for (_, oid) in entries {
+        let size = repo
+            .find_header(*oid)
+            .map_err(|e| GitError::Internal(e.to_string()))?
+            .size();
+        if size > FUZZY_MAX_BLOB_BYTES || size > remaining {
+            blobs.push(None);
+            continue;
+        }
+        remaining -= size;
+        let data = read_blob_data(repo, oid)?;
+        let lines = count_lines(&data);
+        blobs.push(Some(FuzzyBlob { data, lines }));
+    }
+    Ok(blobs)
+}
+
+/// Content similarity in `[0, 1]`, or `None` below the rename
+/// threshold.
+///
+/// Primary measure: surviving lines over the longer side. When that
+/// misses and both blobs are small enough, a byte-level diff decides
+/// instead — a *one-line* file with any edit has zero common lines, so
+/// line granularity alone would never recognize renames of single-line
+/// sources (minified bundles, one-liner configs).
+fn blob_similarity(old: &FuzzyBlob, new: &FuzzyBlob) -> Option<f64> {
+    let longest_lines = old.lines.max(new.lines);
+    if longest_lines == 0 {
+        // Two empty blobs carry no identity signal (git's rename
+        // tracking skips empty files too).
+        return None;
+    }
+    let (_, removals) = line_diff_counts(&old.data, &new.data);
+    let common = old.lines.saturating_sub(removals);
+    let line_similarity = common as f64 / longest_lines as f64;
+    if line_similarity >= RENAME_SIMILARITY {
+        return Some(line_similarity);
+    }
+
+    let longest_bytes = old.data.len().max(new.data.len());
+    if longest_bytes > 0 && longest_bytes <= BYTE_SIMILARITY_MAX_BLOB_BYTES {
+        let input = InternedInput::new(ByteTokens(&old.data), ByteTokens(&new.data));
+        let diff = Diff::compute(Algorithm::Histogram, &input);
+        let common_bytes = (old.data.len() as u64).saturating_sub(u64::from(diff.count_removals()));
+        let byte_similarity = common_bytes as f64 / longest_bytes as f64;
+        if byte_similarity >= RENAME_SIMILARITY {
+            return Some(byte_similarity);
+        }
+    }
+
+    None
+}
+
+/// Byte-granularity token source for the similarity fallback (the
+/// vendored imara-diff tokenizes `&[u8]` by *lines*, which is exactly
+/// what the fallback must not do).
+struct ByteTokens<'a>(&'a [u8]);
+
+impl<'a> gix::diff::blob::TokenSource for ByteTokens<'a> {
+    type Token = u8;
+    type Tokenizer = std::iter::Copied<std::slice::Iter<'a, u8>>;
+
+    fn tokenize(&self) -> Self::Tokenizer {
+        self.0.iter().copied()
+    }
+
+    fn estimate_tokens(&self) -> u32 {
+        u32::try_from(self.0.len()).unwrap_or(u32::MAX)
+    }
 }
 
 /// Line-level (added, removed) counts between two blob payloads using
@@ -321,5 +433,35 @@ mod tests {
         let old = b"fn a() {}\nfn b() {}\n";
         let new = b"fn a_renamed_with_many_bytes() {}\nfn b() {}\n";
         assert_eq!(line_diff_counts(old, new), (1, 1));
+    }
+
+    fn fuzzy(data: &[u8]) -> FuzzyBlob {
+        FuzzyBlob {
+            data: data.to_vec(),
+            lines: count_lines(data),
+        }
+    }
+
+    #[test]
+    fn blob_similarity_falls_back_to_bytes_for_single_line_files() {
+        // A long one-line file with a small edit has zero common
+        // *lines*; the byte-level fallback must still recognize it.
+        let old = format!("export const x = [{}];", "1, ".repeat(200));
+        let new = old.replace("const x", "const y");
+        let similarity = blob_similarity(&fuzzy(old.as_bytes()), &fuzzy(new.as_bytes()))
+            .expect("one-line edit should stay above the rename threshold");
+        assert!(similarity >= RENAME_SIMILARITY, "got {similarity}");
+    }
+
+    #[test]
+    fn blob_similarity_rejects_dissimilar_single_line_files() {
+        let old = b"export const alpha_configuration_value = 1;";
+        let new = b"#!/bin/sh @@ ~~ [[ ]] %% ^^ && || ;; :: ??";
+        assert_eq!(blob_similarity(&fuzzy(old), &fuzzy(new)), None);
+    }
+
+    #[test]
+    fn blob_similarity_ignores_empty_blobs() {
+        assert_eq!(blob_similarity(&fuzzy(b""), &fuzzy(b"")), None);
     }
 }

@@ -145,7 +145,14 @@ struct FileAccumulator {
     commit_frequency: u64,
     churn_added: u64,
     churn_removed: u64,
-    /// Added lines per author identity (authorship signal).
+    /// Everyone who touched the file with any change, for
+    /// `history.authors`.
+    authors: std::collections::HashSet<String>,
+    /// Added lines per author — the *authorship* signal driving
+    /// ownership and minor-contributor classification. Deletion-only /
+    /// rename-only touches deliberately never appear here: a zero
+    /// entry would classify the toucher as a sub-5% minor contributor
+    /// despite having written nothing.
     author_lines: HashMap<String, u64>,
     last_change_seconds: i64,
     sum_of_coupling: u64,
@@ -162,6 +169,7 @@ impl FileAccumulator {
         self.commit_frequency += other.commit_frequency;
         self.churn_added += other.churn_added;
         self.churn_removed += other.churn_removed;
+        self.authors.extend(other.authors);
         for (author, lines) in other.author_lines {
             *self.author_lines.entry(author).or_insert(0) += lines;
         }
@@ -264,10 +272,14 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             acc.commit_frequency += 1;
             acc.churn_added += change.added;
             acc.churn_removed += change.removed;
+            acc.authors.insert(author.clone());
             // Authorship = added lines only: deleting someone else's
-            // code must not count as writing code, or a large cleanup
-            // would hand the janitor near-half ownership.
-            *acc.author_lines.entry(author.clone()).or_insert(0) += change.added;
+            // code (or renaming a file) must not count as writing
+            // code, and a zero-line entry would misclassify the
+            // toucher as a minor contributor.
+            if change.added > 0 {
+                *acc.author_lines.entry(author.clone()).or_insert(0) += change.added;
+            }
             acc.last_change_seconds = acc.last_change_seconds.max(seconds);
             if coupling_eligible {
                 acc.sum_of_coupling += coupled_others;
@@ -291,7 +303,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
 
 /// Fold a walk-time accumulator into the public [`FileHistory`].
 fn finalize_file(acc: FileAccumulator, first_seconds: i64, head_seconds: i64) -> FileHistory {
-    let authors = acc.author_lines.len() as u64;
+    let authors = acc.authors.len() as u64;
     let total_lines: u64 = acc.author_lines.values().sum();
     let (minor_contributors, ownership) = if total_lines == 0 {
         // A history of pure renames/mode changes/deletions adds no
@@ -585,6 +597,9 @@ mod tests {
     fn finalize_ownership_and_minor_contributors() {
         let mut acc = FileAccumulator::default();
         // 100 added lines total: alice 90, bob 7, carol 3.
+        for name in ["alice@x", "bob@x", "carol@x"] {
+            acc.authors.insert(name.into());
+        }
         acc.author_lines.insert("alice@x".into(), 90);
         acc.author_lines.insert("bob@x".into(), 7);
         acc.author_lines.insert("carol@x".into(), 3);
@@ -593,6 +608,21 @@ mod tests {
         // carol (3%) is minor; bob (7%) is not.
         assert_eq!(fh.minor_contributors, 1);
         assert!((fh.ownership - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn deletion_only_authors_count_as_authors_but_not_minor_contributors() {
+        // dave touched the file (pure deletion) — he is an author, but
+        // a zero-added entry must not be classified as a sub-5% minor
+        // contributor: he wrote nothing, minor or otherwise.
+        let mut acc = FileAccumulator::default();
+        acc.authors.insert("alice@x".into());
+        acc.authors.insert("dave@x".into());
+        acc.author_lines.insert("alice@x".into(), 100);
+        let fh = finalize_file(acc, 0, 0);
+        assert_eq!(fh.authors, 2);
+        assert_eq!(fh.minor_contributors, 0);
+        assert!((fh.ownership - 1.0).abs() < 1e-9);
     }
 
     #[test]
