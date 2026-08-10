@@ -233,7 +233,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
     // to a dead prior occupant of that path, and are redirected to a
     // per-boundary tombstone identity so the surviving file never
     // inherits them.
-    let mut aliases: HashMap<PathBuf, FileIdentity> = HashMap::new();
+    let mut aliases: HashMap<PathBuf, AliasEntry> = HashMap::new();
     let mut tombstones: usize = 0;
 
     // Date-order traversal (`git rev-list --date-order`): commits come
@@ -299,17 +299,24 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // prior occupant. The newer accumulation must contain an
         // actual addition — a parallel branch's *edits* walked before
         // an unrelated branch's deletion (merge retained the file) are
-        // modifications only and must not split the identity.
+        // modifications only and must not split the identity. A
+        // *consumed* alias carries the same proof: the redirected
+        // occupant's creation has already been accumulated, so an
+        // older deletion at the path belongs to a yet-older occupant.
         for (change, target) in changes.iter().zip(targets.iter_mut()) {
-            if change.is_deletion
-                && !aliases.contains_key(&change.path)
-                && files
+            if !change.is_deletion {
+                continue;
+            }
+            let recreation_seen = match aliases.get(&change.path) {
+                None => files
                     .get(&FileIdentity::Path(change.path.clone()))
-                    .is_some_and(|acc| acc.has_addition)
-            {
+                    .is_some_and(|acc| acc.has_addition),
+                Some(entry) => entry.consumed,
+            };
+            if recreation_seen {
                 tombstones += 1;
                 let tombstone = FileIdentity::Tombstone(tombstones);
-                aliases.insert(change.path.clone(), tombstone.clone());
+                aliases.insert(change.path.clone(), AliasEntry::new(tombstone.clone()));
                 *target = tombstone;
             }
         }
@@ -325,7 +332,13 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 // reconnect the lineage by dropping a stale destination
                 // boundary, so pre-rename commits flow to the survivor
                 // again instead of a tombstone.
-                if matches!(aliases.get(source), Some(FileIdentity::Tombstone(_))) {
+                if matches!(
+                    aliases.get(source),
+                    Some(AliasEntry {
+                        target: FileIdentity::Tombstone(_),
+                        ..
+                    })
+                ) {
                     aliases.remove(source);
                 }
                 continue;
@@ -333,16 +346,25 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // First-visited (newest) rename wins when parallel branches
             // renamed the same source differently — deterministic,
             // though the losing lineage keeps only its own direct
-            // commits. A *tombstone* alias is reclaimable, though: this
-            // rename explains where the fenced-off occupant actually
-            // went (it was renamed away before the newer occupant
-            // arrived).
-            if matches!(aliases.get(source), Some(FileIdentity::Path(_))) {
+            // commits. A *consumed* alias is different: the newer
+            // occupant's creation has already been accumulated through
+            // it, so this older rename describes a previous occupant
+            // and takes the alias over. A *tombstone* alias is likewise
+            // reclaimable: this rename explains where the fenced-off
+            // occupant actually went (it was renamed away before the
+            // newer occupant arrived).
+            if matches!(
+                aliases.get(source),
+                Some(AliasEntry {
+                    target: FileIdentity::Path(_),
+                    consumed: false,
+                })
+            ) {
                 continue;
             }
             // The alias redirects the *older* commits that are walked
             // after this rename (the pre-rename lineage).
-            aliases.insert(source.clone(), target.clone());
+            aliases.insert(source.clone(), AliasEntry::new(target.clone()));
             // Anything already accumulated under the source path is
             // *newer* than the rename. Fold it into the surviving
             // identity only when it belongs to the renamed lineage (a
@@ -365,12 +387,30 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // are a live lineage this commit moves elsewhere.
             if !commit_sources.contains(&change.path) {
                 tombstones += 1;
-                aliases.insert(change.path.clone(), FileIdentity::Tombstone(tombstones));
+                aliases.insert(
+                    change.path.clone(),
+                    AliasEntry::new(FileIdentity::Tombstone(tombstones)),
+                );
             }
         }
 
         // ── Phase 4: accumulate.
         for (change, target) in changes.iter().zip(targets.iter()) {
+            // An addition that resolved *through* an alias is the
+            // redirected occupant's birth: every deletion or rename
+            // of this path walked from here on is older than that
+            // birth and belongs to a previous occupant, so mark the
+            // alias consumed (see `AliasEntry`). The target equality
+            // check pins this to the resolving entry — an alias
+            // installed by this same commit's rename did not redirect
+            // this addition (phase 1 resolved against the pre-commit
+            // map) and stays live for the pre-rename lineage.
+            if change.is_addition
+                && let Some(entry) = aliases.get_mut(&change.path)
+                && entry.target == *target
+            {
+                entry.consumed = true;
+            }
             let newly_tracked = !files.contains_key(target);
             let acc = files.entry(target.clone()).or_default();
             if newly_tracked {
@@ -523,6 +563,28 @@ enum FileIdentity {
     Tombstone(usize),
 }
 
+/// One rename-identity redirection. `consumed` flips once the walk
+/// accumulates the *creation* of the aliased path through this entry:
+/// the redirected occupant's birth has been found, so anything older
+/// at that path belongs to a previous occupant — an older rename may
+/// then take the alias over, and an older deletion fences history off
+/// behind a fresh tombstone (matching the delete-then-recreate
+/// boundary).
+#[derive(Clone, Debug)]
+struct AliasEntry {
+    target: FileIdentity,
+    consumed: bool,
+}
+
+impl AliasEntry {
+    fn new(target: FileIdentity) -> Self {
+        Self {
+            target,
+            consumed: false,
+        }
+    }
+}
+
 /// Resolve a historical path to its head-relative identity.
 ///
 /// A *single* lookup, deliberately not chain-following: every value in
@@ -531,10 +593,10 @@ enum FileIdentity {
 /// tombstone) that cut off a prior occupant's older changes — chasing
 /// chains through such a boundary would misroute a lineage into a
 /// tombstone.
-fn resolve_alias(aliases: &HashMap<PathBuf, FileIdentity>, path: &Path) -> FileIdentity {
+fn resolve_alias(aliases: &HashMap<PathBuf, AliasEntry>, path: &Path) -> FileIdentity {
     aliases
         .get(path)
-        .cloned()
+        .map(|entry| entry.target.clone())
         .unwrap_or_else(|| FileIdentity::Path(path.to_path_buf()))
 }
 

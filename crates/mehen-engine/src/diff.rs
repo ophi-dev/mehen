@@ -665,7 +665,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // back to a deletion + addition so neither side silently disappears.
     let SplitChanges {
         files: changed,
-        history_suppressed_deletions,
+        mut history_suppressed_deletions,
     } = split_boundary_renames(changed, &is_selected, git_attribute_filters.as_mut())?;
     // When the caller passes explicit `--metric` names, that one list applies
     // to every file. With no `--metric`, defaults are resolved *per file's
@@ -707,6 +707,22 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         filtered.push((cf, utf8_path, language));
+    }
+
+    // A split deletion's lineage is only "carried elsewhere" when its
+    // paired destination row actually entered the history-enriched
+    // source-code pipeline above. A destination diverted to the
+    // documentation pipeline (Markdown) — or dropped by attribute
+    // filters or a non-UTF-8 path — receives no history columns, so
+    // suppressing the deletion too would erase the lineage from the
+    // output entirely; the deletion then keeps its history as the
+    // lineage's only trace.
+    {
+        let history_consuming_sources: std::collections::HashSet<&PathBuf> = filtered
+            .iter()
+            .filter_map(|(cf, _, _)| cf.source_path.as_ref())
+            .collect();
+        history_suppressed_deletions.retain(|src| history_consuming_sources.contains(src));
     }
 
     // History enrichment (`history.*`): repository-scope process

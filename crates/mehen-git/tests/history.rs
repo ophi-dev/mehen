@@ -1641,3 +1641,128 @@ fn tombstones_cannot_collide_with_real_control_byte_paths() {
     assert_eq!(dest.commit_frequency, 2);
     assert_eq!(dest.churn_added, 1);
 }
+
+/// A source path reused and renamed *again*: `a.rs → b.rs`, then an
+/// unrelated `a.rs` is created and renamed to `c.rs`. The newest
+/// rename's alias is consumed once the walk accumulates the reused
+/// file's creation, so the older `a.rs → b.rs` rename must take the
+/// alias over — the original lineage belongs to `b.rs`, not `c.rs`.
+#[test]
+fn older_rename_reclaims_a_source_path_reused_by_a_newer_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c1: the original file.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+
+    // c2: edit the original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(1));
+
+    // c3: the original moves to b.rs.
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "move to b"],
+        ALICE,
+        t(2),
+    );
+
+    // c4: an unrelated file reuses the a.rs path.
+    std::fs::write(dir.path().join("a.rs"), "fn unrelated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "new a"], CAROL, t(3));
+
+    // c5: the reuse moves to c.rs.
+    git(dir.path(), &["mv", "a.rs", "c.rs"], CAROL, t(4));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "move to c"],
+        CAROL,
+        t(4),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // b.rs carries the original lineage: creation, edit, rename.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 3);
+    assert_eq!(b.churn_added, 4);
+
+    // c.rs carries only the reuse: creation and rename.
+    let c = history.file(Path::new("c.rs")).unwrap();
+    assert_eq!(c.commit_frequency, 2);
+    assert_eq!(c.churn_added, 1);
+}
+
+/// Delete, recreate, rename: the deletion (and everything older) at
+/// the reused path belongs to a dead prior occupant and must not leak
+/// into the rename survivor through the (already consumed) alias.
+#[test]
+fn deleted_occupant_of_a_reused_then_renamed_path_stays_fenced_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c1 + c2: a prior occupant lives and grows at a.rs.
+    std::fs::write(dir.path().join("a.rs"), "fn old0() {}\nfn old1() {}\n").unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn old0() {}\nfn old1() {}\nfn old2() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow old a"],
+        BOB,
+        t(1),
+    );
+
+    // c3: the occupant dies.
+    git(dir.path(), &["rm", "-q", "a.rs"], ALICE, t(2));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], ALICE, t(2));
+
+    // c4: an unrelated file reuses the path.
+    std::fs::write(dir.path().join("a.rs"), "fn unrelated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "new a"], CAROL, t(3));
+
+    // c5: the reuse moves to c.rs.
+    git(dir.path(), &["mv", "a.rs", "c.rs"], CAROL, t(4));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "move to c"],
+        CAROL,
+        t(4),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // The survivor sees only the reuse's creation and rename — not
+    // the dead occupant's creation, edit, or deletion.
+    let c = history.file(Path::new("c.rs")).unwrap();
+    assert_eq!(c.commit_frequency, 2);
+    assert_eq!(c.churn_added, 1);
+    assert_eq!(c.churn_removed, 0);
+    assert_eq!(c.authors, 1);
+
+    // The dead occupant's history is fenced off behind a tombstone,
+    // not reported under the vacated path.
+    assert!(history.file(Path::new("a.rs")).is_none());
+}

@@ -964,3 +964,71 @@ fn top_offenders_follows_directory_symlink_roots() {
     assert_eq!(offenders.len(), 1);
     assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
 }
+
+#[test]
+fn cross_language_rename_to_markdown_keeps_deletion_history() {
+    // `a.py → a.md` splits into a deletion + addition, and the
+    // Markdown destination is routed to the documentation pipeline,
+    // which carries no history columns. The Python deletion row must
+    // therefore keep its baseline history — suppressing it too (as
+    // for a split whose destination stays in the source-code
+    // pipeline) would erase the lineage from the output entirely.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "md-base"]);
+
+    git_ok(dir.path(), &["mv", "a.py", "a.md"]);
+    commit_all(dir.path(), "convert to markdown");
+    git_ok(dir.path(), &["tag", "md-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "md-base",
+            "--to",
+            "md-head",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("a.py deletion row must survive: {files:?}"));
+    assert_eq!(row["is_deleted"].as_bool(), Some(true));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    // Two commits touched a.py before the conversion.
+    assert_eq!(metric["baseline"].as_f64(), Some(2.0));
+    assert_eq!(metric["current"].as_f64(), Some(0.0));
+}
