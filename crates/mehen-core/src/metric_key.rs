@@ -77,6 +77,15 @@ pub mod keys {
     pub const NPA: &str = "npa";
     pub const NPM: &str = "npm";
     pub const WMC: &str = "wmc";
+    /// Rolled-up cognitive complexity as published onto the root
+    /// `MetricSpace` by the shared walker.
+    pub const COGNITIVE_SUM: &str = "cognitive.sum";
+
+    // SQL-analyzer-owned keys referenced by the engine's history
+    // composites (relative churn and hotspot read the SQL equivalents
+    // of `loc.sloc` / `cognitive.sum` for SQL files).
+    pub const SQL_LOC_CODE: &str = "sql.loc.code";
+    pub const SQL_COGNITIVE_COMPLEXITY: &str = "sql.cognitive_complexity";
 
     // Git history process metrics (`history.*` family, research
     // foundation §6). Repository-scope: published by the engine's

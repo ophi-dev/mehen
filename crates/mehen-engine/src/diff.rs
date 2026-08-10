@@ -593,17 +593,17 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         .ignore_git_attributes
         .then(|| RevisionGitAttributeFilters::new(&repo, &from_ref, &to_ref))
         .transpose()?;
+    // Shared selection predicate — the rename splitter and the main
+    // filter loop must agree, or a rename could be split here and then
+    // dropped there (or vice versa).
+    let is_selected = |p: &Path| {
+        legacy_path_is_selected(p, &paths)
+            && (include.is_empty() || include.is_match(p))
+            && (exclude.is_empty() || !exclude.is_match(p))
+    };
     // Rename pairs straddling a path/language/attribute boundary fall
     // back to a deletion + addition so neither side silently disappears.
-    let changed = split_boundary_renames(
-        changed,
-        &|p: &Path| {
-            legacy_path_is_selected(p, &paths)
-                && (include.is_empty() || include.is_match(p))
-                && (exclude.is_empty() || !exclude.is_match(p))
-        },
-        git_attribute_filters.as_mut(),
-    );
+    let changed = split_boundary_renames(changed, &is_selected, git_attribute_filters.as_mut());
     // When the caller passes explicit `--metric` names, that one list applies
     // to every file. With no `--metric`, defaults are resolved *per file's
     // language*: SQL files publish only `sql.*` keys, so the source-code
@@ -619,10 +619,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     let mut markdown_files: Vec<mehen_git::ChangedFile> = Vec::new();
     for cf in changed {
         let p = &cf.path;
-        if !legacy_path_is_selected(p, &paths)
-            || (!include.is_empty() && !include.is_match(p))
-            || (!exclude.is_empty() && exclude.is_match(p))
-        {
+        if !is_selected(p) {
             continue;
         }
 
@@ -1122,10 +1119,61 @@ fn get_changed_files(
         && ctx.event_name == "push"
         && let Some(ref files) = ctx.changed_files
     {
-        return Ok(files.clone());
+        return Ok(recover_payload_renames(repo, from, to, files.clone()));
     }
 
     mehen_git::changed_files(repo, from, to)
+}
+
+/// GitHub push payloads expose a rename as `removed` + `added` with no
+/// source identity, so the new row would compare against a zero
+/// baseline (and, with history metrics, a full-history spike). Recover
+/// rename pairs from the real revision tree diff: when it joins a
+/// payload deletion + addition into one rename, replace the pair with
+/// the joined entry. The payload passes through untouched when the
+/// tree diff is unavailable (e.g. force-pushed refs that no longer
+/// resolve) or reports no renames.
+fn recover_payload_renames(
+    repo: &gix::Repository,
+    from: &str,
+    to: &str,
+    files: Vec<mehen_git::ChangedFile>,
+) -> Vec<mehen_git::ChangedFile> {
+    let Ok(tree_diff) = mehen_git::changed_files(repo, from, to) else {
+        return files;
+    };
+    let renames: std::collections::HashMap<PathBuf, PathBuf> = tree_diff
+        .into_iter()
+        .filter_map(|cf| cf.source_path.map(|source| (cf.path, source)))
+        .collect();
+    if renames.is_empty() {
+        return files;
+    }
+
+    let deleted_paths: std::collections::HashSet<PathBuf> = files
+        .iter()
+        .filter(|f| f.status == ChangeStatus::Deleted)
+        .map(|f| f.path.clone())
+        .collect();
+    let mut consumed_sources: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(files.len());
+    for file in &files {
+        if file.status == ChangeStatus::Added
+            && let Some(source) = renames.get(&file.path)
+            && deleted_paths.contains(source)
+        {
+            consumed_sources.insert(source.clone());
+            out.push(mehen_git::ChangedFile {
+                path: file.path.clone(),
+                status: ChangeStatus::Modified,
+                source_path: Some(source.clone()),
+            });
+        } else {
+            out.push(file.clone());
+        }
+    }
+    out.retain(|f| !(f.status == ChangeStatus::Deleted && consumed_sources.contains(&f.path)));
+    out
 }
 
 fn normalize_path_filters(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -1614,6 +1662,57 @@ binary.md binary
             !paths.contains(&"generated.py"),
             "attribute-excluded destination must be dropped: {paths:?}"
         );
+    }
+
+    #[test]
+    fn recover_payload_renames_joins_push_payload_rename_pairs() {
+        // A GitHub push payload reports a rename as removed + added;
+        // the real tree diff must re-join the pair so the diff
+        // compares against the old path's baseline.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("before.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "payload-base"]);
+        git_ok(dir.path(), &["mv", "before.py", "after.py"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "rename"]);
+        git_ok(dir.path(), &["tag", "payload-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let payload = vec![
+            mehen_git::ChangedFile {
+                path: PathBuf::from("before.py"),
+                status: ChangeStatus::Deleted,
+                source_path: None,
+            },
+            mehen_git::ChangedFile {
+                path: PathBuf::from("after.py"),
+                status: ChangeStatus::Added,
+                source_path: None,
+            },
+        ];
+        let out = recover_payload_renames(&repo, "payload-base", "payload-head", payload);
+        assert_eq!(out.len(), 1, "pair must join: {out:?}");
+        assert_eq!(out[0].path, PathBuf::from("after.py"));
+        assert_eq!(out[0].status, ChangeStatus::Modified);
+        assert_eq!(out[0].source_path.as_deref(), Some(Path::new("before.py")));
+    }
+
+    #[test]
+    fn recover_payload_renames_passes_payload_through_when_refs_unresolvable() {
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        let repo = gix::discover(dir.path()).unwrap();
+        let payload = vec![mehen_git::ChangedFile {
+            path: PathBuf::from("a.py"),
+            status: ChangeStatus::Added,
+            source_path: None,
+        }];
+        let out = recover_payload_renames(&repo, "no-such-ref", "also-missing", payload.clone());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, payload[0].path);
     }
 
     fn analysis_with_diagnostics(diagnostics: Vec<ParseDiagnostic>) -> LanguageAnalysis {

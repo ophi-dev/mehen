@@ -922,3 +922,45 @@ fn top_offenders_loads_history_for_nested_repositories() {
     assert_eq!(by_name("inner.py"), 2.0);
     assert_eq!(by_name("outer.py"), 1.0);
 }
+
+#[cfg(unix)]
+#[test]
+fn top_offenders_follows_directory_symlink_roots() {
+    // `mehen top-offenders -M history.… /outside/link-to-repo` where
+    // the link's parent is not a repository must discover the target
+    // repository instead of failing with RepoNotFound.
+    let repo_dir = tempfile::tempdir().expect("repo tempdir");
+    init_git_repo(repo_dir.path());
+    write_python(repo_dir.path(), "linked.py", "a = 1\n");
+    commit_all(repo_dir.path(), "one");
+    write_python(repo_dir.path(), "linked.py", "a = 1\nb = 2\n");
+    commit_all(repo_dir.path(), "two");
+
+    let outside = tempfile::tempdir().expect("non-repo tempdir");
+    let link = outside.path().join("link-to-repo");
+    std::os::unix::fs::symlink(repo_dir.path(), &link).expect("dir symlink");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(outside.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            link.to_str().expect("UTF-8 temp path"),
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 1);
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}

@@ -27,6 +27,32 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let mut entries: Vec<TopOffenderEntry> = Vec::new();
     let mut analysis_errors: Vec<AnalysisErrorRecord> = Vec::new();
+    // `history.*` selectors need repository histories. Root-load
+    // failures surface as `analysis_errors` (this API has no fatal
+    // channel); per-file lazy discovery still covers repositories the
+    // eager pass missed.
+    let histories = if input
+        .selectors
+        .iter()
+        .any(|s| s.key.as_str().starts_with("history."))
+    {
+        let loaded = RepoHistories::new();
+        for root in &input.paths {
+            if let Err(e) = loaded.load_root(root.as_std_path()) {
+                analysis_errors.push(AnalysisErrorRecord {
+                    path: root.clone(),
+                    side: DiffSide::Head,
+                    diagnostics: vec![ParseDiagnostic::warning(
+                        "engine.history_unavailable",
+                        format!("history metrics unavailable for {root}: {e}"),
+                    )],
+                });
+            }
+        }
+        Some(loaded)
+    } else {
+        None
+    };
     // Dedup files across roots. Without this, callers passing
     // overlapping paths (`.` plus `src`, or a directory plus a file
     // inside it) would rank the same file multiple times, crowding
@@ -58,7 +84,7 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
             continue;
         };
         let source = SourceFile::new(entry.clone(), language, text);
-        let Ok(analysis) = analyzer.analyze(&source, &input.config) else {
+        let Ok(mut analysis) = analyzer.analyze(&source, &input.config) else {
             continue;
         };
         // Migrated analyzers can return `Ok(...)` with a partial
@@ -68,6 +94,18 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         // they were measured would mislead CI/policy callers.
         if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
             continue;
+        }
+
+        // Fold the `history.*` family into the metric set so history
+        // selectors rank on real values.
+        if let Some(histories) = histories.as_ref()
+            && let Some((fh, head_seconds)) = histories.file(entry.as_std_path())
+        {
+            crate::history_metrics::inject_history_metrics(
+                &mut analysis.root.metrics,
+                &fh,
+                head_seconds,
+            );
         }
 
         let scores: Vec<f64> = input
@@ -385,11 +423,12 @@ impl RepoHistories {
     /// root, propagating errors — a requested history ranking must not
     /// silently be all zeros because a root isn't in a (full) clone.
     ///
-    /// A file or symlink root discovers from its *lexical* parent so a
-    /// tracked symlink pointing outside its repository still resolves
-    /// to the repository that tracks it.
+    /// A directory root (or a symlink to one) discovers from its
+    /// canonicalized target; a file or file-symlink root discovers
+    /// from its *lexical* parent so a tracked symlink pointing outside
+    /// its repository still resolves to the repository that tracks it.
     fn load_root(&self, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let metadata = std::fs::symlink_metadata(root)
+        let metadata = std::fs::metadata(root)
             .map_err(|e| format!("cannot resolve path {}: {e}", root.display()))?;
         let discover_from = if metadata.is_dir() {
             std::fs::canonicalize(root)?
@@ -422,30 +461,52 @@ impl RepoHistories {
     /// The per-file history entry and that repository's deterministic
     /// "now" for one analyzed file. Untracked files and files outside
     /// every discoverable repository read as absent.
+    ///
+    /// The lock is held only for cache reads/writes — repository
+    /// discovery and (expensive) cold history walks run unlocked so
+    /// concurrent workers analyzing other repositories never serialize
+    /// behind one walk. Two workers may race a cold walk; the first
+    /// inserted result wins and the duplicate is discarded (benign).
     fn file(&self, file_path: &Path) -> Option<(mehen_git::FileHistory, i64)> {
         let canonical = canonical_file_path(file_path)?;
         let parent = canonical.parent()?.to_path_buf();
-        let mut state = self.state.lock().ok()?;
-        let workdir = match state.dir_to_workdir.get(&parent) {
-            Some(cached) => cached.clone(),
+
+        let cached_workdir = {
+            let state = self.state.lock().expect("repo histories mutex poisoned");
+            state.dir_to_workdir.get(&parent).cloned()
+        };
+        let workdir = match cached_workdir {
+            Some(cached) => cached,
             None => {
                 let discovered = mehen_git::open_repo_at(&parent)
                     .ok()
                     .and_then(|repo| repo.workdir().and_then(|wd| std::fs::canonicalize(wd).ok()));
-                state.dir_to_workdir.insert(parent, discovered.clone());
-                discovered
+                let mut state = self.state.lock().expect("repo histories mutex poisoned");
+                state
+                    .dir_to_workdir
+                    .entry(parent)
+                    .or_insert(discovered)
+                    .clone()
             }
         }?;
-        if !state.histories.contains_key(&workdir) {
-            let walked = mehen_git::open_repo_at(&workdir).ok().and_then(|repo| {
+
+        let walked = {
+            let state = self.state.lock().expect("repo histories mutex poisoned");
+            state.histories.contains_key(&workdir)
+        };
+        if !walked {
+            let history = mehen_git::open_repo_at(&workdir).ok().and_then(|repo| {
                 mehen_git::collect_history(&repo, "HEAD")
                     .map_err(|e| {
                         log::warn!("history walk failed for {}: {e}", workdir.display());
                     })
                     .ok()
             });
-            state.histories.insert(workdir.clone(), walked);
+            let mut state = self.state.lock().expect("repo histories mutex poisoned");
+            state.histories.entry(workdir.clone()).or_insert(history);
         }
+
+        let state = self.state.lock().expect("repo histories mutex poisoned");
         let history = state.histories.get(&workdir)?.as_ref()?;
         let relative = canonical.strip_prefix(&workdir).ok()?;
         history
@@ -974,6 +1035,66 @@ mod tests {
         // ranking.
         let space = space_with_metrics(&[("nom.functions.max", 11.0), ("nom.functions_max", 99.0)]);
         assert_eq!(read_metric(&sel("nom.functions.max"), &space), 11.0);
+    }
+
+    #[test]
+    fn rank_top_offenders_ranks_history_selectors_on_real_values() {
+        // The exported API must honor `history.*` selectors just like
+        // the CLI path — a library caller supplying
+        // `history.commit_frequency` gets a history-based ranking, not
+        // all zeros in alphabetical order.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Mehen Test")
+                .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+                .env("GIT_COMMITTER_NAME", "Mehen Test")
+                .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        // aaa_calm.py sorts first alphabetically but has one commit;
+        // zzz_busy.py has two — the history ranking must invert the
+        // alphabetical order.
+        std::fs::write(dir.path().join("aaa_calm.py"), "a = 1\n").unwrap();
+        std::fs::write(dir.path().join("zzz_busy.py"), "z = 1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("zzz_busy.py"), "z = 1\ny = 2\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "two"]);
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("history.commit_frequency")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        assert!(report.analysis_errors.is_empty(), "no history-load errors");
+        let ranked: Vec<(&str, f64)> = report
+            .entries
+            .iter()
+            .map(|e| (e.path.file_name().unwrap_or(""), e.scores[0]))
+            .collect();
+        assert_eq!(
+            ranked,
+            vec![("zzz_busy.py", 2.0), ("aaa_calm.py", 1.0)],
+            "history selector must drive the ranking"
+        );
     }
 
     #[test]

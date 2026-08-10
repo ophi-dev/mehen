@@ -18,19 +18,21 @@
 //! (code-maat, PyDriller, `git log --no-merges --numstat`):
 //! merge commits are skipped and every other commit is diffed against
 //! its first parent (or the empty tree for root commits). Renames are
-//! detected (git-style similarity tracking): a renamed file keeps its
-//! accumulated history under its head-relative path, and a pure rename
-//! churns no lines.
+//! detected (git-style `-M50%` similarity tracking, implemented
+//! in-crate so it never depends on machine configuration): a renamed
+//! file keeps its accumulated history under its head-relative path,
+//! and a pure rename churns no lines.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gix::diff::blob::{Algorithm, Diff, InternedInput};
-use gix::object::tree::diff::ChangeDetached;
 use gix::revision::walk::Sorting;
 use gix::traverse::commit::simple::CommitTimeOrder;
 
 use crate::GitError;
+use crate::tree_changes::{
+    TreeChange, changes_between_trees, count_lines, line_diff_counts, read_blob_data,
+};
 
 /// Average Gregorian month in seconds (30.436875 days), used to express
 /// code age in months without depending on calendar arithmetic.
@@ -43,7 +45,7 @@ const SECONDS_PER_MONTH: f64 = 2_629_746.0;
 /// signal. All other metrics still count them.
 const MAX_COUPLING_CHANGESET: usize = 30;
 
-/// An author contributing less than this share of a file's churned
+/// An author contributing less than this share of a file's added
 /// lines is a "minor contributor" (PyDriller's fixed 5% threshold,
 /// research foundation §6.3).
 const MINOR_CONTRIBUTOR_SHARE: f64 = 0.05;
@@ -70,12 +72,13 @@ pub struct FileHistory {
     /// lower-cased author email (falling back to the author name when
     /// the email is empty).
     pub authors: u64,
-    /// Authors contributing less than 5% of the file's churned lines
-    /// (`history.minor_contributors`).
+    /// Authors who wrote less than 5% of the file's added lines
+    /// (`history.minor_contributors`, PyDriller's fixed threshold).
     pub minor_contributors: u64,
-    /// Share of churned lines contributed by the single top author
-    /// (`history.ownership`), in `[0, 1]`. `0` when no lines were
-    /// churned at all.
+    /// Share of the file's added lines written by the single top
+    /// author (`history.ownership`), in `[0, 1]`. Only *added* lines
+    /// count as authorship — deleting someone else's code is not
+    /// writing code. `0` when no lines were ever added.
     pub ownership: f64,
     /// Committer timestamp (seconds since epoch) of the last commit
     /// touching the file.
@@ -142,7 +145,7 @@ struct FileAccumulator {
     commit_frequency: u64,
     churn_added: u64,
     churn_removed: u64,
-    /// Churned lines per author identity.
+    /// Added lines per author identity (authorship signal).
     author_lines: HashMap<String, u64>,
     last_change_seconds: i64,
     sum_of_coupling: u64,
@@ -175,11 +178,6 @@ impl FileAccumulator {
 /// per modified blob; results depend only on the repository state at
 /// `rev`.
 pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHistory, GitError> {
-    // Pin the diff algorithm so rename-similarity classification (and
-    // thus per-file identity and churn) never depends on user/machine
-    // git configuration.
-    let repo = crate::pinned_diff_repo(repo)?;
-    let repo = &repo;
     let head_id = repo
         .rev_parse_single(rev)
         .map_err(|_| GitError::RefNotFound(rev.to_string()))?;
@@ -189,6 +187,11 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         .peel_to_commit()
         .map_err(|e| GitError::Internal(e.to_string()))?;
     let head_seconds = commit_seconds(&head_commit)?;
+    // The walked rev's tree, used to tell a rename's *source lineage*
+    // apart from a distinct file later re-created at the same path.
+    let head_tree = head_commit
+        .tree()
+        .map_err(|e| GitError::Internal(e.to_string()))?;
 
     let mut files: HashMap<PathBuf, FileAccumulator> = HashMap::new();
     let mut first_commit_seconds = head_seconds;
@@ -234,13 +237,26 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             let path = resolve_alias(&aliases, &change.path);
             if let Some(source) = &change.source_path
                 && *source != path
+                // First-visited (newest) rename wins when parallel
+                // branches renamed the same source differently —
+                // deterministic, though the losing lineage keeps only
+                // its own direct commits (path-keyed history cannot
+                // split one source between two destinations).
+                && !aliases.contains_key(source)
             {
+                // The alias redirects the *older* commits that are
+                // walked after this rename (the pre-rename lineage).
                 aliases.insert(source.clone(), path.clone());
-                // A parallel branch's later-timestamp commit can be
-                // walked before this rename and accumulate under the
-                // source path; fold that stranded accumulator into the
-                // surviving identity so no history is lost.
-                if let Some(stranded) = files.remove(source) {
+                // Anything already accumulated under the source path
+                // is *newer* than the rename. If the source no longer
+                // exists at the walked rev, those are a parallel
+                // branch's edits to the renamed lineage — fold them
+                // into the surviving identity. If it does exist, the
+                // path was re-created as a distinct file afterwards
+                // and its accumulator must stay its own.
+                if !path_exists_at_head(&head_tree, source)?
+                    && let Some(stranded) = files.remove(source)
+                {
                     files.entry(path.clone()).or_default().merge(stranded);
                 }
             }
@@ -248,7 +264,10 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             acc.commit_frequency += 1;
             acc.churn_added += change.added;
             acc.churn_removed += change.removed;
-            *acc.author_lines.entry(author.clone()).or_insert(0) += change.added + change.removed;
+            // Authorship = added lines only: deleting someone else's
+            // code must not count as writing code, or a large cleanup
+            // would hand the janitor near-half ownership.
+            *acc.author_lines.entry(author.clone()).or_insert(0) += change.added;
             acc.last_change_seconds = acc.last_change_seconds.max(seconds);
             if coupling_eligible {
                 acc.sum_of_coupling += coupled_others;
@@ -275,9 +294,9 @@ fn finalize_file(acc: FileAccumulator, first_seconds: i64, head_seconds: i64) ->
     let authors = acc.author_lines.len() as u64;
     let total_lines: u64 = acc.author_lines.values().sum();
     let (minor_contributors, ownership) = if total_lines == 0 {
-        // A history of pure renames/mode changes churns no lines;
-        // ownership is undefined — report zero rather than dividing
-        // by zero.
+        // A history of pure renames/mode changes/deletions adds no
+        // lines; ownership is undefined — report zero rather than
+        // dividing by zero.
         (0, 0.0)
     } else {
         let total = total_lines as f64;
@@ -308,6 +327,12 @@ fn finalize_file(acc: FileAccumulator, first_seconds: i64, head_seconds: i64) ->
 /// `Σᵢ 1 / (1 + e^(−12·tᵢ + 12))` where `tᵢ` is the bug-fixing
 /// commit's time normalized to `[0, 1]` over the walked history
 /// (0 = oldest walked commit, 1 = head).
+///
+/// The result is quantized to 1e-9 before publication: `f64::exp` has
+/// no cross-platform bit-exactness guarantee, and TWR is both
+/// serialized raw and used as a ranking key. Each summand lies in
+/// `[0, 1]` with sub-ULP libm variance, so absorbing everything below
+/// a nanounit keeps identical repositories identical across platforms.
 fn time_weighted_risk(bugfix_seconds: &[i64], first_seconds: i64, head_seconds: i64) -> f64 {
     if bugfix_seconds.is_empty() {
         return 0.0;
@@ -317,7 +342,7 @@ fn time_weighted_risk(bugfix_seconds: &[i64], first_seconds: i64, head_seconds: 
     // order (cross-platform determinism contract).
     let mut times: Vec<i64> = bugfix_seconds.to_vec();
     times.sort_unstable();
-    times
+    let sum: f64 = times
         .iter()
         .map(|&s| {
             let t = if span == 0.0 {
@@ -328,17 +353,25 @@ fn time_weighted_risk(bugfix_seconds: &[i64], first_seconds: i64, head_seconds: 
             };
             1.0 / (1.0 + (-TWR_STEEPNESS * t + TWR_OMEGA).exp())
         })
-        .sum()
+        .sum();
+    (sum * 1e9).round() / 1e9
 }
 
 /// A single file's change within one commit, with line-level churn.
 struct CommitFileChange {
     path: PathBuf,
-    /// The pre-rename path when this change is a rename (never set for
-    /// copies — a copy leaves the source's own history in place).
+    /// The pre-rename path when this change is a rename.
     source_path: Option<PathBuf>,
     added: u64,
     removed: u64,
+}
+
+/// Whether `path` names an entry in the walked rev's tree.
+fn path_exists_at_head(head_tree: &gix::Tree<'_>, path: &Path) -> Result<bool, GitError> {
+    Ok(head_tree
+        .lookup_entry_by_path(path)
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .is_some())
 }
 
 /// Resolve a historical path to its head-relative identity by
@@ -356,22 +389,9 @@ fn resolve_alias(aliases: &HashMap<PathBuf, PathBuf>, path: &Path) -> PathBuf {
     current.to_path_buf()
 }
 
-/// Explicit rename-tracking configuration (equivalent to
-/// `git diff -M50%`), pinned here rather than read from repository /
-/// user configuration so history metrics stay deterministic across
-/// machines.
-pub(crate) fn rewrite_tracking() -> gix::diff::Rewrites {
-    gix::diff::Rewrites {
-        copies: None,
-        percentage: Some(0.5),
-        limit: 1000,
-        track_empty: false,
-    }
-}
-
 /// Diff `commit` against its first parent (or the empty tree for root
-/// commits) with rename tracking, and compute line-level churn per
-/// changed blob.
+/// commits) with in-crate rename tracking, and compute line-level
+/// churn per changed blob.
 fn diff_against_first_parent(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
@@ -388,100 +408,60 @@ fn diff_against_first_parent(
                 .map_err(|e| internal(&e))?;
             Some(parent.tree().map_err(|e| internal(&e))?)
         }
-        // Root commit: `diff_tree_to_tree` treats `None` as the empty tree.
+        // Root commit: diff against the empty tree.
         None => None,
     };
 
-    let options = gix::diff::Options::default().with_rewrites(Some(rewrite_tracking()));
-    let records = repo
-        .diff_tree_to_tree(parent_tree.as_ref(), Some(&to_tree), options)
-        .map_err(|e| internal(&e))?;
-
+    let records = changes_between_trees(repo, parent_tree.as_ref(), &to_tree)?;
     let mut changes = Vec::with_capacity(records.len());
     for change in records {
         let file_change = match change {
-            ChangeDetached::Addition {
-                location,
-                entry_mode,
-                id,
-                ..
+            TreeChange::Added { path, oid } => CommitFileChange {
+                path,
+                source_path: None,
+                added: blob_line_count(repo, &oid)?,
+                removed: 0,
+            },
+            TreeChange::Deleted { path, oid } => CommitFileChange {
+                path,
+                source_path: None,
+                added: 0,
+                removed: blob_line_count(repo, &oid)?,
+            },
+            TreeChange::Modified {
+                path,
+                previous_oid,
+                oid,
             } => {
-                if !entry_mode.is_blob() {
-                    continue;
-                }
-                CommitFileChange {
-                    path: PathBuf::from(location.to_string()),
-                    source_path: None,
-                    added: blob_line_count(repo, &id)?,
-                    removed: 0,
-                }
-            }
-            ChangeDetached::Deletion {
-                location,
-                entry_mode,
-                id,
-                ..
-            } => {
-                if !entry_mode.is_blob() {
-                    continue;
-                }
-                CommitFileChange {
-                    path: PathBuf::from(location.to_string()),
-                    source_path: None,
-                    added: 0,
-                    removed: blob_line_count(repo, &id)?,
-                }
-            }
-            ChangeDetached::Modification {
-                location,
-                previous_entry_mode,
-                previous_id,
-                entry_mode,
-                id,
-            } => {
-                // A modification can also change the entry's *type*
-                // (blob ↔ gitlink/symlink, e.g. a checked-in directory
-                // replaced by a submodule). Only blob-to-blob changes
-                // can be line-diffed; a one-sided blob change counts as
-                // that blob's addition/deletion, and non-blob-only
-                // changes (mode bumps, submodule pointer updates) churn
-                // no lines. Reading a gitlink OID as a blob would fail
-                // the whole walk — the submodule's commit object lives
-                // in the submodule, not in this repository's odb.
-                let (added, removed) = match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
-                    (true, true) if previous_id == id => (0, 0), // mode-only change
-                    (true, true) => blob_line_diff(repo, &previous_id, &id)?,
-                    (true, false) => (0, blob_line_count(repo, &previous_id)?),
-                    (false, true) => (blob_line_count(repo, &id)?, 0),
-                    (false, false) => continue,
+                // Mode-only changes keep the same blob and churn no
+                // lines — skip the two blob reads.
+                let (added, removed) = if previous_oid == oid {
+                    (0, 0)
+                } else {
+                    blob_line_diff(repo, &previous_oid, &oid)?
                 };
                 CommitFileChange {
-                    path: PathBuf::from(location.to_string()),
+                    path,
                     source_path: None,
                     added,
                     removed,
                 }
             }
-            ChangeDetached::Rewrite {
-                source_location,
-                location,
-                diff,
-                entry_mode,
-                copy,
-                ..
+            TreeChange::Renamed {
+                path,
+                source_path,
+                previous_oid,
+                oid,
             } => {
-                if !entry_mode.is_blob() {
-                    continue;
-                }
-                // `diff` is `None` for a perfect rename — zero churn.
-                let (added, removed) = diff
-                    .map(|stats| (u64::from(stats.insertions), u64::from(stats.removals)))
-                    .unwrap_or((0, 0));
+                // A perfect rename keeps the blob — zero churn.
+                let (added, removed) = if previous_oid == oid {
+                    (0, 0)
+                } else {
+                    blob_line_diff(repo, &previous_oid, &oid)?
+                };
                 CommitFileChange {
-                    path: PathBuf::from(location.to_string()),
-                    // Copies keep the source's own history in place;
-                    // only true renames redirect it.
-                    source_path: (!copy).then(|| PathBuf::from(source_location.to_string())),
+                    path,
+                    source_path: Some(source_path),
                     added,
                     removed,
                 }
@@ -500,10 +480,7 @@ fn blob_line_count(repo: &gix::Repository, oid: &gix::ObjectId) -> Result<u64, G
     Ok(count_lines(&data))
 }
 
-/// Line-level (added, removed) counts between two blob versions using
-/// the histogram diff algorithm. The inputs are tokenized into byte
-/// lines explicitly so churn is always counted in lines, matching
-/// `blob_line_count` and the rename-tracking `DiffLineStats`.
+/// Line-level (added, removed) counts between two blob versions.
 fn blob_line_diff(
     repo: &gix::Repository,
     old: &gix::ObjectId,
@@ -511,34 +488,7 @@ fn blob_line_diff(
 ) -> Result<(u64, u64), GitError> {
     let old_data = read_blob_data(repo, old)?;
     let new_data = read_blob_data(repo, new)?;
-    let input = InternedInput::new(
-        gix::diff::blob::sources::byte_lines(&old_data),
-        gix::diff::blob::sources::byte_lines(&new_data),
-    );
-    let diff = Diff::compute(Algorithm::Histogram, &input);
-    Ok((
-        u64::from(diff.count_additions()),
-        u64::from(diff.count_removals()),
-    ))
-}
-
-fn read_blob_data(repo: &gix::Repository, oid: &gix::ObjectId) -> Result<Vec<u8>, GitError> {
-    let object = repo
-        .find_object(*oid)
-        .map_err(|e| GitError::Internal(e.to_string()))?;
-    Ok(object.detach().data)
-}
-
-fn count_lines(data: &[u8]) -> u64 {
-    if data.is_empty() {
-        return 0;
-    }
-    let newlines = data.iter().filter(|&&b| b == b'\n').count() as u64;
-    if data.ends_with(b"\n") {
-        newlines
-    } else {
-        newlines + 1
-    }
+    Ok(line_diff_counts(&old_data, &new_data))
 }
 
 /// Committer timestamp in seconds since the Unix epoch.
@@ -583,15 +533,6 @@ fn is_bugfix_message(message: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn count_lines_handles_trailing_newline_variants() {
-        assert_eq!(count_lines(b""), 0);
-        assert_eq!(count_lines(b"one\n"), 1);
-        assert_eq!(count_lines(b"one\ntwo\n"), 2);
-        assert_eq!(count_lines(b"one\ntwo"), 2);
-        assert_eq!(count_lines(b"no newline"), 1);
-    }
 
     #[test]
     fn bugfix_heuristic_matches_whole_words_only() {
@@ -643,7 +584,7 @@ mod tests {
     #[test]
     fn finalize_ownership_and_minor_contributors() {
         let mut acc = FileAccumulator::default();
-        // 100 churned lines total: alice 90, bob 7, carol 3.
+        // 100 added lines total: alice 90, bob 7, carol 3.
         acc.author_lines.insert("alice@x".into(), 90);
         acc.author_lines.insert("bob@x".into(), 7);
         acc.author_lines.insert("carol@x".into(), 3);

@@ -131,15 +131,17 @@ fn collect_history_computes_all_per_file_statistics() {
     assert_eq!(a.churn_removed, 1); // 1 (fix)
     assert_eq!(a.churn_abs(), 7);
     assert_eq!(a.authors, 2); // alice, bob
-    // alice churned 5 of 7 lines (71%), bob 2 of 7 (29%): no minors.
+    // alice wrote 5 of 6 added lines (83%), bob 1 of 6 (17%): no minors.
+    // (Authorship counts added lines only — deletions aren't writing.)
     assert_eq!(a.minor_contributors, 0);
-    assert!((a.ownership - 5.0 / 7.0).abs() < 1e-9);
+    assert!((a.ownership - 5.0 / 6.0).abs() < 1e-9);
     assert_eq!(a.last_change_seconds, T_MAR);
     // Only the initial 2-file commit couples a.rs with another file.
     assert_eq!(a.sum_of_coupling, 1);
     assert_eq!(a.bugfix_commits, 1); // "fix: bug in a"
     let expected_twr = twr_term(T_MAR, T_JAN, T_JUN);
-    assert!((a.twr - expected_twr).abs() < 1e-12);
+    // TWR is quantized to 1e-9 before publication.
+    assert!((a.twr - expected_twr).abs() < 1e-9);
     let expected_age = (T_JUN - T_MAR) as f64 / SECONDS_PER_MONTH;
     assert!((a.age_months(history.head_seconds) - expected_age).abs() < 1e-9);
 
@@ -165,7 +167,7 @@ fn collect_history_computes_all_per_file_statistics() {
     assert_eq!(c.sum_of_coupling, 0);
     assert_eq!(c.bugfix_commits, 1); // "fix typo"
     let expected_twr = twr_term(T_MAY, T_JAN, T_JUN);
-    assert!((c.twr - expected_twr).abs() < 1e-12);
+    assert!((c.twr - expected_twr).abs() < 1e-9);
 }
 
 #[test]
@@ -563,4 +565,134 @@ fn parallel_branch_edits_before_a_rename_are_merged_into_the_survivor() {
     assert_eq!(b.churn_removed, 1);
     assert_eq!(b.authors, 2);
     assert_eq!(b.last_change_seconds, T_MAR);
+}
+
+#[test]
+fn changed_files_joins_renames_that_also_change_content() {
+    // Rename tracking must hold at the pinned 50% similarity
+    // threshold, not just for identical blobs: a rename that also
+    // edits a minority of lines stays a joined `Modified` row.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    let lines: Vec<String> = (0..10).map(|i| format!("fn f{i}() {{}}")).collect();
+    std::fs::write(dir.path().join("orig.rs"), lines.join("\n") + "\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "edit-rename-base"], ALICE, T_JAN);
+
+    // Rename plus a 2-of-10-line edit — 80% similar, above 50%.
+    let mut edited = lines.clone();
+    edited[0] = "fn f0_changed() {}".to_string();
+    edited[9] = "fn f9_changed() {}".to_string();
+    std::fs::remove_file(dir.path().join("orig.rs")).unwrap();
+    std::fs::write(dir.path().join("moved.rs"), edited.join("\n") + "\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_FEB);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename and edit"],
+        ALICE,
+        T_FEB,
+    );
+    git(dir.path(), &["tag", "edit-rename-head"], ALICE, T_FEB);
+
+    // A rewrite below 50% similarity must NOT pair: replace a second
+    // file wholesale under a new name.
+    std::fs::write(dir.path().join("old_impl.rs"), "fn tiny() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_MAR);
+    git(dir.path(), &["commit", "-q", "-m", "tiny"], ALICE, T_MAR);
+    git(dir.path(), &["tag", "dissimilar-base"], ALICE, T_MAR);
+    std::fs::remove_file(dir.path().join("old_impl.rs")).unwrap();
+    std::fs::write(
+        dir.path().join("new_impl.rs"),
+        "fn completely() {}\nfn different() {}\nfn content() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_APR);
+    git(dir.path(), &["commit", "-q", "-m", "replace"], ALICE, T_APR);
+    git(dir.path(), &["tag", "dissimilar-head"], ALICE, T_APR);
+
+    let repo = gix::discover(dir.path()).unwrap();
+
+    let changed = mehen_git::changed_files(&repo, "edit-rename-base", "edit-rename-head").unwrap();
+    assert_eq!(changed.len(), 1, "80%-similar rename joins: {changed:?}");
+    assert_eq!(changed[0].path, Path::new("moved.rs"));
+    assert_eq!(changed[0].status, mehen_git::ChangeStatus::Modified);
+    assert_eq!(
+        changed[0].source_path.as_deref(),
+        Some(Path::new("orig.rs"))
+    );
+
+    let changed = mehen_git::changed_files(&repo, "dissimilar-base", "dissimilar-head").unwrap();
+    let mut statuses: Vec<(String, mehen_git::ChangeStatus)> = changed
+        .iter()
+        .map(|cf| (cf.path.display().to_string(), cf.status))
+        .collect();
+    statuses.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        statuses,
+        vec![
+            ("new_impl.rs".to_string(), mehen_git::ChangeStatus::Added),
+            ("old_impl.rs".to_string(), mehen_git::ChangeStatus::Deleted),
+        ],
+        "below-threshold rewrite must stay a deletion + addition"
+    );
+}
+
+#[test]
+fn reused_source_path_keeps_its_own_history_after_a_rename() {
+    // Commit 1 adds a.rs, commit 2 renames it to b.rs, commit 3 adds a
+    // brand-new unrelated a.rs. The new a.rs must keep its own history
+    // instead of being folded into b.rs by the rename alias.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn one() {}\nfn two() {}\nfn three() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "a.rs"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "add a"], ALICE, T_JAN);
+
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, T_FEB);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename a"],
+        ALICE,
+        T_FEB,
+    );
+
+    std::fs::write(dir.path().join("a.rs"), "fn brand_new() {}\n").unwrap();
+    git(dir.path(), &["add", "a.rs"], BOB, T_MAR);
+    git(dir.path(), &["commit", "-q", "-m", "new a"], BOB, T_MAR);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // The re-created a.rs keeps its own single-commit history.
+    let a = history.file(Path::new("a.rs")).expect("new a.rs history");
+    assert_eq!(a.commit_frequency, 1);
+    assert_eq!(a.churn_added, 1);
+    assert_eq!(a.authors, 1);
+    assert_eq!(a.last_change_seconds, T_MAR);
+
+    // b.rs carries the renamed lineage: the original creation (walked
+    // after the rename, redirected by the alias) plus the rename.
+    let b = history.file(Path::new("b.rs")).expect("b.rs history");
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 3);
+    assert_eq!(b.last_change_seconds, T_FEB);
 }

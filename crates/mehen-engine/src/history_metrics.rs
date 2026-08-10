@@ -66,8 +66,8 @@ pub(crate) fn inject_history_metrics(
     // Relative churn normalizes by the file's current size; a file
     // whose analyzer published no (or zero) code-line count falls back
     // to a denominator of 1 so the value stays finite and deterministic.
-    let sloc = read_first(&[keys::LOC_SLOC, "sql.loc.code"]).max(1.0);
-    let cognitive_sum = read_first(&["cognitive.sum", "sql.cognitive_complexity"]);
+    let sloc = read_first(&[keys::LOC_SLOC, keys::SQL_LOC_CODE]).max(1.0);
+    let cognitive_sum = read_first(&[keys::COGNITIVE_SUM, keys::SQL_COGNITIVE_COMPLEXITY]);
 
     let churn_abs = file.churn_abs();
     metrics.insert(keys::HISTORY_CHURN_ABS, churn_abs);
