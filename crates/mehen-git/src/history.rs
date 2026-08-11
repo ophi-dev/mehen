@@ -143,65 +143,66 @@ impl RepositoryHistory {
     }
 }
 
+/// One walked change contributing to a file identity. Contributions
+/// stay un-folded until the walk finishes: a rename discovered later
+/// (walk order is newest-first) may have to split everything
+/// accumulated under its source path between the renamed lineage and
+/// a newer occupant of the vacated path, and that partition is by
+/// commit ancestry — folded counters could not be taken apart again.
+#[derive(Debug, Clone)]
+struct Contribution {
+    commit: gix::ObjectId,
+    /// Committer timestamp in seconds.
+    seconds: i64,
+    author: std::sync::Arc<str>,
+    added: u64,
+    removed: u64,
+    /// Other files changed in the same commit (`history.coupling`).
+    coupled_others: u64,
+    /// Whether the changeset was small enough to count for coupling.
+    coupling_eligible: bool,
+    is_bugfix: bool,
+    /// Whether this change *created* the file (a tree-diff addition).
+    is_addition: bool,
+}
+
 /// Per-file accumulator filled during the walk, finalized into
 /// [`FileHistory`] once repository-wide bounds (first/head commit
 /// times) are known.
 #[derive(Debug, Default)]
 struct FileAccumulator {
-    commit_frequency: u64,
-    churn_added: u64,
-    churn_removed: u64,
-    /// Everyone who touched the file with any change, for
-    /// `history.authors`.
-    authors: std::collections::HashSet<String>,
-    /// Added lines per author — the *authorship* signal driving
-    /// ownership and minor-contributor classification. Deletion-only /
-    /// rename-only touches deliberately never appear here: a zero
-    /// entry would classify the toucher as a sub-5% minor contributor
-    /// despite having written nothing.
-    author_lines: HashMap<String, u64>,
-    last_change_seconds: i64,
-    sum_of_coupling: u64,
-    /// Committer timestamps of bug-fixing commits, for TWR.
-    bugfix_seconds: Vec<i64>,
-    /// Whether the *newest walked* change to this path removed the
-    /// file. A stranded accumulator whose lineage ended in deletion is
-    /// a dead post-rename path reuse, not a parallel branch's edits to
-    /// the renamed lineage — it must not be folded into the rename
-    /// destination.
-    newest_is_deletion: bool,
-    /// Whether any accumulated change *created* the file. Required for
-    /// the delete-then-recreate identity split: a true re-creation
-    /// begins with an addition, while parallel-branch edits walked
-    /// before an unrelated branch's deletion are modifications only.
+    contributions: Vec<Contribution>,
+    /// Whether any contribution created the file — cached because the
+    /// delete-then-recreate boundary check runs once per deletion.
     has_addition: bool,
 }
 
 impl FileAccumulator {
+    fn push(&mut self, contribution: Contribution) {
+        self.has_addition |= contribution.is_addition;
+        self.contributions.push(contribution);
+    }
+
     /// Fold another accumulator into this one — used when a rename is
     /// discovered *after* the walk already accumulated changes under
     /// the source path (a parallel branch's later-timestamp commit can
     /// precede the rename in the newest-first order).
     fn merge(&mut self, other: FileAccumulator) {
-        self.commit_frequency += other.commit_frequency;
-        self.churn_added += other.churn_added;
-        self.churn_removed += other.churn_removed;
-        self.authors.extend(other.authors);
-        for (author, lines) in other.author_lines {
-            *self.author_lines.entry(author).or_insert(0) += lines;
-        }
-        self.last_change_seconds = self.last_change_seconds.max(other.last_change_seconds);
-        self.sum_of_coupling += other.sum_of_coupling;
-        self.bugfix_seconds.extend(other.bugfix_seconds);
         self.has_addition |= other.has_addition;
+        self.contributions.extend(other.contributions);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.contributions.is_empty()
     }
 }
 
-/// Walk the full history reachable from `rev` (first-parent diffs,
-/// merges skipped) and accumulate per-file process statistics.
+/// Walk the full history reachable from `rev` (first-parent diffs;
+/// merges contribute no churn but may install rename identity) and
+/// accumulate per-file process statistics.
 ///
-/// The cost is one tree diff per non-merge commit plus one line diff
-/// per modified blob; results depend only on the repository state at
+/// The cost is one tree diff per commit plus one line diff per
+/// modified blob; results depend only on the repository state at
 /// `rev`.
 pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHistory, GitError> {
     let head_id = repo
@@ -213,11 +214,6 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         .peel_to_commit()
         .map_err(|e| GitError::Internal(e.to_string()))?;
     let head_seconds = commit_seconds(&head_commit)?;
-    // The walked rev's tree, used to tell a rename's *source lineage*
-    // apart from a distinct file later re-created at the same path.
-    let head_tree = head_commit
-        .tree()
-        .map_err(|e| GitError::Internal(e.to_string()))?;
 
     let mut files: HashMap<FileIdentity, FileAccumulator> = HashMap::new();
     let mut first_commit_seconds = head_seconds;
@@ -253,28 +249,43 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
 
     for info in walk {
         let info = info.map_err(|e| GitError::Internal(e.to_string()))?;
-        // Merge commits are skipped: their first-parent diff would
-        // double-count every line already attributed to the merged
-        // commits (matching `git log --no-merges` / code-maat).
-        if info.parent_ids.len() > 1 {
-            continue;
-        }
+        let is_merge = info.parent_ids.len() > 1;
 
         let commit = repo
             .find_object(info.id)
             .map_err(|e| GitError::Internal(e.to_string()))?
             .peel_to_commit()
             .map_err(|e| GitError::Internal(e.to_string()))?;
-        let seconds = commit_seconds(&commit)?;
-        first_commit_seconds = first_commit_seconds.min(seconds);
-        let author = author_identity(&commit)?;
-        let is_bugfix = is_bugfix_message(commit.message_raw_sloppy());
 
-        let changes = diff_against_first_parent(repo, &commit)?;
-        let coupling_eligible = changes.len() <= MAX_COUPLING_CHANGESET;
-        // The "other files in this commit" count is the same for every
-        // file in the changeset.
-        let coupled_others = changes.len().saturating_sub(1) as u64;
+        // Merge commits contribute no churn: their first-parent diff
+        // would double-count every line already attributed to the
+        // merged commits (matching `git log --no-merges` / code-maat).
+        // But a merge can still *create identity*: conflict resolution
+        // may commit a tree that renames a file present in the parents
+        // (`a.rs` in both parents, `b.rs` in the merged tree). Such
+        // merge-introduced renames — destination absent from every
+        // parent tree — must install aliases like any other rename, or
+        // the older commits accumulate under the vacated path while
+        // the surviving file reads an empty history.
+        let changes = if is_merge {
+            let introduced = merge_introduced_renames(repo, &commit)?;
+            if introduced.is_empty() {
+                continue;
+            }
+            introduced
+        } else {
+            diff_against_first_parent(repo, &commit)?
+        };
+
+        let seconds = commit_seconds(&commit)?;
+        if !is_merge {
+            // Merges never accumulate, so they don't bound the TWR
+            // normalization window either (as before this walk saw
+            // identity-bearing merges at all).
+            first_commit_seconds = first_commit_seconds.min(seconds);
+        }
+        let author: std::sync::Arc<str> = std::sync::Arc::from(author_identity(&commit)?);
+        let is_bugfix = is_bugfix_message(commit.message_raw_sloppy());
 
         // ── Phase 1: resolve every change against the *pre-commit*
         // alias map, so same-commit rename cycles (an a↔b swap) don't
@@ -366,19 +377,32 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // after this rename (the pre-rename lineage).
             aliases.insert(source.clone(), AliasEntry::new(target.clone()));
             // Anything already accumulated under the source path is
-            // *newer* than the rename. Fold it into the surviving
-            // identity only when it belongs to the renamed lineage (a
-            // parallel branch's edits): a source path that still exists
-            // at the walked rev — or whose newer accumulation ended in
-            // a deletion — is a distinct file re-created after the
-            // rename, and its history must stay its own.
+            // *newer in walk order* than this rename — but it can mix
+            // two occupants: concurrent branches' edits belong to the
+            // renamed lineage (they edited the file that moved away),
+            // while a re-creation of the vacated path (and the edits
+            // in its descendants) is a distinct newer file. Commit
+            // ancestry separates the two exactly: a contribution from
+            // a *descendant* of this rename commit postdates the
+            // rename on its own line and belongs to the new occupant;
+            // anything concurrent belongs to the renamed lineage.
             let source_id = FileIdentity::Path(source.clone());
-            let stranded_is_lineage = !path_exists_at_head(&head_tree, source)?
-                && files
-                    .get(&source_id)
-                    .is_some_and(|acc| !acc.newest_is_deletion);
-            if stranded_is_lineage && let Some(stranded) = files.remove(&source_id) {
-                files.entry(target.clone()).or_default().merge(stranded);
+            if let Some(stranded) = files.remove(&source_id) {
+                let mut occupant = FileAccumulator::default();
+                let mut lineage = FileAccumulator::default();
+                for contribution in stranded.contributions {
+                    if is_descendant_of(repo, info.id, contribution.commit)? {
+                        occupant.push(contribution);
+                    } else {
+                        lineage.push(contribution);
+                    }
+                }
+                if !occupant.is_empty() {
+                    files.insert(source_id, occupant);
+                }
+                if !lineage.is_empty() {
+                    files.entry(target.clone()).or_default().merge(lineage);
+                }
             }
             // Destination identity boundary: older direct changes to
             // the destination path belong to a dead prior occupant —
@@ -394,7 +418,15 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             }
         }
 
-        // ── Phase 4: accumulate.
+        // ── Phase 4: accumulate. Merge commits install identity only —
+        // their churn is deliberately excluded (see above).
+        if is_merge {
+            continue;
+        }
+        let coupling_eligible = changes.len() <= MAX_COUPLING_CHANGESET;
+        // The "other files in this commit" count is the same for every
+        // file in the changeset.
+        let coupled_others = changes.len().saturating_sub(1) as u64;
         for (change, target) in changes.iter().zip(targets.iter()) {
             // An addition that resolved *through* an alias is the
             // redirected occupant's birth: every deletion or rename
@@ -411,31 +443,17 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             {
                 entry.consumed = true;
             }
-            let newly_tracked = !files.contains_key(target);
-            let acc = files.entry(target.clone()).or_default();
-            if newly_tracked {
-                // First (newest-walked) change for this path.
-                acc.newest_is_deletion = change.is_deletion;
-            }
-            acc.has_addition |= change.is_addition;
-            acc.commit_frequency += 1;
-            acc.churn_added += change.added;
-            acc.churn_removed += change.removed;
-            acc.authors.insert(author.clone());
-            // Authorship = added lines only: deleting someone else's
-            // code (or renaming a file) must not count as writing
-            // code, and a zero-line entry would misclassify the
-            // toucher as a minor contributor.
-            if change.added > 0 {
-                *acc.author_lines.entry(author.clone()).or_insert(0) += change.added;
-            }
-            acc.last_change_seconds = acc.last_change_seconds.max(seconds);
-            if coupling_eligible {
-                acc.sum_of_coupling += coupled_others;
-            }
-            if is_bugfix {
-                acc.bugfix_seconds.push(seconds);
-            }
+            files.entry(target.clone()).or_default().push(Contribution {
+                commit: info.id,
+                seconds,
+                author: author.clone(),
+                added: change.added,
+                removed: change.removed,
+                coupled_others,
+                coupling_eligible,
+                is_bugfix,
+                is_addition: change.is_addition,
+            });
         }
     }
 
@@ -459,8 +477,36 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
 
 /// Fold a walk-time accumulator into the public [`FileHistory`].
 fn finalize_file(acc: FileAccumulator, first_seconds: i64, head_seconds: i64) -> FileHistory {
-    let authors = acc.authors.len() as u64;
-    let total_lines: u64 = acc.author_lines.values().sum();
+    let mut churn_added = 0u64;
+    let mut churn_removed = 0u64;
+    let mut last_change_seconds = i64::MIN;
+    let mut sum_of_coupling = 0u64;
+    let mut bugfix_seconds: Vec<i64> = Vec::new();
+    let mut authors: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // Added lines per author — the *authorship* signal driving
+    // ownership and minor-contributor classification. Deletion-only /
+    // rename-only touches deliberately never appear here: a zero
+    // entry would classify the toucher as a sub-5% minor contributor
+    // despite having written nothing.
+    let mut author_lines: HashMap<&str, u64> = HashMap::new();
+    for c in &acc.contributions {
+        churn_added += c.added;
+        churn_removed += c.removed;
+        last_change_seconds = last_change_seconds.max(c.seconds);
+        if c.coupling_eligible {
+            sum_of_coupling += c.coupled_others;
+        }
+        if c.is_bugfix {
+            bugfix_seconds.push(c.seconds);
+        }
+        authors.insert(&c.author);
+        if c.added > 0 {
+            *author_lines.entry(&c.author).or_insert(0) += c.added;
+        }
+    }
+
+    let authors = authors.len() as u64;
+    let total_lines: u64 = author_lines.values().sum();
     let (minor_contributors, ownership) = if total_lines == 0 {
         // A history of pure renames/mode changes/deletions adds no
         // lines; ownership is undefined — report zero rather than
@@ -468,26 +514,25 @@ fn finalize_file(acc: FileAccumulator, first_seconds: i64, head_seconds: i64) ->
         (0, 0.0)
     } else {
         let total = total_lines as f64;
-        let minor = acc
-            .author_lines
+        let minor = author_lines
             .values()
             .filter(|&&lines| (lines as f64) / total < MINOR_CONTRIBUTOR_SHARE)
             .count() as u64;
-        let top = acc.author_lines.values().copied().max().unwrap_or(0);
+        let top = author_lines.values().copied().max().unwrap_or(0);
         (minor, (top as f64) / total)
     };
 
     FileHistory {
-        commit_frequency: acc.commit_frequency,
-        churn_added: acc.churn_added,
-        churn_removed: acc.churn_removed,
+        commit_frequency: acc.contributions.len() as u64,
+        churn_added,
+        churn_removed,
         authors,
         minor_contributors,
         ownership,
-        last_change_seconds: acc.last_change_seconds,
-        sum_of_coupling: acc.sum_of_coupling,
-        bugfix_commits: acc.bugfix_seconds.len() as u64,
-        twr: time_weighted_risk(&acc.bugfix_seconds, first_seconds, head_seconds),
+        last_change_seconds: last_change_seconds.max(0),
+        sum_of_coupling,
+        bugfix_commits: bugfix_seconds.len() as u64,
+        twr: time_weighted_risk(&bugfix_seconds, first_seconds, head_seconds),
     }
 }
 
@@ -543,12 +588,75 @@ struct CommitFileChange {
     is_addition: bool,
 }
 
-/// Whether `path` names an entry in the walked rev's tree.
-fn path_exists_at_head(head_tree: &gix::Tree<'_>, path: &Path) -> Result<bool, GitError> {
-    Ok(head_tree
-        .lookup_entry_by_path(path)
-        .map_err(|e| GitError::Internal(e.to_string()))?
-        .is_some())
+/// Whether `commit` is a descendant of `ancestor` (equal ids count).
+///
+/// Used to partition an accumulator stranded at a rename source: a
+/// contribution from a descendant of the rename commit postdates the
+/// rename on its own line (the path was re-created there), while a
+/// concurrent contribution edited the file that moved away. Rename
+/// events with stranded contributions are rare, so the merge-base
+/// query cost stays negligible next to the per-commit tree diffs.
+fn is_descendant_of(
+    repo: &gix::Repository,
+    ancestor: gix::ObjectId,
+    commit: gix::ObjectId,
+) -> Result<bool, GitError> {
+    if ancestor == commit {
+        return Ok(true);
+    }
+    match repo.merge_base(ancestor, commit) {
+        Ok(base) => Ok(base.detach() == ancestor),
+        // Disjoint histories (e.g. an orphan branch): not an ancestor.
+        Err(gix::repository::merge_base::Error::NotFound { .. }) => Ok(false),
+        Err(e) => Err(GitError::Internal(e.to_string())),
+    }
+}
+
+/// Tree changes a merge commit itself introduced, filtered to renames
+/// whose destination exists in *no* parent tree: conflict resolution
+/// that committed a file present in the parents under a new path.
+/// Everything else in a merge's first-parent diff is either the other
+/// parents' changes replayed against the first parent (their own
+/// commits are walked separately) or churn that `--no-merges`
+/// semantics deliberately exclude.
+fn merge_introduced_renames(
+    repo: &gix::Repository,
+    commit: &gix::Commit<'_>,
+) -> Result<Vec<CommitFileChange>, GitError> {
+    let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
+    let renames: Vec<CommitFileChange> = diff_against_first_parent(repo, commit)?
+        .into_iter()
+        .filter(|change| change.source_path.is_some())
+        .collect();
+    if renames.is_empty() {
+        return Ok(renames);
+    }
+    let mut parent_trees = Vec::new();
+    for parent_id in commit.parent_ids() {
+        let parent = parent_id
+            .object()
+            .map_err(|e| internal(&e))?
+            .peel_to_commit()
+            .map_err(|e| internal(&e))?;
+        parent_trees.push(parent.tree().map_err(|e| internal(&e))?);
+    }
+    let mut introduced = Vec::new();
+    'next: for change in renames {
+        for tree in &parent_trees {
+            if tree
+                .lookup_entry_by_path(&change.path)
+                .map_err(|e| internal(&e))?
+                .is_some()
+            {
+                // The destination exists in a parent: that parent's
+                // own line performed (or already contained) the
+                // rename, and walking its commits handles identity.
+                continue 'next;
+            }
+        }
+        introduced.push(change);
+    }
+    Ok(introduced)
 }
 
 /// The identity a historical change accumulates under: a real
@@ -818,16 +926,28 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// A minimal contribution for finalize-focused tests.
+    fn contribution(author: &str, added: u64) -> Contribution {
+        Contribution {
+            commit: gix::ObjectId::null(gix::hash::Kind::Sha1),
+            seconds: 0,
+            author: author.into(),
+            added,
+            removed: 0,
+            coupled_others: 0,
+            coupling_eligible: true,
+            is_bugfix: false,
+            is_addition: false,
+        }
+    }
+
     #[test]
     fn finalize_ownership_and_minor_contributors() {
         let mut acc = FileAccumulator::default();
         // 100 added lines total: alice 90, bob 7, carol 3.
-        for name in ["alice@x", "bob@x", "carol@x"] {
-            acc.authors.insert(name.into());
-        }
-        acc.author_lines.insert("alice@x".into(), 90);
-        acc.author_lines.insert("bob@x".into(), 7);
-        acc.author_lines.insert("carol@x".into(), 3);
+        acc.push(contribution("alice@x", 90));
+        acc.push(contribution("bob@x", 7));
+        acc.push(contribution("carol@x", 3));
         let fh = finalize_file(acc, 0, 0);
         assert_eq!(fh.authors, 3);
         // carol (3%) is minor; bob (7%) is not.
@@ -841,9 +961,8 @@ mod tests {
         // a zero-added entry must not be classified as a sub-5% minor
         // contributor: he wrote nothing, minor or otherwise.
         let mut acc = FileAccumulator::default();
-        acc.authors.insert("alice@x".into());
-        acc.authors.insert("dave@x".into());
-        acc.author_lines.insert("alice@x".into(), 100);
+        acc.push(contribution("alice@x", 100));
+        acc.push(contribution("dave@x", 0));
         let fh = finalize_file(acc, 0, 0);
         assert_eq!(fh.authors, 2);
         assert_eq!(fh.minor_contributors, 0);

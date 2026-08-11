@@ -643,7 +643,12 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // 2. Get changed file list
     let repo = mehen_git::open_repo()?;
     let from_label = mehen_git::friendly_ref_label(&repo, &from_ref);
-    let changed = get_changed_files(&repo, &from_ref, &to_ref, &ci_ctx)?;
+    // The push payload describes the *event's* range; explicit
+    // `--from`/`--to` overrides compare a different one, where the
+    // payload holds no authority (an empty fold there must not blank
+    // out a real requested diff).
+    let refs_from_event = opts.from.is_none() && opts.to.is_none();
+    let changed = get_changed_files(&repo, &from_ref, &to_ref, &ci_ctx, refs_from_event)?;
 
     // 3. Filter files
     let include = mk_globset(opts.include);
@@ -709,22 +714,6 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         filtered.push((cf, utf8_path, language));
     }
 
-    // A split deletion's lineage is only "carried elsewhere" when its
-    // paired destination row actually entered the history-enriched
-    // source-code pipeline above. A destination diverted to the
-    // documentation pipeline (Markdown) — or dropped by attribute
-    // filters or a non-UTF-8 path — receives no history columns, so
-    // suppressing the deletion too would erase the lineage from the
-    // output entirely; the deletion then keeps its history as the
-    // lineage's only trace.
-    {
-        let history_consuming_sources: std::collections::HashSet<&PathBuf> = filtered
-            .iter()
-            .filter_map(|(cf, _, _)| cf.source_path.as_ref())
-            .collect();
-        history_suppressed_deletions.retain(|src| history_consuming_sources.contains(src));
-    }
-
     // History enrichment (`history.*`): repository-scope process
     // metrics computed by one revision walk per side and folded into
     // each file's metric set after static analysis. The walk costs one
@@ -750,6 +739,24 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 )
             }
         };
+
+    // A split deletion's lineage is only "carried elsewhere" when its
+    // paired destination row actually *reads* history columns: it must
+    // have entered the history-enriched source-code pipeline above
+    // (not been diverted to the documentation pipeline, or dropped by
+    // attribute filters or a non-UTF-8 path), and its effective
+    // selectors must include history metrics (a cross-language rename
+    // into SQL's history-free defaults reads none). Otherwise the
+    // deletion keeps its history as the lineage's only trace.
+    {
+        let history_consuming_sources: std::collections::HashSet<&PathBuf> = filtered
+            .iter()
+            .filter(|entry| file_wants_history(entry))
+            .filter_map(|(cf, _, _)| cf.source_path.as_ref())
+            .collect();
+        history_suppressed_deletions.retain(|src| history_consuming_sources.contains(src));
+    }
+
     let histories: Option<(
         Option<mehen_git::RepositoryHistory>,
         mehen_git::RepositoryHistory,
@@ -1252,6 +1259,7 @@ fn get_changed_files(
     from: &str,
     to: &str,
     ci_ctx: &Option<ci::CiContext>,
+    refs_from_event: bool,
 ) -> Result<Vec<mehen_git::ChangedFile>, GitError> {
     // For push events, the payload's folded per-path statuses (PR #95)
     // are a *fallback*: the real tree diff over the full push range is
@@ -1263,8 +1271,12 @@ fn get_changed_files(
     // still yields a full-range tree diff with rename identity the
     // payload can never express. The payload is used only when the
     // refs don't resolve locally (a force-push discarded the `before`
-    // commit, or the branch's first commit is a root commit).
-    if let Some(ctx) = ci_ctx
+    // commit, or the branch's first commit is a root commit) — and
+    // only when the compared range *is* the event's range: explicit
+    // `--from`/`--to` overrides ask about a different range the
+    // payload knows nothing about.
+    if refs_from_event
+        && let Some(ctx) = ci_ctx
         && ctx.event_name == "push"
         && let Some(ref files) = ctx.changed_files
     {
@@ -1835,7 +1847,7 @@ binary.md binary
                 source_path: None,
             },
         ]));
-        let out = get_changed_files(&repo, "payload-base", "payload-head", &ctx).unwrap();
+        let out = get_changed_files(&repo, "payload-base", "payload-head", &ctx, true).unwrap();
         assert_eq!(out.len(), 1, "tree diff joins the rename: {out:?}");
         assert_eq!(out[0].path, PathBuf::from("after.py"));
         assert_eq!(out[0].status, ChangeStatus::Modified);
@@ -1853,7 +1865,7 @@ binary.md binary
             source_path: None,
         }];
         let ctx = Some(push_ctx(payload.clone()));
-        let out = get_changed_files(&repo, "no-such-ref", "also-missing", &ctx).unwrap();
+        let out = get_changed_files(&repo, "no-such-ref", "also-missing", &ctx, true).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].path, payload[0].path);
     }
@@ -1878,8 +1890,31 @@ binary.md binary
         let ctx = Some(push_ctx(Vec::new()));
         // HEAD~1..HEAD resolves and would report tip.py; the empty
         // payload must win.
-        let out = get_changed_files(&repo, "HEAD~1", "HEAD", &ctx).unwrap();
+        let out = get_changed_files(&repo, "HEAD~1", "HEAD", &ctx, true).unwrap();
         assert!(out.is_empty(), "empty payload is authoritative: {out:?}");
+    }
+
+    #[test]
+    fn explicit_refs_ignore_the_push_payload_entirely() {
+        // `--from`/`--to` overrides compare a range the event payload
+        // knows nothing about: neither an empty fold (which would
+        // blank out the report) nor an unresolvable-baseline fallback
+        // may apply.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("existing.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("tip.py"), "y = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "two"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let ctx = Some(push_ctx(Vec::new()));
+        let out = get_changed_files(&repo, "HEAD~1", "HEAD", &ctx, false).unwrap();
+        assert_eq!(out.len(), 1, "explicit range must be diffed: {out:?}");
+        assert_eq!(out[0].path, PathBuf::from("tip.py"));
     }
 
     #[test]
@@ -1911,7 +1946,7 @@ binary.md binary
         }]);
         // The baseline resolve_refs would supply: first pushed
         // commit's parent = HEAD~2 here.
-        let out = get_changed_files(&repo, "HEAD~2", "HEAD", &Some(ctx)).unwrap();
+        let out = get_changed_files(&repo, "HEAD~2", "HEAD", &Some(ctx), true).unwrap();
         let mut paths: Vec<&str> = out.iter().filter_map(|f| f.path.to_str()).collect();
         paths.sort_unstable();
         assert_eq!(

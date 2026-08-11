@@ -1032,3 +1032,69 @@ fn cross_language_rename_to_markdown_keeps_deletion_history() {
     assert_eq!(metric["baseline"].as_f64(), Some(2.0));
     assert_eq!(metric["current"].as_f64(), Some(0.0));
 }
+
+#[test]
+fn cross_language_rename_to_sql_keeps_deletion_history_under_defaults() {
+    // `a.py → a.sql` splits, and the SQL destination *stays* in the
+    // source-code pipeline — but under default metrics SQL's
+    // selectors are history-free, so the destination reads no history
+    // columns. The Python deletion row must keep its baseline history
+    // or the lineage vanishes from the default report.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "sql-base"]);
+
+    git_ok(dir.path(), &["mv", "a.py", "a.sql"]);
+    commit_all(dir.path(), "convert to sql");
+    git_ok(dir.path(), &["tag", "sql-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "sql-base",
+            "--to",
+            "sql-head",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("a.py deletion row must survive: {files:?}"));
+    assert_eq!(row["is_deleted"].as_bool(), Some(true));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.churn.relative"))
+        .unwrap_or_else(|| panic!("history.churn.relative must be present: {row:?}"));
+    // a.py churned lines across two commits before the conversion —
+    // the baseline history must not be suppressed.
+    let baseline = metric["baseline"].as_f64().expect("baseline");
+    assert!(baseline > 0.0, "baseline history suppressed: {metric:?}");
+}

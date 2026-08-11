@@ -1766,3 +1766,212 @@ fn deleted_occupant_of_a_reused_then_renamed_path_stays_fenced_off() {
     // not reported under the vacated path.
     assert!(history.file(Path::new("a.rs")).is_none());
 }
+
+/// Run git and capture trimmed stdout (for plumbing that returns ids).
+fn git_out(repo: &Path, args: &[&str], author: (&str, &str), seconds: i64) -> String {
+    let date = format!("{seconds} +0000");
+    let output = std::process::Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", author.0)
+        .env("GIT_AUTHOR_EMAIL", author.1)
+        .env("GIT_COMMITTER_NAME", author.0)
+        .env("GIT_COMMITTER_EMAIL", author.1)
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_DATE", &date)
+        .output()
+        .expect("failed to run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+/// One branch renames `a.rs → b.rs` and re-creates an unrelated
+/// `a.rs`; a parallel branch edits the *original* `a.rs` before the
+/// merge. Date order can walk both the re-creation and the parallel
+/// edit before the rename — ancestry must split them: the re-creation
+/// (a descendant of the rename) stays at `a.rs`, the concurrent edit
+/// belongs to the renamed lineage at `b.rs`.
+#[test]
+fn parallel_edits_are_split_from_a_reused_rename_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c1 (main): the original file.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+    let c1 = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(0));
+
+    // feature branch: rename a.rs → b.rs, then reuse the a.rs path.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "feature"],
+        ALICE,
+        t(1),
+    );
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "move to b"],
+        ALICE,
+        t(1),
+    );
+    std::fs::write(dir.path().join("a.rs"), "fn unrelated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(4));
+    git(dir.path(), &["commit", "-q", "-m", "reuse a"], CAROL, t(4));
+    let feature = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(4));
+
+    // main (parallel): edit the original a.rs.
+    git(dir.path(), &["checkout", "-q", "main"], BOB, t(3));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\nfn a4() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(3));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(3));
+    let _ = c1;
+
+    // Merged tree, built directly to sidestep the rename/edit
+    // conflict: b.rs absorbs main's edit, the reused a.rs survives.
+    git(dir.path(), &["checkout", "-q", "feature"], ALICE, t(5));
+    std::fs::write(
+        dir.path().join("b.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\nfn a4() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &feature,
+            "-p",
+            &main,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs = original creation (4 lines) + parallel edit (1 line) +
+    // the rename itself. The parallel edit must not stick to the
+    // reused a.rs path.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 3);
+    assert_eq!(b.churn_added, 5);
+    assert_eq!(b.authors, 2, "bob's parallel edit belongs to b.rs");
+
+    // a.rs = only the unrelated re-creation.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.commit_frequency, 1);
+    assert_eq!(a.churn_added, 1);
+    assert_eq!(a.authors, 1);
+}
+
+/// A rename performed *by the merge commit itself* (conflict
+/// resolution commits `a.rs` — present in both parents — as `b.rs`)
+/// must install identity: without it the older commits accumulate
+/// under the vacated `a.rs` while `b.rs` reads an empty history. The
+/// merge still contributes no churn of its own.
+#[test]
+fn merge_commit_renames_establish_file_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c1: common ancestor.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+
+    // main: edit a.rs.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow on main"],
+        BOB,
+        t(1),
+    );
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // side branch from c1: a different edit to a.rs.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "side", "HEAD~1"],
+        CAROL,
+        t(2),
+    );
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn side() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow on side"],
+        CAROL,
+        t(2),
+    );
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(2));
+
+    // The merge resolves the conflict by committing the file as b.rs
+    // (main's blob, so the tree diff sees an exact rename); a.rs is
+    // gone from the merged tree though both parents contain it.
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(3));
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(3));
+    git(dir.path(), &["add", "-A"], ALICE, t(3));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(3));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(3),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs carries the full a.rs lineage: creation + both edits. The
+    // merge itself adds no commit and no churn.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 3);
+    assert_eq!(b.churn_added, 5);
+    assert_eq!(b.authors, 3);
+
+    // Nothing is reported under the vacated path.
+    assert!(history.file(Path::new("a.rs")).is_none());
+}
