@@ -5,13 +5,18 @@
 //!
 //! Built directly on the low-level `gix::diff::tree` walk plus an
 //! in-crate similarity pass, deliberately *not* on
-//! `Repository::diff_tree_to_tree`: the high-level API builds its
-//! rewrite-tracking resource cache from repository/user configuration
-//! (`diff.algorithm`, attribute-driven conversions from the current
-//! checkout's index), which would make rename classification — and
-//! therefore churn, ownership, and path identity — vary across
-//! machines and checkouts. Everything here is a pure function of the
-//! two trees: histogram line diffs, a fixed 50% similarity threshold
+//! `Repository::diff_tree_to_tree`. An explicit
+//! `Options::track_rewrites(Some(Rewrites { .. }))` can pin the
+//! rename-detection *parameters* independent of `diff.renames` /
+//! `diff.renameLimit` (see GitoxideLabs/gitoxide#2915), but two gaps
+//! remain: the similarity pipeline converts blob content through a
+//! resource cache that reads `.gitattributes` from the HEAD index —
+//! so rename classification (and therefore churn, ownership, and path
+//! identity) could still vary across checkouts — and `Rewrites`
+//! models `-M`/`-C` but not git's `-B` break-rewrite, which this
+//! module needs to recover renames whose old path was reused within
+//! the compared range. Everything here is a pure function of the two
+//! trees: histogram line diffs, a fixed 50% similarity threshold
 //! (git's `-M50%` default), and a fixed fuzzy-pair budget.
 //!
 //! Only blob entries are reported: directories, symlinks, and gitlinks
