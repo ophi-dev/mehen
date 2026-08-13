@@ -350,21 +350,37 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         }
 
         // ── Phase 3: install rename aliases, boundaries, and stranded
-        // merges (all against the phase-1 resolutions).
+        // merges (all against the phase-1 resolutions). Entry vectors
+        // only ever grow or mark entries consumed here — removing
+        // entries would invalidate the indices phase 4 uses to mark
+        // consumption.
         let mut new_boundaries: Vec<(PathBuf, FileIdentity)> = Vec::new();
+        // Entries a change of this very commit resolved through: such
+        // an entry is *in use* — e.g. a same-commit replacement's
+        // creation resolving into a later deletion's fence — and must
+        // not be reclaimed or retired by this commit's renames.
+        let mut in_use: HashMap<&PathBuf, std::collections::HashSet<usize>> = HashMap::new();
+        for (change, used) in changes.iter().zip(&used_entries) {
+            if let Some(idx) = used {
+                in_use.entry(&change.path).or_default().insert(*idx);
+            }
+        }
         for (change, target) in changes.iter().zip(targets.iter()) {
             let Some(source) = &change.source_path else {
                 continue;
             };
             if matches!(target, FileIdentity::Path(p) if p == source) {
                 // A rename returning to its own identity (a→b→a):
-                // reconnect the lineage by dropping stale destination
+                // reconnect the lineage by retiring stale destination
                 // boundaries, so pre-rename commits flow to the
                 // survivor again instead of a tombstone.
                 if let Some(entries) = aliases.get_mut(source) {
-                    entries.retain(|e| !matches!(e.target, FileIdentity::Tombstone(_)));
-                    if entries.is_empty() {
-                        aliases.remove(source);
+                    for (idx, entry) in entries.iter_mut().enumerate() {
+                        if matches!(entry.target, FileIdentity::Tombstone(_))
+                            && !in_use.get(source).is_some_and(|s| s.contains(&idx))
+                        {
+                            entry.consumed = true;
+                        }
                     }
                 }
                 continue;
@@ -375,11 +391,13 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // commits. A *consumed* entry is different: the occupant it
             // redirected has been fully walked, so this older rename
             // describes a previous occupant and installs alongside. A
-            // *tombstone* entry is reclaimable outright: this rename
-            // explains where the fenced-off occupant actually went (it
-            // was renamed away, not merely deleted), so its fenced
+            // *tombstone* entry is reclaimable outright — unless a
+            // change of this same commit resolved through it (the
+            // fence is in active use) — because this rename explains
+            // where the fenced-off occupant actually went (it was
+            // renamed away, not merely deleted): its fenced
             // contributions move to the rename target and the fence
-            // comes down.
+            // retires.
             let entries = aliases.entry(source.clone()).or_default();
             if entries
                 .iter()
@@ -388,15 +406,18 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 continue;
             }
             let mut reclaimed = FileAccumulator::default();
-            entries.retain(|e| {
-                if e.consumed || !matches!(e.target, FileIdentity::Tombstone(_)) {
-                    return true;
+            for (idx, entry) in entries.iter_mut().enumerate() {
+                if entry.consumed
+                    || !matches!(entry.target, FileIdentity::Tombstone(_))
+                    || in_use.get(source).is_some_and(|s| s.contains(&idx))
+                {
+                    continue;
                 }
-                if let Some(fenced) = files.remove(&e.target) {
+                if let Some(fenced) = files.remove(&entry.target) {
                     reclaimed.merge(fenced);
                 }
-                false
-            });
+                entry.consumed = true;
+            }
             // The alias redirects the *older* commits that are walked
             // after this rename (the pre-rename lineage).
             entries.push(AliasEntry::new(target.clone(), info.id));
@@ -673,23 +694,20 @@ fn is_descendant_of(
 
 /// Tree changes a merge commit itself introduced, filtered to renames
 /// whose destination exists in *no* parent tree: conflict resolution
-/// that committed a file present in the parents under a new path.
-/// Everything else in a merge's first-parent diff is either the other
-/// parents' changes replayed against the first parent (their own
-/// commits are walked separately) or churn that `--no-merges`
-/// semantics deliberately exclude.
+/// that committed a file present in some parent under a new path. The
+/// merge tree is compared against **every** parent — a rename whose
+/// source lives only in a non-first parent is invisible to the
+/// first-parent diff (the destination looks like a plain addition).
+/// Everything else in a merge's diffs is either a parent's own
+/// changes replayed (their commits are walked separately) or churn
+/// that `--no-merges` semantics deliberately exclude; accordingly the
+/// returned changes carry no churn (identity only, never accumulated).
 fn merge_introduced_renames(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
 ) -> Result<Vec<CommitFileChange>, GitError> {
     let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
-    let renames: Vec<CommitFileChange> = diff_against_first_parent(repo, commit)?
-        .into_iter()
-        .filter(|change| change.source_path.is_some())
-        .collect();
-    if renames.is_empty() {
-        return Ok(renames);
-    }
+    let to_tree = commit.tree().map_err(|e| internal(&e))?;
     let mut parent_trees = Vec::new();
     for parent_id in commit.parent_ids() {
         let parent = parent_id
@@ -699,21 +717,49 @@ fn merge_introduced_renames(
             .map_err(|e| internal(&e))?;
         parent_trees.push(parent.tree().map_err(|e| internal(&e))?);
     }
-    let mut introduced = Vec::new();
-    'next: for change in renames {
-        for tree in &parent_trees {
-            if tree
-                .lookup_entry_by_path(&change.path)
-                .map_err(|e| internal(&e))?
-                .is_some()
-            {
-                // The destination exists in a parent: that parent's
-                // own line performed (or already contained) the
-                // rename, and walking its commits handles identity.
-                continue 'next;
+    let mut introduced: Vec<CommitFileChange> = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for diff_base in &parent_trees {
+        for change in changes_between_trees(repo, Some(diff_base), &to_tree)? {
+            let TreeChange::Renamed {
+                path, source_path, ..
+            } = change
+            else {
+                continue;
+            };
+            // First parent's pairing wins for a destination seen in
+            // several parent diffs — deterministic parent order.
+            if seen.contains(&path) {
+                continue;
             }
+            let mut in_parent = false;
+            for tree in &parent_trees {
+                if tree
+                    .lookup_entry_by_path(&path)
+                    .map_err(|e| internal(&e))?
+                    .is_some()
+                {
+                    // The destination exists in a parent: that
+                    // parent's own line performed (or already
+                    // contained) the rename, and walking its commits
+                    // handles identity.
+                    in_parent = true;
+                    break;
+                }
+            }
+            if in_parent {
+                continue;
+            }
+            seen.insert(path.clone());
+            introduced.push(CommitFileChange {
+                path,
+                source_path: Some(source_path),
+                added: 0,
+                removed: 0,
+                is_deletion: false,
+                is_addition: false,
+            });
         }
-        introduced.push(change);
     }
     Ok(introduced)
 }
@@ -733,13 +779,16 @@ enum FileIdentity {
 /// One rename-identity redirection. `installed_by` is the commit that
 /// created the entry: an alias only describes that commit's own line,
 /// so *concurrent* additions (a parallel branch re-creating the path)
-/// must not resolve through it. `consumed` flips once the walk
-/// accumulates the *creation* of the aliased path through this entry:
-/// the redirected occupant's birth has been found, so anything older
-/// at that path belongs to a previous occupant — an older rename may
-/// then take the alias over, and an older deletion fences history off
-/// behind a fresh tombstone (matching the delete-then-recreate
-/// boundary).
+/// must not resolve through it. `consumed` retires an entry from
+/// resolution — either because the walk accumulated the *creation* of
+/// the aliased path through it (the redirected occupant's birth has
+/// been found, so anything older at that path belongs to a previous
+/// occupant), or because an older rename reclaimed the fence after
+/// explaining where the fenced occupant went. An older rename may
+/// install alongside a consumed entry, and an older deletion fences
+/// history off behind a fresh tombstone (matching the
+/// delete-then-recreate boundary). Entries are never removed: phase 4
+/// marks consumption by index, so indices must stay stable.
 #[derive(Clone, Debug)]
 struct AliasEntry {
     target: FileIdentity,

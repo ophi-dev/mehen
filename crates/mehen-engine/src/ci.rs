@@ -123,6 +123,15 @@ fn detect_github_actions() -> Option<CiContext> {
 
 fn extract_push_changed_files(payload: &serde_json::Value) -> Option<Vec<ChangedFile>> {
     let commits = payload.get("commits")?.as_array()?;
+    // GitHub truncates the webhook `commits` array (documented cap:
+    // 20 entries); `size` carries the push's true commit count. A
+    // truncated array cannot be folded faithfully — report the
+    // payload as unavailable so callers use the tree diff instead.
+    if let Some(size) = payload.get("size").and_then(|v| v.as_u64())
+        && size as usize != commits.len()
+    {
+        return None;
+    }
     let mut by_path: std::collections::HashMap<PathBuf, ChangeStatus> =
         std::collections::HashMap::new();
 
@@ -316,6 +325,36 @@ mod tests {
         });
         let files = extract_push_changed_files(&payload).expect("payload is available");
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_extract_push_truncated_commits_are_unavailable() {
+        // GitHub caps the webhook `commits` array at 20 entries; when
+        // `size` says the push had more, the fold would miss files
+        // from the omitted commits — the payload must be reported as
+        // unavailable so the tree diff is used instead.
+        let payload = serde_json::json!({
+            "size": 25,
+            "commits": [
+                {"added": ["src/kept.rs"], "modified": [], "removed": []}
+            ]
+        });
+        assert!(extract_push_changed_files(&payload).is_none());
+    }
+
+    #[test]
+    fn test_extract_push_complete_commits_with_size_fold_normally() {
+        let payload = serde_json::json!({
+            "size": 1,
+            "commits": [
+                {"added": ["src/new.rs"], "modified": [], "removed": []}
+            ]
+        });
+        let files = extract_push_changed_files(&payload).unwrap();
+        assert_eq!(
+            paths_with_status(&files),
+            vec![(PathBuf::from("src/new.rs"), ChangeStatus::Added)]
+        );
     }
 
     #[test]

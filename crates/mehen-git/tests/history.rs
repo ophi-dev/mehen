@@ -2188,3 +2188,132 @@ fn concurrent_delete_and_recreate_walked_after_the_rename() {
     assert_eq!(b.churn_added, 3);
     assert_eq!(b.commit_frequency, 2);
 }
+
+/// A merge-introduced rename whose source exists only in a
+/// *non-first* parent: the first-parent diff sees the destination as
+/// a plain addition, so the merge diff must be taken against every
+/// parent to pair the rename and install identity.
+#[test]
+fn merge_renames_of_non_first_parent_files_establish_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c1: common ancestor without the file.
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(0));
+
+    // side branch: create and grow a.rs — main never has it.
+    git(dir.path(), &["checkout", "-q", "-b", "side"], BOB, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(1));
+    git(dir.path(), &["commit", "-q", "-m", "add a"], BOB, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], CAROL, t(2));
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(2));
+
+    // The merge (first parent = main) commits side's file as b.rs;
+    // neither parent contains b.rs.
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(3));
+    git(dir.path(), &["add", "-A"], ALICE, t(3));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(3));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(3),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs carries side's full a.rs lineage.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 4);
+    assert_eq!(b.authors, 2);
+    assert!(history.file(Path::new("a.rs")).is_none());
+}
+
+/// One commit renames `a → b` *and* creates a replacement `a`; the
+/// replacement is later deleted and the path re-created. The
+/// replacement's creation resolves into the later deletion's fence in
+/// the same commit as the rename — that in-use fence must not be
+/// reclaimed into `b`, and the fresh `a → b` alias must not be
+/// mistaken for the entry the replacement consumed.
+#[test]
+fn same_commit_replacement_does_not_corrupt_the_rename_alias() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c1: the original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+
+    // c2: rename to b.rs and create a replacement a.rs, one commit.
+    git(dir.path(), &["mv", "a.rs", "b.rs"], BOB, t(1));
+    std::fs::write(dir.path().join("a.rs"), "fn repl0() {}\nfn repl1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "split a into b and new a"],
+        BOB,
+        t(1),
+    );
+
+    // c3: the replacement dies.
+    git(dir.path(), &["rm", "-q", "a.rs"], ALICE, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "drop replacement"],
+        ALICE,
+        t(2),
+    );
+
+    // c4: an unrelated file re-creates the path.
+    std::fs::write(dir.path().join("a.rs"), "fn unrelated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "reuse a"], CAROL, t(3));
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // b.rs = the original lineage only: creation + rename. Neither
+    // the replacement's churn nor its deletion may leak in.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 3);
+    assert_eq!(b.churn_removed, 0);
+
+    // The final a.rs is only the last re-creation.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.commit_frequency, 1);
+    assert_eq!(a.churn_added, 1);
+    assert_eq!(a.authors, 1);
+}
