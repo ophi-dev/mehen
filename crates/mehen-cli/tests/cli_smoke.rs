@@ -1753,3 +1753,70 @@ fn top_offenders_rank_unparseable_files_on_history_only() {
     );
     assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
 }
+
+#[test]
+fn diff_reports_history_only_for_unparseable_files() {
+    // A malformed head file has no trustworthy static metrics: the
+    // row must show zeros for statics (not partial values blended
+    // into history composites) while history reads real values. The
+    // run still exits non-zero for the blocking diagnostics.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "broken.py", "x = 1\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "broken-cli-base"]);
+    write_python(dir.path(), "broken.py", "def broken(:\n");
+    commit_all(dir.path(), "break it");
+    git_ok(dir.path(), &["tag", "broken-cli-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "broken-cli-base",
+            "--to",
+            "broken-cli-head",
+            "--metrics",
+            "cognitive,history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        !output.status.success(),
+        "blocking diagnostics must fail the run"
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("broken.py"))
+        .unwrap_or_else(|| panic!("broken.py must appear: {files:?}"));
+    let metric = |name: &str| {
+        row["metrics"]
+            .as_array()
+            .expect("metrics array")
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing metric {name}"))
+            .clone()
+    };
+    // History is real; the partial static root was rejected.
+    assert_eq!(
+        metric("history.commit_frequency")["current"].as_f64(),
+        Some(2.0)
+    );
+    assert_eq!(metric("cognitive")["current"].as_f64(), Some(0.0));
+}

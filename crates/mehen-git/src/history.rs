@@ -325,8 +325,9 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // consumed flag lands on the right one.
         let mut targets: Vec<FileIdentity> = Vec::with_capacity(changes.len());
         let mut used_entries: Vec<Option<usize>> = Vec::with_capacity(changes.len());
+        let mut floor_gated_entries: Vec<Option<usize>> = Vec::with_capacity(changes.len());
         for change in &changes {
-            let (target, used) = resolve_alias(
+            let (target, used, floor_gated) = resolve_alias(
                 repo,
                 &mut ancestry,
                 &aliases,
@@ -336,6 +337,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             )?;
             targets.push(target);
             used_entries.push(used);
+            floor_gated_entries.push(floor_gated);
         }
         // Paths that are rename *sources* in this commit: a swap's
         // destination is simultaneously a source, and its older
@@ -588,7 +590,12 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // The "other files in this commit" count is the same for every
         // file in the changeset.
         let coupled_others = coupling_paths.saturating_sub(1) as u64;
-        for ((change, target), used) in changes.iter().zip(targets.iter()).zip(&used_entries) {
+        for (index, ((change, target), used)) in changes
+            .iter()
+            .zip(targets.iter())
+            .zip(&used_entries)
+            .enumerate()
+        {
             // An addition that resolved *through* an alias entry is
             // the redirected occupant's birth: every deletion or
             // rename of this path walked from here on is older than
@@ -599,6 +606,59 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 && let Some(entries) = aliases.get_mut(&change.path)
             {
                 entries[*idx].consumed = true;
+            }
+            // A *floor-gated* addition is a recreated occupant's birth
+            // on a scoped line (see `AliasEntry::addition_floor`). Its
+            // edits — descendants of this addition, inside the entry's
+            // scopes — were walked earlier and routed through the
+            // alias into the rename target; pull them back to the
+            // occupant's own identity now that its birth proves they
+            // belong to it. Genuine parallel edits of the moved file
+            // are concurrent with (not descendants of) the recreation
+            // and stay put, as do the rename target's own commits
+            // (outside the entry's scopes).
+            if change.is_addition
+                && let Some(idx) = floor_gated_entries[index]
+            {
+                let (entry_target, entry_scopes) = {
+                    let entry = &aliases[&change.path][idx];
+                    (entry.target.clone(), entry.scopes.clone())
+                };
+                let mut moved: Vec<Contribution> = Vec::new();
+                if let Some(acc) = files.get_mut(&entry_target) {
+                    let contributions = std::mem::take(&mut acc.contributions);
+                    let mut kept = Vec::with_capacity(contributions.len());
+                    for c in contributions {
+                        let mut is_occupant_edit =
+                            is_descendant_of(repo, &mut ancestry, info.id, c.commit)?;
+                        if is_occupant_edit {
+                            let mut in_scope = false;
+                            for scope in &entry_scopes {
+                                if is_descendant_of(repo, &mut ancestry, c.commit, *scope)? {
+                                    in_scope = true;
+                                    break;
+                                }
+                            }
+                            is_occupant_edit = in_scope;
+                        }
+                        if is_occupant_edit {
+                            moved.push(c);
+                        } else {
+                            kept.push(c);
+                        }
+                    }
+                    acc.has_addition = kept.iter().any(|c| c.is_addition);
+                    acc.contributions = kept;
+                    if acc.is_empty() {
+                        files.remove(&entry_target);
+                    }
+                }
+                if !moved.is_empty() {
+                    let occupant = files.entry(target.clone()).or_default();
+                    for c in moved {
+                        occupant.push(c);
+                    }
+                }
             }
             files.entry(target.clone()).or_default().push(Contribution {
                 commit: info.id,
@@ -1262,17 +1322,35 @@ fn resolve_alias(
     path: &Path,
     commit: gix::ObjectId,
     is_addition: bool,
-) -> Result<(FileIdentity, Option<usize>), GitError> {
+) -> Result<(FileIdentity, Option<usize>, Option<usize>), GitError> {
     let Some(entries) = aliases.get(path) else {
-        return Ok((FileIdentity::Path(path.to_path_buf()), None));
+        return Ok((FileIdentity::Path(path.to_path_buf()), None, None));
     };
     let mut tombstone: Option<(FileIdentity, usize)> = None;
+    // The first entry whose scopes admit this addition but whose
+    // addition floor rejects it: the caller uses it to recognize a
+    // recreated occupant's birth and pull the occupant's already-
+    // routed edits back out of the alias target (see phase 4).
+    let mut floor_gated: Option<usize> = None;
     for (idx, entry) in entries.iter().enumerate() {
-        if entry.consumed || !entry.applies_to(repo, graph, commit, is_addition)? {
+        if entry.consumed {
+            continue;
+        }
+        if is_addition
+            && entry.addition_floor.is_some()
+            && entry.applies_to(repo, graph, commit, false)?
+            && !entry.applies_to(repo, graph, commit, true)?
+        {
+            if floor_gated.is_none() {
+                floor_gated = Some(idx);
+            }
+            continue;
+        }
+        if !entry.applies_to(repo, graph, commit, is_addition)? {
             continue;
         }
         match &entry.target {
-            FileIdentity::Path(_) => return Ok((entry.target.clone(), Some(idx))),
+            FileIdentity::Path(_) => return Ok((entry.target.clone(), Some(idx), floor_gated)),
             FileIdentity::Tombstone(_) => {
                 if tombstone.is_none() {
                     tombstone = Some((entry.target.clone(), idx));
@@ -1281,8 +1359,8 @@ fn resolve_alias(
         }
     }
     Ok(match tombstone {
-        Some((target, idx)) => (target, Some(idx)),
-        None => (FileIdentity::Path(path.to_path_buf()), None),
+        Some((target, idx)) => (target, Some(idx), floor_gated),
+        None => (FileIdentity::Path(path.to_path_buf()), None, floor_gated),
     })
 }
 

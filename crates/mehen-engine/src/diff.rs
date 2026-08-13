@@ -265,13 +265,17 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
                 .into_iter()
                 .filter(|path| !already.contains(path))
                 .filter(|path| {
-                    // Markdown routes to the documentation section and
-                    // never evaluates source thresholds; undetected
-                    // languages are skipped by the loop anyway.
+                    // Unlike the CLI pipeline (whose documentation
+                    // section has no history columns), this API
+                    // analyzes Markdown and evaluates every threshold
+                    // against it — restored Markdown must be included
+                    // or a Git-only policy silently passes for it.
+                    // Undetected languages are skipped by the loop
+                    // anyway.
                     Utf8PathBuf::try_from(path.clone())
                         .ok()
                         .and_then(|utf8| detect_language(&utf8))
-                        .is_some_and(|language| !matches!(language, Language::Markdown))
+                        .is_some()
                 })
                 .map(|path| mehen_git::ChangedFile {
                     path,
@@ -409,10 +413,20 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
             && let Some(history) = head_history.as_ref()
             && let Some(fh) = history.file(cf.path.as_path())
         {
+            // Only *Git-only* history keys evaluate in this fallback:
+            // the composites (`history.hotspot`, relative churn) read
+            // cognitive complexity and SLOC from the unavailable
+            // static analysis, and injecting them into an empty space
+            // would score hotspot zero and divide churn by one.
             let history_thresholds: Vec<Threshold> = input
                 .thresholds
                 .iter()
-                .filter(|t| t.selector.key.as_str().starts_with("history."))
+                .filter(|t| {
+                    let key = t.selector.key.as_str();
+                    key.starts_with("history.")
+                        && key != mehen_core::keys::HISTORY_HOTSPOT
+                        && key != mehen_core::keys::HISTORY_CHURN_RELATIVE
+                })
                 .cloned()
                 .collect();
             if !history_thresholds.is_empty() {
@@ -1022,6 +1036,13 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             }
             if has_blocking_diagnostic(&analysis.diagnostics) {
                 analysis_failed = true;
+                // A partial tree behind an `Error`/`Fatal` diagnostic
+                // is not a measurement (§9.3): emitting its truncated
+                // statics — or blending them into the history
+                // composites — would mislead even though the run
+                // already exits non-zero. The side falls back to the
+                // history-only synthetic space below.
+                return None;
             }
             Some(analysis.root)
         };
@@ -2018,6 +2039,113 @@ binary.md binary
         assert_eq!(v.path, "broken.py");
         assert_eq!(v.evaluation.actual, 2.0);
         assert!(v.evaluation.violated);
+    }
+
+    #[test]
+    fn blocked_parses_suppress_static_dependent_history_thresholds() {
+        // history.hotspot and history.churn.relative read cognitive
+        // complexity and SLOC from the unavailable analysis — they
+        // must not evaluate against an empty space (hotspot 0, churn
+        // divided by 1), while Git-only keys still do.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("broken.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "mixed-base"]);
+        std::fs::write(dir.path().join("broken.py"), "def broken(:\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "break it"]);
+        git_ok(dir.path(), &["tag", "mixed-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![
+            Threshold::new(
+                "history.commit_frequency".parse().unwrap(),
+                1.0,
+                Polarity::HigherIsWorse,
+            ),
+            // Limit -1 would be violated by *any* evaluated value —
+            // including the fabricated 0 an empty space would yield.
+            Threshold::new(
+                "history.hotspot".parse().unwrap(),
+                -1.0,
+                Polarity::HigherIsWorse,
+            ),
+            Threshold::new(
+                "history.churn.relative".parse().unwrap(),
+                -1.0,
+                Polarity::HigherIsWorse,
+            ),
+        ];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "mixed-base".to_string(),
+                to: "mixed-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        // Only the Git-only key evaluates against the fallback space.
+        assert_eq!(report.threshold_violations.len(), 1);
+        assert_eq!(
+            report.threshold_violations[0]
+                .evaluation
+                .selector
+                .key
+                .as_str(),
+            "history.commit_frequency"
+        );
+    }
+
+    #[test]
+    fn restored_markdown_evaluates_history_thresholds() {
+        // analyze_diff analyzes Markdown and evaluates thresholds on
+        // it — a restored README must not dodge a Git-only policy.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("README.md"), "# T\n\nStable.\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "md-thresh-base"]);
+        std::fs::write(dir.path().join("README.md"), "# T\n\nTemporary.\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "touch"]);
+        std::fs::write(dir.path().join("README.md"), "# T\n\nStable.\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "restore"]);
+        git_ok(dir.path(), &["tag", "md-thresh-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![Threshold::new(
+            "history.commit_frequency".parse().unwrap(),
+            2.0,
+            Polarity::HigherIsWorse,
+        )];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "md-thresh-base".to_string(),
+                to: "md-thresh-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert_eq!(report.threshold_violations.len(), 1);
+        let v = &report.threshold_violations[0];
+        assert_eq!(v.path, "README.md");
+        assert_eq!(v.evaluation.actual, 3.0);
     }
 
     #[test]
