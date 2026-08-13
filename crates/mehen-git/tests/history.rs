@@ -2985,3 +2985,170 @@ fn range_touched_files_require_blob_endpoints() {
         "symlink-at-both-endpoints paths must not surface: {touched:?}"
     );
 }
+
+/// A parent that deleted and *recreated* the source path after the
+/// merge base must be excluded from a merge rename's scopes when the
+/// merge retains its recreated version at the path: the retained
+/// occupant survives where it is, and its commits must not resolve
+/// into the rename target nor consume the alias.
+#[test]
+fn merge_rename_scopes_exclude_retained_delete_and_recreate_occupants() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the original a.rs exists at the (future) merge base.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // main: grow the original (older timestamps — walked last).
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\nfn orig3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(1));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // dr branch (from the base): delete the original, recreate an
+    // unrelated file at the path — newer timestamps, walked first.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "dr", "HEAD~1"],
+        CAROL,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], CAROL, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], CAROL, t(3));
+    std::fs::write(dir.path().join("a.rs"), "fn own0() {}\nfn own1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(4));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "recreate a"],
+        CAROL,
+        t(4),
+    );
+    let dr = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(4));
+
+    // The merge keeps dr's a.rs and moves main's original to b.rs.
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(5));
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(5));
+    std::fs::write(dir.path().join("a.rs"), "fn own0() {}\nfn own1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let merge = git_out(
+        dir.path(),
+        &["commit-tree", &tree, "-p", &main, "-p", &dr, "-m", "merge"],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs = the original lineage: root creation + main's growth.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 4);
+    assert_eq!(b.churn_removed, 0);
+
+    // The surviving a.rs is only carol's recreation; her deletion of
+    // the original stays fenced.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.commit_frequency, 1);
+    assert_eq!(a.churn_added, 2);
+    assert_eq!(a.authors, 1);
+}
+
+/// A merge replacing a symlink with a regular blob at the same path
+/// creates a *new* file identity: an older regular file that occupied
+/// the path before it became a symlink stays fenced instead of
+/// donating its history to the merge-created blob.
+#[test]
+#[cfg(unix)]
+fn merge_created_blob_over_symlink_fences_the_old_occupant() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // The old regular occupant lives and grows…
+    std::fs::write(dir.path().join("alias.py"), "old0 = 1\nold1 = 2\n").unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+    std::fs::write(
+        dir.path().join("alias.py"),
+        "old0 = 1\nold1 = 2\nold2 = 3\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow"], BOB, t(1));
+
+    // …then the path becomes a symlink.
+    std::fs::remove_file(dir.path().join("alias.py")).unwrap();
+    std::os::unix::fs::symlink("keep.rs", dir.path().join("alias.py")).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "symlinkify"],
+        ALICE,
+        t(2),
+    );
+
+    // A side branch so the merge has two parents (both hold the
+    // symlink).
+    git(dir.path(), &["checkout", "-q", "-b", "side"], CAROL, t(3));
+    std::fs::write(dir.path().join("side.rs"), "fn side() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "side"], CAROL, t(3));
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(4));
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\nfn more() {}\n").unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow keep"],
+        ALICE,
+        t(4),
+    );
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(4));
+
+    // The merge replaces the symlink with a brand-new regular blob.
+    std::fs::remove_file(dir.path().join("alias.py")).unwrap();
+    std::fs::write(dir.path().join("alias.py"), "reborn = 1\n").unwrap();
+    std::fs::write(dir.path().join("side.rs"), "fn side() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The merge-created blob inherits nothing from the pre-symlink
+    // occupant (its creation, growth, and blob-side deletion at the
+    // symlinkify commit all stay fenced).
+    assert!(history.file(Path::new("alias.py")).is_none());
+    assert_eq!(
+        history.file(Path::new("side.rs")).unwrap().commit_frequency,
+        1
+    );
+}

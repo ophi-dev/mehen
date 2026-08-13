@@ -788,17 +788,21 @@ fn merge_introduced_changes(
         .map(|base| changes_between_trees(repo, Some(base), &to_tree).map(|tc| tc.changes))
         .collect::<Result<_, _>>()?;
 
-    // A destination is merge-introduced only when no parent has it:
-    // if some parent does, that parent's own line performed (or
-    // already contained) the change, and walking its commits handles
-    // identity.
+    // A destination is merge-introduced only when no parent has a
+    // *blob* there: a parent holding a symlink or gitlink at the path
+    // is a different identity entirely (conflict resolution replacing
+    // a symlink with a real file still creates that file), and a
+    // parent holding a blob performed (or already contained) the
+    // change itself — walking its commits handles identity.
+    let blob_in = |tree: &gix::Tree<'_>, path: &Path| -> Result<bool, GitError> {
+        Ok(tree
+            .lookup_entry_by_path(path)
+            .map_err(|e| internal(&e))?
+            .is_some_and(|entry| entry.mode().is_blob()))
+    };
     let in_any_parent = |path: &Path| -> Result<bool, GitError> {
         for tree in &parent_trees {
-            if tree
-                .lookup_entry_by_path(path)
-                .map_err(|e| internal(&e))?
-                .is_some()
-            {
+            if blob_in(tree, path)? {
                 return Ok(true);
             }
         }
@@ -824,34 +828,52 @@ fn merge_introduced_changes(
             // Scope the alias to the parents whose lineage the rename
             // actually describes. The supplying parent (whose diff
             // paired the rename) always qualifies. Another parent
-            // containing the source path qualifies only when the path
-            // predates the branches' divergence (their merge base has
-            // it) — an occupant *independently created* on that line
-            // is an unrelated file, and admitting its commits would
-            // route them into the rename target and let its creation
-            // consume the alias before the real lineage is walked.
+            // holding a blob at the source path qualifies only when
+            // (a) its version was *not* simply retained at that path
+            // by the merge — a retained occupant survives where it is
+            // and its commits belong to the surviving file, not the
+            // moved one — and (b) the path predates the branches'
+            // divergence (their merge base has it): an occupant
+            // independently created on that line is an unrelated
+            // file, and admitting its commits would route them into
+            // the rename target and let its creation consume the
+            // alias before the real lineage is walked.
             let supplier = parent_ids[supplier_idx];
             let mut scopes = vec![supplier];
+            let retained_oid = to_tree
+                .lookup_entry_by_path(source_path)
+                .map_err(|e| internal(&e))?
+                .filter(|entry| entry.mode().is_blob())
+                .map(|entry| entry.oid().to_owned());
             for (idx, (parent_id, tree)) in parent_ids.iter().zip(&parent_trees).enumerate() {
-                if idx == supplier_idx
-                    || tree
-                        .lookup_entry_by_path(source_path)
-                        .map_err(|e| internal(&e))?
-                        .is_none()
-                {
+                if idx == supplier_idx {
+                    continue;
+                }
+                let Some(parent_entry) = tree
+                    .lookup_entry_by_path(source_path)
+                    .map_err(|e| internal(&e))?
+                    .filter(|entry| entry.mode().is_blob())
+                else {
+                    continue;
+                };
+                if retained_oid.is_some_and(|oid| oid == parent_entry.oid()) {
+                    // The merged tree keeps this parent's version at
+                    // the source path: a surviving occupant (e.g. a
+                    // delete-and-recreate on that line resolved in
+                    // its favor), not part of the moved lineage.
                     continue;
                 }
                 let shares_lineage = match repo.merge_base(supplier, *parent_id) {
-                    Ok(base) => base
-                        .object()
-                        .map_err(|e| internal(&e))?
-                        .peel_to_commit()
-                        .map_err(|e| internal(&e))?
-                        .tree()
-                        .map_err(|e| internal(&e))?
-                        .lookup_entry_by_path(source_path)
-                        .map_err(|e| internal(&e))?
-                        .is_some(),
+                    Ok(base) => blob_in(
+                        &base
+                            .object()
+                            .map_err(|e| internal(&e))?
+                            .peel_to_commit()
+                            .map_err(|e| internal(&e))?
+                            .tree()
+                            .map_err(|e| internal(&e))?,
+                        source_path,
+                    )?,
                     // Disjoint histories cannot share the file.
                     Err(gix::repository::merge_base::Error::NotFound { .. }) => false,
                     Err(e) => return Err(GitError::Internal(e.to_string())),
@@ -913,13 +935,7 @@ fn merge_introduced_changes(
             let TreeChange::Deleted { path, .. } = change else {
                 continue;
             };
-            if seen.contains(path)
-                || rename_sources.contains(path)
-                || to_tree
-                    .lookup_entry_by_path(path)
-                    .map_err(|e| internal(&e))?
-                    .is_some()
-            {
+            if seen.contains(path) || rename_sources.contains(path) || blob_in(&to_tree, path)? {
                 continue;
             }
             seen.insert(path.clone());

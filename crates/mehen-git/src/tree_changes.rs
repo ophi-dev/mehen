@@ -30,6 +30,17 @@ use std::path::{Path, PathBuf};
 use gix::diff::blob::{Algorithm, Diff, InternedInput, sources::byte_lines};
 use gix::diff::tree::recorder::Change;
 
+/// Canonical, platform-independent ordering for repository paths: the
+/// underlying git path bytes. `PathBuf`'s own `Ord` may order
+/// differently across platforms (Windows `OsStr` ordering is not the
+/// byte ordering), which would let equally ranked rename tie-breaks
+/// pick different pairings per platform.
+fn git_path_order(a: &Path, b: &Path) -> std::cmp::Ordering {
+    a.as_os_str()
+        .as_encoded_bytes()
+        .cmp(b.as_os_str().as_encoded_bytes())
+}
+
 /// Convert a git tree path (raw bytes) to a `PathBuf` without lossy
 /// UTF-8 replacement: on Unix, `b"x\xff.py"` must stay distinct from
 /// a real file literally named `x\u{FFFD}.py` — a lossy conversion
@@ -255,7 +266,7 @@ pub(crate) fn changes_between_trees(
     let small_swap_scan =
         !has_loose_ends && modified.len() >= 2 && modified.len() <= SWAP_SCAN_MAX_MODIFICATIONS;
     // Path order keeps budget truncation deterministic.
-    modified.sort_by(|a, b| a.0.cmp(&b.0));
+    modified.sort_by(|a, b| git_path_order(&a.0, &b.0));
     let mut break_budget = BREAK_TOTAL_BYTE_BUDGET;
     for (path, previous_oid, oid) in modified {
         // Worth breaking only when something could pair with a half:
@@ -320,8 +331,8 @@ fn detect_renames(
     mut deleted: Vec<RenameSide>,
     broken_pairs: &[(PathBuf, gix::ObjectId, gix::ObjectId)],
 ) -> Result<(), GitError> {
-    added.sort_by(|a, b| a.path.cmp(&b.path));
-    deleted.sort_by(|a, b| a.path.cmp(&b.path));
+    added.sort_by(|a, b| git_path_order(&a.path, &b.path));
+    deleted.sort_by(|a, b| git_path_order(&a.path, &b.path));
 
     // Exact pass: identical blob content is a certain rename. When an
     // OID has several candidates on either side (e.g. two identical
@@ -399,8 +410,8 @@ fn detect_renames(
     }
     exact_candidates.sort_by(|a, b| {
         b.0.cmp(&a.0)
-            .then_with(|| deleted[a.1].path.cmp(&deleted[b.1].path))
-            .then_with(|| added[a.2].path.cmp(&added[b.2].path))
+            .then_with(|| git_path_order(&deleted[a.1].path, &deleted[b.1].path))
+            .then_with(|| git_path_order(&added[a.2].path, &added[b.2].path))
     });
 
     let mut deleted_taken = vec![false; deleted.len()];
@@ -474,11 +485,11 @@ fn detect_renames(
         candidates.sort_by(|a, b| {
             b.0.total_cmp(&a.0)
                 .then_with(|| {
-                    remaining_deleted[a.1]
-                        .path
-                        .cmp(&remaining_deleted[b.1].path)
+                    git_path_order(&remaining_deleted[a.1].path, &remaining_deleted[b.1].path)
                 })
-                .then_with(|| remaining_added[a.2].path.cmp(&remaining_added[b.2].path))
+                .then_with(|| {
+                    git_path_order(&remaining_added[a.2].path, &remaining_added[b.2].path)
+                })
         });
 
         let mut added_taken = vec![false; remaining_added.len()];
