@@ -30,6 +30,29 @@ use std::path::{Path, PathBuf};
 use gix::diff::blob::{Algorithm, Diff, InternedInput, sources::byte_lines};
 use gix::diff::tree::recorder::Change;
 
+/// Whether two blobs plausibly hold the *same file lineage*: equal
+/// ids, or spanhash similarity at git's rename threshold. Used by the
+/// history walk to tell a lineage-continuing edit apart from an
+/// unrelated file re-created at the same path when only trees are
+/// available (e.g. qualifying merge-alias scopes). Oversized blobs
+/// are conservatively *not* considered the same lineage — never
+/// loaded, deterministic.
+pub(crate) fn same_blob_lineage(
+    repo: &gix::Repository,
+    a: &gix::ObjectId,
+    b: &gix::ObjectId,
+) -> Result<bool, GitError> {
+    if a == b {
+        return Ok(true);
+    }
+    if blob_size(repo, a)? > FUZZY_MAX_BLOB_BYTES || blob_size(repo, b)? > FUZZY_MAX_BLOB_BYTES {
+        return Ok(false);
+    }
+    let a_data = read_blob_data(repo, a)?;
+    let b_data = read_blob_data(repo, b)?;
+    Ok(spanhash_similarity(&a_data, &b_data) >= RENAME_SIMILARITY)
+}
+
 /// Canonical, platform-independent ordering for repository paths: the
 /// underlying git path bytes. `PathBuf`'s own `Ord` may order
 /// differently across platforms (Windows `OsStr` ordering is not the

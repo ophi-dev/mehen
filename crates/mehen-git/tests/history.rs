@@ -3328,3 +3328,155 @@ fn converging_merge_renames_preserve_every_parent_lineage() {
     assert!(history.file(Path::new("x.rs")).is_none());
     assert!(history.file(Path::new("y.rs")).is_none());
 }
+
+/// A merge rename onto a destination another parent already owns:
+/// conflict resolution carries the `a.rs` lineage into the merged
+/// `b.rs` (content from `a.rs`, not the retained parent blob). The
+/// alias must install — and without a destination boundary, so the
+/// owning parent's legitimate `b.rs` history keeps converging.
+#[test]
+fn merge_renames_onto_parent_owned_destinations_install_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: common ancestor.
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // main: a.rs is born and grows.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(1));
+    git(dir.path(), &["commit", "-q", "-m", "create a"], ALICE, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(2));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(2));
+
+    // side: an unrelated b.rs is born.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "side", "HEAD~2"],
+        CAROL,
+        t(3),
+    );
+    std::fs::write(dir.path().join("b.rs"), "fn b_own() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(4));
+    git(dir.path(), &["commit", "-q", "-m", "create b"], CAROL, t(4));
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(4));
+
+    // The merge resolves a.rs *into* b.rs: the merged b.rs holds
+    // main's a.rs content (≠ side's b.rs blob), and a.rs is gone.
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(5));
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(5));
+    git(dir.path(), &["add", "-A"], ALICE, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs absorbs both lineages: a.rs's creation + growth (via the
+    // alias) and side's own b.rs creation (no boundary fences it).
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 3);
+    assert_eq!(b.churn_added, 5);
+    assert_eq!(b.authors, 3);
+    assert!(history.file(Path::new("a.rs")).is_none());
+}
+
+/// A parent that deleted the base file and re-created an unrelated
+/// one — whose re-creation the merge then *discards* — must not enter
+/// the rename scopes: path existence at the merge base is not
+/// lineage continuity.
+#[test]
+fn merge_rename_scopes_exclude_discarded_recreated_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the original a.rs exists at the (future) merge base.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // main: grow the original (older timestamps — walked last).
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\nfn orig3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(1));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // dr branch: delete + recreate an unrelated file (newer
+    // timestamps — walked first).
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "dr", "HEAD~1"],
+        CAROL,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], CAROL, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], CAROL, t(3));
+    std::fs::write(dir.path().join("a.rs"), "fn own0() {}\nfn own1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(4));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "recreate a"],
+        CAROL,
+        t(4),
+    );
+    let dr = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(4));
+
+    // The merge discards the recreation entirely and moves main's
+    // original to b.rs — no blob survives at a.rs.
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(5));
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(5));
+    git(dir.path(), &["add", "-A"], ALICE, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let merge = git_out(
+        dir.path(),
+        &["commit-tree", &tree, "-p", &main, "-p", &dr, "-m", "merge"],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs = the original lineage only: the discarded recreation's
+    // commits must neither route into it nor consume the alias.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 4);
+    assert_eq!(b.churn_removed, 0);
+    assert_eq!(b.authors, 2);
+}

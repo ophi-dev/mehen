@@ -1547,7 +1547,7 @@ fn split_rename_history_composites_use_source_static_inputs() {
             "--to",
             "split-head",
             "--metrics",
-            "history.hotspot",
+            "cognitive,history.hotspot",
             "--output-format",
             "json",
         ])
@@ -1583,4 +1583,30 @@ fn split_rename_history_composites_use_source_static_inputs() {
         Some(2.0),
         "baseline hotspot must use the source's static inputs: {metric:?}"
     );
+    // The staged composite inputs must not leak into displayed static
+    // selectors: the new row's cognitive baseline stays 0 (the paired
+    // deletion row already carries the source's static baseline, and
+    // leaking here would double-count it).
+    let cognitive = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("cognitive"))
+        .expect("cognitive must be present");
+    assert_eq!(
+        cognitive["baseline"].as_f64(),
+        Some(0.0),
+        "composite inputs leaked into displayed selectors: {cognitive:?}"
+    );
+    let deletion = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .expect("deletion row must exist");
+    let deletion_cognitive = deletion["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("cognitive"))
+        .expect("cognitive must be present");
+    assert_eq!(deletion_cognitive["baseline"].as_f64(), Some(1.0));
 }

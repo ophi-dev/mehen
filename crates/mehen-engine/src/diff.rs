@@ -203,6 +203,20 @@ fn split_boundary_renames(
     })
 }
 
+/// Static inputs the history composites read (`history.hotspot` needs
+/// the cognitive sum, `history.churn.relative` the code-line count),
+/// per metric family. Staged into a split rename's synthetic baseline
+/// for injection and stripped afterwards — the keys are shared with
+/// displayed selectors.
+const COMPOSITE_INPUT_KEYS: [&str; 6] = [
+    mehen_core::keys::LOC_SLOC,
+    mehen_core::keys::COGNITIVE_SUM,
+    mehen_core::keys::SQL_LOC_CODE,
+    mehen_core::keys::SQL_COGNITIVE_COMPLEXITY,
+    mehen_core::keys::MARKDOWN_LOC_TLOC,
+    mehen_core::keys::MARKDOWN_COGNITIVE_COMPLEXITY,
+];
+
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
@@ -1023,10 +1037,13 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             // full-history spike. The history *composites* also read
             // static inputs at the baseline revision — hotspot needs
             // the source's cognitive complexity, relative churn its
-            // size — so exactly those inputs are copied from an
-            // analysis of the source blob; every displayed static
-            // column still reads 0 there, keeping the row's
-            // new-file presentation.
+            // size — so exactly those inputs are staged from an
+            // analysis of the source blob for the injection below,
+            // then stripped again (their keys are shared with
+            // displayed selectors, which must keep reading 0 so the
+            // row keeps its new-file presentation and the paired
+            // deletion row isn't double-counted against).
+            let mut staged_composite_inputs = false;
             if baseline_space.is_none()
                 && cf.source_path.is_some()
                 && base_history
@@ -1047,20 +1064,14 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                     let base_source = SourceFile::new(base_utf8, base_language, text);
                     if let Ok(base_analysis) = base_analyzer.analyze(&base_source, &analysis_config)
                     {
-                        for key in [
-                            mehen_core::keys::LOC_SLOC,
-                            mehen_core::keys::COGNITIVE_SUM,
-                            mehen_core::keys::SQL_LOC_CODE,
-                            mehen_core::keys::SQL_COGNITIVE_COMPLEXITY,
-                            mehen_core::keys::MARKDOWN_LOC_TLOC,
-                            mehen_core::keys::MARKDOWN_COGNITIVE_COMPLEXITY,
-                        ] {
+                        for key in COMPOSITE_INPUT_KEYS {
                             if let Some(value) = base_analysis
                                 .root
                                 .metrics
                                 .get(&mehen_core::MetricKey::new(key))
                             {
                                 space.metrics.insert(key, value);
+                                staged_composite_inputs = true;
                             }
                         }
                     }
@@ -1117,6 +1128,17 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                         fh,
                         history.head_seconds,
                     );
+                }
+            }
+            // The staged composite inputs did their job during
+            // injection; their keys are shared with displayed
+            // selectors (`cognitive` reads `cognitive.sum`, …), and
+            // leaving them would subtract the source's statics from
+            // this new row *and* double-count against the paired
+            // deletion row, which already carries them.
+            if staged_composite_inputs && let Some(space) = baseline_space.as_mut() {
+                for key in COMPOSITE_INPUT_KEYS {
+                    space.metrics.remove(&mehen_core::MetricKey::new(key));
                 }
             }
         }

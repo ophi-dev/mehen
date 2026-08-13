@@ -72,9 +72,6 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         let Some(language) = detect_language(entry.as_path()) else {
             continue;
         };
-        let Ok(text) = std::fs::read_to_string(entry.as_std_path()) else {
-            continue;
-        };
         let Some(analyzer) = registry.analyzer_for(language) else {
             // Language detected but no analyzer registered (the
             // owning crate is feature-gated off in this build).
@@ -85,35 +82,49 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
             record_unavailable(&mut analysis_errors, &entry, language);
             continue;
         };
-        let source = SourceFile::new(entry.clone(), language, text);
-        let Ok(mut analysis) = analyzer.analyze(&source, &input.config) else {
-            continue;
+        // History metrics don't depend on decoding or parsing the
+        // blob: a recognized file whose contents static analysis
+        // cannot handle still has repository history, and a history
+        // selector must rank it on real values (via an empty metric
+        // space) instead of silently dropping it. Static-only
+        // rankings keep skipping such files.
+        let history_entry = histories.as_ref().and_then(|h| h.file(entry.as_std_path()));
+        let analyzed_root = std::fs::read_to_string(entry.as_std_path())
+            .ok()
+            .and_then(|text| {
+                let source = SourceFile::new(entry.clone(), language, text);
+                let analysis = analyzer.analyze(&source, &input.config).ok()?;
+                // Migrated analyzers can return `Ok(...)` with a
+                // partial tree alongside an `Error`/`Fatal`
+                // diagnostic when the file doesn't parse cleanly.
+                // Per §9.3 those analyses are incomplete; surfacing
+                // them in the offender list as if they were measured
+                // would mislead CI/policy callers.
+                if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
+                    return None;
+                }
+                Some(analysis.root)
+            });
+        let mut root = match (analyzed_root, history_entry.is_some()) {
+            (Some(root), _) => root,
+            (None, true) => mehen_core::MetricSpace::new(
+                mehen_core::SpaceId(0),
+                mehen_core::SpaceKind::Unit,
+                mehen_core::SourceSpan::empty(),
+            ),
+            (None, false) => continue,
         };
-        // Migrated analyzers can return `Ok(...)` with a partial
-        // tree alongside an `Error`/`Fatal` diagnostic when the
-        // file doesn't parse cleanly. Per §9.3 those analyses are
-        // incomplete; surfacing them in the offender list as if
-        // they were measured would mislead CI/policy callers.
-        if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
-            continue;
-        }
 
         // Fold the `history.*` family into the metric set so history
         // selectors rank on real values.
-        if let Some(histories) = histories.as_ref()
-            && let Some((fh, head_seconds)) = histories.file(entry.as_std_path())
-        {
-            crate::history_metrics::inject_history_metrics(
-                &mut analysis.root.metrics,
-                &fh,
-                head_seconds,
-            );
+        if let Some((fh, head_seconds)) = history_entry {
+            crate::history_metrics::inject_history_metrics(&mut root.metrics, &fh, head_seconds);
         }
 
         let scores: Vec<f64> = input
             .selectors
             .iter()
-            .map(|s| read_metric(s, &analysis.root))
+            .map(|s| read_metric(s, &root))
             .collect();
 
         entries.push(TopOffenderEntry {
@@ -1172,6 +1183,62 @@ mod tests {
             ranked,
             vec![("zzz_busy.py", 2.0), ("aaa_calm.py", 1.0)],
             "history selector must drive the ranking"
+        );
+    }
+
+    #[test]
+    fn rank_top_offenders_ranks_undecodable_files_on_history() {
+        // A recognized file whose contents static analysis cannot
+        // decode still has repository history — the exported API must
+        // rank it (empty metric space + injection) instead of
+        // silently dropping it.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Mehen Test")
+                .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+                .env("GIT_COMMITTER_NAME", "Mehen Test")
+                .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\n").unwrap();
+        std::fs::write(dir.path().join("plain.py"), "y = 1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\nz = 2\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "two"]);
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("history.commit_frequency")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        let ranked: Vec<(&str, f64)> = report
+            .entries
+            .iter()
+            .map(|e| (e.path.file_name().unwrap_or(""), e.scores[0]))
+            .collect();
+        assert_eq!(
+            ranked,
+            vec![("latin.py", 2.0), ("plain.py", 1.0)],
+            "undecodable file must rank on its history"
         );
     }
 

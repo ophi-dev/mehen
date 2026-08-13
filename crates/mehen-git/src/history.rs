@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use crate::GitError;
 use crate::tree_changes::{
     TreeChange, blob_size, changes_between_trees, count_lines, is_binary, line_diff_counts,
-    read_blob_data,
+    read_blob_data, same_blob_lineage,
 };
 
 /// Average Gregorian month in seconds (30.436875 days), used to express
@@ -493,8 +493,10 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // the destination path belong to a dead prior occupant —
             // unless the destination is itself a rename source in this
             // same commit (a swap), in which case its older changes
-            // are a live lineage this commit moves elsewhere.
-            if !commit_sources.contains(&change.path) {
+            // are a live lineage this commit moves elsewhere, or the
+            // change opts out (a merge rename converging onto a
+            // parent-owned destination whose older history is real).
+            if change.install_destination_boundary && !commit_sources.contains(&change.path) {
                 tombstones += 1;
                 let boundary = FileIdentity::Tombstone(tombstones);
                 aliases
@@ -715,6 +717,12 @@ struct CommitFileChange {
     /// `None` for ordinary changes — the walked commit itself scopes
     /// the alias.
     alias_scopes: Option<Vec<gix::ObjectId>>,
+    /// Whether the rename installs a destination identity boundary.
+    /// True everywhere except a merge rename onto a path some parent
+    /// already owns: that parent's older history at the destination
+    /// is legitimate lineage converging into the merged file, not a
+    /// dead prior occupant to fence off.
+    install_destination_boundary: bool,
 }
 
 /// A reusable revision graph for merge-base queries, per the gix
@@ -809,6 +817,15 @@ fn merge_introduced_changes(
         Ok(false)
     };
 
+    let blob_oid_at =
+        |tree: &gix::Tree<'_>, path: &Path| -> Result<Option<gix::ObjectId>, GitError> {
+            Ok(tree
+                .lookup_entry_by_path(path)
+                .map_err(|e| internal(&e))?
+                .filter(|entry| entry.mode().is_blob())
+                .map(|entry| entry.oid().to_owned()))
+        };
+
     let mut introduced: Vec<CommitFileChange> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     // Renames first, across all parent diffs. Distinct sources may
@@ -827,8 +844,33 @@ fn merge_introduced_changes(
             else {
                 continue;
             };
-            if seen_pairs.contains(&(path.clone(), source_path.clone())) || in_any_parent(path)? {
+            if seen_pairs.contains(&(path.clone(), source_path.clone())) {
                 continue;
+            }
+            // A destination some parent already owns is still a merge
+            // rename when the merged content was *not* simply retained
+            // from that parent — conflict resolution carried the
+            // source lineage into the existing path, and both files'
+            // histories converge there. A retained destination blob
+            // means no merge rename happened (that parent's own line
+            // owns the identity). Such convergent renames skip the
+            // destination boundary: the owning parent's older history
+            // at the path is real lineage, not a dead occupant.
+            let dest_in_parent = in_any_parent(path)?;
+            if dest_in_parent {
+                let merged_oid = blob_oid_at(&to_tree, path)?;
+                let mut retained = merged_oid.is_none();
+                if let Some(merged_oid) = merged_oid {
+                    for tree in &parent_trees {
+                        if blob_oid_at(tree, path)? == Some(merged_oid) {
+                            retained = true;
+                            break;
+                        }
+                    }
+                }
+                if retained {
+                    continue;
+                }
             }
             // Scope the alias to the parents whose lineage the rename
             // actually describes. The supplying parent (whose diff
@@ -853,16 +895,33 @@ fn merge_introduced_changes(
                     continue;
                 }
                 let shares_lineage = match repo.merge_base(supplier, *parent_id) {
-                    Ok(base) => blob_in(
-                        &base
+                    Ok(base) => {
+                        let base_tree = base
                             .object()
                             .map_err(|e| internal(&e))?
                             .peel_to_commit()
                             .map_err(|e| internal(&e))?
                             .tree()
-                            .map_err(|e| internal(&e))?,
-                        source_path,
-                    )?,
+                            .map_err(|e| internal(&e))?;
+                        // The path merely *existing* at the base is
+                        // not enough: a parent that deleted the base
+                        // file and re-created an unrelated one at the
+                        // same path crossed an identity boundary, and
+                        // its commits describe the discarded
+                        // re-creation, not the moved lineage. Require
+                        // the parent's blob to plausibly continue the
+                        // base's (equal, or similar at git's rename
+                        // threshold).
+                        match (
+                            blob_oid_at(&base_tree, source_path)?,
+                            blob_oid_at(tree, source_path)?,
+                        ) {
+                            (Some(base_oid), Some(parent_oid)) => {
+                                same_blob_lineage(repo, &base_oid, &parent_oid)?
+                            }
+                            _ => false,
+                        }
+                    }
                     // Disjoint histories cannot share the file.
                     Err(gix::repository::merge_base::Error::NotFound { .. }) => false,
                     Err(e) => return Err(GitError::Internal(e.to_string())),
@@ -881,6 +940,7 @@ fn merge_introduced_changes(
                 is_deletion: false,
                 is_addition: false,
                 alias_scopes: Some(scopes),
+                install_destination_boundary: !dest_in_parent,
             });
         }
     }
@@ -904,6 +964,7 @@ fn merge_introduced_changes(
                 is_deletion: false,
                 is_addition: true,
                 alias_scopes: None,
+                install_destination_boundary: true,
             });
         }
     }
@@ -937,6 +998,7 @@ fn merge_introduced_changes(
                 is_deletion: true,
                 is_addition: false,
                 alias_scopes: None,
+                install_destination_boundary: true,
             });
         }
     }
@@ -1090,6 +1152,7 @@ fn diff_against_first_parent(
                 is_deletion: false,
                 is_addition: true,
                 alias_scopes: None,
+                install_destination_boundary: true,
             },
             TreeChange::Deleted { path, oid } => CommitFileChange {
                 path,
@@ -1099,6 +1162,7 @@ fn diff_against_first_parent(
                 is_deletion: true,
                 is_addition: false,
                 alias_scopes: None,
+                install_destination_boundary: true,
             },
             TreeChange::Modified {
                 path,
@@ -1120,6 +1184,7 @@ fn diff_against_first_parent(
                     is_deletion: false,
                     is_addition: false,
                     alias_scopes: None,
+                    install_destination_boundary: true,
                 }
             }
             TreeChange::Renamed {
@@ -1142,6 +1207,7 @@ fn diff_against_first_parent(
                     is_deletion: false,
                     is_addition: false,
                     alias_scopes: None,
+                    install_destination_boundary: true,
                 }
             }
         };

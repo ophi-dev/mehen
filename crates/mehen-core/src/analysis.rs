@@ -93,6 +93,10 @@ impl MetricSet {
         self.0.get(key).copied()
     }
 
+    pub fn remove(&mut self, key: &MetricKey) -> Option<MetricValue> {
+        self.0.remove(key)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&MetricKey, &MetricValue)> {
         self.0.iter()
     }
