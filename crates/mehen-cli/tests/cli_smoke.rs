@@ -1467,3 +1467,120 @@ fn restored_markdown_stays_out_of_history_augmentation() {
         "markdown must not enter the source-code table: {files:?}"
     );
 }
+
+#[test]
+fn top_offenders_rank_non_utf8_files_on_history() {
+    // Static analysis cannot decode the Latin-1 file, but its
+    // repository history is real — a history selector must rank it
+    // instead of silently dropping it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\n").unwrap();
+    write_python(dir.path(), "plain.py", "y = 1\n");
+    commit_all(dir.path(), "base");
+    std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\nz = 2\n").unwrap();
+    commit_all(dir.path(), "grow latin");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    // latin.py leads with 2 commits; plain.py has 1.
+    assert_eq!(offenders.len(), 2, "non-UTF-8 file dropped: {offenders:?}");
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("latin.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn split_rename_history_composites_use_source_static_inputs() {
+    // Cross-language rename: the destination row's baseline hotspot
+    // must be cognitive.sum(source) × commit_frequency(source), not
+    // zero — otherwise the whole current hotspot masquerades as new.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    // Python with cognitive complexity 1 (one `if`).
+    let py = "def f(x):\n    if x:\n        return 1\n    return 0\n";
+    write_python(dir.path(), "a.py", py);
+    commit_all(dir.path(), "base");
+    write_python(
+        dir.path(),
+        "a.py",
+        "def f(x):\n    if x:\n        return 1\n    return 0\n\n\ndef g():\n    return 2\n",
+    );
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "split-base"]);
+
+    git_ok(dir.path(), &["mv", "a.py", "a.rs"]);
+    commit_all(dir.path(), "cross-language move");
+    git_ok(dir.path(), &["tag", "split-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "split-base",
+            "--to",
+            "split-head",
+            "--metrics",
+            "history.hotspot",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+
+    // The Rust analyzer may reject the moved Python text (that is the
+    // point of a cross-language split) — assert on the report itself,
+    // not the exit code.
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.rs"))
+        .unwrap_or_else(|| panic!("split destination row must exist: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.hotspot"))
+        .expect("history.hotspot must be present");
+    // Source lineage at split-base: cognitive.sum = 1, two commits.
+    assert_eq!(
+        metric["baseline"].as_f64(),
+        Some(2.0),
+        "baseline hotspot must use the source's static inputs: {metric:?}"
+    );
+}

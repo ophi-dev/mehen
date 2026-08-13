@@ -233,9 +233,45 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
     // Thresholds against `history.*` keys need the repository history
     // at the head revision (thresholds are evaluated against the head
     // analysis only). Walked lazily — the family is opt-in.
-    let head_history = if history_metrics::names_want_history(
+    let wants_history = history_metrics::names_want_history(
         input.thresholds.iter().map(|t| t.selector.key.as_str()),
-    ) {
+    );
+    // `history.*` metrics change with every touch, not only when the
+    // endpoint trees differ: a file modified and restored within the
+    // range gained commit frequency and churn, and a head-side
+    // threshold can newly trip even though the endpoint diff has no
+    // row for it. Mirror the CLI diff's range-touch augmentation.
+    let changed = if wants_history {
+        let mut changed = changed;
+        let already: std::collections::HashSet<&PathBuf> =
+            changed.iter().map(|cf| &cf.path).collect();
+        let extra: Vec<mehen_git::ChangedFile> =
+            mehen_git::range_touched_files(repo, &input.from, &input.to)
+                .map_err(DiffError::Git)?
+                .into_iter()
+                .filter(|path| !already.contains(path))
+                .filter(|path| {
+                    // Markdown routes to the documentation section and
+                    // never evaluates source thresholds; undetected
+                    // languages are skipped by the loop anyway.
+                    Utf8PathBuf::try_from(path.clone())
+                        .ok()
+                        .and_then(|utf8| detect_language(&utf8))
+                        .is_some_and(|language| !matches!(language, Language::Markdown))
+                })
+                .map(|path| mehen_git::ChangedFile {
+                    path,
+                    status: ChangeStatus::Modified,
+                    source_path: None,
+                })
+                .collect();
+        drop(already);
+        changed.extend(extra);
+        changed
+    } else {
+        changed
+    };
+    let head_history = if wants_history {
         Some(mehen_git::collect_history(repo, &input.to).map_err(DiffError::Git)?)
     } else {
         None
@@ -982,20 +1018,54 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             // A split rename (`Added` row carrying `source_path`, e.g.
             // a cross-language `a.py → a.rs`) has no baseline *blob*,
             // but its baseline *history* is the source lineage. Give
-            // it an empty synthetic baseline space so history columns
+            // it a synthetic baseline space so history columns
             // compare against real values instead of manufacturing a
-            // full-history spike; static columns still read 0 there.
+            // full-history spike. The history *composites* also read
+            // static inputs at the baseline revision — hotspot needs
+            // the source's cognitive complexity, relative churn its
+            // size — so exactly those inputs are copied from an
+            // analysis of the source blob; every displayed static
+            // column still reads 0 there, keeping the row's
+            // new-file presentation.
             if baseline_space.is_none()
                 && cf.source_path.is_some()
                 && base_history
                     .as_ref()
                     .is_some_and(|history| history.file(base_path).is_some())
             {
-                baseline_space = Some(MetricSpace::new(
+                let mut space = MetricSpace::new(
                     mehen_core::SpaceId(0),
                     mehen_core::SpaceKind::Unit,
                     mehen_core::SourceSpan::empty(),
-                ));
+                );
+                if let Ok(Some(bytes)) = mehen_git::read_blob(&repo, &from_ref, base_path)
+                    && let Ok(base_utf8) = Utf8PathBuf::try_from(base_path.to_path_buf())
+                    && let Some(base_language) = detect_language(&base_utf8)
+                    && let Some(base_analyzer) = registry.analyzer_for(base_language)
+                    && let Ok(text) = String::from_utf8(bytes)
+                {
+                    let base_source = SourceFile::new(base_utf8, base_language, text);
+                    if let Ok(base_analysis) = base_analyzer.analyze(&base_source, &analysis_config)
+                    {
+                        for key in [
+                            mehen_core::keys::LOC_SLOC,
+                            mehen_core::keys::COGNITIVE_SUM,
+                            mehen_core::keys::SQL_LOC_CODE,
+                            mehen_core::keys::SQL_COGNITIVE_COMPLEXITY,
+                            mehen_core::keys::MARKDOWN_LOC_TLOC,
+                            mehen_core::keys::MARKDOWN_COGNITIVE_COMPLEXITY,
+                        ] {
+                            if let Some(value) = base_analysis
+                                .root
+                                .metrics
+                                .get(&mehen_core::MetricKey::new(key))
+                            {
+                                space.metrics.insert(key, value);
+                            }
+                        }
+                    }
+                }
+                baseline_space = Some(space);
             }
             // History metrics don't depend on decoding or parsing the
             // blob: a side whose static analysis is unavailable (e.g.
@@ -1803,6 +1873,53 @@ binary.md binary
         let v = &report.threshold_violations[0];
         assert_eq!(v.path, "hot.py");
         assert_eq!(v.evaluation.actual, 2.0);
+        assert!(v.evaluation.violated);
+    }
+
+    #[test]
+    fn analyze_diff_history_thresholds_cover_restored_files() {
+        // Modified in one range commit, restored in the next: the
+        // endpoint trees are identical, but the head history gained
+        // two commits and the threshold must still trip.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("wobbly.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "restored-base"]);
+
+        std::fs::write(dir.path().join("wobbly.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "grow"]);
+        std::fs::write(dir.path().join("wobbly.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "restore"]);
+        git_ok(dir.path(), &["tag", "restored-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![Threshold::new(
+            "history.commit_frequency".parse().unwrap(),
+            2.0,
+            Polarity::HigherIsWorse,
+        )];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "restored-base".to_string(),
+                to: "restored-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert_eq!(report.threshold_violations.len(), 1);
+        let v = &report.threshold_violations[0];
+        assert_eq!(v.path, "wobbly.py");
+        assert_eq!(v.evaluation.actual, 3.0);
         assert!(v.evaluation.violated);
     }
 

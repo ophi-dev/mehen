@@ -600,28 +600,36 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         None => return Ok(()),
     };
 
-    let text = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
-    };
+    // History metrics don't depend on decoding or parsing the blob:
+    // a recognized file whose contents static analysis cannot handle
+    // (e.g. non-UTF-8 but non-binary) still has repository history,
+    // and a history selector must rank it on real values instead of
+    // silently dropping it. Static-only rankings keep skipping such
+    // files (an all-zero row would be noise).
+    let history_entry = cfg.history.as_ref().and_then(|h| h.file(&path));
 
-    let source = SourceFile::new(utf8_path, language, text);
-    let mut analysis = match analyzer.analyze(&source, &mehen_core::AnalysisConfig::default()) {
-        Ok(a) => a,
-        Err(_) => return Ok(()),
+    let analyzed_root = std::fs::read_to_string(&path).ok().and_then(|text| {
+        let source = SourceFile::new(utf8_path, language, text);
+        analyzer
+            .analyze(&source, &mehen_core::AnalysisConfig::default())
+            .ok()
+            .map(|analysis| analysis.root)
+    });
+    let mut root = match (analyzed_root, history_entry.is_some()) {
+        (Some(root), _) => root,
+        (None, true) => mehen_core::MetricSpace::new(
+            mehen_core::SpaceId(0),
+            mehen_core::SpaceKind::Unit,
+            mehen_core::SourceSpan::empty(),
+        ),
+        (None, false) => return Ok(()),
     };
 
     // Fold the `history.*` family into the metric set so history
     // selectors rank on real values. Files without recorded history
     // (untracked, outside every known work dir) read the family as 0.0.
-    if let Some(histories) = cfg.history.as_ref()
-        && let Some((fh, head_seconds)) = histories.file(&path)
-    {
-        crate::history_metrics::inject_history_metrics(
-            &mut analysis.root.metrics,
-            &fh,
-            head_seconds,
-        );
+    if let Some((fh, head_seconds)) = history_entry {
+        crate::history_metrics::inject_history_metrics(&mut root.metrics, &fh, head_seconds);
     }
 
     let metrics: Vec<CliMetricValue> = cfg
@@ -630,7 +638,7 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         .map(|sel| CliMetricValue {
             name: sel.name,
             label: sel.label,
-            value: read_selector_metric(&analysis.root, sel),
+            value: read_selector_metric(&root, sel),
         })
         .collect();
 
