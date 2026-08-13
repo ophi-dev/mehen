@@ -1292,6 +1292,11 @@ fn merge_introduced_changes(
     // survivor's own pre-branch history. The fence is scoped to the
     // discarding parent and floored at its divergence from the
     // supplying parent, so shared ancestors stay with the survivor.
+    // One fence per (path, discarding parent): an octopus merge can
+    // discard several parents' independent occupants of one path, and
+    // each needs its own scoped fence.
+    let mut fenced: std::collections::HashSet<(PathBuf, gix::ObjectId)> =
+        std::collections::HashSet::new();
     for (q_idx, diff) in diffs.iter().enumerate() {
         for change in diff {
             let TreeChange::Modified {
@@ -1302,7 +1307,7 @@ fn merge_introduced_changes(
             else {
                 continue;
             };
-            if seen.contains(path) {
+            if seen.contains(path) || fenced.contains(&(path.clone(), parent_ids[q_idx])) {
                 continue;
             }
             // Find the parent that supplied the merged blob (exact,
@@ -1353,7 +1358,7 @@ fn merge_introduced_changes(
             {
                 continue;
             }
-            seen.insert(path.clone());
+            fenced.insert((path.clone(), parent_ids[q_idx]));
             introduced.push(CommitFileChange {
                 path: path.clone(),
                 source_path: None,

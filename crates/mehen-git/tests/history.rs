@@ -4601,3 +4601,115 @@ fn similar_discarded_recreations_are_still_fenced_at_merges() {
     assert_eq!(a.churn_added, 5, "the shared creation was fenced away");
     assert_eq!(a.authors, 2, "the similar recreation leaked in");
 }
+
+/// An octopus merge discarding *two* parents' independent occupants
+/// of the same path: each discarded parent needs its own fence — a
+/// per-path dedup would leave the second occupant unfenced.
+#[test]
+fn octopus_merges_fence_every_discarded_occupant() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // Retaining branch.
+    git(dir.path(), &["checkout", "-q", "-b", "retain"], BOB, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn kept_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(1));
+    let retain = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // First discarded branch: delete + recreate (newest timestamps).
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "d1", "main"],
+        CAROL,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], CAROL, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "d1 drops a"],
+        CAROL,
+        t(2),
+    );
+    std::fs::write(dir.path().join("a.rs"), "fn d1_own() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "d1 recreates a"],
+        CAROL,
+        t(3),
+    );
+    let d1 = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    // Second discarded branch: another independent occupant.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "d2", "main"],
+        CAROL,
+        t(4),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], CAROL, t(4));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "d2 drops a"],
+        CAROL,
+        t(4),
+    );
+    std::fs::write(dir.path().join("a.rs"), "fn d2_own() {}\nfn d2_more() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(5));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "d2 recreates a"],
+        CAROL,
+        t(5),
+    );
+    let d2 = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(5));
+
+    // The octopus merge keeps the retaining parent's blob.
+    git(dir.path(), &["checkout", "-q", "-f", "retain"], BOB, t(6));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(6));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &retain,
+            "-p",
+            &d1,
+            "-p",
+            &d2,
+            "-m",
+            "octopus keep",
+        ],
+        BOB,
+        t(6),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The survivor keeps exactly its own lineage plus the two
+    // deletion touches; neither recreated occupant's lines leak in.
+    // (carol appears as an author through her deletion touches only —
+    // zero added lines.)
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.churn_added, 4, "a discarded occupant leaked in");
+    assert_eq!(a.commit_frequency, 4);
+    assert_eq!(a.authors, 3);
+    assert!((a.ownership - 0.75).abs() < 1e-9, "got {}", a.ownership);
+}

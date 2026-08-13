@@ -347,36 +347,39 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         };
 
         let analyzer = registry.analyzer_for(language);
-        let Some(analyzer) = analyzer else {
-            // Language detected but no analyzer registered (feature off);
-            // surface as a non-fatal analysis error.
+        if analyzer.is_none() {
+            // Language detected but no analyzer registered (feature
+            // off); surface as a non-fatal analysis error. Git-only
+            // history thresholds still evaluate through the fallback
+            // below — they need no parser.
             record_unavailable(&mut report, &utf8_path, language);
-            continue;
-        };
+        }
 
         let mut head_analysis: Option<LanguageAnalysis> = None;
-        for (text, side) in [
-            (base_text.as_deref(), DiffSide::Base),
-            (head_text.as_deref(), DiffSide::Head),
-        ] {
-            let Some(text) = text else { continue };
-            let source = SourceFile::new(utf8_path.clone(), language, text.to_string());
-            match analyzer.analyze(&source, &input.config) {
-                Ok(analysis) => {
-                    collect_diagnostics(&mut report, &utf8_path, side, &analysis);
-                    if matches!(side, DiffSide::Head) {
-                        head_analysis = Some(analysis);
+        if let Some(analyzer) = analyzer {
+            for (text, side) in [
+                (base_text.as_deref(), DiffSide::Base),
+                (head_text.as_deref(), DiffSide::Head),
+            ] {
+                let Some(text) = text else { continue };
+                let source = SourceFile::new(utf8_path.clone(), language, text.to_string());
+                match analyzer.analyze(&source, &input.config) {
+                    Ok(analysis) => {
+                        collect_diagnostics(&mut report, &utf8_path, side, &analysis);
+                        if matches!(side, DiffSide::Head) {
+                            head_analysis = Some(analysis);
+                        }
                     }
-                }
-                Err(err) => {
-                    report.analysis_errors.push(AnalysisErrorRecord {
-                        path: utf8_path.clone(),
-                        side,
-                        diagnostics: vec![ParseDiagnostic::error(
-                            "analysis.error",
-                            err.to_string(),
-                        )],
-                    });
+                    Err(err) => {
+                        report.analysis_errors.push(AnalysisErrorRecord {
+                            path: utf8_path.clone(),
+                            side,
+                            diagnostics: vec![ParseDiagnostic::error(
+                                "analysis.error",
+                                err.to_string(),
+                            )],
+                        });
+                    }
                 }
             }
         }
