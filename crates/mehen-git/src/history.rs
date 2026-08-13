@@ -893,7 +893,7 @@ fn path_deleted_in_range(
     path: &Path,
 ) -> Result<bool, GitError> {
     let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
-    let blob_at = |id: gix::ObjectId| -> Result<bool, GitError> {
+    let blob_oid = |id: gix::ObjectId| -> Result<Option<gix::ObjectId>, GitError> {
         Ok(repo
             .find_object(id)
             .map_err(|e| internal(&e))?
@@ -903,28 +903,59 @@ fn path_deleted_in_range(
             .map_err(|e| internal(&e))?
             .lookup_entry_by_path(path)
             .map_err(|e| internal(&e))?
-            .is_some_and(|entry| entry.mode().is_blob()))
+            .filter(|entry| entry.mode().is_blob())
+            .map(|entry| entry.oid().to_owned()))
     };
 
     let mut current = tip;
-    let mut present_in_current = blob_at(current)?;
+    let mut current_oid = blob_oid(current)?;
     while current != base {
         let commit = repo
             .find_object(current)
             .map_err(|e| internal(&e))?
             .peel_to_commit()
             .map_err(|e| internal(&e))?;
-        let Some(parent_id) = commit.parent_ids().next() else {
+        let parents: Vec<gix::ObjectId> = commit.parent_ids().map(|id| id.detach()).collect();
+        let Some(&first_parent) = parents.first() else {
             break;
         };
-        let parent_id = parent_id.detach();
-        let parent_present = blob_at(parent_id)?;
-        if !present_in_current && parent_present {
-            // The path vanished at `current` on this line.
+        // At a merge, follow the parent that actually *supplied* the
+        // blob the lineage carries (exact oid match), not blindly the
+        // first parent: a merge may have resolved in favor of its
+        // second parent's retained copy while the first-parent line
+        // deleted the path — that deletion is not this lineage's
+        // boundary. Fall back to the first parent holding any blob at
+        // the path, then to the first parent.
+        let mut next = first_parent;
+        if parents.len() > 1
+            && let Some(oid) = current_oid
+        {
+            let mut chosen: Option<gix::ObjectId> = None;
+            let mut any_blob: Option<gix::ObjectId> = None;
+            for &parent in &parents {
+                match blob_oid(parent)? {
+                    Some(parent_oid) if parent_oid == oid => {
+                        chosen = Some(parent);
+                        break;
+                    }
+                    Some(_) if any_blob.is_none() => any_blob = Some(parent),
+                    _ => {}
+                }
+            }
+            next = chosen.or(any_blob).unwrap_or(first_parent);
+        }
+        let next_oid = blob_oid(next)?;
+        // A presence flip in either direction along the followed line
+        // is an identity boundary: absent→present downward means the
+        // path was deleted here; present→absent downward means the
+        // tip's file was *created* inside the range — and since the
+        // qualification already verified the path exists at the base,
+        // a prior occupant must have been deleted below.
+        if current_oid.is_some() != next_oid.is_some() {
             return Ok(true);
         }
-        current = parent_id;
-        present_in_current = parent_present;
+        current = next;
+        current_oid = next_oid;
     }
     Ok(false)
 }

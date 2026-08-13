@@ -1114,6 +1114,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 {
                     let base_source = SourceFile::new(base_utf8, base_language, text);
                     if let Ok(base_analysis) = base_analyzer.analyze(&base_source, &analysis_config)
+                        && !has_blocking_diagnostic(&base_analysis.diagnostics)
                     {
                         for key in COMPOSITE_INPUT_KEYS {
                             if let Some(value) = base_analysis

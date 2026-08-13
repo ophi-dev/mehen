@@ -1820,3 +1820,72 @@ fn diff_reports_history_only_for_unparseable_files() {
     );
     assert_eq!(metric("cognitive")["current"].as_f64(), Some(0.0));
 }
+
+#[test]
+fn split_rename_baselines_reject_blocked_source_analyses() {
+    // The split-rename baseline staging re-analyzes the *source* blob
+    // for composite inputs; a source with blocking parse errors must
+    // stage nothing (baseline hotspot 0) instead of partial
+    // cognitive/SLOC values.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    // Parseable prefix (cognitive 1) followed by a syntax error: a
+    // partial tree would report non-zero composite inputs.
+    let broken = "def f(x):\n    if x:\n        return 1\n    return 0\n\n\ndef broken(:\n";
+    write_python(dir.path(), "a.py", broken);
+    commit_all(dir.path(), "base");
+    write_python(
+        dir.path(),
+        "a.py",
+        "def f(x):\n    if x:\n        return 1\n    return 0\n\n\ndef broken(:\n# more\n",
+    );
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "blocked-split-base"]);
+
+    git_ok(dir.path(), &["mv", "a.py", "a.rs"]);
+    commit_all(dir.path(), "cross-language move");
+    git_ok(dir.path(), &["tag", "blocked-split-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "blocked-split-base",
+            "--to",
+            "blocked-split-head",
+            "--metrics",
+            "history.commit_frequency,history.hotspot",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.rs"))
+        .unwrap_or_else(|| panic!("split destination row must exist: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.hotspot"))
+        .expect("history.hotspot must be present");
+    assert_eq!(
+        metric["baseline"].as_f64(),
+        Some(0.0),
+        "partial source statics staged into the synthetic baseline: {metric:?}"
+    );
+}

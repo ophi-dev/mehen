@@ -4134,3 +4134,172 @@ fn recreated_occupant_edits_are_pulled_back_from_merge_aliases() {
     assert_eq!(a.commit_frequency, 2);
     assert_eq!(a.churn_added, 2);
 }
+
+/// A few bytes inserted near the start of a renamed long single-line
+/// file: content-defined similarity chunking must keep the rename
+/// joined (fixed-offset chunking alone would shift every span
+/// boundary and collapse the similarity).
+#[test]
+fn single_line_renames_survive_small_insertions() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // ~900 bytes of varied single-line content (no newline until the
+    // end), so gear cuts fire at content-defined positions.
+    let body: String = (0..100).map(|i| format!("tok{i:04}x")).collect();
+    std::fs::write(dir.path().join("bundle.min.js"), format!("{body}\n")).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, t(0));
+    git(dir.path(), &["tag", "ins-base"], ALICE, t(0));
+
+    // Rename + insert a few bytes near the beginning.
+    git(
+        dir.path(),
+        &["mv", "bundle.min.js", "bundle.v2.min.js"],
+        BOB,
+        t(1),
+    );
+    std::fs::write(
+        dir.path().join("bundle.v2.min.js"),
+        format!("INSERTED;{body}\n"),
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename + insert"],
+        BOB,
+        t(1),
+    );
+    git(dir.path(), &["tag", "ins-head"], BOB, t(1));
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "ins-base", "ins-head").unwrap();
+    assert_eq!(changed.len(), 1, "rename must stay joined: {changed:?}");
+    assert_eq!(
+        changed[0].path,
+        std::path::PathBuf::from("bundle.v2.min.js")
+    );
+    assert_eq!(
+        changed[0].source_path.as_deref(),
+        Some(Path::new("bundle.min.js"))
+    );
+
+    // And the history walk keeps one lineage across the rename.
+    let history = collect_history(&repo, "ins-head").unwrap();
+    let fh = history.file(Path::new("bundle.v2.min.js")).unwrap();
+    assert_eq!(fh.commit_frequency, 2);
+}
+
+/// A candidate parent that is itself a merge which kept its *second*
+/// parent's retained copy while its first-parent line deleted the
+/// path: the boundary scan must follow the lineage that supplies the
+/// candidate's blob, not blindly the first parent.
+#[test]
+fn boundary_scan_follows_the_blob_supplying_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the shared original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // p1: deletes a.rs (will be the candidate merge's *first* parent).
+    git(dir.path(), &["checkout", "-q", "-b", "p1"], CAROL, t(1));
+    git(dir.path(), &["rm", "-q", "a.rs"], CAROL, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "p1 drops a"],
+        CAROL,
+        t(1),
+    );
+    let p1 = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(1));
+
+    // p2: retains and edits a.rs.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "p2", "main"],
+        CAROL,
+        t(2),
+    );
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p2_edit() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "p2 edits a"],
+        CAROL,
+        t(2),
+    );
+    let p2 = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(2));
+
+    // The candidate merge keeps p2's blob (first parent = p1!).
+    git(dir.path(), &["checkout", "-q", "p2"], CAROL, t(3));
+    let p_tree = git_out(dir.path(), &["write-tree"], CAROL, t(3));
+    let p_tip = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &p_tree,
+            "-p",
+            &p1,
+            "-p",
+            &p2,
+            "-m",
+            "keep p2's a",
+        ],
+        CAROL,
+        t(3),
+    );
+
+    // main: unrelated work; the rename happens in the final merge.
+    git(dir.path(), &["checkout", "-q", "main"], BOB, t(4));
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\nfn more() {}\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow keep"], BOB, t(4));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(4));
+
+    git(dir.path(), &["mv", "a.rs", "b.rs"], BOB, t(5));
+    std::fs::write(
+        dir.path().join("b.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p2_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(5));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &p_tip,
+            "-m",
+            "merge",
+        ],
+        BOB,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // Carol's retained-lineage edit must follow the rename: the first
+    // parent's deletion is not the supplying lineage's boundary.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(
+        b.churn_added, 4,
+        "the retained second-parent lineage was disqualified"
+    );
+}

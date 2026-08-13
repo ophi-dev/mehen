@@ -102,11 +102,18 @@ const FUZZY_TOTAL_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
 /// beyond the budget simply stay `Modified`.
 const BREAK_TOTAL_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
 
-/// Maximum span length for the similarity chunking (git's spanhash
-/// uses the same bound): spans end at a newline or at 64 bytes,
-/// whichever comes first, so similarity is byte-weighted, robust to
-/// line insertions, and meaningful for single-line files.
-const SIMILARITY_SPAN_BYTES: usize = 64;
+/// Fixed-offset span bound for the similarity chunking (git's
+/// spanhash uses the same 64-byte bound).
+const SPAN_FIXED_BYTES: usize = 64;
+
+/// Bounds for the *content-defined* similarity chunking: gear-hash
+/// cuts average ~64 bytes past the minimum, clamped so pathological
+/// content cannot produce degenerate spans.
+const SPAN_MIN_BYTES: usize = 16;
+const SPAN_MAX_BYTES: usize = 256;
+/// Cut when the low six gear bits are all set: 1/64 per byte, ~64-byte
+/// spans on average past the minimum.
+const SPAN_CUT_MASK: u64 = 0x3F;
 
 /// Binary detection window: git treats content with a NUL byte in the
 /// first 8000 bytes as binary.
@@ -663,25 +670,43 @@ fn blob_similarity(old: &FuzzyBlob, new: &FuzzyBlob) -> Option<f64> {
     (similarity >= RENAME_SIMILARITY).then_some(similarity)
 }
 
-/// Byte-weighted content similarity following git's spanhash design:
-/// both payloads are split into spans terminated by `\n` or at 64
-/// bytes, and similarity is the byte volume of the multiset span
-/// intersection over the larger payload. Weighting by *bytes* (not
-/// physical lines) means one shared boilerplate line cannot outvote a
-/// huge rewritten line, and long single-line files still compare
-/// meaningfully through their 64-byte sub-spans.
+/// Byte-weighted content similarity following git's spanhash design,
+/// scored under two chunkings with the better result taken:
+///
+/// * spans ending at `\n` or at fixed 64-byte offsets — exact for
+///   normal text and for same-length edits of long single-line
+///   content (including periodic content, where alignment is the
+///   only usable signal);
+/// * spans ending at `\n` or at *content-defined* gear-hash cuts —
+///   insertion-stable for long single-line content, where a few
+///   inserted bytes would shift every fixed offset and collapse the
+///   fixed-chunking similarity below the rename threshold.
+///
+/// Both chunkings are pure functions of the bytes, so the maximum is
+/// deterministic. Weighting by *bytes* (not physical lines) means one
+/// shared boilerplate line cannot outvote a huge rewritten line.
 fn spanhash_similarity(old: &[u8], new: &[u8]) -> f64 {
+    let fixed = span_multiset_similarity(old, new, fixed_spans);
+    if fixed >= 1.0 {
+        return fixed;
+    }
+    fixed.max(span_multiset_similarity(old, new, gear_spans))
+}
+
+/// The byte volume of the multiset span-hash intersection over the
+/// larger payload, using `chunk` to split both payloads.
+fn span_multiset_similarity(old: &[u8], new: &[u8], chunk: fn(&[u8]) -> Vec<&[u8]>) -> f64 {
     let longest = old.len().max(new.len());
     if longest == 0 {
         return 0.0;
     }
     // Multiset of span hashes, weighted by total span bytes.
     let mut available: HashMap<u64, u64> = HashMap::new();
-    for span in spans(old) {
+    for span in chunk(old) {
         *available.entry(fnv1a(span)).or_insert(0) += span.len() as u64;
     }
     let mut common: u64 = 0;
-    for span in spans(new) {
+    for span in chunk(new) {
         if let Some(bytes) = available.get_mut(&fnv1a(span)) {
             let take = (span.len() as u64).min(*bytes);
             *bytes -= take;
@@ -691,25 +716,70 @@ fn spanhash_similarity(old: &[u8], new: &[u8]) -> f64 {
     common as f64 / longest as f64
 }
 
-/// Split a payload into spans ending at `\n` or [`SIMILARITY_SPAN_BYTES`].
-fn spans(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+/// Split a payload into spans ending at `\n` or at fixed 64-byte
+/// offsets (git's spanhash bound).
+fn fixed_spans(data: &[u8]) -> Vec<&[u8]> {
     let mut rest = data;
-    std::iter::from_fn(move || {
-        if rest.is_empty() {
-            return None;
-        }
-        let end = match rest
-            .iter()
-            .take(SIMILARITY_SPAN_BYTES)
-            .position(|&b| b == b'\n')
-        {
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let end = match rest.iter().take(SPAN_FIXED_BYTES).position(|&b| b == b'\n') {
             Some(newline) => newline + 1,
-            None => SIMILARITY_SPAN_BYTES.min(rest.len()),
+            None => SPAN_FIXED_BYTES.min(rest.len()),
         };
         let (span, tail) = rest.split_at(end);
+        out.push(span);
         rest = tail;
-        Some(span)
-    })
+    }
+    out
+}
+
+/// Split a payload into spans ending at `\n` or at content-defined
+/// gear-hash cuts (low six bits all set: 1/64 per byte, ~64-byte
+/// spans past the minimum), bounded to
+/// `[SPAN_MIN_BYTES, SPAN_MAX_BYTES]`. Cut positions depend only on
+/// nearby content, so an insertion shifts only the spans it touches.
+fn gear_spans(data: &[u8]) -> Vec<&[u8]> {
+    let mut rest = data;
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let mut gear: u64 = 0;
+        let mut end = rest.len().min(SPAN_MAX_BYTES);
+        for (i, &byte) in rest.iter().take(SPAN_MAX_BYTES).enumerate() {
+            if byte == b'\n' {
+                end = i + 1;
+                break;
+            }
+            gear = (gear << 1).wrapping_add(GEAR[byte as usize]);
+            if i + 1 >= SPAN_MIN_BYTES && gear & SPAN_CUT_MASK == SPAN_CUT_MASK {
+                end = i + 1;
+                break;
+            }
+        }
+        let (span, tail) = rest.split_at(end);
+        out.push(span);
+        rest = tail;
+    }
+    out
+}
+
+/// Deterministic gear table for the content-defined span cuts
+/// (splitmix64 over a fixed seed — no runtime randomness, identical
+/// on every platform and run).
+const GEAR: [u64; 256] = build_gear_table();
+
+const fn build_gear_table() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut i = 0;
+    while i < 256 {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        table[i] = z ^ (z >> 31);
+        i += 1;
+    }
+    table
 }
 
 /// FNV-1a — a fixed, dependency-free hash so span classification never
