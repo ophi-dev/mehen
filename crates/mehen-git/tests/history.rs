@@ -2716,3 +2716,133 @@ fn merge_performed_deletions_fence_recreated_paths() {
     assert_eq!(p.churn_added, 1);
     assert_eq!(p.authors, 1);
 }
+
+/// A merge-introduced rename must be scoped to the parents whose
+/// trees contain the source: with the merge commit as the scope, an
+/// unrelated file that lived and died at the same path on *another*
+/// parent's line would resolve through the alias and corrupt the
+/// survivor's history.
+#[test]
+fn merge_rename_aliases_are_scoped_to_the_supplying_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: common ancestor without a.rs.
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // main: the real file is born and grows (older timestamps, so
+    // this line is walked *after* the side branch).
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(1));
+    git(dir.path(), &["commit", "-q", "-m", "create a"], ALICE, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\nfn orig3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(2));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(2));
+
+    // side (from the root): an unrelated a.rs lives and dies — with
+    // *newer* timestamps, so it is walked before the merge's alias
+    // would find the real lineage.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "side", "HEAD~2"],
+        CAROL,
+        t(3),
+    );
+    std::fs::write(dir.path().join("a.rs"), "fn other0() {}\nfn other1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(4));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "unrelated a"],
+        CAROL,
+        t(4),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], CAROL, t(5));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "drop unrelated a"],
+        CAROL,
+        t(5),
+    );
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(5));
+
+    // The merge resolves main's a.rs as b.rs (absent from both
+    // parents); a.rs is gone from the merged tree.
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(6));
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(6));
+    git(dir.path(), &["add", "-A"], ALICE, t(6));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(6));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(6),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs = main's lineage only: creation + growth. The side
+    // branch's unrelated file (2 commits, 2 added, 2 removed, carol)
+    // must not leak in nor consume the alias.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 4);
+    assert_eq!(b.churn_removed, 0);
+    assert_eq!(b.authors, 2, "only alice and bob touched the lineage");
+}
+
+/// Coupling cardinality counts every changed leaf path — a commit
+/// touching one source file plus a symlink couples them, even though
+/// the symlink carries no analyzable text.
+#[test]
+#[cfg(unix)]
+fn coupling_counts_non_blob_changeset_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    std::fs::write(dir.path().join("code.rs"), "fn a() {}\n").unwrap();
+    std::os::unix::fs::symlink("code.rs", dir.path().join("link")).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+
+    // Change both the file and the symlink target in one commit.
+    std::fs::write(dir.path().join("code.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+    std::fs::remove_file(dir.path().join("link")).unwrap();
+    std::os::unix::fs::symlink("other", dir.path().join("link")).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "grow both"],
+        ALICE,
+        t(1),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // Each commit's changeset is {code.rs, link}: one coupled other
+    // per commit — previously the symlink was invisible and soc was 0.
+    let code = history.file(Path::new("code.rs")).unwrap();
+    assert_eq!(code.sum_of_coupling, 2);
+}

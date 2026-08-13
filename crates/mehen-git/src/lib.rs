@@ -145,7 +145,7 @@ pub fn changed_files(
     let from_tree = resolve_tree(repo, from)?;
     let to_tree = resolve_tree(repo, to)?;
 
-    let changes = tree_changes::changes_between_trees(repo, Some(&from_tree), &to_tree)?;
+    let changes = tree_changes::changes_between_trees(repo, Some(&from_tree), &to_tree)?.changes;
     let files = changes
         .into_iter()
         .map(|change| match change {
@@ -240,7 +240,8 @@ pub fn range_touched_files(
             None => None,
         };
         let commit_tree = commit.tree().map_err(|e| internal(&e))?;
-        for change in tree_changes::changes_between_trees(repo, parent_tree.as_ref(), &commit_tree)?
+        for change in
+            tree_changes::changes_between_trees(repo, parent_tree.as_ref(), &commit_tree)?.changes
         {
             match change {
                 tree_changes::TreeChange::Added { path, .. }

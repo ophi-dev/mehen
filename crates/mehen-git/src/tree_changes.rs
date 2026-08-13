@@ -116,13 +116,23 @@ struct RenameSide {
     broken: Option<usize>,
 }
 
+/// The result of a tree-to-tree diff: analyzable blob changes with
+/// renames joined, plus a count of changed non-blob leaf entries
+/// (symlinks, gitlinks). The count exists for coupling cardinality:
+/// a commit's changeset size includes every changed path, even those
+/// carrying no analyzable text.
+pub(crate) struct TreeChanges {
+    pub(crate) changes: Vec<TreeChange>,
+    pub(crate) non_blob_changes: usize,
+}
+
 /// Diff two trees (blob entries only, renames joined). `parent` of
 /// `None` means the empty tree (root commits).
 pub(crate) fn changes_between_trees(
     repo: &gix::Repository,
     parent: Option<&gix::Tree<'_>>,
     current: &gix::Tree<'_>,
-) -> Result<Vec<TreeChange>, GitError> {
+) -> Result<TreeChanges, GitError> {
     let (parent_data, parent_kind) = match parent {
         Some(tree) => (tree.data.as_slice(), tree.id.kind()),
         None => ([].as_slice(), current.id.kind()),
@@ -142,6 +152,7 @@ pub(crate) fn changes_between_trees(
     let mut deleted: Vec<RenameSide> = Vec::new();
     let mut modified: Vec<(PathBuf, gix::ObjectId, gix::ObjectId)> = Vec::new();
     let mut changes: Vec<TreeChange> = Vec::new();
+    let mut non_blob_changes: usize = 0;
 
     for change in recorder.records {
         match change {
@@ -157,6 +168,8 @@ pub(crate) fn changes_between_trees(
                         oid,
                         broken: None,
                     });
+                } else {
+                    non_blob_changes += 1;
                 }
             }
             Change::Deletion {
@@ -171,6 +184,8 @@ pub(crate) fn changes_between_trees(
                         oid,
                         broken: None,
                     });
+                } else {
+                    non_blob_changes += 1;
                 }
             }
             Change::Modification {
@@ -192,7 +207,9 @@ pub(crate) fn changes_between_trees(
                         oid: previous_oid,
                     }),
                     (false, true) => changes.push(TreeChange::Added { path, oid }),
-                    (false, false) => {}
+                    // e.g. a submodule pointer bump: no analyzable
+                    // text, but still a changed path in the changeset.
+                    (false, false) => non_blob_changes += 1,
                 }
             }
         }
@@ -278,7 +295,10 @@ pub(crate) fn changes_between_trees(
 
     detect_renames(repo, &mut changes, added, deleted, &broken_pairs)?;
 
-    Ok(changes)
+    Ok(TreeChanges {
+        changes,
+        non_blob_changes,
+    })
 }
 
 /// Pair deletions with additions into [`TreeChange::Renamed`] entries:

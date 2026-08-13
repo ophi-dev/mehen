@@ -268,12 +268,13 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // older commits accumulate under vacated paths while the
         // surviving files read an empty (or worse, a dead prior
         // occupant's) history.
-        let changes = if is_merge {
+        let (changes, non_blob_changes) = if is_merge {
             let introduced = merge_introduced_changes(repo, &commit)?;
             if introduced.is_empty() {
                 continue;
             }
-            introduced
+            // Identity only — merges never reach the coupling math.
+            (introduced, 0)
         } else {
             diff_against_first_parent(repo, &commit)?
         };
@@ -334,7 +335,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             }
             if !recreation_seen && let Some(entries) = aliases.get(&change.path) {
                 for entry in entries {
-                    if entry.consumed && is_descendant_of(repo, info.id, entry.installed_by)? {
+                    if entry.consumed && entry.applies_to(repo, info.id)? {
                         recreation_seen = true;
                         break;
                     }
@@ -346,7 +347,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 aliases
                     .entry(change.path.clone())
                     .or_default()
-                    .push(AliasEntry::new(tombstone.clone(), info.id));
+                    .push(AliasEntry::new(tombstone.clone(), vec![info.id]));
                 *target = tombstone;
             }
         }
@@ -418,8 +419,14 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 entry.consumed = true;
             }
             // The alias redirects the *older* commits that are walked
-            // after this rename (the pre-rename lineage).
-            entries.push(AliasEntry::new(target.clone(), info.id));
+            // after this rename (the pre-rename lineage). A
+            // merge-introduced rename carries the scopes of the
+            // parents that supplied the source; everything else is
+            // scoped to this commit.
+            entries.push(AliasEntry::new(
+                target.clone(),
+                change.alias_scopes.clone().unwrap_or_else(|| vec![info.id]),
+            ));
             if !reclaimed.is_empty() {
                 files.entry(target.clone()).or_default().merge(reclaimed);
             }
@@ -480,7 +487,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 aliases
                     .entry(change.path.clone())
                     .or_default()
-                    .push(AliasEntry::new(boundary.clone(), info.id));
+                    .push(AliasEntry::new(boundary.clone(), vec![info.id]));
                 new_boundaries.push((change.path.clone(), boundary));
             }
         }
@@ -519,16 +526,22 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                         .or_default()
                         .push(AliasEntry::new(
                             FileIdentity::Tombstone(tombstones),
-                            info.id,
+                            vec![info.id],
                         ));
                 }
             }
             continue;
         }
-        let coupling_eligible = changes.len() <= MAX_COUPLING_CHANGESET;
+        // The changeset size for coupling includes every changed leaf
+        // path — symlinks and submodule pointer bumps co-change like
+        // any other file even though they carry no analyzable text —
+        // so both the noise threshold and the "other files in this
+        // commit" count use the full cardinality.
+        let coupling_paths = changes.len() + non_blob_changes;
+        let coupling_eligible = coupling_paths <= MAX_COUPLING_CHANGESET;
         // The "other files in this commit" count is the same for every
         // file in the changeset.
-        let coupled_others = changes.len().saturating_sub(1) as u64;
+        let coupled_others = coupling_paths.saturating_sub(1) as u64;
         for ((change, target), used) in changes.iter().zip(targets.iter()).zip(&used_entries) {
             // An addition that resolved *through* an alias entry is
             // the redirected occupant's birth: every deletion or
@@ -684,6 +697,11 @@ struct CommitFileChange {
     /// have actually been created after the deletion; parallel-branch
     /// edits are modifications and must not trigger a split.
     is_addition: bool,
+    /// For merge-introduced renames: the parent commits whose lineage
+    /// the rename describes (parents whose trees contain the source).
+    /// `None` for ordinary changes — the walked commit itself scopes
+    /// the alias.
+    alias_scopes: Option<Vec<gix::ObjectId>>,
 }
 
 /// Whether `commit` is a descendant of `ancestor` (equal ids count).
@@ -729,7 +747,9 @@ fn merge_introduced_changes(
     let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
     let to_tree = commit.tree().map_err(|e| internal(&e))?;
     let mut parent_trees = Vec::new();
+    let mut parent_ids: Vec<gix::ObjectId> = Vec::new();
     for parent_id in commit.parent_ids() {
+        parent_ids.push(parent_id.detach());
         let parent = parent_id
             .object()
             .map_err(|e| internal(&e))?
@@ -739,7 +759,7 @@ fn merge_introduced_changes(
     }
     let diffs: Vec<Vec<TreeChange>> = parent_trees
         .iter()
-        .map(|base| changes_between_trees(repo, Some(base), &to_tree))
+        .map(|base| changes_between_trees(repo, Some(base), &to_tree).map(|tc| tc.changes))
         .collect::<Result<_, _>>()?;
 
     // A destination is merge-introduced only when no parent has it:
@@ -775,6 +795,21 @@ fn merge_introduced_changes(
             if seen.contains(path) || in_any_parent(path)? {
                 continue;
             }
+            // Scope the alias to the parents whose lineage the rename
+            // actually describes — those whose trees contain the
+            // source. Scoping to the merge commit itself would capture
+            // ancestors of *every* parent, including a line where an
+            // unrelated file lived and died at the same path.
+            let mut scopes = Vec::new();
+            for (parent_id, tree) in parent_ids.iter().zip(&parent_trees) {
+                if tree
+                    .lookup_entry_by_path(source_path)
+                    .map_err(|e| internal(&e))?
+                    .is_some()
+                {
+                    scopes.push(*parent_id);
+                }
+            }
             seen.insert(path.clone());
             introduced.push(CommitFileChange {
                 path: path.clone(),
@@ -783,6 +818,7 @@ fn merge_introduced_changes(
                 removed: 0,
                 is_deletion: false,
                 is_addition: false,
+                alias_scopes: Some(scopes),
             });
         }
     }
@@ -805,6 +841,7 @@ fn merge_introduced_changes(
                 removed: 0,
                 is_deletion: false,
                 is_addition: true,
+                alias_scopes: None,
             });
         }
     }
@@ -843,6 +880,7 @@ fn merge_introduced_changes(
                 removed: 0,
                 is_deletion: true,
                 is_addition: false,
+                alias_scopes: None,
             });
         }
     }
@@ -862,33 +900,49 @@ enum FileIdentity {
     Tombstone(usize),
 }
 
-/// One rename-identity redirection. `installed_by` is the commit that
-/// created the entry: an alias only describes that commit's own line,
-/// so *concurrent* additions (a parallel branch re-creating the path)
-/// must not resolve through it. `consumed` retires an entry from
-/// resolution — either because the walk accumulated the *creation* of
-/// the aliased path through it (the redirected occupant's birth has
-/// been found, so anything older at that path belongs to a previous
-/// occupant), or because an older rename reclaimed the fence after
-/// explaining where the fenced occupant went. An older rename may
-/// install alongside a consumed entry, and an older deletion fences
-/// history off behind a fresh tombstone (matching the
-/// delete-then-recreate boundary). Entries are never removed: phase 4
-/// marks consumption by index, so indices must stay stable.
+/// One rename-identity redirection. `scopes` are the commits whose
+/// *ancestors* the entry applies to: an alias only describes the
+/// lineage it redirected, so *concurrent* changes (a parallel branch
+/// re-creating the path) must not resolve through it. For an ordinary
+/// rename the scope is the renaming commit itself; for a
+/// merge-introduced rename it is the parents whose trees contain the
+/// source — scoping to the merge commit would wrongly capture every
+/// parent's line, including one where an unrelated file lived and died
+/// at the same path. `consumed` retires an entry from resolution —
+/// either because the walk accumulated the *creation* of the aliased
+/// path through it (the redirected occupant's birth has been found, so
+/// anything older at that path belongs to a previous occupant), or
+/// because an older rename reclaimed the fence after explaining where
+/// the fenced occupant went. An older rename may install alongside a
+/// consumed entry, and an older deletion fences history off behind a
+/// fresh tombstone (matching the delete-then-recreate boundary).
+/// Entries are never removed: phase 4 marks consumption by index, so
+/// indices must stay stable.
 #[derive(Clone, Debug)]
 struct AliasEntry {
     target: FileIdentity,
-    installed_by: gix::ObjectId,
+    scopes: Vec<gix::ObjectId>,
     consumed: bool,
 }
 
 impl AliasEntry {
-    fn new(target: FileIdentity, installed_by: gix::ObjectId) -> Self {
+    fn new(target: FileIdentity, scopes: Vec<gix::ObjectId>) -> Self {
         Self {
             target,
-            installed_by,
+            scopes,
             consumed: false,
         }
+    }
+
+    /// Whether the entry applies to a change made by `commit`: the
+    /// change must be an ancestor of (or equal to) one of the scopes.
+    fn applies_to(&self, repo: &gix::Repository, commit: gix::ObjectId) -> Result<bool, GitError> {
+        for scope in &self.scopes {
+            if is_descendant_of(repo, commit, *scope)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -917,7 +971,7 @@ fn resolve_alias(
     };
     let mut tombstone: Option<(FileIdentity, usize)> = None;
     for (idx, entry) in entries.iter().enumerate() {
-        if entry.consumed || !is_descendant_of(repo, commit, entry.installed_by)? {
+        if entry.consumed || !entry.applies_to(repo, commit)? {
             continue;
         }
         match &entry.target {
@@ -937,11 +991,13 @@ fn resolve_alias(
 
 /// Diff `commit` against its first parent (or the empty tree for root
 /// commits) with in-crate rename tracking, and compute line-level
-/// churn per changed blob.
+/// churn per changed blob. Also returns the count of changed non-blob
+/// leaf paths (symlinks, gitlinks) — they carry no analyzable text but
+/// still belong to the commit's changeset for coupling cardinality.
 fn diff_against_first_parent(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
-) -> Result<Vec<CommitFileChange>, GitError> {
+) -> Result<(Vec<CommitFileChange>, usize), GitError> {
     let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
 
     let to_tree = commit.tree().map_err(|e| internal(&e))?;
@@ -959,6 +1015,8 @@ fn diff_against_first_parent(
     };
 
     let records = changes_between_trees(repo, parent_tree.as_ref(), &to_tree)?;
+    let non_blob_changes = records.non_blob_changes;
+    let records = records.changes;
     let mut changes = Vec::with_capacity(records.len());
     for change in records {
         let file_change = match change {
@@ -969,6 +1027,7 @@ fn diff_against_first_parent(
                 removed: 0,
                 is_deletion: false,
                 is_addition: true,
+                alias_scopes: None,
             },
             TreeChange::Deleted { path, oid } => CommitFileChange {
                 path,
@@ -977,6 +1036,7 @@ fn diff_against_first_parent(
                 removed: blob_line_count(repo, &oid)?,
                 is_deletion: true,
                 is_addition: false,
+                alias_scopes: None,
             },
             TreeChange::Modified {
                 path,
@@ -997,6 +1057,7 @@ fn diff_against_first_parent(
                     removed,
                     is_deletion: false,
                     is_addition: false,
+                    alias_scopes: None,
                 }
             }
             TreeChange::Renamed {
@@ -1018,13 +1079,14 @@ fn diff_against_first_parent(
                     removed,
                     is_deletion: false,
                     is_addition: false,
+                    alias_scopes: None,
                 }
             }
         };
         changes.push(file_change);
     }
 
-    Ok(changes)
+    Ok((changes, non_blob_changes))
 }
 
 /// Number of lines in a blob (a trailing fragment without `\n` counts
