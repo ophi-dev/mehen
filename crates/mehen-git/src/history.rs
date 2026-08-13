@@ -411,17 +411,21 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // counted once rather than duplicated into both survivors.
             // A *tombstone* entry is reclaimable outright — unless a
             // change of this same commit resolved through it (the
-            // fence is in active use) — because this rename explains
-            // where the fenced-off occupant actually went (it was
-            // renamed away, not merely deleted): its fenced
-            // contributions move to the rename target and the fence
-            // retires.
+            // fence is in active use), or this very commit installed
+            // it (a same-commit deletion boundary, e.g. a merge that
+            // both moves one parent's file and fences another
+            // parent's dead occupant of the same path) — because this
+            // rename explains where the fenced-off occupant actually
+            // went (it was renamed away, not merely deleted): its
+            // fenced contributions move to the rename target and the
+            // fence retires.
             let entries = aliases.entry(source.clone()).or_default();
             let mut reclaimed = FileAccumulator::default();
             for (idx, entry) in entries.iter_mut().enumerate() {
                 if entry.consumed
                     || !matches!(entry.target, FileIdentity::Tombstone(_))
                     || in_use.get(source).is_some_and(|s| s.contains(&idx))
+                    || entry.scopes.contains(&info.id)
                 {
                     continue;
                 }
@@ -762,6 +766,57 @@ fn is_descendant_of(
     }
 }
 
+/// Whether `path` was deleted anywhere on the way from `base` to
+/// `tip` (checked on each range commit's first-parent line): a
+/// present→absent flip is an identity boundary, even when the path is
+/// later re-created with byte-identical contents — endpoint blobs
+/// alone cannot see the interruption. Used to qualify merge-alias
+/// scopes; the ranges involved are single branches, so the walk stays
+/// short and runs only for the rare multi-parent-source merge rename.
+fn path_deleted_in_range(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    base: gix::ObjectId,
+    path: &Path,
+) -> Result<bool, GitError> {
+    let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
+    let blob_at = |tree: &gix::Tree<'_>| -> Result<bool, GitError> {
+        Ok(tree
+            .lookup_entry_by_path(path)
+            .map_err(|e| internal(&e))?
+            .is_some_and(|entry| entry.mode().is_blob()))
+    };
+    let walk =
+        gix::traverse::commit::topo::Builder::from_iters(repo.objects.clone(), [tip], Some([base]))
+            .build()
+            .map_err(|e| internal(&e))?;
+    for info in walk {
+        let info = info.map_err(|e| internal(&e))?;
+        let commit = repo
+            .find_object(info.id)
+            .map_err(|e| internal(&e))?
+            .peel_to_commit()
+            .map_err(|e| internal(&e))?;
+        if blob_at(&commit.tree().map_err(|e| internal(&e))?)? {
+            continue;
+        }
+        let Some(parent_id) = commit.parent_ids().next() else {
+            continue;
+        };
+        let parent_tree = parent_id
+            .object()
+            .map_err(|e| internal(&e))?
+            .peel_to_commit()
+            .map_err(|e| internal(&e))?
+            .tree()
+            .map_err(|e| internal(&e))?;
+        if blob_at(&parent_tree)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Tree changes a merge commit itself introduced: renames and
 /// additions whose destination path exists in *no* parent tree —
 /// conflict resolution that committed a file under a brand-new path.
@@ -848,21 +903,26 @@ fn merge_introduced_changes(
                 continue;
             }
             // A destination some parent already owns is still a merge
-            // rename when the merged content was *not* simply retained
-            // from that parent — conflict resolution carried the
+            // rename when the merged content does *not continue* that
+            // parent's version — conflict resolution carried the
             // source lineage into the existing path, and both files'
-            // histories converge there. A retained destination blob
-            // means no merge rename happened (that parent's own line
-            // owns the identity). Such convergent renames skip the
-            // destination boundary: the owning parent's older history
-            // at the path is real lineage, not a dead occupant.
+            // histories converge there. Continuation is judged like
+            // rename similarity (equal blob, or ≥50% similar): an
+            // edited-but-kept destination is retention, and treating
+            // every unequal blob as proof that the source lineage won
+            // would merge a discarded source into a surviving file.
+            // Such convergent renames skip the destination boundary:
+            // the owning parent's older history at the path is real
+            // lineage, not a dead occupant.
             let dest_in_parent = in_any_parent(path)?;
             if dest_in_parent {
                 let merged_oid = blob_oid_at(&to_tree, path)?;
                 let mut retained = merged_oid.is_none();
                 if let Some(merged_oid) = merged_oid {
                     for tree in &parent_trees {
-                        if blob_oid_at(tree, path)? == Some(merged_oid) {
+                        if let Some(parent_oid) = blob_oid_at(tree, path)?
+                            && same_blob_lineage(repo, &parent_oid, &merged_oid)?
+                        {
                             retained = true;
                             break;
                         }
@@ -896,13 +956,12 @@ fn merge_introduced_changes(
                 }
                 let shares_lineage = match repo.merge_base(supplier, *parent_id) {
                     Ok(base) => {
-                        let base_tree = base
+                        let base_commit = base
                             .object()
                             .map_err(|e| internal(&e))?
                             .peel_to_commit()
-                            .map_err(|e| internal(&e))?
-                            .tree()
                             .map_err(|e| internal(&e))?;
+                        let base_tree = base_commit.tree().map_err(|e| internal(&e))?;
                         // The path merely *existing* at the base is
                         // not enough: a parent that deleted the base
                         // file and re-created an unrelated one at the
@@ -911,13 +970,22 @@ fn merge_introduced_changes(
                         // re-creation, not the moved lineage. Require
                         // the parent's blob to plausibly continue the
                         // base's (equal, or similar at git's rename
-                        // threshold).
+                        // threshold) — and require no delete/recreate
+                        // boundary inside the range, which endpoint
+                        // blobs cannot see when the re-creation is
+                        // byte-identical.
                         match (
                             blob_oid_at(&base_tree, source_path)?,
                             blob_oid_at(tree, source_path)?,
                         ) {
                             (Some(base_oid), Some(parent_oid)) => {
                                 same_blob_lineage(repo, &base_oid, &parent_oid)?
+                                    && !path_deleted_in_range(
+                                        repo,
+                                        *parent_id,
+                                        base_commit.id,
+                                        source_path,
+                                    )?
                             }
                             _ => false,
                         }
@@ -969,24 +1037,42 @@ fn merge_introduced_changes(
         }
     }
     // Finally merge-performed deletions: a path present in a parent
-    // but absent from the merged tree (and not consumed as a rename
-    // source above) was resolved away by the merge itself. Passing the
-    // deletion through lets the walk's delete-then-recreate boundary
-    // fence the dead occupant when a newer commit reuses the path —
-    // without it, the pre-merge occupant's history would leak into the
-    // unrelated new file. Like every merge change, it carries no churn
-    // and is never accumulated.
-    let rename_sources: std::collections::HashSet<&PathBuf> = introduced
-        .iter()
-        .filter_map(|change| change.source_path.as_ref())
-        .collect();
+    // but absent from the merged tree was resolved away by the merge
+    // itself. Passing the deletion through lets the walk's
+    // delete-then-recreate boundary fence the dead occupant when a
+    // newer commit reuses the path — without it, the pre-merge
+    // occupant's history would leak into the unrelated new file. A
+    // deletion is suppressed only for parent lineages the rename
+    // alias actually covers: a merge can move one parent's `a.rs`
+    // *and* delete another parent's unrelated occupant of the same
+    // path, and the latter still needs its fence. Like every merge
+    // change, deletions carry no churn and are never accumulated.
+    let mut rename_source_scopes: HashMap<&PathBuf, Vec<gix::ObjectId>> = HashMap::new();
+    for change in &introduced {
+        if let (Some(source), Some(scopes)) =
+            (change.source_path.as_ref(), change.alias_scopes.as_ref())
+        {
+            rename_source_scopes
+                .entry(source)
+                .or_default()
+                .extend(scopes.iter().copied());
+        }
+    }
     let mut deletions: Vec<CommitFileChange> = Vec::new();
-    for diff in &diffs {
+    for (parent_idx, diff) in diffs.iter().enumerate() {
         for change in diff {
             let TreeChange::Deleted { path, .. } = change else {
                 continue;
             };
-            if seen.contains(path) || rename_sources.contains(path) || blob_in(&to_tree, path)? {
+            if seen.contains(path) || blob_in(&to_tree, path)? {
+                continue;
+            }
+            if rename_source_scopes
+                .get(path)
+                .is_some_and(|scopes| scopes.contains(&parent_ids[parent_idx]))
+            {
+                // This parent's lineage moved with the rename — its
+                // "deletion" is the move itself.
                 continue;
             }
             seen.insert(path.clone());

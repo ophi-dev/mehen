@@ -1610,3 +1610,49 @@ fn split_rename_history_composites_use_source_static_inputs() {
         .expect("cognitive must be present");
     assert_eq!(deletion_cognitive["baseline"].as_f64(), Some(1.0));
 }
+
+#[test]
+fn top_offenders_history_supports_container_roots() {
+    // The root itself is not inside Git but contains a repository:
+    // per-file lazy discovery must resolve the nested repository
+    // instead of the eager root check failing the whole run.
+    let outer = tempfile::tempdir().expect("tempdir");
+    let proj = outer.path().join("proj");
+    std::fs::create_dir(&proj).unwrap();
+    init_git_repo(&proj);
+
+    write_python(&proj, "tracked.py", "x = 1\n");
+    commit_all(&proj, "one");
+    write_python(&proj, "tracked.py", "x = 1\ny = 2\n");
+    commit_all(&proj, "two");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(outer.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "container root must not fail: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 1, "{offenders:?}");
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("tracked.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}

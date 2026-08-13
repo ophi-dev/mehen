@@ -479,7 +479,23 @@ impl RepoHistories {
             };
             std::fs::canonicalize(parent)?
         };
-        let repo = mehen_git::open_repo_at(&discover_from)?;
+        let repo = match mehen_git::open_repo_at(&discover_from) {
+            Ok(repo) => repo,
+            // A directory root that is not itself inside Git may still
+            // *contain* repositories: per-file lookups discover the
+            // innermost repository lazily (see `file`), so an eager
+            // hard failure here would reject valid layouts like a
+            // container directory of checkouts. Files directly under
+            // such a root simply have no history. Genuine open
+            // failures (untrusted or unreadable repositories, shallow
+            // clones) still propagate.
+            Err(mehen_git::GitError::RepoNotFound) if metadata.is_dir() => {
+                let mut state = self.state.lock().expect("repo histories mutex poisoned");
+                state.dir_to_workdir.insert(discover_from, None);
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
         let workdir = repo
             .workdir()
             .ok_or("repository has no work dir (bare repository)")?
