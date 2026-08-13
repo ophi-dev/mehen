@@ -4303,3 +4303,133 @@ fn boundary_scan_follows_the_blob_supplying_parent() {
         "the retained second-parent lineage was disqualified"
     );
 }
+
+/// The candidate merge *edits* the blob its second parent supplied
+/// (no parent matches exactly), while its first-parent line deleted
+/// and re-created the path with unrelated content: the boundary scan
+/// must follow the similarity-continuing parent, not the first
+/// parent that happens to hold any blob.
+#[test]
+fn boundary_scan_follows_edited_blobs_by_similarity() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the shared original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // p1 (the candidate merge's *first* parent): delete, then
+    // recreate with unrelated content.
+    git(dir.path(), &["checkout", "-q", "-b", "p1"], CAROL, t(1));
+    git(dir.path(), &["rm", "-q", "a.rs"], CAROL, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "p1 drops a"],
+        CAROL,
+        t(1),
+    );
+    std::fs::write(dir.path().join("a.rs"), "fn own0() {}\nfn own1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "p1 recreates a"],
+        CAROL,
+        t(2),
+    );
+    let p1 = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(2));
+
+    // p2: retains and edits the original.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "p2", "main"],
+        CAROL,
+        t(3),
+    );
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p2_edit() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "p2 edits a"],
+        CAROL,
+        t(3),
+    );
+    let p2 = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    // The candidate merge keeps p2's lineage *with an extra edit*
+    // (matching no parent blob exactly); first parent is p1.
+    git(dir.path(), &["checkout", "-q", "p2"], CAROL, t(4));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p2_edit() {}\nfn merge_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(4));
+    let p_tree = git_out(dir.path(), &["write-tree"], CAROL, t(4));
+    let p_tip = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &p_tree,
+            "-p",
+            &p1,
+            "-p",
+            &p2,
+            "-m",
+            "keep p2's a, edited",
+        ],
+        CAROL,
+        t(4),
+    );
+
+    // main: unrelated work; the rename happens in the final merge.
+    git(dir.path(), &["checkout", "-q", "-f", "main"], BOB, t(5));
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\nfn more() {}\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow keep"], BOB, t(5));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(5));
+
+    git(dir.path(), &["mv", "a.rs", "b.rs"], BOB, t(6));
+    std::fs::write(
+        dir.path().join("b.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p2_edit() {}\nfn merge_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(6));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(6));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &p_tip,
+            "-m",
+            "merge",
+        ],
+        BOB,
+        t(6),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // Carol's retained-lineage edit follows the rename: neither p1's
+    // unrelated recreation nor its deletion flip may disqualify the
+    // candidate whose blob continues through p2.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(
+        b.churn_added, 4,
+        "the edited merge blob was traced through the wrong parent"
+    );
+}

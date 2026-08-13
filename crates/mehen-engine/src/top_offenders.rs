@@ -443,8 +443,11 @@ struct RepoHistoriesState {
     /// Canonical parent dir → canonical work dir (`None`: not in a
     /// repository, or discovery failed).
     dir_to_workdir: HashMap<PathBuf, Option<PathBuf>>,
-    /// Canonical work dir → walked `HEAD` history (`None`: walk failed).
-    histories: HashMap<PathBuf, Option<mehen_git::RepositoryHistory>>,
+    /// Canonical work dir → lazily initialized `HEAD` history
+    /// (`None` inside an initialized cell: walk failed). The
+    /// `OnceLock` serializes each repository's cold walk across
+    /// workers while different repositories initialize concurrently.
+    histories: HashMap<PathBuf, Arc<std::sync::OnceLock<Option<mehen_git::RepositoryHistory>>>>,
     /// Lazily discovered repositories that exist but whose history is
     /// unavailable (shallow nested clone, walk failure). Recorded once
     /// per location so callers can surface them instead of silently
@@ -501,17 +504,31 @@ impl RepoHistories {
             .ok_or("repository has no work dir (bare repository)")?
             .to_path_buf();
         let canonical_workdir = std::fs::canonicalize(&workdir)?;
-        let mut state = self.state.lock().expect("repo histories mutex poisoned");
-        state
-            .dir_to_workdir
-            .insert(discover_from, Some(canonical_workdir.clone()));
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            state.histories.entry(canonical_workdir)
-        {
-            let history = mehen_git::collect_history(&repo, "HEAD")?;
-            entry.insert(Some(history));
+        let cell = {
+            let mut state = self.state.lock().expect("repo histories mutex poisoned");
+            state
+                .dir_to_workdir
+                .insert(discover_from, Some(canonical_workdir.clone()));
+            state
+                .histories
+                .entry(canonical_workdir)
+                .or_default()
+                .clone()
+        };
+        // Walk outside the state lock (other repositories keep
+        // loading); the cell serializes duplicate initializers.
+        let mut walk_error: Option<mehen_git::GitError> = None;
+        cell.get_or_init(|| match mehen_git::collect_history(&repo, "HEAD") {
+            Ok(history) => Some(history),
+            Err(e) => {
+                walk_error = Some(e);
+                None
+            }
+        });
+        match walk_error {
+            Some(e) => Err(e.into()),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// The per-file history entry and that repository's deterministic
@@ -521,8 +538,9 @@ impl RepoHistories {
     /// The lock is held only for cache reads/writes — repository
     /// discovery and (expensive) cold history walks run unlocked so
     /// concurrent workers analyzing other repositories never serialize
-    /// behind one walk. Two workers may race a cold walk; the first
-    /// inserted result wins and the duplicate is discarded (benign).
+    /// behind one walk. Each repository's cold walk runs exactly once:
+    /// workers racing the same repository block on its `OnceLock`
+    /// cell rather than launching duplicate walks.
     fn file(&self, file_path: &Path) -> Option<(mehen_git::FileHistory, i64)> {
         let canonical = canonical_file_path(file_path)?;
         let parent = canonical.parent()?.to_path_buf();
@@ -558,28 +576,30 @@ impl RepoHistories {
             }
         }?;
 
-        let walked = {
-            let state = self.state.lock().expect("repo histories mutex poisoned");
-            state.histories.contains_key(&workdir)
-        };
-        if !walked {
-            let history = match mehen_git::open_repo_at(&workdir)
-                .and_then(|repo| mehen_git::collect_history(&repo, "HEAD"))
-            {
-                Ok(history) => Some(history),
-                Err(e) => {
-                    log::warn!("history walk failed for {}: {e}", workdir.display());
-                    let mut state = self.state.lock().expect("repo histories mutex poisoned");
-                    state.failures.push((workdir.clone(), e.to_string()));
-                    None
-                }
-            };
+        // Per-worktree cold-walk coordination: the first worker to
+        // reach a repository initializes its `OnceLock` while others
+        // block on that cell only — different repositories still load
+        // concurrently, and a large repository is walked exactly once
+        // instead of once per worker that races the cold cache.
+        let cell = {
             let mut state = self.state.lock().expect("repo histories mutex poisoned");
-            state.histories.entry(workdir.clone()).or_insert(history);
-        }
-
-        let state = self.state.lock().expect("repo histories mutex poisoned");
-        let history = state.histories.get(&workdir)?.as_ref()?;
+            state.histories.entry(workdir.clone()).or_default().clone()
+        };
+        let history = cell
+            .get_or_init(|| {
+                match mehen_git::open_repo_at(&workdir)
+                    .and_then(|repo| mehen_git::collect_history(&repo, "HEAD"))
+                {
+                    Ok(history) => Some(history),
+                    Err(e) => {
+                        log::warn!("history walk failed for {}: {e}", workdir.display());
+                        let mut state = self.state.lock().expect("repo histories mutex poisoned");
+                        state.failures.push((workdir.clone(), e.to_string()));
+                        None
+                    }
+                }
+            })
+            .as_ref()?;
         let relative = canonical.strip_prefix(&workdir).ok()?;
         // `tracked_file`, not `file`: a workspace path may be an
         // untracked file (or a symlink) occupying a spot whose tracked

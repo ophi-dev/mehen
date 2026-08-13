@@ -920,29 +920,36 @@ fn path_deleted_in_range(
             break;
         };
         // At a merge, follow the parent that actually *supplied* the
-        // blob the lineage carries (exact oid match), not blindly the
-        // first parent: a merge may have resolved in favor of its
-        // second parent's retained copy while the first-parent line
-        // deleted the path — that deletion is not this lineage's
-        // boundary. Fall back to the first parent holding any blob at
-        // the path, then to the first parent.
+        // blob the lineage carries: exact blob-oid match first; when
+        // conflict resolution edited the merged blob (no parent
+        // matches exactly), the parent whose blob *continues* it at
+        // rename similarity — falling back to the first parent
+        // holding any blob would happily pick an unrelated
+        // delete-and-recreate occupant on that line. Last resorts:
+        // any blob-holding parent, then the first parent.
         let mut next = first_parent;
         if parents.len() > 1
             && let Some(oid) = current_oid
         {
-            let mut chosen: Option<gix::ObjectId> = None;
+            let mut exact: Option<gix::ObjectId> = None;
+            let mut continuing: Option<gix::ObjectId> = None;
             let mut any_blob: Option<gix::ObjectId> = None;
             for &parent in &parents {
-                match blob_oid(parent)? {
-                    Some(parent_oid) if parent_oid == oid => {
-                        chosen = Some(parent);
-                        break;
-                    }
-                    Some(_) if any_blob.is_none() => any_blob = Some(parent),
-                    _ => {}
+                let Some(parent_oid) = blob_oid(parent)? else {
+                    continue;
+                };
+                if parent_oid == oid {
+                    exact = Some(parent);
+                    break;
+                }
+                if continuing.is_none() && same_blob_lineage(repo, &parent_oid, &oid)? {
+                    continuing = Some(parent);
+                }
+                if any_blob.is_none() {
+                    any_blob = Some(parent);
                 }
             }
-            next = chosen.or(any_blob).unwrap_or(first_parent);
+            next = exact.or(continuing).or(any_blob).unwrap_or(first_parent);
         }
         let next_oid = blob_oid(next)?;
         // A presence flip in either direction along the followed line
