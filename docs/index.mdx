@@ -30,6 +30,9 @@ mehen diff --from main --to HEAD --paths src
   <Card title="Markdown metrics" icon="book-open" href="/metrics/markdown/overview">
     DMI, MRPC, MCC, link debt, filler/lazy risk, English/Japanese prose layer.
   </Card>
+  <Card title="History metrics" icon="clock-rotate-left" href="/metrics/history/overview">
+    Churn, code age, ownership, hotspots, change coupling, bug risk — from git history.
+  </Card>
 </Columns>
 
 ## Why mehen?
@@ -84,6 +87,16 @@ For Markdown documentation:
   [Review Criticality Index](/metrics/markdown/review-criticality-index).
 - An opt-in [English readability ensemble](/metrics/markdown/prose/english-readability) and
   [Japanese prose layer](/metrics/markdown/prose/japanese-script-composition).
+
+From git history:
+
+- [Churn](/metrics/history/churn) (absolute and size-relative), [code age](/metrics/history/age),
+  [commit frequency](/metrics/history/commit-frequency).
+- [Ownership & authorship](/metrics/history/ownership): distinct authors, minor contributors,
+  top-contributor share.
+- [Hotspot](/metrics/history/hotspot) (cognitive complexity × commit frequency),
+  [sum of coupling](/metrics/history/sum-of-coupling), and
+  [bug risk](/metrics/history/bug-risk) (bug-fix count and Time-Weighted Risk).
 
 ## What is Mehen?
 

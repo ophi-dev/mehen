@@ -1,0 +1,73 @@
+---
+title: "History metrics overview"
+description: "Git process metrics: churn, code age, ownership, hotspots, change coupling, and bug risk computed from repository history."
+keywords: ["history metrics", "process metrics", "churn", "hotspot", "ownership", "code age", "git"]
+---
+
+The `history.*` family reports **process metrics** — signals derived from how a file *changed over
+time* rather than from its current content. The empirical literature is consistent that process
+metrics out-predict static code metrics for defects while costing far less to compute; mehen pairs
+them with its real complexity metrics to get composites (like the
+[hotspot](/metrics/history/hotspot)) that neither side can produce alone.
+
+## What mehen emits
+
+| Metric | Key | Description |
+|---|---|---|
+| [Churn](/metrics/history/churn) | `history.churn.abs` | Lines added + removed across the file's history. |
+| [Churn](/metrics/history/churn) | `history.churn.relative` | Absolute churn normalized by the file's current size — the defect-predictive form. |
+| [Code age](/metrics/history/age) | `history.age_months` | Months since the file's last change, relative to the analyzed revision. |
+| [Ownership](/metrics/history/ownership) | `history.authors` | Distinct authors who ever touched the file. |
+| [Ownership](/metrics/history/ownership) | `history.minor_contributors` | Authors contributing < 5% of the file's added lines. |
+| [Ownership](/metrics/history/ownership) | `history.ownership` | The top contributor's share of the file's added lines. |
+| [Commit frequency](/metrics/history/commit-frequency) | `history.commit_frequency` | Commits that touched the file. |
+| [Hotspot](/metrics/history/hotspot) | `history.hotspot` | `cognitive.sum × commit_frequency` — fragile *and* frequently touched. |
+| [Sum of coupling](/metrics/history/sum-of-coupling) | `history.sum_of_coupling` | How often the file changes together with other files. |
+| [Bug risk](/metrics/history/bug-risk) | `history.bugfix_commits` | Bug-fixing commits that touched the file. |
+| [Bug risk](/metrics/history/bug-risk) | `history.twr` | Google's Time-Weighted Risk — bug fixes weighted toward the recent past. |
+
+Two of these — `history.hotspot` and `history.churn.relative` — are part of the
+**default [`mehen diff`](/commands/diff) columns** for source-code files.
+
+## How the history walk works
+
+History metrics cannot come from a language analyzer (which sees one file's content at one
+revision). Instead, mehen walks the repository history reachable from the analyzed revision once
+per revision and folds per-file statistics into each file's metric set after static analysis:
+
+- **Deterministic by construction.** The walk is a pure function of the repository state at the
+  analyzed revision: commits are visited in `--date-order` topological order, diffs use mehen's own
+  [configuration-independent rename detection](/concepts/architecture), and "now" for
+  [code age](/metrics/history/age) is the analyzed revision's committer timestamp — never
+  wall-clock time. Two machines analyzing the same commit always report identical values.
+- **Rename-aware identity.** A file renamed along the way accumulates **one** history: statistics
+  follow the file across renames instead of resetting. Delete-then-recreate sequences split
+  identity, so a new file that reuses an old path does not inherit the dead file's history —
+  including through merges, parallel branches, and path reuse.
+- **Merges are identity-only.** Merge commits contribute no churn (matching
+  `git log --no-merges` and code-maat), but renames performed by conflict resolution still
+  establish file identity.
+- **Binary-safe churn.** Blobs that are binary (NUL sniff) or larger than 8 MiB churn zero lines,
+  mirroring `git log --numstat` reporting `-` for binary files.
+
+## Requirements
+
+The walk needs the actual history: run against a **full clone**. In GitHub Actions use
+`actions/checkout` with `fetch-depth: 0`. Because the walk costs one tree diff per commit, mehen
+only runs it when a `history.*` metric is actually requested — a SQL-only or docs-only diff never
+pays for it.
+
+## In diffs
+
+[`mehen diff`](/commands/diff) walks the history of **both** revisions, so history columns carry
+real deltas — the commits and churn a file gained between base and head — rather than comparing
+against a phantom zero baseline.
+
+## References
+
+- Rahman, F. & Devanbu, P. (2013). *How, and why, process metrics are better.* ICSE 2013.
+- Tornhill, A. (2015). *Your Code as a Crime Scene.* Pragmatic Bookshelf.
+- [PyDriller process metrics](https://pydriller.readthedocs.io/en/latest/processmetrics.html) —
+  the reference implementation for churn and ownership semantics.
+- [code-maat](https://github.com/adamtornhill/code-maat) — Tornhill's original analyses (age,
+  authors, coupling, churn).

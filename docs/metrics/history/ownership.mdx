@@ -1,0 +1,50 @@
+---
+title: "Ownership & authorship"
+description: "Distinct authors, minor contributors, and the top contributor's share of a file."
+keywords: ["ownership", "authors", "minor contributors", "bird", "knowledge distribution"]
+---
+
+**Ownership metrics** describe *who* wrote a file. Number-of-authors is one of the most-validated
+defect signals in the literature, and Bird et al. showed that files with many **minor
+contributors** — people who wrote only a sliver of the code — have significantly more defects,
+while a strong top contributor is protective.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `history.authors` | int | Distinct authors who touched the file with any change. |
+| `history.minor_contributors` | int | Authors whose added lines are < 5% of the file's total added lines (PyDriller's fixed threshold). |
+| `history.ownership` | float | The top contributor's share of the file's added lines, in `[0, 1]`. |
+
+## Semantics
+
+- **Authorship = added lines.** Ownership and the minor-contributor classification count *lines
+  added* per author across the walked history — matching PyDriller, the reference implementation.
+  Deleting someone else's code or renaming a file does not count as writing code, so a
+  deletion-only toucher appears in `history.authors` but is never misclassified as a sub-5% "minor
+  contributor" of code they didn't write.
+- **Identity** is the author's lower-cased email (falling back to the name for commits without
+  one).
+- A history of pure renames and deletions has no added lines; ownership is then reported as `0`
+  rather than dividing by zero.
+
+## How to read it
+
+| Signal | Interpretation |
+|---|---|
+| `ownership` near 1.0, 1–2 authors | Strong ownership — but also a bus-factor risk worth knowing about. |
+| Many `minor_contributors` | The classic defect signal: lots of drive-by edits, no steward. |
+| `authors` growing in a diff | The file is becoming shared infrastructure; its implicit conventions may need writing down. |
+
+## References
+
+- Bird, C., Nagappan, N., Murphy, B., Gall, H. & Devanbu, P. (2011). *Don't Touch My Code!
+  Examining the Effects of Ownership on Software Quality.* ESEC/FSE 2011.
+- [PyDriller process metrics](https://pydriller.readthedocs.io/en/latest/processmetrics.html) —
+  contribution-based ownership and the 5% minor-contributor threshold.
+- code-maat `authors`, `main-dev`, `entity-ownership` ([repo](https://github.com/adamtornhill/code-maat)).
+
+## See also
+
+- [Commit frequency](/metrics/history/commit-frequency) — how often the file changes at all.

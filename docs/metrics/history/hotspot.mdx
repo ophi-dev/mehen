@@ -1,0 +1,51 @@
+---
+title: "Hotspot"
+description: "Cognitive complexity × commit frequency — files that are both fragile and frequently touched."
+keywords: ["hotspot", "codescene", "tornhill", "refactoring targets", "complexity"]
+---
+
+A **hotspot** is a file where complexity and change frequency *overlap*: complicated code that the
+team also touches all the time. That intersection is the highest-leverage refactoring target —
+CodeScene reports that top hotspots typically occupy ~5% of a codebase yet absorb ~18% of
+development effort and ~23% of fixed defects. Complexity alone over-flags stable legacy code
+nobody touches; frequency alone flags churning-but-trivial files; the product flags what actually
+costs money.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `history.hotspot` | float | `cognitive.sum × history.commit_frequency`. |
+
+`history.hotspot` is one of the **default [`mehen diff`](/commands/diff) columns**.
+
+## Better than the classic form
+
+The open hotspot definition from the literature uses **LOC** as its complexity proxy because
+that's what a history-mining tool can compute without parsing code. mehen has real parsers, so it
+upgrades the proxy to [cognitive complexity](/metrics/code/cognitive) summed over the file — a
+measure of how hard the code actually is to understand, not merely how long it is. The complexity
+input is family-aware: SQL files use `sql.cognitive_complexity` and Markdown files use their own
+cognitive-load measure, so hotspots aren't degenerate outside the shared source-code suite.
+
+Note that CodeScene's *prioritization and ranking layer* on top of this signal is proprietary and
+probabilistic; mehen deliberately implements only the open, reproducible
+complexity-times-frequency overlap.
+
+## How to read it
+
+| Signal | Interpretation |
+|---|---|
+| High hotspot, rising in a diff | You are adding complexity to a file the team constantly revisits — the strongest refactoring signal this family produces. |
+| High complexity, hotspot near zero | Complex but stable — usually not worth proactive refactoring. |
+| Hotspot dropping in a diff | A refactor is paying off exactly where it matters. |
+
+## References
+
+- Tornhill, A. (2018). *Software Design X-Rays.* Pragmatic Bookshelf.
+- [CodeScene hotspots documentation](https://codescene.io/docs/guides/technical/hotspots.html).
+
+## See also
+
+- [Cognitive complexity](/metrics/code/cognitive) — the complexity input.
+- [Commit frequency](/metrics/history/commit-frequency) — the change-frequency input.

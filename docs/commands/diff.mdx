@@ -88,11 +88,11 @@ against source-code metrics they never emit and silently drop out as unchanged.
 The source-code default columns follow a one-column-per-dimension design:
 **Cognitive** (control-flow understandability), **ABC** (computational volume),
 **MI** (the one deliberate composite rollup), **Hotspot**
-(`history.hotspot` = cognitive complexity × commit frequency — is this a
-fragile, frequently-touched file?), and **Churn** (`history.churn.relative` —
+([`history.hotspot`](/metrics/history/hotspot) = cognitive complexity × commit frequency — is this a
+fragile, frequently-touched file?), and **Churn** ([`history.churn.relative`](/metrics/history/churn) —
 how much of the file's full repository history has moved, normalized by its
 size). The two history columns are computed by walking the git history of each
-compared revision. All columns are review-prioritization signals, not quality
+compared revision — see the [history metric family](/metrics/history/overview). All columns are review-prioritization signals, not quality
 verdicts: a rising number flags *where to look*, not *that the code is bad*.
 
 ## `--fail-on` thresholds
