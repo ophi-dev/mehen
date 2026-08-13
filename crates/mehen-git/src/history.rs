@@ -205,6 +205,17 @@ impl FileAccumulator {
 /// modified blob; results depend only on the repository state at
 /// `rev`.
 pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHistory, GitError> {
+    // Accelerate the walk's many commit/blob lookups (gix maintainer
+    // guidance): an in-memory object cache for repeated reads, and one
+    // reusable revision graph for all ancestry queries.
+    let mut repo = repo.clone();
+    repo.object_cache_size_if_unset(4 * 1024 * 1024);
+    let repo = &repo;
+    let commit_graph_cache = repo
+        .commit_graph_if_enabled()
+        .map_err(|e| GitError::Internal(e.to_string()))?;
+    let mut ancestry: AncestryGraph<'_, '_> = repo.revision_graph(commit_graph_cache.as_ref());
+
     let head_id = repo
         .rev_parse_single(rev)
         .map_err(|_| GitError::RefNotFound(rev.to_string()))?;
@@ -297,7 +308,8 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         let mut targets: Vec<FileIdentity> = Vec::with_capacity(changes.len());
         let mut used_entries: Vec<Option<usize>> = Vec::with_capacity(changes.len());
         for change in &changes {
-            let (target, used) = resolve_alias(repo, &aliases, &change.path, info.id)?;
+            let (target, used) =
+                resolve_alias(repo, &mut ancestry, &aliases, &change.path, info.id)?;
             targets.push(target);
             used_entries.push(used);
         }
@@ -327,7 +339,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             let mut recreation_seen = false;
             if let Some(acc) = files.get(&FileIdentity::Path(change.path.clone())) {
                 for c in &acc.contributions {
-                    if c.is_addition && is_descendant_of(repo, info.id, c.commit)? {
+                    if c.is_addition && is_descendant_of(repo, &mut ancestry, info.id, c.commit)? {
                         recreation_seen = true;
                         break;
                     }
@@ -335,7 +347,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             }
             if !recreation_seen && let Some(entries) = aliases.get(&change.path) {
                 for entry in entries {
-                    if entry.consumed && entry.applies_to(repo, info.id)? {
+                    if entry.consumed && entry.applies_to(repo, &mut ancestry, info.id)? {
                         recreation_seen = true;
                         break;
                     }
@@ -449,11 +461,11 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 let mut pending: Vec<Contribution> = Vec::new();
                 for contribution in stranded.contributions {
                     if contribution.is_addition
-                        && !is_descendant_of(repo, info.id, contribution.commit)?
+                        && !is_descendant_of(repo, &mut ancestry, info.id, contribution.commit)?
                     {
                         recreations.push(contribution.commit);
                         occupant.push(contribution);
-                    } else if is_descendant_of(repo, info.id, contribution.commit)? {
+                    } else if is_descendant_of(repo, &mut ancestry, info.id, contribution.commit)? {
                         occupant.push(contribution);
                     } else {
                         pending.push(contribution);
@@ -462,7 +474,8 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 let mut lineage = FileAccumulator::default();
                 'pending: for contribution in pending {
                     for recreation in &recreations {
-                        if is_descendant_of(repo, *recreation, contribution.commit)? {
+                        if is_descendant_of(repo, &mut ancestry, *recreation, contribution.commit)?
+                        {
                             occupant.push(contribution);
                             continue 'pending;
                         }
@@ -704,26 +717,39 @@ struct CommitFileChange {
     alias_scopes: Option<Vec<gix::ObjectId>>,
 }
 
+/// A reusable revision graph for merge-base queries, per the gix
+/// maintainer's guidance (GitoxideLabs/gitoxide#2914): reusing one
+/// graph across queries amortizes commit lookups (and leverages the
+/// commit-graph file when present) instead of re-walking from scratch
+/// on every ancestry check.
+type AncestryGraph<'repo, 'cache> = gix::revwalk::Graph<
+    'repo,
+    'cache,
+    gix::revwalk::graph::Commit<gix::revision::plumbing::merge_base::Flags>,
+>;
+
 /// Whether `commit` is a descendant of `ancestor` (equal ids count).
 ///
 /// Used to partition an accumulator stranded at a rename source: a
 /// contribution from a descendant of the rename commit postdates the
 /// rename on its own line (the path was re-created there), while a
 /// concurrent contribution edited the file that moved away. Rename
-/// events with stranded contributions are rare, so the merge-base
-/// query cost stays negligible next to the per-commit tree diffs.
+/// events with stranded contributions are rare, and the shared graph
+/// caches commit lookups across queries, so the cost stays negligible
+/// next to the per-commit tree diffs.
 fn is_descendant_of(
     repo: &gix::Repository,
+    graph: &mut AncestryGraph<'_, '_>,
     ancestor: gix::ObjectId,
     commit: gix::ObjectId,
 ) -> Result<bool, GitError> {
     if ancestor == commit {
         return Ok(true);
     }
-    match repo.merge_base(ancestor, commit) {
+    match repo.merge_base_with_graph(ancestor, commit, graph) {
         Ok(base) => Ok(base.detach() == ancestor),
         // Disjoint histories (e.g. an orphan branch): not an ancestor.
-        Err(gix::repository::merge_base::Error::NotFound { .. }) => Ok(false),
+        Err(gix::repository::merge_base_with_graph::Error::NotFound { .. }) => Ok(false),
         Err(e) => Err(GitError::Internal(e.to_string())),
     }
 }
@@ -936,9 +962,14 @@ impl AliasEntry {
 
     /// Whether the entry applies to a change made by `commit`: the
     /// change must be an ancestor of (or equal to) one of the scopes.
-    fn applies_to(&self, repo: &gix::Repository, commit: gix::ObjectId) -> Result<bool, GitError> {
+    fn applies_to(
+        &self,
+        repo: &gix::Repository,
+        graph: &mut AncestryGraph<'_, '_>,
+        commit: gix::ObjectId,
+    ) -> Result<bool, GitError> {
         for scope in &self.scopes {
-            if is_descendant_of(repo, commit, *scope)? {
+            if is_descendant_of(repo, graph, commit, *scope)? {
                 return Ok(true);
             }
         }
@@ -962,6 +993,7 @@ impl AliasEntry {
 /// deterministic walk order.
 fn resolve_alias(
     repo: &gix::Repository,
+    graph: &mut AncestryGraph<'_, '_>,
     aliases: &HashMap<PathBuf, Vec<AliasEntry>>,
     path: &Path,
     commit: gix::ObjectId,
@@ -971,7 +1003,7 @@ fn resolve_alias(
     };
     let mut tombstone: Option<(FileIdentity, usize)> = None;
     for (idx, entry) in entries.iter().enumerate() {
-        if entry.consumed || !entry.applies_to(repo, commit)? {
+        if entry.consumed || !entry.applies_to(repo, graph, commit)? {
             continue;
         }
         match &entry.target {
