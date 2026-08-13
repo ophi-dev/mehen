@@ -1975,3 +1975,216 @@ fn merge_commit_renames_establish_file_identity() {
     // Nothing is reported under the vacated path.
     assert!(history.file(Path::new("a.rs")).is_none());
 }
+
+/// A commit that renames one file *over* another (`git mv -f a.rs
+/// b.rs`) emits `Renamed(a → b)` plus `Deleted(b)` for the old
+/// occupant. The deletion must land behind the destination boundary —
+/// not in the surviving lineage, where its removed lines, author, and
+/// commit would pollute the new `b.rs` history.
+#[test]
+fn rename_over_an_existing_file_fences_the_old_occupant() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c1: two unrelated files.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn alpha0() {}\nfn alpha1() {}\nfn alpha2() {}\nfn alpha3() {}\nfn alpha4() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.rs"),
+        "fn beta0() {}\nfn beta1() {}\nfn beta2() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+
+    // c2: a.rs replaces b.rs.
+    git(dir.path(), &["mv", "-f", "a.rs", "b.rs"], BOB, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "replace b with a"],
+        BOB,
+        t(1),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // b.rs = the a.rs lineage: creation (5 lines) + the rename. The
+    // old occupant's deletion (3 removed lines) is fenced off.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 5);
+    assert_eq!(b.churn_removed, 0, "old occupant's deletion leaked in");
+    assert!(history.file(Path::new("a.rs")).is_none());
+}
+
+/// One branch renames `a.rs → b.rs`; a parallel branch deletes the
+/// original `a.rs` and re-creates an unrelated file at that path; the
+/// merge keeps both. Whatever the walk order, the surviving `a.rs`
+/// must keep (only) its own history and the original lineage must
+/// flow to `b.rs`. This variant walks the parallel branch *before*
+/// the rename (its timestamps are newer).
+#[test]
+fn concurrent_delete_and_recreate_walked_before_the_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+
+    // feature: the rename, with the *oldest* post-branch timestamp.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "feature"],
+        ALICE,
+        t(1),
+    );
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "move to b"],
+        ALICE,
+        t(1),
+    );
+    let feature = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(1));
+
+    // main (parallel): delete the original, then reuse the path.
+    git(dir.path(), &["checkout", "-q", "main"], BOB, t(2));
+    git(dir.path(), &["rm", "-q", "a.rs"], BOB, t(2));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], BOB, t(2));
+    std::fs::write(dir.path().join("a.rs"), "fn unrelated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "reuse a"], CAROL, t(3));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    // Merged tree keeps both files.
+    git(dir.path(), &["checkout", "-q", "feature"], ALICE, t(4));
+    std::fs::write(dir.path().join("a.rs"), "fn unrelated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(4));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(4));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &feature,
+            "-p",
+            &main,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(4),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The surviving a.rs is only the parallel re-creation.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.commit_frequency, 1);
+    assert_eq!(a.churn_added, 1);
+    assert_eq!(a.authors, 1);
+
+    // b.rs owns the original lineage: creation, the parallel branch's
+    // deletion of the original (reclaimed from its fence when the
+    // rename explained where the file went), and the rename.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.churn_added, 3);
+    assert_eq!(b.commit_frequency, 3);
+}
+
+/// Same topology as above, but the rename carries the *newest*
+/// timestamp and is walked first — the parallel branch's re-creation
+/// must then bypass the already-installed alias (it is concurrent
+/// with the rename, not part of its pre-rename lineage).
+#[test]
+fn concurrent_delete_and_recreate_walked_after_the_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+
+    // main (parallel): delete the original, then reuse the path —
+    // with *older* timestamps than the rename.
+    git(dir.path(), &["rm", "-q", "a.rs"], BOB, t(1));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], BOB, t(1));
+    std::fs::write(dir.path().join("a.rs"), "fn unrelated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(2));
+    git(dir.path(), &["commit", "-q", "-m", "reuse a"], CAROL, t(2));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(2));
+
+    // feature from the root commit: the rename, newest timestamp.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "feature", "HEAD~2"],
+        ALICE,
+        t(3),
+    );
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(3));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "move to b"],
+        ALICE,
+        t(3),
+    );
+    let feature = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(3));
+
+    // Merged tree keeps both files.
+    std::fs::write(dir.path().join("a.rs"), "fn unrelated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(4));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(4));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &feature,
+            "-p",
+            &main,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(4),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The surviving a.rs is only the parallel re-creation — the
+    // alias installed by the earlier-walked rename must not swallow
+    // a concurrent addition.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.commit_frequency, 1);
+    assert_eq!(a.churn_added, 1);
+    assert_eq!(a.authors, 1);
+
+    // b.rs owns the original lineage: creation + rename. The
+    // concurrent deletion of the original stays fenced in this
+    // ordering (the fence postdates the already-walked rename).
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.churn_added, 3);
+    assert_eq!(b.commit_frequency, 2);
+}

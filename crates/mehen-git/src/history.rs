@@ -217,19 +217,18 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
 
     let mut files: HashMap<FileIdentity, FileAccumulator> = HashMap::new();
     let mut first_commit_seconds = head_seconds;
-    // Rename identity: maps a historical path to the identity it
-    // eventually became (a head-relative path, or a tombstone for a
-    // dead prior occupant), so a renamed file accumulates one
-    // history entry instead of losing everything before the rename.
-    // The newest-first walk sees a rename before the older commits
-    // that touched its source path; values stored in the map are
-    // always fully resolved, and `resolve_alias` follows chains for
-    // multi-rename histories. Rename destinations also get a
-    // *boundary*: older direct changes to the destination path belong
-    // to a dead prior occupant of that path, and are redirected to a
-    // per-boundary tombstone identity so the surviving file never
-    // inherits them.
-    let mut aliases: HashMap<PathBuf, AliasEntry> = HashMap::new();
+    // Rename identity: maps a historical path to entries describing
+    // what it became (a head-relative path, or a tombstone standing in
+    // for a dead prior occupant), each scoped by the commit that
+    // installed it — see `resolve_alias` for the ancestry gate and
+    // preference order. Values are stored fully resolved; resolution
+    // is a single lookup, deliberately not chain-following (chasing
+    // chains through a later destination boundary would misroute a
+    // lineage into a tombstone). Rename destinations get a *boundary*
+    // entry: older direct changes to the destination path belong to a
+    // dead prior occupant, and are redirected to a per-boundary
+    // tombstone so the surviving file never inherits them.
+    let mut aliases: HashMap<PathBuf, Vec<AliasEntry>> = HashMap::new();
     let mut tombstones: usize = 0;
 
     // Date-order traversal (`git rev-list --date-order`): commits come
@@ -289,11 +288,16 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
 
         // ── Phase 1: resolve every change against the *pre-commit*
         // alias map, so same-commit rename cycles (an a↔b swap) don't
-        // resolve through each other's just-installed aliases.
-        let mut targets: Vec<FileIdentity> = changes
-            .iter()
-            .map(|change| resolve_alias(&aliases, &change.path))
-            .collect();
+        // resolve through each other's just-installed aliases. Each
+        // resolution remembers which entry applied (if any) so the
+        // consumed flag lands on the right one.
+        let mut targets: Vec<FileIdentity> = Vec::with_capacity(changes.len());
+        let mut used_entries: Vec<Option<usize>> = Vec::with_capacity(changes.len());
+        for change in &changes {
+            let (target, used) = resolve_alias(repo, &aliases, &change.path, info.id)?;
+            targets.push(target);
+            used_entries.push(used);
+        }
         // Paths that are rename *sources* in this commit: a swap's
         // destination is simultaneously a source, and its older
         // changes are a lineage this commit moves elsewhere — not a
@@ -303,99 +307,140 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             .filter_map(|change| change.source_path.as_ref())
             .collect();
 
-        // ── Phase 2: a deletion *older* than an already-accumulated
-        // *re-creation* of the same (unaliased) path cuts the lineage:
-        // the newer changes belong to a file re-created at that path,
-        // and this deletion plus everything older belongs to the dead
-        // prior occupant. The newer accumulation must contain an
-        // actual addition — a parallel branch's *edits* walked before
-        // an unrelated branch's deletion (merge retained the file) are
-        // modifications only and must not split the identity. A
-        // *consumed* alias carries the same proof: the redirected
-        // occupant's creation has already been accumulated, so an
-        // older deletion at the path belongs to a yet-older occupant.
-        for (change, target) in changes.iter().zip(targets.iter_mut()) {
-            if !change.is_deletion {
+        // ── Phase 2: a deletion *older* than a re-creation of the
+        // same path cuts the lineage: the re-creation (and everything
+        // on its descendants) belongs to a new file, and this deletion
+        // plus everything older belongs to the dead prior occupant.
+        // The proof must be ancestry-precise: either an accumulated
+        // *addition* at this path from a descendant of the deletion,
+        // or a consumed alias entry installed on the deletion's own
+        // descendant line (the recreation was redirected through it).
+        // A parallel branch's *edits* walked earlier are modifications
+        // only and must not split the identity.
+        for ((change, target), used) in changes.iter().zip(targets.iter_mut()).zip(&used_entries) {
+            if !change.is_deletion || used.is_some() {
                 continue;
             }
-            let recreation_seen = match aliases.get(&change.path) {
-                None => files
-                    .get(&FileIdentity::Path(change.path.clone()))
-                    .is_some_and(|acc| acc.has_addition),
-                Some(entry) => entry.consumed,
-            };
+            let mut recreation_seen = false;
+            if let Some(acc) = files.get(&FileIdentity::Path(change.path.clone())) {
+                for c in &acc.contributions {
+                    if c.is_addition && is_descendant_of(repo, info.id, c.commit)? {
+                        recreation_seen = true;
+                        break;
+                    }
+                }
+            }
+            if !recreation_seen && let Some(entries) = aliases.get(&change.path) {
+                for entry in entries {
+                    if entry.consumed && is_descendant_of(repo, info.id, entry.installed_by)? {
+                        recreation_seen = true;
+                        break;
+                    }
+                }
+            }
             if recreation_seen {
                 tombstones += 1;
                 let tombstone = FileIdentity::Tombstone(tombstones);
-                aliases.insert(change.path.clone(), AliasEntry::new(tombstone.clone()));
+                aliases
+                    .entry(change.path.clone())
+                    .or_default()
+                    .push(AliasEntry::new(tombstone.clone(), info.id));
                 *target = tombstone;
             }
         }
 
         // ── Phase 3: install rename aliases, boundaries, and stranded
         // merges (all against the phase-1 resolutions).
+        let mut new_boundaries: Vec<(PathBuf, FileIdentity)> = Vec::new();
         for (change, target) in changes.iter().zip(targets.iter()) {
             let Some(source) = &change.source_path else {
                 continue;
             };
             if matches!(target, FileIdentity::Path(p) if p == source) {
                 // A rename returning to its own identity (a→b→a):
-                // reconnect the lineage by dropping a stale destination
-                // boundary, so pre-rename commits flow to the survivor
-                // again instead of a tombstone.
-                if matches!(
-                    aliases.get(source),
-                    Some(AliasEntry {
-                        target: FileIdentity::Tombstone(_),
-                        ..
-                    })
-                ) {
-                    aliases.remove(source);
+                // reconnect the lineage by dropping stale destination
+                // boundaries, so pre-rename commits flow to the
+                // survivor again instead of a tombstone.
+                if let Some(entries) = aliases.get_mut(source) {
+                    entries.retain(|e| !matches!(e.target, FileIdentity::Tombstone(_)));
+                    if entries.is_empty() {
+                        aliases.remove(source);
+                    }
                 }
                 continue;
             }
             // First-visited (newest) rename wins when parallel branches
             // renamed the same source differently — deterministic,
             // though the losing lineage keeps only its own direct
-            // commits. A *consumed* alias is different: the newer
-            // occupant's creation has already been accumulated through
-            // it, so this older rename describes a previous occupant
-            // and takes the alias over. A *tombstone* alias is likewise
-            // reclaimable: this rename explains where the fenced-off
-            // occupant actually went (it was renamed away before the
-            // newer occupant arrived).
-            if matches!(
-                aliases.get(source),
-                Some(AliasEntry {
-                    target: FileIdentity::Path(_),
-                    consumed: false,
-                })
-            ) {
+            // commits. A *consumed* entry is different: the occupant it
+            // redirected has been fully walked, so this older rename
+            // describes a previous occupant and installs alongside. A
+            // *tombstone* entry is reclaimable outright: this rename
+            // explains where the fenced-off occupant actually went (it
+            // was renamed away, not merely deleted), so its fenced
+            // contributions move to the rename target and the fence
+            // comes down.
+            let entries = aliases.entry(source.clone()).or_default();
+            if entries
+                .iter()
+                .any(|e| matches!(e.target, FileIdentity::Path(_)) && !e.consumed)
+            {
                 continue;
             }
+            let mut reclaimed = FileAccumulator::default();
+            entries.retain(|e| {
+                if e.consumed || !matches!(e.target, FileIdentity::Tombstone(_)) {
+                    return true;
+                }
+                if let Some(fenced) = files.remove(&e.target) {
+                    reclaimed.merge(fenced);
+                }
+                false
+            });
             // The alias redirects the *older* commits that are walked
             // after this rename (the pre-rename lineage).
-            aliases.insert(source.clone(), AliasEntry::new(target.clone()));
+            entries.push(AliasEntry::new(target.clone(), info.id));
+            if !reclaimed.is_empty() {
+                files.entry(target.clone()).or_default().merge(reclaimed);
+            }
             // Anything already accumulated under the source path is
             // *newer in walk order* than this rename — but it can mix
             // two occupants: concurrent branches' edits belong to the
             // renamed lineage (they edited the file that moved away),
             // while a re-creation of the vacated path (and the edits
             // in its descendants) is a distinct newer file. Commit
-            // ancestry separates the two exactly: a contribution from
-            // a *descendant* of this rename commit postdates the
-            // rename on its own line and belongs to the new occupant;
-            // anything concurrent belongs to the renamed lineage.
+            // ancestry separates the two: descendants of this rename
+            // postdate it on its own line, and a concurrent *addition*
+            // is a parallel branch's re-creation (an addition cannot
+            // edit the moved file) — both belong to the new occupant,
+            // as do edits descending from such a re-creation. Anything
+            // else concurrent edited the renamed lineage.
             let source_id = FileIdentity::Path(source.clone());
             if let Some(stranded) = files.remove(&source_id) {
                 let mut occupant = FileAccumulator::default();
-                let mut lineage = FileAccumulator::default();
+                let mut recreations: Vec<gix::ObjectId> = Vec::new();
+                let mut pending: Vec<Contribution> = Vec::new();
                 for contribution in stranded.contributions {
-                    if is_descendant_of(repo, info.id, contribution.commit)? {
+                    if contribution.is_addition
+                        && !is_descendant_of(repo, info.id, contribution.commit)?
+                    {
+                        recreations.push(contribution.commit);
+                        occupant.push(contribution);
+                    } else if is_descendant_of(repo, info.id, contribution.commit)? {
                         occupant.push(contribution);
                     } else {
-                        lineage.push(contribution);
+                        pending.push(contribution);
                     }
+                }
+                let mut lineage = FileAccumulator::default();
+                'pending: for contribution in pending {
+                    for recreation in &recreations {
+                        if is_descendant_of(repo, *recreation, contribution.commit)? {
+                            occupant.push(contribution);
+                            continue 'pending;
+                        }
+                    }
+                    lineage.push(contribution);
                 }
                 if !occupant.is_empty() {
                     files.insert(source_id, occupant);
@@ -411,10 +456,28 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // are a live lineage this commit moves elsewhere.
             if !commit_sources.contains(&change.path) {
                 tombstones += 1;
-                aliases.insert(
-                    change.path.clone(),
-                    AliasEntry::new(FileIdentity::Tombstone(tombstones)),
-                );
+                let boundary = FileIdentity::Tombstone(tombstones);
+                aliases
+                    .entry(change.path.clone())
+                    .or_default()
+                    .push(AliasEntry::new(boundary.clone(), info.id));
+                new_boundaries.push((change.path.clone(), boundary));
+            }
+        }
+        // A commit that renames one file *over* another emits both
+        // `Renamed(a → b)` and `Deleted(b)`; the deletion is the old
+        // occupant of `b` dying, and belongs behind the destination
+        // boundary just installed — not in the surviving lineage,
+        // where its removed lines, author, and commit would pollute
+        // the new `b`'s history.
+        for ((change, target), used) in changes.iter().zip(targets.iter_mut()).zip(&used_entries) {
+            if !change.is_deletion || used.is_some() {
+                continue;
+            }
+            if let Some((_, boundary)) =
+                new_boundaries.iter().find(|(path, _)| *path == change.path)
+            {
+                *target = boundary.clone();
             }
         }
 
@@ -427,21 +490,17 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // The "other files in this commit" count is the same for every
         // file in the changeset.
         let coupled_others = changes.len().saturating_sub(1) as u64;
-        for (change, target) in changes.iter().zip(targets.iter()) {
-            // An addition that resolved *through* an alias is the
-            // redirected occupant's birth: every deletion or rename
-            // of this path walked from here on is older than that
-            // birth and belongs to a previous occupant, so mark the
-            // alias consumed (see `AliasEntry`). The target equality
-            // check pins this to the resolving entry — an alias
-            // installed by this same commit's rename did not redirect
-            // this addition (phase 1 resolved against the pre-commit
-            // map) and stays live for the pre-rename lineage.
+        for ((change, target), used) in changes.iter().zip(targets.iter()).zip(&used_entries) {
+            // An addition that resolved *through* an alias entry is
+            // the redirected occupant's birth: every deletion or
+            // rename of this path walked from here on is older than
+            // that birth and belongs to a previous occupant, so mark
+            // the applied entry consumed (see `AliasEntry`).
             if change.is_addition
-                && let Some(entry) = aliases.get_mut(&change.path)
-                && entry.target == *target
+                && let Some(idx) = used
+                && let Some(entries) = aliases.get_mut(&change.path)
             {
-                entry.consumed = true;
+                entries[*idx].consumed = true;
             }
             files.entry(target.clone()).or_default().push(Contribution {
                 commit: info.id,
@@ -671,7 +730,10 @@ enum FileIdentity {
     Tombstone(usize),
 }
 
-/// One rename-identity redirection. `consumed` flips once the walk
+/// One rename-identity redirection. `installed_by` is the commit that
+/// created the entry: an alias only describes that commit's own line,
+/// so *concurrent* additions (a parallel branch re-creating the path)
+/// must not resolve through it. `consumed` flips once the walk
 /// accumulates the *creation* of the aliased path through this entry:
 /// the redirected occupant's birth has been found, so anything older
 /// at that path belongs to a previous occupant — an older rename may
@@ -681,31 +743,61 @@ enum FileIdentity {
 #[derive(Clone, Debug)]
 struct AliasEntry {
     target: FileIdentity,
+    installed_by: gix::ObjectId,
     consumed: bool,
 }
 
 impl AliasEntry {
-    fn new(target: FileIdentity) -> Self {
+    fn new(target: FileIdentity, installed_by: gix::ObjectId) -> Self {
         Self {
             target,
+            installed_by,
             consumed: false,
         }
     }
 }
 
-/// Resolve a historical path to its head-relative identity.
+/// Resolve a historical path to its identity for a change made by
+/// `commit`, returning the applied entry's index when an alias was
+/// used (so the caller can mark it consumed).
 ///
-/// A *single* lookup, deliberately not chain-following: every value in
-/// the map is stored fully resolved at insertion time, and rename
-/// destinations later gain terminal *boundary* entries (path →
-/// tombstone) that cut off a prior occupant's older changes — chasing
-/// chains through such a boundary would misroute a lineage into a
-/// tombstone.
-fn resolve_alias(aliases: &HashMap<PathBuf, AliasEntry>, path: &Path) -> FileIdentity {
-    aliases
-        .get(path)
-        .map(|entry| entry.target.clone())
-        .unwrap_or_else(|| FileIdentity::Path(path.to_path_buf()))
+/// An entry applies only when `commit` is an *ancestor* of the commit
+/// that installed it: aliases redirect the pre-rename lineage on the
+/// installer's own line, and a concurrent change (a parallel branch
+/// re-creating or deleting the path) knows nothing of that rename.
+/// Consumed entries never apply — the occupant they redirected has
+/// been fully walked, so anything older belongs to someone else.
+/// Among applicable entries, real-path targets win over tombstones
+/// (a rename explains where the file went; a deletion boundary is
+/// only a fence), first-installed first — deterministic under the
+/// deterministic walk order.
+fn resolve_alias(
+    repo: &gix::Repository,
+    aliases: &HashMap<PathBuf, Vec<AliasEntry>>,
+    path: &Path,
+    commit: gix::ObjectId,
+) -> Result<(FileIdentity, Option<usize>), GitError> {
+    let Some(entries) = aliases.get(path) else {
+        return Ok((FileIdentity::Path(path.to_path_buf()), None));
+    };
+    let mut tombstone: Option<(FileIdentity, usize)> = None;
+    for (idx, entry) in entries.iter().enumerate() {
+        if entry.consumed || !is_descendant_of(repo, commit, entry.installed_by)? {
+            continue;
+        }
+        match &entry.target {
+            FileIdentity::Path(_) => return Ok((entry.target.clone(), Some(idx))),
+            FileIdentity::Tombstone(_) => {
+                if tombstone.is_none() {
+                    tombstone = Some((entry.target.clone(), idx));
+                }
+            }
+        }
+    }
+    Ok(match tombstone {
+        Some((target, idx)) => (target, Some(idx)),
+        None => (FileIdentity::Path(path.to_path_buf()), None),
+    })
 }
 
 /// Diff `commit` against its first parent (or the empty tree for root
