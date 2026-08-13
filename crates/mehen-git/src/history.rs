@@ -154,7 +154,7 @@ struct Contribution {
     commit: gix::ObjectId,
     /// Committer timestamp in seconds.
     seconds: i64,
-    author: std::sync::Arc<str>,
+    author: std::sync::Arc<[u8]>,
     added: u64,
     removed: u64,
     /// Other files changed in the same commit (`history.coupling`).
@@ -285,7 +285,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // identity-bearing merges at all).
             first_commit_seconds = first_commit_seconds.min(seconds);
         }
-        let author: std::sync::Arc<str> = std::sync::Arc::from(author_identity(&commit)?);
+        let author: std::sync::Arc<[u8]> = std::sync::Arc::from(author_identity(&commit)?);
         let is_bugfix = is_bugfix_message(commit.message_raw_sloppy());
 
         // ── Phase 1: resolve every change against the *pre-commit*
@@ -580,13 +580,13 @@ fn finalize_file(acc: FileAccumulator, first_seconds: i64, head_seconds: i64) ->
     let mut last_change_seconds = i64::MIN;
     let mut sum_of_coupling = 0u64;
     let mut bugfix_seconds: Vec<i64> = Vec::new();
-    let mut authors: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut authors: std::collections::HashSet<&[u8]> = std::collections::HashSet::new();
     // Added lines per author — the *authorship* signal driving
     // ownership and minor-contributor classification. Deletion-only /
     // rename-only touches deliberately never appear here: a zero
     // entry would classify the toucher as a sub-5% minor contributor
     // despite having written nothing.
-    let mut author_lines: HashMap<&str, u64> = HashMap::new();
+    let mut author_lines: HashMap<&[u8], u64> = HashMap::new();
     for c in &acc.contributions {
         churn_added += c.added;
         churn_removed += c.removed;
@@ -1032,18 +1032,23 @@ fn commit_seconds(commit: &gix::Commit<'_>) -> Result<i64, GitError> {
         .seconds)
 }
 
-/// Author identity for ownership metrics: lower-cased email, falling
-/// back to the author name for commits without one.
-fn author_identity(commit: &gix::Commit<'_>) -> Result<String, GitError> {
+/// Author identity for ownership metrics: the author's raw email
+/// bytes (ASCII-lowercased), falling back to the name for commits
+/// without one. Byte-preserving deliberately — a lossy UTF-8
+/// conversion would replace every invalid sequence with U+FFFD and
+/// collapse distinct identities that differ only in such bytes,
+/// undercounting `history.authors` and skewing ownership shares.
+fn author_identity(commit: &gix::Commit<'_>) -> Result<Vec<u8>, GitError> {
     let author = commit
         .author()
         .map_err(|e| GitError::Internal(e.to_string()))?;
-    let email = author.email.to_string();
-    if email.trim().is_empty() {
-        Ok(author.name.to_string().to_lowercase())
+    let email: &[u8] = author.email.as_ref();
+    let bytes: &[u8] = if email.iter().all(u8::is_ascii_whitespace) {
+        author.name.as_ref()
     } else {
-        Ok(email.to_lowercase())
-    }
+        email
+    };
+    Ok(bytes.to_ascii_lowercase())
 }
 
 /// Bug-fix commit heuristic (Lewis et al. use a message classifier; the
@@ -1119,7 +1124,7 @@ mod tests {
         Contribution {
             commit: gix::ObjectId::null(gix::hash::Kind::Sha1),
             seconds: 0,
-            author: author.into(),
+            author: author.as_bytes().into(),
             added,
             removed: 0,
             coupled_others: 0,

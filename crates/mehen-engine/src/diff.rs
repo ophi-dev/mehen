@@ -1299,7 +1299,34 @@ fn get_changed_files(
             log::warn!(
                 "falling back to the push payload's changed files ({from} does not resolve locally)"
             );
-            return Ok(files.clone());
+            // With the baseline unreadable, every baseline blob read
+            // downstream would fail and quietly turn `Modified` rows
+            // into fabricated full-value-vs-zero deltas, while
+            // `Deleted` rows (neither side analyzable) would vanish.
+            // Degrade honestly instead: modified files are presented
+            // as their current state only (an `Added` row, 🆕 in the
+            // report), and deletions are dropped with a warning.
+            let degraded = files
+                .iter()
+                .filter(|cf| {
+                    if cf.status == ChangeStatus::Deleted {
+                        log::warn!(
+                            "dropping deleted file {} from the report: its baseline \
+                             ({from}) is not available locally",
+                            cf.path.display()
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .map(|cf| mehen_git::ChangedFile {
+                    path: cf.path.clone(),
+                    status: ChangeStatus::Added,
+                    source_path: cf.source_path.clone(),
+                })
+                .collect();
+            return Ok(degraded);
         }
     }
 
@@ -1915,6 +1942,49 @@ binary.md binary
         let out = get_changed_files(&repo, "HEAD~1", "HEAD", &ctx, false).unwrap();
         assert_eq!(out.len(), 1, "explicit range must be diffed: {out:?}");
         assert_eq!(out[0].path, PathBuf::from("tip.py"));
+    }
+
+    #[test]
+    fn unresolvable_baseline_payloads_degrade_modified_and_drop_deleted() {
+        // With the baseline commit gone (force-push), every baseline
+        // blob read would fail downstream: a `Modified` row would
+        // fabricate a full-value-vs-zero delta and a `Deleted` row
+        // would vanish silently. The fallback must degrade honestly:
+        // modified files become current-state-only `Added` rows (🆕),
+        // deletions are dropped with a warning.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        let repo = gix::discover(dir.path()).unwrap();
+        let ctx = Some(push_ctx(vec![
+            mehen_git::ChangedFile {
+                path: PathBuf::from("kept.py"),
+                status: ChangeStatus::Modified,
+                source_path: None,
+            },
+            mehen_git::ChangedFile {
+                path: PathBuf::from("gone.py"),
+                status: ChangeStatus::Deleted,
+                source_path: None,
+            },
+            mehen_git::ChangedFile {
+                path: PathBuf::from("new.py"),
+                status: ChangeStatus::Added,
+                source_path: None,
+            },
+        ]));
+        let out = get_changed_files(&repo, "no-such-ref", "also-missing", &ctx, true).unwrap();
+        let mut rows: Vec<(&str, ChangeStatus)> = out
+            .iter()
+            .map(|f| (f.path.to_str().unwrap(), f.status))
+            .collect();
+        rows.sort_unstable_by_key(|(path, _)| *path);
+        assert_eq!(
+            rows,
+            vec![
+                ("kept.py", ChangeStatus::Added),
+                ("new.py", ChangeStatus::Added)
+            ]
+        );
     }
 
     #[test]

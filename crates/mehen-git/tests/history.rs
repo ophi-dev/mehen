@@ -2568,3 +2568,58 @@ fn merge_created_additions_fence_dead_prior_occupants() {
         1
     );
 }
+
+/// Author identities preserve raw bytes: two emails differing only in
+/// an invalid UTF-8 byte must stay two distinct authors — a lossy
+/// conversion would collapse both to the same `U+FFFD` string.
+#[test]
+#[cfg(unix)]
+fn non_utf8_author_emails_stay_distinct() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    let commit = |file_content: &str, msg: &str, email: &[u8], seconds: i64| {
+        std::fs::write(dir.path().join("a.py"), file_content).unwrap();
+        let date = format!("{seconds} +0000");
+        for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", msg]] {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(&args)
+                .env("GIT_AUTHOR_NAME", "Weird")
+                .env("GIT_AUTHOR_EMAIL", OsStr::from_bytes(email))
+                .env("GIT_COMMITTER_NAME", "Weird")
+                .env("GIT_COMMITTER_EMAIL", OsStr::from_bytes(email))
+                .env("GIT_AUTHOR_DATE", &date)
+                .env("GIT_COMMITTER_DATE", &date)
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    };
+
+    // Two identities differing only in the invalid byte: lossy
+    // conversion maps both to "a\u{FFFD}x@example.com".
+    commit("x = 1\n", "one", b"a\xffx@example.com", t(0));
+    commit("x = 1\ny = 2\n", "two", b"a\xfex@example.com", t(1));
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    let a = history.file(Path::new("a.py")).unwrap();
+    assert_eq!(a.commit_frequency, 2);
+    assert_eq!(a.authors, 2, "distinct non-UTF-8 emails collapsed");
+    // Each contributed half the added lines: no 100% owner.
+    assert!(
+        (a.ownership - 0.5).abs() < 1e-9,
+        "ownership {}",
+        a.ownership
+    );
+}
