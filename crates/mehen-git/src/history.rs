@@ -718,7 +718,7 @@ fn tree_blob_paths(
         .records
         .into_iter()
         .filter(|entry| entry.mode.is_blob())
-        .map(|entry| crate::tree_changes::path_from_git(&entry.filepath))
+        .filter_map(|entry| crate::tree_changes::path_from_git(&entry.filepath))
         .collect())
 }
 

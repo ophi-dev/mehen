@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 gix = { workspace = true }
+log = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

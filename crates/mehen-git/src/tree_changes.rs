@@ -80,8 +80,23 @@ fn git_path_order(a: &Path, b: &Path) -> std::cmp::Ordering {
 /// a real file literally named `x\u{FFFD}.py` — a lossy conversion
 /// would collide the two and merge their changes (and their history
 /// accumulators) into one identity.
-pub(crate) fn path_from_git(path: &gix::bstr::BString) -> PathBuf {
-    gix::path::from_bstr(path.as_ref() as &gix::bstr::BStr).into_owned()
+///
+/// Returns `None` when the platform cannot represent the bytes as a
+/// native path (Windows requires valid UTF-8; the infallible gix
+/// conversion would *panic* there). Such a path cannot exist in a
+/// Windows checkout at all, so callers skip the entry instead of
+/// aborting the whole analysis. On Unix the conversion never fails.
+pub(crate) fn path_from_git(path: &gix::bstr::BString) -> Option<PathBuf> {
+    match gix::path::try_from_bstr(path.as_ref() as &gix::bstr::BStr) {
+        Ok(p) => Some(p.into_owned()),
+        Err(_) => {
+            log::warn!(
+                "skipping git path not representable on this platform: {}",
+                String::from_utf8_lossy(path)
+            );
+            None
+        }
+    }
 }
 use gix::objs::TreeRefIter;
 
@@ -220,8 +235,11 @@ pub(crate) fn changes_between_trees(
                 ..
             } => {
                 if entry_mode.is_blob() {
+                    let Some(path) = path_from_git(&path) else {
+                        continue;
+                    };
                     added.push(RenameSide {
-                        path: path_from_git(&path),
+                        path,
                         oid,
                         broken: None,
                     });
@@ -236,8 +254,11 @@ pub(crate) fn changes_between_trees(
                 ..
             } => {
                 if entry_mode.is_blob() {
+                    let Some(path) = path_from_git(&path) else {
+                        continue;
+                    };
                     deleted.push(RenameSide {
-                        path: path_from_git(&path),
+                        path,
                         oid,
                         broken: None,
                     });
@@ -256,7 +277,9 @@ pub(crate) fn changes_between_trees(
                 // downstream blob reads never touch a gitlink OID (the
                 // submodule's commit object is not in this
                 // repository's odb).
-                let path = path_from_git(&path);
+                let Some(path) = path_from_git(&path) else {
+                    continue;
+                };
                 match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
                     (true, true) => modified.push((path, previous_oid, oid)),
                     (true, false) => changes.push(TreeChange::Deleted {
