@@ -72,39 +72,41 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         let Some(language) = detect_language(entry.as_path()) else {
             continue;
         };
-        let Some(analyzer) = registry.analyzer_for(language) else {
+        let analyzer = registry.analyzer_for(language);
+        if analyzer.is_none() {
             // Language detected but no analyzer registered (the
             // owning crate is feature-gated off in this build).
             // Surface as a non-fatal `analysis_error` so callers
             // can distinguish "no offenders" from "offenders
             // silently skipped" — matching the diff path's
-            // `record_unavailable` (rewrite plan §3.5).
+            // `record_unavailable` (rewrite plan §3.5). History
+            // metrics need no parser, so the file may still rank
+            // below on Git-only selectors.
             record_unavailable(&mut analysis_errors, &entry, language);
-            continue;
-        };
+        }
         // History metrics don't depend on decoding or parsing the
         // blob: a recognized file whose contents static analysis
-        // cannot handle still has repository history, and a history
-        // selector must rank it on real values (via an empty metric
-        // space) instead of silently dropping it. Static-only
+        // cannot handle — or whose language's analyzer is
+        // feature-gated off — still has repository history, and a
+        // history selector must rank it on real values (via an empty
+        // metric space) instead of silently dropping it. Static-only
         // rankings keep skipping such files.
         let history_entry = histories.as_ref().and_then(|h| h.file(entry.as_std_path()));
-        let analyzed_root = std::fs::read_to_string(entry.as_std_path())
-            .ok()
-            .and_then(|text| {
-                let source = SourceFile::new(entry.clone(), language, text);
-                let analysis = analyzer.analyze(&source, &input.config).ok()?;
-                // Migrated analyzers can return `Ok(...)` with a
-                // partial tree alongside an `Error`/`Fatal`
-                // diagnostic when the file doesn't parse cleanly.
-                // Per §9.3 those analyses are incomplete; surfacing
-                // them in the offender list as if they were measured
-                // would mislead CI/policy callers.
-                if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
-                    return None;
-                }
-                Some(analysis.root)
-            });
+        let analyzed_root = analyzer.and_then(|analyzer| {
+            let text = std::fs::read_to_string(entry.as_std_path()).ok()?;
+            let source = SourceFile::new(entry.clone(), language, text);
+            let analysis = analyzer.analyze(&source, &input.config).ok()?;
+            // Migrated analyzers can return `Ok(...)` with a
+            // partial tree alongside an `Error`/`Fatal`
+            // diagnostic when the file doesn't parse cleanly.
+            // Per §9.3 those analyses are incomplete; surfacing
+            // them in the offender list as if they were measured
+            // would mislead CI/policy callers.
+            if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
+                return None;
+            }
+            Some(analysis.root)
+        });
         let statics_available = analyzed_root.is_some();
         let mut root = match (analyzed_root, history_entry.is_some()) {
             (Some(root), _) => root,
@@ -654,20 +656,19 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         },
     };
 
-    let analyzer = match cfg.registry.analyzer_for(language) {
-        Some(a) => a,
-        None => return Ok(()),
-    };
+    let analyzer = cfg.registry.analyzer_for(language);
 
     // History metrics don't depend on decoding or parsing the blob:
     // a recognized file whose contents static analysis cannot handle
-    // (e.g. non-UTF-8 but non-binary) still has repository history,
-    // and a history selector must rank it on real values instead of
-    // silently dropping it. Static-only rankings keep skipping such
-    // files (an all-zero row would be noise).
+    // (e.g. non-UTF-8 but non-binary) — or whose language's analyzer
+    // is feature-gated off in this build — still has repository
+    // history, and a history selector must rank it on real values
+    // instead of silently dropping it. Static-only rankings keep
+    // skipping such files (an all-zero row would be noise).
     let history_entry = cfg.history.as_ref().and_then(|h| h.file(&path));
 
-    let analyzed_root = std::fs::read_to_string(&path).ok().and_then(|text| {
+    let analyzed_root = analyzer.and_then(|analyzer| {
+        let text = std::fs::read_to_string(&path).ok()?;
         let source = SourceFile::new(utf8_path, language, text);
         let analysis = analyzer
             .analyze(&source, &mehen_core::AnalysisConfig::default())

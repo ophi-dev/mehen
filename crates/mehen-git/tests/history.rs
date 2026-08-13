@@ -4516,3 +4516,88 @@ fn discarded_same_path_recreations_are_fenced_at_merges() {
     assert_eq!(a.commit_frequency, 3);
     assert_eq!(a.authors, 2, "the discarded occupant leaked in");
 }
+
+/// The discarded branch's recreation *resembles* the survivor
+/// (≥ 50% similar): endpoint similarity alone would classify it as a
+/// continuation, but the deletion on that branch's line is an
+/// identity boundary and the fence must still install.
+#[test]
+fn similar_discarded_recreations_are_still_fenced_at_merges() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // Retaining branch: grows the original.
+    git(dir.path(), &["checkout", "-q", "-b", "retain"], BOB, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\nfn kept_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(1));
+    let retain = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // Discard branch: delete, then recreate with *similar* content
+    // (three of four original lines survive — well above the rename
+    // threshold). Newer timestamps: walked before the retainer.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "discard", "main"],
+        ALICE,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], ALICE, t(2));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], ALICE, t(2));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn imposter() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "recreate similar a"],
+        CAROL,
+        t(3),
+    );
+    let discard = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    // The merge keeps the retaining parent's blob.
+    git(dir.path(), &["checkout", "-q", "-f", "retain"], BOB, t(4));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(4));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &retain,
+            "-p",
+            &discard,
+            "-m",
+            "keep the original",
+        ],
+        BOB,
+        t(4),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The survivor keeps its full lineage; carol's similar-but-
+    // recreated file stays fenced (its creation must neither appear
+    // here nor fence away the shared root creation).
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.churn_added, 5, "the shared creation was fenced away");
+    assert_eq!(a.authors, 2, "the similar recreation leaked in");
+}

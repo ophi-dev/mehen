@@ -1302,7 +1302,7 @@ fn merge_introduced_changes(
             else {
                 continue;
             };
-            if seen.contains(path) || same_blob_lineage(repo, previous_oid, oid)? {
+            if seen.contains(path) {
                 continue;
             }
             // Find the parent that supplied the merged blob (exact,
@@ -1339,6 +1339,20 @@ fn merge_introduced_changes(
                 Err(gix::repository::merge_base::Error::NotFound { .. }) => None,
                 Err(e) => return Err(GitError::Internal(e.to_string())),
             };
+            // Endpoint similarity alone cannot prove continuation:
+            // a recreation may resemble the survivor (or be judged
+            // against an edited merge blob). The parent's own line is
+            // consulted for a delete/recreate boundary since the
+            // divergence — only an uninterrupted, similar version is
+            // a genuine continuation needing no fence.
+            if same_blob_lineage(repo, previous_oid, oid)?
+                && match floor {
+                    Some(base) => !path_deleted_in_range(repo, parent_ids[q_idx], base, path)?,
+                    None => true,
+                }
+            {
+                continue;
+            }
             seen.insert(path.clone());
             introduced.push(CommitFileChange {
                 path: path.clone(),
