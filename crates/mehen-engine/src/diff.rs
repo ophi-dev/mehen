@@ -406,6 +406,7 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
                     &mut analysis.root.metrics,
                     fh,
                     history.head_seconds,
+                    true,
                 );
             }
             evaluate_thresholds(&mut report, &utf8_path, &input.thresholds, &analysis.root);
@@ -439,6 +440,7 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
                     &mut space.metrics,
                     fh,
                     history.head_seconds,
+                    false,
                 );
                 evaluate_thresholds(&mut report, &utf8_path, &history_thresholds, &space);
             }
@@ -1080,6 +1082,14 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         // it reflects blob availability, not history availability.
         let is_new_row = is_new && baseline_space.is_none();
         if let Some((base_history, head_history)) = histories.as_ref() {
+            // Whether each side's space is backed by real static
+            // analysis: the synthetic fallbacks below carry no static
+            // inputs, and the composite keys must then be omitted
+            // (hotspot would read a fabricated 0, relative churn
+            // would divide by 1). The split-rename baseline counts as
+            // backed exactly when its staged inputs were accepted.
+            let mut baseline_composites = baseline_space.is_some();
+            let mut current_composites = current_space.is_some();
             // A split rename (`Added` row carrying `source_path`, e.g.
             // a cross-language `a.py → a.rs`) has no baseline *blob*,
             // but its baseline *history* is the source lineage. Give
@@ -1129,6 +1139,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 baseline_space = Some(space);
+                baseline_composites = staged_composite_inputs;
             }
             // History metrics don't depend on decoding or parsing the
             // blob: a side whose static analysis is unavailable (e.g.
@@ -1150,14 +1161,17 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                     .is_some_and(|history| history.file(base_path).is_some())
             {
                 baseline_space = Some(empty_space());
+                baseline_composites = false;
             }
             if current_space.is_none() && !is_deleted && head_history.file(&cf.path).is_some() {
                 current_space = Some(empty_space());
+                current_composites = false;
             }
             let mut sides: Vec<(
                 Option<&mut MetricSpace>,
                 &mehen_git::RepositoryHistory,
                 &Path,
+                bool,
             )> = Vec::with_capacity(2);
             // A split-rename deletion row's lineage is already carried
             // by its paired destination row — injecting it here too
@@ -1168,10 +1182,20 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(base_history) = base_history.as_ref()
                 && !deletion_history_suppressed
             {
-                sides.push((baseline_space.as_mut(), base_history, base_path));
+                sides.push((
+                    baseline_space.as_mut(),
+                    base_history,
+                    base_path,
+                    baseline_composites,
+                ));
             }
-            sides.push((current_space.as_mut(), head_history, cf.path.as_path()));
-            for (space, history, path) in sides {
+            sides.push((
+                current_space.as_mut(),
+                head_history,
+                cf.path.as_path(),
+                current_composites,
+            ));
+            for (space, history, path, with_composites) in sides {
                 if let Some(space) = space
                     && let Some(fh) = history.file(path)
                 {
@@ -1179,6 +1203,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                         &mut space.metrics,
                         fh,
                         history.head_seconds,
+                        with_composites,
                     );
                 }
             }

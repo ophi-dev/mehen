@@ -3988,9 +3988,9 @@ fn recreations_on_merged_side_branches_do_not_consume_merge_aliases() {
     assert_eq!(b.churn_added, 4, "recreation leaked or alias consumed");
     assert_eq!(b.churn_removed, 3);
 
-    // The recreation keeps its own identity at the vacated path.
-    let a = history.file(Path::new("a.rs")).unwrap();
-    assert_eq!(a.churn_added, 1);
+    // The recreation is a discarded occupant, fenced at the inner
+    // merge rather than reported under the vacated path.
+    assert!(history.file(Path::new("a.rs")).is_none());
 }
 
 /// The recreated occupant on a merged side branch was also *edited*
@@ -4129,10 +4129,10 @@ fn recreated_occupant_edits_are_pulled_back_from_merge_aliases() {
         "the recreated occupant's edits leaked into the survivor"
     );
 
-    // The occupant keeps its whole lineage: recreation + edit.
-    let a = history.file(Path::new("a.rs")).unwrap();
-    assert_eq!(a.commit_frequency, 2);
-    assert_eq!(a.churn_added, 2);
+    // The discarded occupant's whole lineage (recreation + edit) is
+    // fenced at the inner merge rather than reported under the
+    // vacated path.
+    assert!(history.file(Path::new("a.rs")).is_none());
 }
 
 /// A few bytes inserted near the start of a renamed long single-line
@@ -4432,4 +4432,87 @@ fn boundary_scan_follows_edited_blobs_by_similarity() {
         b.churn_added, 4,
         "the edited merge blob was traced through the wrong parent"
     );
+}
+
+/// A merge keeps one parent's original `a.rs` while another parent's
+/// line deleted and recreated an unrelated `a.rs` that the merge
+/// discards — with no introduced rename or addition. The discarded
+/// occupant still needs a fence: its recreation must not accumulate
+/// under the live path, and its deletion must not fence the shared
+/// pre-branch creation away from the survivor.
+#[test]
+fn discarded_same_path_recreations_are_fenced_at_merges() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // Retaining branch: grows the original.
+    git(dir.path(), &["checkout", "-q", "-b", "retain"], BOB, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn kept_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(1));
+    let retain = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // Discard branch: delete, then recreate unrelated content —
+    // *newer* timestamps, so its commits walk before the retainer's.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "discard", "main"],
+        ALICE,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], ALICE, t(2));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], ALICE, t(2));
+    std::fs::write(dir.path().join("a.rs"), "fn own0() {}\nfn own1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "recreate a"],
+        CAROL,
+        t(3),
+    );
+    let discard = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    // The merge keeps the retaining parent's blob at a.rs.
+    git(dir.path(), &["checkout", "-q", "-f", "retain"], BOB, t(4));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(4));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &retain,
+            "-p",
+            &discard,
+            "-m",
+            "keep the original",
+        ],
+        BOB,
+        t(4),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The survivor keeps its full lineage — creation, growth, and the
+    // discard branch's deletion touch — and nothing of the discarded
+    // recreation (whose author carol must not appear).
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.churn_added, 4, "the shared creation was fenced away");
+    assert_eq!(a.commit_frequency, 3);
+    assert_eq!(a.authors, 2, "the discarded occupant leaked in");
 }

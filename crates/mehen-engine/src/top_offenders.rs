@@ -105,6 +105,7 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
                 }
                 Some(analysis.root)
             });
+        let statics_available = analyzed_root.is_some();
         let mut root = match (analyzed_root, history_entry.is_some()) {
             (Some(root), _) => root,
             (None, true) => mehen_core::MetricSpace::new(
@@ -116,9 +117,16 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         };
 
         // Fold the `history.*` family into the metric set so history
-        // selectors rank on real values.
+        // selectors rank on real values. The static-dependent
+        // composites are omitted when no real analysis backs the
+        // space (see `inject_history_metrics`).
         if let Some((fh, head_seconds)) = history_entry {
-            crate::history_metrics::inject_history_metrics(&mut root.metrics, &fh, head_seconds);
+            crate::history_metrics::inject_history_metrics(
+                &mut root.metrics,
+                &fh,
+                head_seconds,
+                statics_available,
+            );
         }
 
         let scores: Vec<f64> = input
@@ -673,6 +681,7 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         }
         Some(analysis.root)
     });
+    let statics_available = analyzed_root.is_some();
     let mut root = match (analyzed_root, history_entry.is_some()) {
         (Some(root), _) => root,
         (None, true) => mehen_core::MetricSpace::new(
@@ -685,9 +694,16 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
 
     // Fold the `history.*` family into the metric set so history
     // selectors rank on real values. Files without recorded history
-    // (untracked, outside every known work dir) read the family as 0.0.
+    // (untracked, outside every known work dir) read the family as
+    // 0.0; the static-dependent composites are omitted when no real
+    // analysis backs the space (see `inject_history_metrics`).
     if let Some((fh, head_seconds)) = history_entry {
-        crate::history_metrics::inject_history_metrics(&mut root.metrics, &fh, head_seconds);
+        crate::history_metrics::inject_history_metrics(
+            &mut root.metrics,
+            &fh,
+            head_seconds,
+            statics_available,
+        );
     }
 
     let metrics: Vec<CliMetricValue> = cfg

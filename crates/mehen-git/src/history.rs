@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 
 use crate::GitError;
 use crate::tree_changes::{
-    TreeChange, blob_size, changes_between_trees, count_lines, is_binary, line_diff_counts,
-    read_blob_data, same_blob_lineage,
+    RENAME_SIMILARITY, TreeChange, blob_lineage_similarity, blob_size, changes_between_trees,
+    count_lines, is_binary, line_diff_counts, read_blob_data, same_blob_lineage,
 };
 
 /// Average Gregorian month in seconds (30.436875 days), used to express
@@ -373,7 +373,10 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             }
             if !recreation_seen && let Some(entries) = aliases.get(&change.path) {
                 for entry in entries {
-                    if entry.consumed && entry.applies_to(repo, &mut ancestry, info.id, false)? {
+                    if entry.consumed
+                        && !entry.from_discarded_occupant
+                        && entry.applies_to(repo, &mut ancestry, info.id, false)?
+                    {
                         recreation_seen = true;
                         break;
                     }
@@ -567,6 +570,14 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // (which needs an accumulated creation as proof) can
             // never fire for them — install the boundary eagerly.
             for change in &changes {
+                if let Some((scope, floor)) = change.discarded_occupant_fence {
+                    tombstones += 1;
+                    let mut entry =
+                        AliasEntry::new(FileIdentity::Tombstone(tombstones), vec![scope]);
+                    entry.floor = floor;
+                    entry.from_discarded_occupant = true;
+                    aliases.entry(change.path.clone()).or_default().push(entry);
+                }
                 if change.is_addition {
                     tombstones += 1;
                     aliases
@@ -836,6 +847,12 @@ struct CommitFileChange {
     /// See [`AliasEntry::addition_floor`] — set for merge renames
     /// whose scopes span several parents.
     alias_addition_floor: Option<gix::ObjectId>,
+    /// A same-path occupant fence a merge must install: `(scope,
+    /// floor)` for a parent whose version of this path the merge
+    /// discarded in favor of another parent's continuation. Older
+    /// commits on that parent's post-divergence line describe the
+    /// discarded occupant, not the survivor.
+    discarded_occupant_fence: Option<(gix::ObjectId, Option<gix::ObjectId>)>,
 }
 
 /// A reusable revision graph for merge-base queries, per the gix
@@ -932,7 +949,10 @@ fn path_deleted_in_range(
             && let Some(oid) = current_oid
         {
             let mut exact: Option<gix::ObjectId> = None;
-            let mut continuing: Option<gix::ObjectId> = None;
+            // The *strongest* threshold-passing continuation wins: a
+            // weaker passing parent may be an unrelated recreation
+            // while a later parent holds the closer lineage.
+            let mut best_continuing: Option<(f64, gix::ObjectId)> = None;
             let mut any_blob: Option<gix::ObjectId> = None;
             for &parent in &parents {
                 let Some(parent_oid) = blob_oid(parent)? else {
@@ -942,14 +962,20 @@ fn path_deleted_in_range(
                     exact = Some(parent);
                     break;
                 }
-                if continuing.is_none() && same_blob_lineage(repo, &parent_oid, &oid)? {
-                    continuing = Some(parent);
+                if let Some(similarity) = blob_lineage_similarity(repo, &parent_oid, &oid)?
+                    && similarity >= RENAME_SIMILARITY
+                    && best_continuing.is_none_or(|(best, _)| similarity > best)
+                {
+                    best_continuing = Some((similarity, parent));
                 }
                 if any_blob.is_none() {
                     any_blob = Some(parent);
                 }
             }
-            next = exact.or(continuing).or(any_blob).unwrap_or(first_parent);
+            next = exact
+                .or(best_continuing.map(|(_, parent)| parent))
+                .or(any_blob)
+                .unwrap_or(first_parent);
         }
         let next_oid = blob_oid(next)?;
         // A presence flip in either direction along the followed line
@@ -1172,6 +1198,7 @@ fn merge_introduced_changes(
                 alias_scopes: Some(scopes),
                 install_destination_boundary: !dest_in_parent,
                 alias_addition_floor: addition_floor,
+                discarded_occupant_fence: None,
             });
         }
     }
@@ -1197,6 +1224,7 @@ fn merge_introduced_changes(
                 alias_scopes: None,
                 install_destination_boundary: true,
                 alias_addition_floor: None,
+                discarded_occupant_fence: None,
             });
         }
     }
@@ -1250,10 +1278,82 @@ fn merge_introduced_changes(
                 alias_scopes: None,
                 install_destination_boundary: true,
                 alias_addition_floor: None,
+                discarded_occupant_fence: None,
             });
         }
     }
     introduced.extend(deletions);
+    // Discarded same-path occupants: the merged tree keeps a blob at
+    // a path, but some parent's blob there does *not* continue it —
+    // that parent's post-divergence line held a different occupant
+    // (e.g. a delete-and-recreate) which the merge resolved away.
+    // Without a fence, the discarded occupant's recreation would
+    // accumulate under the live path and its deletion could fence the
+    // survivor's own pre-branch history. The fence is scoped to the
+    // discarding parent and floored at its divergence from the
+    // supplying parent, so shared ancestors stay with the survivor.
+    for (q_idx, diff) in diffs.iter().enumerate() {
+        for change in diff {
+            let TreeChange::Modified {
+                path,
+                previous_oid,
+                oid,
+            } = change
+            else {
+                continue;
+            };
+            if seen.contains(path) || same_blob_lineage(repo, previous_oid, oid)? {
+                continue;
+            }
+            // Find the parent that supplied the merged blob (exact,
+            // then similarity) — the survivor's lineage.
+            let mut supplier: Option<gix::ObjectId> = None;
+            let mut best = 0.0_f64;
+            for (idx, (parent_id, tree)) in parent_ids.iter().zip(&parent_trees).enumerate() {
+                if idx == q_idx {
+                    continue;
+                }
+                let Some(parent_oid) = blob_oid_at(tree, path)? else {
+                    continue;
+                };
+                if parent_oid == *oid {
+                    supplier = Some(*parent_id);
+                    break;
+                }
+                if let Some(similarity) = blob_lineage_similarity(repo, &parent_oid, oid)?
+                    && similarity >= RENAME_SIMILARITY
+                    && similarity > best
+                {
+                    supplier = Some(*parent_id);
+                    best = similarity;
+                }
+            }
+            let Some(supplier) = supplier else {
+                // No parent continues the merged blob (conflict
+                // resolution rewrote it): ambiguous — leave identity
+                // handling to the ordinary walk.
+                continue;
+            };
+            let floor = match repo.merge_base(supplier, parent_ids[q_idx]) {
+                Ok(base) => Some(base.detach()),
+                Err(gix::repository::merge_base::Error::NotFound { .. }) => None,
+                Err(e) => return Err(GitError::Internal(e.to_string())),
+            };
+            seen.insert(path.clone());
+            introduced.push(CommitFileChange {
+                path: path.clone(),
+                source_path: None,
+                added: 0,
+                removed: 0,
+                is_deletion: false,
+                is_addition: false,
+                alias_scopes: None,
+                install_destination_boundary: true,
+                alias_addition_floor: None,
+                discarded_occupant_fence: Some((parent_ids[q_idx], floor)),
+            });
+        }
+    }
     Ok(introduced)
 }
 
@@ -1301,6 +1401,18 @@ struct AliasEntry {
     /// (ordinary renames, single-scope merges) leaves additions
     /// gated by the scopes alone.
     addition_floor: Option<gix::ObjectId>,
+    /// A floor for *every* change: the entry applies only to commits
+    /// that are **not** ancestors of it. Used by discarded-occupant
+    /// fences, whose events all postdate the divergence — the shared
+    /// pre-branch history belongs to the surviving file, not behind
+    /// the fence.
+    floor: Option<gix::ObjectId>,
+    /// A fence for a same-path occupant a merge discarded (see the
+    /// merge handling in the walk). Excluded from the
+    /// delete-then-recreate "consumed entry" proof: the path stayed
+    /// continuously occupied by the survivor, so a consumed fence
+    /// says nothing about *its* older history.
+    from_discarded_occupant: bool,
     consumed: bool,
 }
 
@@ -1310,13 +1422,16 @@ impl AliasEntry {
             target,
             scopes,
             addition_floor: None,
+            floor: None,
+            from_discarded_occupant: false,
             consumed: false,
         }
     }
 
     /// Whether the entry applies to a change made by `commit`: the
     /// change must be an ancestor of (or equal to) one of the scopes,
-    /// and an addition must additionally pass the addition floor.
+    /// must postdate the all-change floor when one is set, and an
+    /// addition must additionally pass the addition floor.
     fn applies_to(
         &self,
         repo: &gix::Repository,
@@ -1324,6 +1439,12 @@ impl AliasEntry {
         commit: gix::ObjectId,
         is_addition: bool,
     ) -> Result<bool, GitError> {
+        if let Some(floor) = self.floor
+            && is_descendant_of(repo, graph, commit, floor)?
+        {
+            // Pre-divergence commits are the surviving lineage's.
+            return Ok(false);
+        }
         if is_addition
             && let Some(floor) = self.addition_floor
             && !is_descendant_of(repo, graph, commit, floor)?
@@ -1443,6 +1564,7 @@ fn diff_against_first_parent(
                 alias_scopes: None,
                 install_destination_boundary: true,
                 alias_addition_floor: None,
+                discarded_occupant_fence: None,
             },
             TreeChange::Deleted { path, oid } => CommitFileChange {
                 path,
@@ -1454,6 +1576,7 @@ fn diff_against_first_parent(
                 alias_scopes: None,
                 install_destination_boundary: true,
                 alias_addition_floor: None,
+                discarded_occupant_fence: None,
             },
             TreeChange::Modified {
                 path,
@@ -1477,6 +1600,7 @@ fn diff_against_first_parent(
                     alias_scopes: None,
                     install_destination_boundary: true,
                     alias_addition_floor: None,
+                    discarded_occupant_fence: None,
                 }
             }
             TreeChange::Renamed {
@@ -1501,6 +1625,7 @@ fn diff_against_first_parent(
                     alias_scopes: None,
                     install_destination_boundary: true,
                     alias_addition_floor: None,
+                    discarded_occupant_fence: None,
                 }
             }
         };

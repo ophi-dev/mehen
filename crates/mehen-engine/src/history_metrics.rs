@@ -40,10 +40,18 @@ pub(crate) fn names_want_history<'a>(mut names: impl Iterator<Item = &'a str>) -
 /// committer timestamp (the deterministic "now" for code age). Files
 /// untouched by any walked commit publish nothing — selectors then
 /// read the family as `0.0` via the missing-key fallback.
+///
+/// `with_composites` controls the two static-dependent keys
+/// (`history.hotspot`, `history.churn.relative`): callers injecting
+/// into a synthetic space with no static analysis behind it must pass
+/// `false`, or hotspot would read a fabricated 0 and relative churn
+/// would divide the absolute churn by 1 — the keys are omitted
+/// instead, reading as absent like any unpublished metric.
 pub(crate) fn inject_history_metrics(
     metrics: &mut MetricSet,
     file: &FileHistory,
     head_seconds: i64,
+    with_composites: bool,
 ) {
     let read = |metrics: &MetricSet, key: &str| {
         metrics
@@ -77,16 +85,20 @@ pub(crate) fn inject_history_metrics(
 
     let churn_abs = file.churn_abs();
     metrics.insert(keys::HISTORY_CHURN_ABS, churn_abs);
-    metrics.insert(keys::HISTORY_CHURN_RELATIVE, churn_abs as f64 / sloc);
+    if with_composites {
+        metrics.insert(keys::HISTORY_CHURN_RELATIVE, churn_abs as f64 / sloc);
+    }
     metrics.insert(keys::HISTORY_AGE_MONTHS, file.age_months(head_seconds));
     metrics.insert(keys::HISTORY_AUTHORS, file.authors);
     metrics.insert(keys::HISTORY_MINOR_CONTRIBUTORS, file.minor_contributors);
     metrics.insert(keys::HISTORY_OWNERSHIP, file.ownership);
     metrics.insert(keys::HISTORY_COMMIT_FREQUENCY, file.commit_frequency);
-    metrics.insert(
-        keys::HISTORY_HOTSPOT,
-        cognitive_sum * file.commit_frequency as f64,
-    );
+    if with_composites {
+        metrics.insert(
+            keys::HISTORY_HOTSPOT,
+            cognitive_sum * file.commit_frequency as f64,
+        );
+    }
     metrics.insert(keys::HISTORY_SUM_OF_COUPLING, file.sum_of_coupling);
     metrics.insert(keys::HISTORY_TWR, file.twr);
     metrics.insert(keys::HISTORY_BUGFIX_COMMITS, file.bugfix_commits);
@@ -134,7 +146,7 @@ mod tests {
         let mut metrics = MetricSet::default();
         metrics.insert("loc.sloc", 20.0);
         metrics.insert("cognitive.sum", 8.0);
-        inject_history_metrics(&mut metrics, &sample_history(), 2_629_746);
+        inject_history_metrics(&mut metrics, &sample_history(), 2_629_746, true);
 
         assert_eq!(read(&metrics, keys::HISTORY_CHURN_ABS), 40.0);
         // 40 churned lines over 20 SLOC.
@@ -157,7 +169,7 @@ mod tests {
         // No loc.sloc / cognitive.sum published (e.g. analyzer without
         // those families): relative churn divides by 1, hotspot is 0.
         let mut metrics = MetricSet::default();
-        inject_history_metrics(&mut metrics, &sample_history(), 0);
+        inject_history_metrics(&mut metrics, &sample_history(), 0, true);
         assert_eq!(read(&metrics, keys::HISTORY_CHURN_RELATIVE), 40.0);
         assert_eq!(read(&metrics, keys::HISTORY_HOTSPOT), 0.0);
     }
@@ -170,7 +182,7 @@ mod tests {
         let mut metrics = MetricSet::default();
         metrics.insert("sql.loc.code", 10.0);
         metrics.insert("sql.cognitive_complexity", 5.0);
-        inject_history_metrics(&mut metrics, &sample_history(), 0);
+        inject_history_metrics(&mut metrics, &sample_history(), 0, true);
         // 40 churned lines over 10 SQL code lines.
         assert_eq!(read(&metrics, keys::HISTORY_CHURN_RELATIVE), 4.0);
         // sql.cognitive_complexity (5) × commit_frequency (4).
@@ -186,7 +198,7 @@ mod tests {
         let mut metrics = MetricSet::default();
         metrics.insert("markdown.loc.tloc", 20.0);
         metrics.insert("markdown.complexity.cognitive_complexity", 3.0);
-        inject_history_metrics(&mut metrics, &sample_history(), 0);
+        inject_history_metrics(&mut metrics, &sample_history(), 0, true);
         // 40 churned lines over 20 Markdown text lines.
         assert_eq!(read(&metrics, keys::HISTORY_CHURN_RELATIVE), 2.0);
         // markdown cognitive (3) × commit_frequency (4).

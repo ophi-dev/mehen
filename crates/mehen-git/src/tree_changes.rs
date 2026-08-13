@@ -30,6 +30,25 @@ use std::path::{Path, PathBuf};
 use gix::diff::blob::{Algorithm, Diff, InternedInput, sources::byte_lines};
 use gix::diff::tree::recorder::Change;
 
+/// Spanhash similarity of two blobs, when both are loadable within
+/// the fuzzy budget (equal ids score 1.0; oversized blobs score
+/// nothing rather than being loaded).
+pub(crate) fn blob_lineage_similarity(
+    repo: &gix::Repository,
+    a: &gix::ObjectId,
+    b: &gix::ObjectId,
+) -> Result<Option<f64>, GitError> {
+    if a == b {
+        return Ok(Some(1.0));
+    }
+    if blob_size(repo, a)? > FUZZY_MAX_BLOB_BYTES || blob_size(repo, b)? > FUZZY_MAX_BLOB_BYTES {
+        return Ok(None);
+    }
+    let a_data = read_blob_data(repo, a)?;
+    let b_data = read_blob_data(repo, b)?;
+    Ok(Some(spanhash_similarity(&a_data, &b_data)))
+}
+
 /// Whether two blobs plausibly hold the *same file lineage*: equal
 /// ids, or spanhash similarity at git's rename threshold. Used by the
 /// history walk to tell a lineage-continuing edit apart from an
@@ -42,15 +61,7 @@ pub(crate) fn same_blob_lineage(
     a: &gix::ObjectId,
     b: &gix::ObjectId,
 ) -> Result<bool, GitError> {
-    if a == b {
-        return Ok(true);
-    }
-    if blob_size(repo, a)? > FUZZY_MAX_BLOB_BYTES || blob_size(repo, b)? > FUZZY_MAX_BLOB_BYTES {
-        return Ok(false);
-    }
-    let a_data = read_blob_data(repo, a)?;
-    let b_data = read_blob_data(repo, b)?;
-    Ok(spanhash_similarity(&a_data, &b_data) >= RENAME_SIMILARITY)
+    Ok(blob_lineage_similarity(repo, a, b)?.is_some_and(|s| s >= RENAME_SIMILARITY))
 }
 
 /// Canonical, platform-independent ordering for repository paths: the
@@ -77,7 +88,7 @@ use gix::objs::TreeRefIter;
 use crate::GitError;
 
 /// Similarity threshold for rename detection (git's `-M50%` default).
-const RENAME_SIMILARITY: f64 = 0.5;
+pub(crate) const RENAME_SIMILARITY: f64 = 0.5;
 
 /// Upper bound on deletion×addition pairs examined by the fuzzy rename
 /// pass within one tree diff (the spirit of git's `diff.renameLimit`).

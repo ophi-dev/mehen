@@ -1779,7 +1779,7 @@ fn diff_reports_history_only_for_unparseable_files() {
             "--to",
             "broken-cli-head",
             "--metrics",
-            "cognitive,history.commit_frequency",
+            "cognitive,history.commit_frequency,history.churn.relative",
             "--output-format",
             "json",
         ])
@@ -1819,6 +1819,12 @@ fn diff_reports_history_only_for_unparseable_files() {
         Some(2.0)
     );
     assert_eq!(metric("cognitive")["current"].as_f64(), Some(0.0));
+    // Static-dependent composites are omitted on the synthetic side:
+    // relative churn must not read absolute churn divided by 1.
+    assert_eq!(
+        metric("history.churn.relative")["current"].as_f64(),
+        Some(0.0)
+    );
 }
 
 #[test]
