@@ -1707,3 +1707,49 @@ fn untracked_files_do_not_inherit_dead_occupant_history() {
         "the dead occupant's history leaked into the untracked file: {ghost:?}"
     );
 }
+
+#[test]
+fn top_offenders_rank_unparseable_files_on_history_only() {
+    // A file with blocking parse errors has incomplete static metrics;
+    // ranking must fall back to history-only (empty static space)
+    // instead of feeding partial cognitive/SLOC values into the
+    // history composites.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "broken.py", "def broken(:\n");
+    write_python(dir.path(), "fine.py", "y = 1\n");
+    commit_all(dir.path(), "base");
+    write_python(dir.path(), "broken.py", "def broken(:\n# more\n");
+    commit_all(dir.path(), "grow broken");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 2, "{offenders:?}");
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("broken.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}

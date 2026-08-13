@@ -326,8 +326,14 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         let mut targets: Vec<FileIdentity> = Vec::with_capacity(changes.len());
         let mut used_entries: Vec<Option<usize>> = Vec::with_capacity(changes.len());
         for change in &changes {
-            let (target, used) =
-                resolve_alias(repo, &mut ancestry, &aliases, &change.path, info.id)?;
+            let (target, used) = resolve_alias(
+                repo,
+                &mut ancestry,
+                &aliases,
+                &change.path,
+                info.id,
+                change.is_addition,
+            )?;
             targets.push(target);
             used_entries.push(used);
         }
@@ -365,7 +371,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             }
             if !recreation_seen && let Some(entries) = aliases.get(&change.path) {
                 for entry in entries {
-                    if entry.consumed && entry.applies_to(repo, &mut ancestry, info.id)? {
+                    if entry.consumed && entry.applies_to(repo, &mut ancestry, info.id, false)? {
                         recreation_seen = true;
                         break;
                     }
@@ -455,12 +461,15 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // The alias redirects the *older* commits that are walked
             // after this rename (the pre-rename lineage). A
             // merge-introduced rename carries the scopes of the
-            // parents that supplied the source; everything else is
+            // parents that supplied the source (and an addition floor
+            // when they span several parents); everything else is
             // scoped to this commit.
-            entries.push(AliasEntry::new(
+            let mut alias_entry = AliasEntry::new(
                 target.clone(),
                 change.alias_scopes.clone().unwrap_or_else(|| vec![info.id]),
-            ));
+            );
+            alias_entry.addition_floor = change.alias_addition_floor;
+            entries.push(alias_entry);
             if !reclaimed.is_empty() {
                 files.entry(target.clone()).or_default().merge(reclaimed);
             }
@@ -764,6 +773,9 @@ struct CommitFileChange {
     /// is legitimate lineage converging into the merged file, not a
     /// dead prior occupant to fence off.
     install_destination_boundary: bool,
+    /// See [`AliasEntry::addition_floor`] — set for merge renames
+    /// whose scopes span several parents.
+    alias_addition_floor: Option<gix::ObjectId>,
 }
 
 /// A reusable revision graph for merge-base queries, per the gix
@@ -990,6 +1002,7 @@ fn merge_introduced_changes(
             let supplier = parent_ids[supplier_idx];
             let mut scopes = vec![supplier];
             let source_retained = blob_in(&to_tree, source_path)?;
+            let mut addition_floor: Option<gix::ObjectId> = None;
             for (idx, (parent_id, tree)) in parent_ids.iter().zip(&parent_trees).enumerate() {
                 if source_retained || idx == supplier_idx || !blob_in(tree, source_path)? {
                     continue;
@@ -1019,13 +1032,24 @@ fn merge_introduced_changes(
                             blob_oid_at(tree, source_path)?,
                         ) {
                             (Some(base_oid), Some(parent_oid)) => {
-                                same_blob_lineage(repo, &base_oid, &parent_oid)?
+                                let shares = same_blob_lineage(repo, &base_oid, &parent_oid)?
                                     && !path_deleted_in_range(
                                         repo,
                                         *parent_id,
                                         base_commit.id,
                                         source_path,
-                                    )?
+                                    )?;
+                                if shares && addition_floor.is_none() {
+                                    // Additions through a multi-parent
+                                    // scope must predate the
+                                    // divergence: an addition on just
+                                    // one line is a delete-and-
+                                    // recreate inside its unchecked
+                                    // sub-branches, not the moved
+                                    // file's creation.
+                                    addition_floor = Some(base_commit.id);
+                                }
+                                shares
                             }
                             _ => false,
                         }
@@ -1049,6 +1073,7 @@ fn merge_introduced_changes(
                 is_addition: false,
                 alias_scopes: Some(scopes),
                 install_destination_boundary: !dest_in_parent,
+                alias_addition_floor: addition_floor,
             });
         }
     }
@@ -1073,6 +1098,7 @@ fn merge_introduced_changes(
                 is_addition: true,
                 alias_scopes: None,
                 install_destination_boundary: true,
+                alias_addition_floor: None,
             });
         }
     }
@@ -1125,6 +1151,7 @@ fn merge_introduced_changes(
                 is_addition: false,
                 alias_scopes: None,
                 install_destination_boundary: true,
+                alias_addition_floor: None,
             });
         }
     }
@@ -1166,6 +1193,16 @@ enum FileIdentity {
 struct AliasEntry {
     target: FileIdentity,
     scopes: Vec<gix::ObjectId>,
+    /// For merge-installed aliases whose scopes span several parents:
+    /// an *addition* resolves through the entry only when it is an
+    /// ancestor of this floor (the parents' merge base). The moved
+    /// file's true creation predates the divergence; an addition on
+    /// just one scoped line is a delete-and-recreate inside that
+    /// line's sub-branches — a different identity that must neither
+    /// route into the rename target nor consume the alias. `None`
+    /// (ordinary renames, single-scope merges) leaves additions
+    /// gated by the scopes alone.
+    addition_floor: Option<gix::ObjectId>,
     consumed: bool,
 }
 
@@ -1174,18 +1211,27 @@ impl AliasEntry {
         Self {
             target,
             scopes,
+            addition_floor: None,
             consumed: false,
         }
     }
 
     /// Whether the entry applies to a change made by `commit`: the
-    /// change must be an ancestor of (or equal to) one of the scopes.
+    /// change must be an ancestor of (or equal to) one of the scopes,
+    /// and an addition must additionally pass the addition floor.
     fn applies_to(
         &self,
         repo: &gix::Repository,
         graph: &mut AncestryGraph<'_, '_>,
         commit: gix::ObjectId,
+        is_addition: bool,
     ) -> Result<bool, GitError> {
+        if is_addition
+            && let Some(floor) = self.addition_floor
+            && !is_descendant_of(repo, graph, commit, floor)?
+        {
+            return Ok(false);
+        }
         for scope in &self.scopes {
             if is_descendant_of(repo, graph, commit, *scope)? {
                 return Ok(true);
@@ -1215,13 +1261,14 @@ fn resolve_alias(
     aliases: &HashMap<PathBuf, Vec<AliasEntry>>,
     path: &Path,
     commit: gix::ObjectId,
+    is_addition: bool,
 ) -> Result<(FileIdentity, Option<usize>), GitError> {
     let Some(entries) = aliases.get(path) else {
         return Ok((FileIdentity::Path(path.to_path_buf()), None));
     };
     let mut tombstone: Option<(FileIdentity, usize)> = None;
     for (idx, entry) in entries.iter().enumerate() {
-        if entry.consumed || !entry.applies_to(repo, graph, commit)? {
+        if entry.consumed || !entry.applies_to(repo, graph, commit, is_addition)? {
             continue;
         }
         match &entry.target {
@@ -1279,6 +1326,7 @@ fn diff_against_first_parent(
                 is_addition: true,
                 alias_scopes: None,
                 install_destination_boundary: true,
+                alias_addition_floor: None,
             },
             TreeChange::Deleted { path, oid } => CommitFileChange {
                 path,
@@ -1289,6 +1337,7 @@ fn diff_against_first_parent(
                 is_addition: false,
                 alias_scopes: None,
                 install_destination_boundary: true,
+                alias_addition_floor: None,
             },
             TreeChange::Modified {
                 path,
@@ -1311,6 +1360,7 @@ fn diff_against_first_parent(
                     is_addition: false,
                     alias_scopes: None,
                     install_destination_boundary: true,
+                    alias_addition_floor: None,
                 }
             }
             TreeChange::Renamed {
@@ -1334,6 +1384,7 @@ fn diff_against_first_parent(
                     is_addition: false,
                     alias_scopes: None,
                     install_destination_boundary: true,
+                    alias_addition_floor: None,
                 }
             }
         };

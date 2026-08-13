@@ -3859,3 +3859,136 @@ fn side_branch_deletions_do_not_disqualify_uninterrupted_parents() {
     assert_eq!(b.churn_added, 4, "carol's parallel edit must reach b.rs");
     assert_eq!(b.authors, 2, "alice and carol touched the lineage");
 }
+
+/// A non-supplier parent that is itself a merge: its first-parent
+/// line keeps `a.rs` uninterrupted, but a side branch merged into it
+/// deleted and recreated the path. The recreation is an ancestor of
+/// the scoped parent, yet it must not resolve through the rename
+/// alias (the addition floor keeps additions pre-divergence).
+#[test]
+fn recreations_on_merged_side_branches_do_not_consume_merge_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the shared original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // Candidate branch P: keeps a.rs on its own line but merges a
+    // side branch that deleted and recreated it (P's merge keeps P's
+    // copy).
+    git(dir.path(), &["checkout", "-q", "-b", "p"], CAROL, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p_edit() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "edit on p"],
+        CAROL,
+        t(1),
+    );
+    let p_edit = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(1));
+
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "s", "main"],
+        CAROL,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], CAROL, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "s drops a"],
+        CAROL,
+        t(2),
+    );
+    std::fs::write(dir.path().join("a.rs"), "fn recreated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "s recreates a"],
+        CAROL,
+        t(3),
+    );
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    // P merges s, keeping P's own copy.
+    git(dir.path(), &["checkout", "-q", "p"], CAROL, t(4));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(4));
+    let p_tree = git_out(dir.path(), &["write-tree"], CAROL, t(4));
+    let p_tip = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &p_tree,
+            "-p",
+            &p_edit,
+            "-p",
+            &side,
+            "-m",
+            "keep p's a",
+        ],
+        CAROL,
+        t(4),
+    );
+
+    // main: unrelated work; the rename happens in the final merge.
+    git(dir.path(), &["checkout", "-q", "main"], BOB, t(5));
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\nfn more() {}\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow keep"], BOB, t(5));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(5));
+
+    git(dir.path(), &["mv", "a.rs", "b.rs"], BOB, t(6));
+    std::fs::write(
+        dir.path().join("b.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(6));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(6));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &p_tip,
+            "-m",
+            "merge",
+        ],
+        BOB,
+        t(6),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs: shared creation (3) + p's edit (1). The side branch's
+    // recreated file must neither add its churn nor consume the alias
+    // (which would strand the shared creation under a.rs). The side's
+    // *deletion* of the original is a lineage touch and legitimately
+    // counts toward the survivor's removed churn.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.churn_added, 4, "recreation leaked or alias consumed");
+    assert_eq!(b.churn_removed, 3);
+
+    // The recreation keeps its own identity at the vacated path.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.churn_added, 1);
+}

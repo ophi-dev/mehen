@@ -641,10 +641,17 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
 
     let analyzed_root = std::fs::read_to_string(&path).ok().and_then(|text| {
         let source = SourceFile::new(utf8_path, language, text);
-        analyzer
+        let analysis = analyzer
             .analyze(&source, &mehen_core::AnalysisConfig::default())
-            .ok()
-            .map(|analysis| analysis.root)
+            .ok()?;
+        // A partial tree behind an `Error`/`Fatal` diagnostic is an
+        // incomplete measurement (§9.3): ranking on it — or feeding
+        // its truncated cognitive/SLOC values into the history
+        // composites — would mislead; fall back to history-only.
+        if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
+            return None;
+        }
+        Some(analysis.root)
     });
     let mut root = match (analyzed_root, history_entry.is_some()) {
         (Some(root), _) => root,
