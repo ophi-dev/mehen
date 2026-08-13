@@ -1098,3 +1098,131 @@ fn cross_language_rename_to_sql_keeps_deletion_history_under_defaults() {
     let baseline = metric["baseline"].as_f64().expect("baseline");
     assert!(baseline > 0.0, "baseline history suppressed: {metric:?}");
 }
+
+#[test]
+fn modified_then_reverted_files_report_history_deltas() {
+    // The endpoint trees are identical for a.py (modified in one
+    // range commit, reverted in the next), so the endpoint diff has
+    // no row — but the head history gained two commits and churn.
+    // With history selectors active the file must appear.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "revert-base"]);
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "grow");
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "revert");
+    git_ok(dir.path(), &["tag", "revert-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "revert-base",
+            "--to",
+            "revert-head",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("reverted file must appear: {files:?}"));
+    assert_eq!(row["is_new"].as_bool(), Some(false));
+    assert_eq!(row["is_deleted"].as_bool(), Some(false));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    assert_eq!(metric["baseline"].as_f64(), Some(1.0));
+    assert_eq!(metric["current"].as_f64(), Some(3.0));
+}
+
+#[test]
+fn non_utf8_content_still_reports_history_metrics() {
+    // Static analysis rejects non-UTF-8 (non-binary) content, but
+    // history metrics don't depend on decoding the blob: an explicit
+    // history selector must read real values, not zeros.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    // Latin-1 content: 0xE9 is invalid UTF-8 but contains no NUL.
+    std::fs::write(dir.path().join("a.py"), b"# caf\xe9\nx = 1\n").unwrap();
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "latin-base"]);
+
+    std::fs::write(dir.path().join("a.py"), b"# caf\xe9\nx = 1\ny = 2\n").unwrap();
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "latin-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "latin-base",
+            "--to",
+            "latin-head",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("non-UTF-8 file must appear: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    assert_eq!(metric["baseline"].as_f64(), Some(1.0));
+    assert_eq!(metric["current"].as_f64(), Some(2.0));
+}

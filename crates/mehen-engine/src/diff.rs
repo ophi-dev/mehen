@@ -649,6 +649,46 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // out a real requested diff).
     let refs_from_event = opts.from.is_none() && opts.to.is_none();
     let changed = get_changed_files(&repo, &from_ref, &to_ref, &ci_ctx, refs_from_event)?;
+    // `history.*` metrics change with every touch, not only when the
+    // endpoint trees differ: a file modified in one range commit and
+    // reverted in a later one gained commit frequency, churn, and
+    // possibly bug-fix risk between the revisions, yet produces no
+    // endpoint diff row. When the request can read history columns
+    // (an explicit history selector, or default metrics — whose
+    // source-code set includes them), add such surviving touched
+    // paths as `Modified` rows: their static deltas are zero, and
+    // rows whose selected metrics all read zero still drop out of
+    // the report as unchanged.
+    let may_want_history = if opts.metrics.is_empty() {
+        true
+    } else {
+        history_metrics::names_want_history(
+            parse_metric_selectors(&opts.metrics).iter().map(|s| s.name),
+        )
+    };
+    let changed = if may_want_history
+        && repo.rev_parse_single(from_ref.as_str()).is_ok()
+        && repo.rev_parse_single(to_ref.as_str()).is_ok()
+    {
+        let mut changed = changed;
+        let already: std::collections::HashSet<&PathBuf> =
+            changed.iter().map(|cf| &cf.path).collect();
+        let extra: Vec<mehen_git::ChangedFile> =
+            mehen_git::range_touched_files(&repo, &from_ref, &to_ref)?
+                .into_iter()
+                .filter(|path| !already.contains(path))
+                .map(|path| mehen_git::ChangedFile {
+                    path,
+                    status: ChangeStatus::Modified,
+                    source_path: None,
+                })
+                .collect();
+        drop(already);
+        changed.extend(extra);
+        changed
+    } else {
+        changed
+    };
 
     // 3. Filter files
     let include = mk_globset(opts.include);
@@ -916,6 +956,30 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                     mehen_core::SpaceKind::Unit,
                     mehen_core::SourceSpan::empty(),
                 ));
+            }
+            // History metrics don't depend on decoding or parsing the
+            // blob: a side whose static analysis is unavailable (e.g.
+            // non-UTF-8 but non-binary content the analyzer rejects)
+            // still has valid repository history. Synthesize an empty
+            // space for such a side so history-only selectors read the
+            // real values instead of zero — static columns stay 0.
+            let empty_space = || {
+                MetricSpace::new(
+                    mehen_core::SpaceId(0),
+                    mehen_core::SpaceKind::Unit,
+                    mehen_core::SourceSpan::empty(),
+                )
+            };
+            if baseline_space.is_none()
+                && !is_new
+                && base_history
+                    .as_ref()
+                    .is_some_and(|history| history.file(base_path).is_some())
+            {
+                baseline_space = Some(empty_space());
+            }
+            if current_space.is_none() && !is_deleted && head_history.file(&cf.path).is_some() {
+                current_space = Some(empty_space());
             }
             let mut sides: Vec<(
                 Option<&mut MetricSpace>,

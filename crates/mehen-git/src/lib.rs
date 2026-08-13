@@ -107,9 +107,12 @@ pub fn open_repo_at(path: &Path) -> Result<gix::Repository, GitError> {
         gix::discover::Error::Discover(
             gix::discover::upwards::Error::NoGitRepository { .. }
             | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. }
-            | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. }
-            | gix::discover::upwards::Error::NoTrustedGitRepository { .. },
+            | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. },
         ) => GitError::RepoNotFound,
+        // A repository *was* found but failed the trust check: that is
+        // "a repo we couldn't read", not "no repo here" — mapping it to
+        // `RepoNotFound` would make history consumers silently rank
+        // the repo's files with missing `history.*` values.
         _ => GitError::Internal(e.to_string()),
     })?;
 
@@ -172,6 +175,104 @@ pub fn changed_files(
         .collect();
 
     Ok(files)
+}
+
+/// Paths *touched* by non-merge commits in `from..to` that still exist
+/// in both endpoint trees, even when the endpoint-to-endpoint diff is
+/// empty for them (modified in one commit, reverted in a later one).
+///
+/// The endpoint tree diff is the right source for *static* metric
+/// deltas, but `history.*` metrics change with every touch: a file
+/// modified and restored within the range gained commit frequency,
+/// churn, and possibly bug-fix risk between the two revisions, and a
+/// diff limited to endpoint changes would silently omit it. Paths
+/// absent from either endpoint are excluded — a net-new-and-removed
+/// file has no row to hang a delta on.
+pub fn range_touched_files(
+    repo: &gix::Repository,
+    from: &str,
+    to: &str,
+) -> Result<Vec<PathBuf>, GitError> {
+    let from_id = repo
+        .rev_parse_single(from)
+        .map_err(|_| GitError::RefNotFound(from.to_string()))?
+        .detach();
+    let to_id = repo
+        .rev_parse_single(to)
+        .map_err(|_| GitError::RefNotFound(to.to_string()))?
+        .detach();
+    let from_tree = resolve_tree(repo, from)?;
+    let to_tree = resolve_tree(repo, to)?;
+    let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
+
+    let walk = gix::traverse::commit::topo::Builder::from_iters(
+        repo.objects.clone(),
+        [to_id],
+        Some([from_id]),
+    )
+    .build()
+    .map_err(|e| internal(&e))?;
+
+    let mut touched: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    for info in walk {
+        let info = info.map_err(|e| internal(&e))?;
+        // Merge commits replay their parents' changes; the parents'
+        // own commits are walked (mirroring the history walk's
+        // `--no-merges` accounting).
+        if info.parent_ids.len() > 1 {
+            continue;
+        }
+        let commit = repo
+            .find_object(info.id)
+            .map_err(|e| internal(&e))?
+            .peel_to_commit()
+            .map_err(|e| internal(&e))?;
+        let parent_tree = match commit.parent_ids().next() {
+            Some(parent_id) => Some(
+                parent_id
+                    .object()
+                    .map_err(|e| internal(&e))?
+                    .peel_to_commit()
+                    .map_err(|e| internal(&e))?
+                    .tree()
+                    .map_err(|e| internal(&e))?,
+            ),
+            None => None,
+        };
+        let commit_tree = commit.tree().map_err(|e| internal(&e))?;
+        for change in tree_changes::changes_between_trees(repo, parent_tree.as_ref(), &commit_tree)?
+        {
+            match change {
+                tree_changes::TreeChange::Added { path, .. }
+                | tree_changes::TreeChange::Deleted { path, .. }
+                | tree_changes::TreeChange::Modified { path, .. } => {
+                    touched.insert(path);
+                }
+                tree_changes::TreeChange::Renamed {
+                    path, source_path, ..
+                } => {
+                    touched.insert(path);
+                    touched.insert(source_path);
+                }
+            }
+        }
+    }
+
+    let mut survivors = Vec::new();
+    for path in touched {
+        let in_from = from_tree
+            .lookup_entry_by_path(&path)
+            .map_err(|e| internal(&e))?
+            .is_some();
+        let in_to = to_tree
+            .lookup_entry_by_path(&path)
+            .map_err(|e| internal(&e))?
+            .is_some();
+        if in_from && in_to {
+            survivors.push(path);
+        }
+    }
+    Ok(survivors)
 }
 
 /// Read file content at a specific revision. Returns `None` if the path

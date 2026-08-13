@@ -808,6 +808,45 @@ fn merge_introduced_changes(
             });
         }
     }
+    // Finally merge-performed deletions: a path present in a parent
+    // but absent from the merged tree (and not consumed as a rename
+    // source above) was resolved away by the merge itself. Passing the
+    // deletion through lets the walk's delete-then-recreate boundary
+    // fence the dead occupant when a newer commit reuses the path —
+    // without it, the pre-merge occupant's history would leak into the
+    // unrelated new file. Like every merge change, it carries no churn
+    // and is never accumulated.
+    let rename_sources: std::collections::HashSet<&PathBuf> = introduced
+        .iter()
+        .filter_map(|change| change.source_path.as_ref())
+        .collect();
+    let mut deletions: Vec<CommitFileChange> = Vec::new();
+    for diff in &diffs {
+        for change in diff {
+            let TreeChange::Deleted { path, .. } = change else {
+                continue;
+            };
+            if seen.contains(path)
+                || rename_sources.contains(path)
+                || to_tree
+                    .lookup_entry_by_path(path)
+                    .map_err(|e| internal(&e))?
+                    .is_some()
+            {
+                continue;
+            }
+            seen.insert(path.clone());
+            deletions.push(CommitFileChange {
+                path: path.clone(),
+                source_path: None,
+                added: 0,
+                removed: 0,
+                is_deletion: true,
+                is_addition: false,
+            });
+        }
+    }
+    introduced.extend(deletions);
     Ok(introduced)
 }
 

@@ -2623,3 +2623,96 @@ fn non_utf8_author_emails_stay_distinct() {
         a.ownership
     );
 }
+
+/// A merge that resolves a path by *deleting* it must still let the
+/// delete-then-recreate boundary fire: when a later commit creates an
+/// unrelated file at that path, the pre-merge occupant's history must
+/// not leak into it.
+#[test]
+fn merge_performed_deletions_fence_recreated_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // The occupant lives on main.
+    std::fs::write(
+        dir.path().join("p.rs"),
+        "fn p0() {}\nfn p1() {}\nfn p2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+    std::fs::write(
+        dir.path().join("p.rs"),
+        "fn p0() {}\nfn p1() {}\nfn p2() {}\nfn p3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow p"], BOB, t(1));
+
+    // A side branch, so the merge has two parents.
+    git(dir.path(), &["checkout", "-q", "-b", "side"], CAROL, t(2));
+    std::fs::write(dir.path().join("side.rs"), "fn side() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "side work"],
+        CAROL,
+        t(2),
+    );
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(2));
+
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(3));
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\nfn more() {}\n").unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow keep"],
+        ALICE,
+        t(3),
+    );
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(3));
+
+    // The merge resolves p.rs away: present in both parents, absent
+    // from the merged tree.
+    git(dir.path(), &["rm", "-q", "p.rs"], ALICE, t(4));
+    std::fs::write(dir.path().join("side.rs"), "fn side() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(4));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(4));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(4),
+    );
+    git(
+        dir.path(),
+        &["update-ref", "refs/heads/main", &merge],
+        ALICE,
+        t(4),
+    );
+    git(dir.path(), &["checkout", "-q", "-f", "main"], ALICE, t(4));
+
+    // A later commit reuses the path for an unrelated file.
+    std::fs::write(dir.path().join("p.rs"), "fn unrelated() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(5));
+    git(dir.path(), &["commit", "-q", "-m", "reuse p"], CAROL, t(5));
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // Only the re-creation: the pre-merge occupant's creation and
+    // edit stay fenced behind the merge-performed deletion.
+    let p = history.file(Path::new("p.rs")).unwrap();
+    assert_eq!(p.commit_frequency, 1);
+    assert_eq!(p.churn_added, 1);
+    assert_eq!(p.authors, 1);
+}
