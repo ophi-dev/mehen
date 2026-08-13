@@ -193,14 +193,24 @@ pub fn range_touched_files(
     from: &str,
     to: &str,
 ) -> Result<Vec<PathBuf>, GitError> {
+    // Peel to commits: an annotated tag's own object id would fail
+    // the topological walker, which decodes its tips as commits.
     let from_id = repo
         .rev_parse_single(from)
         .map_err(|_| GitError::RefNotFound(from.to_string()))?
-        .detach();
+        .object()
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .peel_to_commit()
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .id;
     let to_id = repo
         .rev_parse_single(to)
         .map_err(|_| GitError::RefNotFound(to.to_string()))?
-        .detach();
+        .object()
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .peel_to_commit()
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .id;
     let from_tree = resolve_tree(repo, from)?;
     let to_tree = resolve_tree(repo, to)?;
     let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());

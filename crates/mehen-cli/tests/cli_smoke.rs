@@ -1226,3 +1226,116 @@ fn non_utf8_content_still_reports_history_metrics() {
     assert_eq!(metric["baseline"].as_f64(), Some(1.0));
     assert_eq!(metric["current"].as_f64(), Some(2.0));
 }
+
+#[test]
+fn authoritative_empty_push_payloads_suppress_history_augmentation() {
+    // A branch created at an existing commit: the payload's commit
+    // fold is authoritatively empty, but resolve_refs falls back to
+    // HEAD~1..HEAD. The history range augmentation must not
+    // repopulate the report with the tip's previous commit.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "old.py", "x = 1\n");
+    commit_all(dir.path(), "one");
+    write_python(dir.path(), "newer.py", "y = 2\n");
+    commit_all(dir.path(), "two");
+
+    let event = dir.path().join("event.json");
+    std::fs::write(
+        &event,
+        serde_json::json!({
+            "before": "0000000000000000000000000000000000000000",
+            "size": 0,
+            "commits": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args(["diff", "--output-format", "json"])
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_EVENT_NAME", "push")
+        .env("GITHUB_EVENT_PATH", &event)
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    assert!(
+        files.is_empty(),
+        "an authoritatively-empty push must stay empty: {files:?}"
+    );
+}
+
+#[test]
+fn history_diffs_support_annotated_tags() {
+    // Annotated tag objects must be peeled before the range walk —
+    // endpoint diffing and the history walks already peel them.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "-a", "-m", "release base", "ann-base"]);
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "-a", "-m", "release head", "ann-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "ann-base",
+            "--to",
+            "ann-head",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("a.py must appear: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    assert_eq!(metric["baseline"].as_f64(), Some(1.0));
+    assert_eq!(metric["current"].as_f64(), Some(2.0));
+}

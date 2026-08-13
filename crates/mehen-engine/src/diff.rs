@@ -666,7 +666,21 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             parse_metric_selectors(&opts.metrics).iter().map(|s| s.name),
         )
     };
+    // An authoritatively-empty push payload (branch created at an
+    // existing commit, or an add-then-remove push) means *nothing
+    // changed in this event* — and `resolve_refs`'s `HEAD~1` last
+    // resort is a guess at a range, not the event's range, so walking
+    // it would repopulate the report with the tip's previous commit.
+    let payload_authoritative_empty = refs_from_event
+        && ci_ctx.as_ref().is_some_and(|ctx| {
+            ctx.event_name == "push"
+                && ctx
+                    .changed_files
+                    .as_ref()
+                    .is_some_and(|files| files.is_empty())
+        });
     let changed = if may_want_history
+        && !payload_authoritative_empty
         && repo.rev_parse_single(from_ref.as_str()).is_ok()
         && repo.rev_parse_single(to_ref.as_str()).is_ok()
     {
