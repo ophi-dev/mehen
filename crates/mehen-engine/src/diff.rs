@@ -687,10 +687,36 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         let mut changed = changed;
         let already: std::collections::HashSet<&PathBuf> =
             changed.iter().map(|cf| &cf.path).collect();
+        let explicit = !opts.metrics.is_empty();
         let extra: Vec<mehen_git::ChangedFile> =
             mehen_git::range_touched_files(&repo, &from_ref, &to_ref)?
                 .into_iter()
                 .filter(|path| !already.contains(path))
+                .filter(|path| {
+                    // Only languages whose effective selectors read
+                    // history columns benefit from a synthetic row.
+                    // Markdown always routes to the documentation
+                    // pipeline (fixed columns, no history, no
+                    // unchanged-row filter), so a restored-content
+                    // README must never be resurrected here; under
+                    // default metrics, SQL's history-free defaults
+                    // exclude it too.
+                    let Ok(utf8_path) = Utf8PathBuf::try_from(path.clone()) else {
+                        return false;
+                    };
+                    let Some(language) = detect_language(&utf8_path) else {
+                        return false;
+                    };
+                    if matches!(language, Language::Markdown) {
+                        return false;
+                    }
+                    explicit
+                        || history_metrics::names_want_history(
+                            crate::metric_selector::default_metrics_for_language(language)
+                                .iter()
+                                .copied(),
+                        )
+                })
                 .map(|path| mehen_git::ChangedFile {
                     path,
                     status: ChangeStatus::Modified,

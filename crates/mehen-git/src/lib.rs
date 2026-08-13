@@ -215,55 +215,63 @@ pub fn range_touched_files(
     let to_tree = resolve_tree(repo, to)?;
     let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
 
-    let walk = gix::traverse::commit::topo::Builder::from_iters(
-        repo.objects.clone(),
-        [to_id],
-        Some([from_id]),
-    )
-    .build()
-    .map_err(|e| internal(&e))?;
-
     let mut touched: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
-    for info in walk {
-        let info = info.map_err(|e| internal(&e))?;
-        // Merge commits replay their parents' changes; the parents'
-        // own commits are walked (mirroring the history walk's
-        // `--no-merges` accounting).
-        if info.parent_ids.len() > 1 {
-            continue;
-        }
-        let commit = repo
-            .find_object(info.id)
-            .map_err(|e| internal(&e))?
-            .peel_to_commit()
-            .map_err(|e| internal(&e))?;
-        let parent_tree = match commit.parent_ids().next() {
-            Some(parent_id) => Some(
-                parent_id
-                    .object()
-                    .map_err(|e| internal(&e))?
-                    .peel_to_commit()
-                    .map_err(|e| internal(&e))?
-                    .tree()
-                    .map_err(|e| internal(&e))?,
-            ),
-            None => None,
-        };
-        let commit_tree = commit.tree().map_err(|e| internal(&e))?;
-        for change in
-            tree_changes::changes_between_trees(repo, parent_tree.as_ref(), &commit_tree)?.changes
-        {
-            match change {
-                tree_changes::TreeChange::Added { path, .. }
-                | tree_changes::TreeChange::Deleted { path, .. }
-                | tree_changes::TreeChange::Modified { path, .. } => {
-                    touched.insert(path);
-                }
-                tree_changes::TreeChange::Renamed {
-                    path, source_path, ..
-                } => {
-                    touched.insert(path);
-                    touched.insert(source_path);
+    // Both directions: for a non-fast-forward range (sibling branches,
+    // or a reversed range) a file may have been touched only on the
+    // `from` side — its baseline history then differs from the head's
+    // even though the endpoint trees agree, and the resulting
+    // `history.*` decrease must still be reported.
+    for (tip, hidden) in [(to_id, from_id), (from_id, to_id)] {
+        let walk = gix::traverse::commit::topo::Builder::from_iters(
+            repo.objects.clone(),
+            [tip],
+            Some([hidden]),
+        )
+        .build()
+        .map_err(|e| internal(&e))?;
+
+        for info in walk {
+            let info = info.map_err(|e| internal(&e))?;
+            // Merge commits replay their parents' changes; the
+            // parents' own commits are walked (mirroring the history
+            // walk's `--no-merges` accounting).
+            if info.parent_ids.len() > 1 {
+                continue;
+            }
+            let commit = repo
+                .find_object(info.id)
+                .map_err(|e| internal(&e))?
+                .peel_to_commit()
+                .map_err(|e| internal(&e))?;
+            let parent_tree = match commit.parent_ids().next() {
+                Some(parent_id) => Some(
+                    parent_id
+                        .object()
+                        .map_err(|e| internal(&e))?
+                        .peel_to_commit()
+                        .map_err(|e| internal(&e))?
+                        .tree()
+                        .map_err(|e| internal(&e))?,
+                ),
+                None => None,
+            };
+            let commit_tree = commit.tree().map_err(|e| internal(&e))?;
+            for change in
+                tree_changes::changes_between_trees(repo, parent_tree.as_ref(), &commit_tree)?
+                    .changes
+            {
+                match change {
+                    tree_changes::TreeChange::Added { path, .. }
+                    | tree_changes::TreeChange::Deleted { path, .. }
+                    | tree_changes::TreeChange::Modified { path, .. } => {
+                        touched.insert(path);
+                    }
+                    tree_changes::TreeChange::Renamed {
+                        path, source_path, ..
+                    } => {
+                        touched.insert(path);
+                        touched.insert(source_path);
+                    }
                 }
             }
         }
@@ -271,15 +279,17 @@ pub fn range_touched_files(
 
     let mut survivors = Vec::new();
     for path in touched {
-        let in_from = from_tree
-            .lookup_entry_by_path(&path)
-            .map_err(|e| internal(&e))?
-            .is_some();
-        let in_to = to_tree
-            .lookup_entry_by_path(&path)
-            .map_err(|e| internal(&e))?
-            .is_some();
-        if in_from && in_to {
+        // Both endpoints must hold *blob* entries — `changed_files`'
+        // blob-only contract. A path that is a symlink at both
+        // endpoints (with a transient blob life inside the range) has
+        // no analyzable text to hang a diff row on.
+        let blob_at = |tree: &gix::Tree<'_>| -> Result<bool, GitError> {
+            Ok(tree
+                .lookup_entry_by_path(&path)
+                .map_err(|e| internal(&e))?
+                .is_some_and(|entry| entry.mode().is_blob()))
+        };
+        if blob_at(&from_tree)? && blob_at(&to_tree)? {
             survivors.push(path);
         }
     }

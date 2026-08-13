@@ -810,7 +810,7 @@ fn merge_introduced_changes(
     // Renames first, across all parent diffs: a destination that some
     // parent diff can pair with a source carries a lineage, which
     // beats the addition-shaped view another parent diff has of it.
-    for diff in &diffs {
+    for (supplier_idx, diff) in diffs.iter().enumerate() {
         for change in diff {
             let TreeChange::Renamed {
                 path, source_path, ..
@@ -822,17 +822,41 @@ fn merge_introduced_changes(
                 continue;
             }
             // Scope the alias to the parents whose lineage the rename
-            // actually describes — those whose trees contain the
-            // source. Scoping to the merge commit itself would capture
-            // ancestors of *every* parent, including a line where an
-            // unrelated file lived and died at the same path.
-            let mut scopes = Vec::new();
-            for (parent_id, tree) in parent_ids.iter().zip(&parent_trees) {
-                if tree
-                    .lookup_entry_by_path(source_path)
-                    .map_err(|e| internal(&e))?
-                    .is_some()
+            // actually describes. The supplying parent (whose diff
+            // paired the rename) always qualifies. Another parent
+            // containing the source path qualifies only when the path
+            // predates the branches' divergence (their merge base has
+            // it) — an occupant *independently created* on that line
+            // is an unrelated file, and admitting its commits would
+            // route them into the rename target and let its creation
+            // consume the alias before the real lineage is walked.
+            let supplier = parent_ids[supplier_idx];
+            let mut scopes = vec![supplier];
+            for (idx, (parent_id, tree)) in parent_ids.iter().zip(&parent_trees).enumerate() {
+                if idx == supplier_idx
+                    || tree
+                        .lookup_entry_by_path(source_path)
+                        .map_err(|e| internal(&e))?
+                        .is_none()
                 {
+                    continue;
+                }
+                let shares_lineage = match repo.merge_base(supplier, *parent_id) {
+                    Ok(base) => base
+                        .object()
+                        .map_err(|e| internal(&e))?
+                        .peel_to_commit()
+                        .map_err(|e| internal(&e))?
+                        .tree()
+                        .map_err(|e| internal(&e))?
+                        .lookup_entry_by_path(source_path)
+                        .map_err(|e| internal(&e))?
+                        .is_some(),
+                    // Disjoint histories cannot share the file.
+                    Err(gix::repository::merge_base::Error::NotFound { .. }) => false,
+                    Err(e) => return Err(GitError::Internal(e.to_string())),
+                };
+                if shares_lineage {
                     scopes.push(*parent_id);
                 }
             }

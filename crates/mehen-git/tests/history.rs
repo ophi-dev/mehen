@@ -2846,3 +2846,142 @@ fn coupling_counts_non_blob_changeset_members() {
     let code = history.file(Path::new("code.rs")).unwrap();
     assert_eq!(code.sum_of_coupling, 2);
 }
+
+/// A merge retains one parent's *independently created* `a.rs` while
+/// moving the other parent's original to `b.rs`. The rename alias
+/// must be scoped by lineage, not bare path existence: the retained
+/// occupant's commits belong to the surviving `a.rs`, not to `b.rs`.
+#[test]
+fn merge_rename_scopes_exclude_independently_created_occupants() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: common ancestor without a.rs.
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // main: the original file (older timestamps — walked last).
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(1));
+    git(dir.path(), &["commit", "-q", "-m", "create a"], ALICE, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\nfn orig3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(2));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(2));
+
+    // indep (from the root, which never had a.rs): its own a.rs —
+    // newer timestamps, walked before main's line.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "indep", "HEAD~2"],
+        CAROL,
+        t(3),
+    );
+    std::fs::write(dir.path().join("a.rs"), "fn own0() {}\nfn own1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(4));
+    git(dir.path(), &["commit", "-q", "-m", "own a"], CAROL, t(4));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn own0() {}\nfn own1() {}\nfn own2() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow own a"],
+        CAROL,
+        t(5),
+    );
+    let indep = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(5));
+
+    // The merge keeps indep's a.rs and moves main's original to b.rs.
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(6));
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(6));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn own0() {}\nfn own1() {}\nfn own2() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(6));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(6));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &indep,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(6),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs = the original lineage only.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 4);
+    assert_eq!(b.authors, 2, "only alice and bob wrote the original");
+
+    // The surviving a.rs keeps the independent creator's history.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.commit_frequency, 2);
+    assert_eq!(a.churn_added, 3);
+    assert_eq!(a.authors, 1, "carol's file stays carol's");
+}
+
+/// A transient blob life inside the range must not promote a path
+/// that is a symlink at both endpoints: there is no analyzable text
+/// to hang a diff row on.
+#[test]
+#[cfg(unix)]
+fn range_touched_files_require_blob_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    std::fs::write(dir.path().join("real.py"), "x = 1\n").unwrap();
+    std::os::unix::fs::symlink("real.py", dir.path().join("alias.py")).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, t(0));
+    git(dir.path(), &["tag", "sym-base"], ALICE, t(0));
+
+    // The symlink briefly becomes a regular file…
+    std::fs::remove_file(dir.path().join("alias.py")).unwrap();
+    std::fs::write(dir.path().join("alias.py"), "y = 2\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "materialize"],
+        ALICE,
+        t(1),
+    );
+
+    // …and is restored.
+    std::fs::remove_file(dir.path().join("alias.py")).unwrap();
+    std::os::unix::fs::symlink("real.py", dir.path().join("alias.py")).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(2));
+    git(dir.path(), &["commit", "-q", "-m", "restore"], ALICE, t(2));
+    git(dir.path(), &["tag", "sym-head"], ALICE, t(2));
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let touched = mehen_git::range_touched_files(&repo, "sym-base", "sym-head").unwrap();
+    assert!(
+        touched.is_empty(),
+        "symlink-at-both-endpoints paths must not surface: {touched:?}"
+    );
+}

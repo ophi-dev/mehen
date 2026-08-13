@@ -1339,3 +1339,131 @@ fn history_diffs_support_annotated_tags() {
     assert_eq!(metric["baseline"].as_f64(), Some(1.0));
     assert_eq!(metric["current"].as_f64(), Some(2.0));
 }
+
+#[test]
+fn reversed_ranges_report_history_decreases() {
+    // The touched-path augmentation must walk both sides of the
+    // range: comparing back from a tip whose extra commits modified
+    // and restored a file leaves identical endpoint trees, but the
+    // *baseline* history is richer and the decrease must be visible.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "rev-old"]);
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "grow");
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "revert");
+    git_ok(dir.path(), &["tag", "rev-new"]);
+
+    // Reversed: from the newer tag back to the older one.
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "rev-new",
+            "--to",
+            "rev-old",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("from-side-only history must surface: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    assert_eq!(metric["baseline"].as_f64(), Some(3.0));
+    assert_eq!(metric["current"].as_f64(), Some(1.0));
+}
+
+#[test]
+fn restored_markdown_stays_out_of_history_augmentation() {
+    // Markdown routes to the documentation pipeline, which reads no
+    // history selectors and applies no unchanged-row filter: a
+    // modified-then-restored README must not be resurrected by the
+    // history augmentation under default metrics.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    std::fs::write(dir.path().join("README.md"), "# Title\n\nStable body.\n").unwrap();
+    write_python(dir.path(), "code.py", "x = 1\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "md-rev-base"]);
+
+    std::fs::write(dir.path().join("README.md"), "# Title\n\nTemporary body.\n").unwrap();
+    commit_all(dir.path(), "touch readme");
+    std::fs::write(dir.path().join("README.md"), "# Title\n\nStable body.\n").unwrap();
+    commit_all(dir.path(), "restore readme");
+    git_ok(dir.path(), &["tag", "md-rev-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "md-rev-base",
+            "--to",
+            "md-rev-head",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    if let Some(docs) = value.get("markdown").and_then(|d| d.as_array()) {
+        assert!(
+            !docs.iter().any(|f| f["path"].as_str() == Some("README.md")),
+            "an unchanged document must not be reported: {docs:?}"
+        );
+    }
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    assert!(
+        !files
+            .iter()
+            .any(|f| f["path"].as_str() == Some("README.md")),
+        "markdown must not enter the source-code table: {files:?}"
+    );
+}
