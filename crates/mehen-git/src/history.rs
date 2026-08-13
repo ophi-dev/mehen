@@ -123,12 +123,29 @@ pub struct RepositoryHistory {
     /// the deterministic "now" for age computations.
     pub head_seconds: i64,
     files: HashMap<PathBuf, FileHistory>,
+    /// Blob paths present in the walked rev's tree, for
+    /// [`tracked_file`](Self::tracked_file).
+    head_blobs: std::collections::HashSet<PathBuf>,
 }
 
 impl RepositoryHistory {
     /// History stats for a repository-relative path, if any walked
-    /// commit touched it.
+    /// commit touched it — including files *deleted* at the walked
+    /// rev, whose history diff baselines still read.
     pub fn file(&self, path: &Path) -> Option<&FileHistory> {
+        self.files.get(path)
+    }
+
+    /// Like [`file`](Self::file), but only for paths that exist as
+    /// blobs at the walked rev. Workspace-oriented consumers (ranking
+    /// files found on disk) must use this: an untracked file — or a
+    /// symlink — occupying a path whose tracked blob HEAD deleted has
+    /// no history of its own, and returning the dead occupant's would
+    /// assign it someone else's commits, churn, and authors.
+    pub fn tracked_file(&self, path: &Path) -> Option<&FileHistory> {
+        if !self.head_blobs.contains(path) {
+            return None;
+        }
         self.files.get(path)
     }
 
@@ -225,6 +242,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         .peel_to_commit()
         .map_err(|e| GitError::Internal(e.to_string()))?;
     let head_seconds = commit_seconds(&head_commit)?;
+    let head_blobs = tree_blob_paths(&head_commit)?;
 
     let mut files: HashMap<FileIdentity, FileAccumulator> = HashMap::new();
     let mut first_commit_seconds = head_seconds;
@@ -602,7 +620,26 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
     Ok(RepositoryHistory {
         head_seconds,
         files,
+        head_blobs,
     })
+}
+
+/// Blob paths in a commit's tree (recursive).
+fn tree_blob_paths(
+    commit: &gix::Commit<'_>,
+) -> Result<std::collections::HashSet<PathBuf>, GitError> {
+    let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
+    let tree = commit.tree().map_err(|e| internal(&e))?;
+    let mut recorder = gix::traverse::tree::Recorder::default();
+    tree.traverse()
+        .breadthfirst(&mut recorder)
+        .map_err(|e| internal(&e))?;
+    Ok(recorder
+        .records
+        .into_iter()
+        .filter(|entry| entry.mode.is_blob())
+        .map(|entry| crate::tree_changes::path_from_git(&entry.filepath))
+        .collect())
 }
 
 /// Fold a walk-time accumulator into the public [`FileHistory`].
@@ -766,13 +803,17 @@ fn is_descendant_of(
     }
 }
 
-/// Whether `path` was deleted anywhere on the way from `base` to
-/// `tip` (checked on each range commit's first-parent line): a
-/// present→absent flip is an identity boundary, even when the path is
+/// Whether `path` was deleted on `tip`'s *first-parent chain* between
+/// `base` and `tip`: a present→absent flip along the candidate
+/// parent's own line is an identity boundary, even when the path is
 /// later re-created with byte-identical contents — endpoint blobs
-/// alone cannot see the interruption. Used to qualify merge-alias
-/// scopes; the ranges involved are single branches, so the walk stays
-/// short and runs only for the rare multi-parent-source merge rename.
+/// alone cannot see the interruption. Deliberately not a full range
+/// walk: a side branch merged into the candidate may have deleted the
+/// path while the candidate's own copy survived uninterrupted (the
+/// merge kept it), and that side deletion says nothing about the
+/// candidate's lineage. The chain reads commit headers and per-commit
+/// tree lookups only, and runs just for the rare multi-parent-source
+/// merge rename.
 fn path_deleted_in_range(
     repo: &gix::Repository,
     tip: gix::ObjectId,
@@ -780,39 +821,38 @@ fn path_deleted_in_range(
     path: &Path,
 ) -> Result<bool, GitError> {
     let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
-    let blob_at = |tree: &gix::Tree<'_>| -> Result<bool, GitError> {
-        Ok(tree
-            .lookup_entry_by_path(path)
-            .map_err(|e| internal(&e))?
-            .is_some_and(|entry| entry.mode().is_blob()))
-    };
-    let walk =
-        gix::traverse::commit::topo::Builder::from_iters(repo.objects.clone(), [tip], Some([base]))
-            .build()
-            .map_err(|e| internal(&e))?;
-    for info in walk {
-        let info = info.map_err(|e| internal(&e))?;
-        let commit = repo
-            .find_object(info.id)
-            .map_err(|e| internal(&e))?
-            .peel_to_commit()
-            .map_err(|e| internal(&e))?;
-        if blob_at(&commit.tree().map_err(|e| internal(&e))?)? {
-            continue;
-        }
-        let Some(parent_id) = commit.parent_ids().next() else {
-            continue;
-        };
-        let parent_tree = parent_id
-            .object()
+    let blob_at = |id: gix::ObjectId| -> Result<bool, GitError> {
+        Ok(repo
+            .find_object(id)
             .map_err(|e| internal(&e))?
             .peel_to_commit()
             .map_err(|e| internal(&e))?
             .tree()
+            .map_err(|e| internal(&e))?
+            .lookup_entry_by_path(path)
+            .map_err(|e| internal(&e))?
+            .is_some_and(|entry| entry.mode().is_blob()))
+    };
+
+    let mut current = tip;
+    let mut present_in_current = blob_at(current)?;
+    while current != base {
+        let commit = repo
+            .find_object(current)
+            .map_err(|e| internal(&e))?
+            .peel_to_commit()
             .map_err(|e| internal(&e))?;
-        if blob_at(&parent_tree)? {
+        let Some(parent_id) = commit.parent_ids().next() else {
+            break;
+        };
+        let parent_id = parent_id.detach();
+        let parent_present = blob_at(parent_id)?;
+        if !present_in_current && parent_present {
+            // The path vanished at `current` on this line.
             return Ok(true);
         }
+        current = parent_id;
+        present_in_current = parent_present;
     }
     Ok(false)
 }

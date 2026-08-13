@@ -1656,3 +1656,54 @@ fn top_offenders_history_supports_container_roots() {
     );
     assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
 }
+
+#[test]
+fn untracked_files_do_not_inherit_dead_occupant_history() {
+    // HEAD deleted the tracked file; an untracked workspace file now
+    // occupies the path. Ranking must not assign it the dead
+    // occupant's commits.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "ghost.py", "x = 1\n");
+    write_python(dir.path(), "alive.py", "y = 1\n");
+    commit_all(dir.path(), "base");
+    write_python(dir.path(), "ghost.py", "x = 1\nx2 = 2\n");
+    commit_all(dir.path(), "grow ghost");
+    git_ok(dir.path(), &["rm", "-q", "ghost.py"]);
+    commit_all(dir.path(), "drop ghost");
+
+    // An untracked file re-occupies the path in the workspace only.
+    write_python(dir.path(), "ghost.py", "unrelated = 1\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    let ghost = offenders
+        .iter()
+        .find(|o| o["path"].as_str().expect("path").ends_with("ghost.py"))
+        .expect("untracked file is still ranked");
+    assert_eq!(
+        ghost["metrics"][0]["value"].as_f64(),
+        Some(0.0),
+        "the dead occupant's history leaked into the untracked file: {ghost:?}"
+    );
+}

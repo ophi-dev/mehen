@@ -581,8 +581,12 @@ impl RepoHistories {
         let state = self.state.lock().expect("repo histories mutex poisoned");
         let history = state.histories.get(&workdir)?.as_ref()?;
         let relative = canonical.strip_prefix(&workdir).ok()?;
+        // `tracked_file`, not `file`: a workspace path may be an
+        // untracked file (or a symlink) occupying a spot whose tracked
+        // blob HEAD deleted — the dead occupant's history is not this
+        // file's.
         history
-            .file(relative)
+            .tracked_file(relative)
             .map(|fh| (fh.clone(), history.head_seconds))
     }
 

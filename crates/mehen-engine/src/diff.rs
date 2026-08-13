@@ -380,11 +380,18 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         // Threshold evaluation runs against the head analysis (the
         // post-change state) so policy gates like "head cyclomatic must
         // not exceed 30" mean what callers expect. Files with a
-        // blocking diagnostic on the head side are skipped — the
-        // analysis is incomplete and folding a partial number into a
-        // policy decision would be a false positive.
+        // blocking diagnostic on the head side skip *static*
+        // thresholds — the analysis is incomplete and folding a
+        // partial number into a policy decision would be a false
+        // positive — but parser-independent `history.*` thresholds
+        // still evaluate: their complete values come from the
+        // repository walk, and a malformed file must not silently
+        // pass a history policy.
+        let head_blocked = head_analysis
+            .as_ref()
+            .is_some_and(|analysis| has_blocking_diagnostic(&analysis.diagnostics));
         if let Some(analysis) = head_analysis.as_mut()
-            && !has_blocking_diagnostic(&analysis.diagnostics)
+            && !head_blocked
         {
             // Fold `history.*` into the head metric set first so
             // history thresholds read real values.
@@ -397,7 +404,30 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
                     history.head_seconds,
                 );
             }
-            evaluate_thresholds(&mut report, &utf8_path, &input.thresholds, analysis);
+            evaluate_thresholds(&mut report, &utf8_path, &input.thresholds, &analysis.root);
+        } else if cf.status != ChangeStatus::Deleted
+            && let Some(history) = head_history.as_ref()
+            && let Some(fh) = history.file(cf.path.as_path())
+        {
+            let history_thresholds: Vec<Threshold> = input
+                .thresholds
+                .iter()
+                .filter(|t| t.selector.key.as_str().starts_with("history."))
+                .cloned()
+                .collect();
+            if !history_thresholds.is_empty() {
+                let mut space = MetricSpace::new(
+                    mehen_core::SpaceId(0),
+                    mehen_core::SpaceKind::Unit,
+                    mehen_core::SourceSpan::empty(),
+                );
+                history_metrics::inject_history_metrics(
+                    &mut space.metrics,
+                    fh,
+                    history.head_seconds,
+                );
+                evaluate_thresholds(&mut report, &utf8_path, &history_thresholds, &space);
+            }
         }
 
         if matches!(language, mehen_core::Language::Markdown) {
@@ -417,10 +447,10 @@ fn evaluate_thresholds(
     report: &mut DiffReport,
     path: &Utf8PathBuf,
     thresholds: &[Threshold],
-    analysis: &LanguageAnalysis,
+    root: &MetricSpace,
 ) {
     for threshold in thresholds {
-        let actual = read_metric(&threshold.selector, &analysis.root);
+        let actual = read_metric(&threshold.selector, root);
         let violated = threshold.violated_by(actual);
         if violated {
             report.threshold_violations.push(ThresholdViolation {
@@ -1946,6 +1976,51 @@ binary.md binary
     }
 
     #[test]
+    fn history_thresholds_evaluate_despite_parser_failures() {
+        // A malformed head file skips static thresholds (incomplete
+        // analysis) but must not silently pass parser-independent
+        // history policies.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("broken.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "broken-base"]);
+
+        // Head revision: syntactically invalid Python.
+        std::fs::write(dir.path().join("broken.py"), "def broken(:\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "break it"]);
+        git_ok(dir.path(), &["tag", "broken-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![Threshold::new(
+            "history.commit_frequency".parse().unwrap(),
+            1.0,
+            Polarity::HigherIsWorse,
+        )];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "broken-base".to_string(),
+                to: "broken-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert_eq!(report.threshold_violations.len(), 1);
+        let v = &report.threshold_violations[0];
+        assert_eq!(v.path, "broken.py");
+        assert_eq!(v.evaluation.actual, 2.0);
+        assert!(v.evaluation.violated);
+    }
+
+    #[test]
     fn split_boundary_renames_keeps_same_language_in_scope_renames_joined() {
         let rename = mehen_git::ChangedFile {
             path: PathBuf::from("src/after.py"),
@@ -2350,7 +2425,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &thresholds,
-            &analysis,
+            &analysis.root,
         );
         assert_eq!(report.threshold_violations.len(), 1);
         let v = &report.threshold_violations[0];
@@ -2373,7 +2448,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &thresholds,
-            &analysis,
+            &analysis.root,
         );
         assert!(report.threshold_violations.is_empty());
     }
@@ -2391,7 +2466,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &thresholds,
-            &analysis,
+            &analysis.root,
         );
         assert_eq!(report.threshold_violations.len(), 1);
         assert!(report.threshold_violations[0].evaluation.violated);
@@ -2421,7 +2496,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &thresholds,
-            &analysis,
+            &analysis.root,
         );
         // Only cyclomatic.sum exceeds its limit; cognitive.sum is fine.
         assert_eq!(report.threshold_violations.len(), 1);
@@ -2443,7 +2518,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &[],
-            &analysis,
+            &analysis.root,
         );
         assert!(report.threshold_violations.is_empty());
     }

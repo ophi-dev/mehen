@@ -69,7 +69,7 @@ fn git_path_order(a: &Path, b: &Path) -> std::cmp::Ordering {
 /// a real file literally named `x\u{FFFD}.py` — a lossy conversion
 /// would collide the two and merge their changes (and their history
 /// accumulators) into one identity.
-fn path_from_git(path: &gix::bstr::BString) -> PathBuf {
+pub(crate) fn path_from_git(path: &gix::bstr::BString) -> PathBuf {
     gix::path::from_bstr(path.as_ref() as &gix::bstr::BStr).into_owned()
 }
 use gix::objs::TreeRefIter;

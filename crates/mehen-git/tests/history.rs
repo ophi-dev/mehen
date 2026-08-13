@@ -3737,3 +3737,125 @@ fn merge_deletions_on_unscoped_parents_still_fence() {
     assert_eq!(b.commit_frequency, 2);
     assert_eq!(b.churn_added, 4);
 }
+
+/// A candidate parent whose merge *kept* its own uninterrupted copy
+/// while a merged-in side branch deleted the path: the side deletion
+/// is not the candidate's identity boundary, and the candidate's
+/// parallel edits must still follow the rename.
+#[test]
+fn side_branch_deletions_do_not_disqualify_uninterrupted_parents() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the shared original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // Candidate branch P: edit a.rs, then merge a side branch that
+    // deleted it — resolving to keep P's own copy.
+    git(dir.path(), &["checkout", "-q", "-b", "p"], CAROL, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p_edit() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "edit on p"],
+        CAROL,
+        t(1),
+    );
+    let p_edit = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(1));
+
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "s", "main"],
+        ALICE,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], ALICE, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "side deletes a"],
+        ALICE,
+        t(2),
+    );
+    let side_del = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(2));
+
+    // Merge s into p, keeping p's a.rs (first parent = p's edit).
+    git(dir.path(), &["checkout", "-q", "p"], CAROL, t(3));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    let p_tree = git_out(dir.path(), &["write-tree"], CAROL, t(3));
+    let p_tip = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &p_tree,
+            "-p",
+            &p_edit,
+            "-p",
+            &side_del,
+            "-m",
+            "keep p's a",
+        ],
+        CAROL,
+        t(3),
+    );
+
+    // main (supplier): unrelated work with newer timestamps; the
+    // rename itself happens in the final merge (conflict resolution).
+    git(dir.path(), &["checkout", "-q", "main"], BOB, t(4));
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\nfn more() {}\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow keep"], BOB, t(4));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(4));
+
+    // Final merge: conflict resolution commits the file as b.rs
+    // (p's edited content, so the parallel edit visibly survives) and
+    // vacates a.rs.
+    git(dir.path(), &["mv", "a.rs", "b.rs"], BOB, t(5));
+    std::fs::write(
+        dir.path().join("b.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn p_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(5));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &p_tip,
+            "-m",
+            "merge",
+        ],
+        BOB,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // Carol's parallel edit belongs to the surviving b.rs: the side
+    // branch's deletion (kept out by p's merge) must not disqualify
+    // p from the rename scopes. b.rs = shared creation (3 lines,
+    // alice) + carol's edit (1 line) + the side deletion touch.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.churn_added, 4, "carol's parallel edit must reach b.rs");
+    assert_eq!(b.authors, 2, "alice and carol touched the lineage");
+}
