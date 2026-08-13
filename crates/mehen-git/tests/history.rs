@@ -3152,3 +3152,179 @@ fn merge_created_blob_over_symlink_fences_the_old_occupant() {
         1
     );
 }
+
+/// A parent whose delete-and-recreated `a.rs` is retained by the
+/// merge *with conflict-resolution edits* (so its blob differs from
+/// the parent's) must still be excluded from the rename scopes: a
+/// surviving blob at the source path means the moved lineage is the
+/// supplier's alone.
+#[test]
+fn merge_rename_scopes_exclude_edited_retained_occupants() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the original a.rs exists at the (future) merge base.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // main: grow the original (older timestamps — walked last).
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn orig0() {}\nfn orig1() {}\nfn orig2() {}\nfn orig3() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(1));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // dr branch: delete + recreate an unrelated file at the path.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "dr", "HEAD~1"],
+        CAROL,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], CAROL, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], CAROL, t(3));
+    std::fs::write(dir.path().join("a.rs"), "fn own0() {}\nfn own1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(4));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "recreate a"],
+        CAROL,
+        t(4),
+    );
+    let dr = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(4));
+
+    // The merge keeps dr's recreation *with an extra edit* (blob no
+    // longer byte-identical to dr's) and moves main's original.
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(5));
+    git(dir.path(), &["mv", "a.rs", "b.rs"], ALICE, t(5));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn own0() {}\nfn own1() {}\nfn merged_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let merge = git_out(
+        dir.path(),
+        &["commit-tree", &tree, "-p", &main, "-p", &dr, "-m", "merge"],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // b.rs = the original lineage only.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 4);
+    assert_eq!(b.churn_removed, 0);
+
+    // The surviving a.rs keeps carol's recreation.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.commit_frequency, 1);
+    assert_eq!(a.churn_added, 2);
+    assert_eq!(a.authors, 1);
+}
+
+/// Two branches rename the shared base file differently and the merge
+/// commits the survivor under a third name: both intermediate-path
+/// lineages must converge on the survivor instead of the second
+/// pairing being dropped.
+#[test]
+fn converging_merge_renames_preserve_every_parent_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the shared original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // main: rename to x.rs and edit it.
+    git(dir.path(), &["mv", "a.rs", "x.rs"], ALICE, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "move to x"],
+        ALICE,
+        t(1),
+    );
+    std::fs::write(
+        dir.path().join("x.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn x_edit() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow x"], BOB, t(2));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(2));
+
+    // side: rename to y.rs and edit it differently.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "side", "HEAD~2"],
+        CAROL,
+        t(3),
+    );
+    git(dir.path(), &["mv", "a.rs", "y.rs"], CAROL, t(3));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "move to y"],
+        CAROL,
+        t(3),
+    );
+    std::fs::write(
+        dir.path().join("y.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn y_edit0() {}\nfn y_edit1() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow y"], CAROL, t(4));
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(4));
+
+    // The merge commits the survivor as z.rs (main's blob, exact for
+    // the x-side pairing; y pairs by similarity).
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(5));
+    git(dir.path(), &["mv", "x.rs", "z.rs"], ALICE, t(5));
+    git(dir.path(), &["add", "-A"], ALICE, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // z.rs carries the shared creation, both renames, and both
+    // branches' edits — the y-side lineage must not be stranded.
+    let z = history.file(Path::new("z.rs")).unwrap();
+    assert_eq!(z.commit_frequency, 5);
+    assert_eq!(z.churn_added, 6);
+    assert_eq!(z.authors, 3);
+    assert!(history.file(Path::new("x.rs")).is_none());
+    assert!(history.file(Path::new("y.rs")).is_none());
+}

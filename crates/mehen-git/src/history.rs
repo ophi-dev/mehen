@@ -811,9 +811,14 @@ fn merge_introduced_changes(
 
     let mut introduced: Vec<CommitFileChange> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    // Renames first, across all parent diffs: a destination that some
-    // parent diff can pair with a source carries a lineage, which
-    // beats the addition-shaped view another parent diff has of it.
+    // Renames first, across all parent diffs. Distinct sources may
+    // converge on one destination (two branches renamed the shared
+    // file differently and conflict resolution committed a third
+    // name): every pairing installs its own alias, deduplicated per
+    // (destination, source) pair, so no branch's intermediate-path
+    // lineage is stranded.
+    let mut seen_pairs: std::collections::HashSet<(PathBuf, PathBuf)> =
+        std::collections::HashSet::new();
     for (supplier_idx, diff) in diffs.iter().enumerate() {
         for change in diff {
             let TreeChange::Renamed {
@@ -822,45 +827,29 @@ fn merge_introduced_changes(
             else {
                 continue;
             };
-            if seen.contains(path) || in_any_parent(path)? {
+            if seen_pairs.contains(&(path.clone(), source_path.clone())) || in_any_parent(path)? {
                 continue;
             }
             // Scope the alias to the parents whose lineage the rename
             // actually describes. The supplying parent (whose diff
-            // paired the rename) always qualifies. Another parent
-            // holding a blob at the source path qualifies only when
-            // (a) its version was *not* simply retained at that path
-            // by the merge — a retained occupant survives where it is
-            // and its commits belong to the surviving file, not the
-            // moved one — and (b) the path predates the branches'
-            // divergence (their merge base has it): an occupant
-            // independently created on that line is an unrelated
-            // file, and admitting its commits would route them into
-            // the rename target and let its creation consume the
-            // alias before the real lineage is walked.
+            // paired the rename) always qualifies. When the merged
+            // tree *retains a blob at the source path*, every other
+            // parent is excluded outright: whatever survives there —
+            // a delete-and-recreate resolved in that branch's favor,
+            // even one edited during conflict resolution — is the
+            // occupant those parents' commits describe, not the moved
+            // lineage. Otherwise another parent holding a blob at the
+            // source qualifies only when the path predates the
+            // branches' divergence (their merge base has it): an
+            // occupant independently created on that line is an
+            // unrelated file, and admitting its commits would route
+            // them into the rename target and let its creation
+            // consume the alias before the real lineage is walked.
             let supplier = parent_ids[supplier_idx];
             let mut scopes = vec![supplier];
-            let retained_oid = to_tree
-                .lookup_entry_by_path(source_path)
-                .map_err(|e| internal(&e))?
-                .filter(|entry| entry.mode().is_blob())
-                .map(|entry| entry.oid().to_owned());
+            let source_retained = blob_in(&to_tree, source_path)?;
             for (idx, (parent_id, tree)) in parent_ids.iter().zip(&parent_trees).enumerate() {
-                if idx == supplier_idx {
-                    continue;
-                }
-                let Some(parent_entry) = tree
-                    .lookup_entry_by_path(source_path)
-                    .map_err(|e| internal(&e))?
-                    .filter(|entry| entry.mode().is_blob())
-                else {
-                    continue;
-                };
-                if retained_oid.is_some_and(|oid| oid == parent_entry.oid()) {
-                    // The merged tree keeps this parent's version at
-                    // the source path: a surviving occupant (e.g. a
-                    // delete-and-recreate on that line resolved in
-                    // its favor), not part of the moved lineage.
+                if source_retained || idx == supplier_idx || !blob_in(tree, source_path)? {
                     continue;
                 }
                 let shares_lineage = match repo.merge_base(supplier, *parent_id) {
@@ -882,6 +871,7 @@ fn merge_introduced_changes(
                     scopes.push(*parent_id);
                 }
             }
+            seen_pairs.insert((path.clone(), source_path.clone()));
             seen.insert(path.clone());
             introduced.push(CommitFileChange {
                 path: path.clone(),
