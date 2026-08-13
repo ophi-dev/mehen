@@ -2317,3 +2317,254 @@ fn same_commit_replacement_does_not_corrupt_the_rename_alias() {
     assert_eq!(a.churn_added, 1);
     assert_eq!(a.authors, 1);
 }
+
+/// Two branches rename the same source to different destinations and
+/// the merge keeps both: each branch's pre-rename edits must route to
+/// that branch's survivor (ancestry-scoped aliases), with the shared
+/// pre-branch lineage counted once toward the first-walked rename.
+#[test]
+fn concurrent_renames_to_different_destinations_both_keep_their_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c1: common ancestor.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+
+    // branch one: edit, then rename to b.rs.
+    git(dir.path(), &["checkout", "-q", "-b", "one"], BOB, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn b_edit() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "edit on one"],
+        BOB,
+        t(1),
+    );
+    git(dir.path(), &["mv", "a.rs", "b.rs"], BOB, t(2));
+    git(dir.path(), &["commit", "-q", "-m", "move to b"], BOB, t(2));
+    let one = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(2));
+
+    // branch two: a different edit, then rename to c.rs — with newer
+    // timestamps, so its rename is walked first.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "two", "main"],
+        CAROL,
+        t(3),
+    );
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn c_edit0() {}\nfn c_edit1() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "edit on two"],
+        CAROL,
+        t(3),
+    );
+    git(dir.path(), &["mv", "a.rs", "c.rs"], CAROL, t(4));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "move to c"],
+        CAROL,
+        t(4),
+    );
+    let two = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(4));
+
+    // Merge keeps both survivors.
+    git(dir.path(), &["checkout", "-q", "one"], ALICE, t(5));
+    std::fs::write(
+        dir.path().join("c.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn c_edit0() {}\nfn c_edit1() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let merge = git_out(
+        dir.path(),
+        &["commit-tree", &tree, "-p", &one, "-p", &two, "-m", "merge"],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // First-walked rename (two → c.rs, newest timestamps) gets the
+    // shared pre-branch lineage plus its own edit.
+    let c = history.file(Path::new("c.rs")).unwrap();
+    assert_eq!(c.commit_frequency, 3);
+    assert_eq!(c.churn_added, 5);
+
+    // The other survivor still owns its branch's pre-rename edit —
+    // previously the second-visited rename was rejected outright and
+    // this edit stayed keyed to the obsolete a.rs.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.commit_frequency, 2);
+    assert_eq!(b.churn_added, 1);
+
+    assert!(history.file(Path::new("a.rs")).is_none());
+}
+
+/// Non-UTF-8 paths keep their raw bytes: `x\xff.py` must not collide
+/// with a real file literally named `x\u{FFFD}.py` (the lossy
+/// replacement of the invalid byte).
+#[test]
+#[cfg(unix)]
+fn non_utf8_paths_do_not_collide_with_replacement_character_paths() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+    git(
+        dir.path(),
+        &["config", "core.quotePath", "false"],
+        ALICE,
+        t(0),
+    );
+
+    let weird = std::ffi::OsStr::from_bytes(b"x\xff.py");
+    let lookalike = "x\u{FFFD}.py";
+
+    std::fs::write(dir.path().join(weird), "w0 = 1\nw1 = 2\n").unwrap();
+    std::fs::write(dir.path().join(lookalike), "l0 = 1\nl1 = 2\nl2 = 3\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+
+    std::fs::write(
+        dir.path().join(lookalike),
+        "l0 = 1\nl1 = 2\nl2 = 3\nl3 = 4\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow lookalike"],
+        BOB,
+        t(1),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // Each file reports exactly its own history — with lossy path
+    // conversion both would fold into one identity.
+    let w = history.file(Path::new(weird)).unwrap();
+    assert_eq!(w.commit_frequency, 1);
+    assert_eq!(w.churn_added, 2);
+
+    let l = history.file(Path::new(lookalike)).unwrap();
+    assert_eq!(l.commit_frequency, 2);
+    assert_eq!(l.churn_added, 4);
+}
+
+/// A merge that *creates* a file at a path absent from every parent
+/// (conflict resolution) establishes a fresh identity: a dead prior
+/// occupant of that path must stay fenced off instead of donating its
+/// creation, edits, and deletion to the merge-created file.
+#[test]
+fn merge_created_additions_fence_dead_prior_occupants() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // The prior occupant lives and dies on main.
+    std::fs::write(
+        dir.path().join("victim.rs"),
+        "fn v0() {}\nfn v1() {}\nfn v2() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));
+    std::fs::write(
+        dir.path().join("victim.rs"),
+        "fn v0() {}\nfn v1() {}\nfn v2() {}\nfn v3() {}\n",
+    )
+    .unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow victim"],
+        BOB,
+        t(1),
+    );
+    git(dir.path(), &["rm", "-q", "victim.rs"], ALICE, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "drop victim"],
+        ALICE,
+        t(2),
+    );
+
+    // A side branch, so the merge has two parents.
+    git(dir.path(), &["checkout", "-q", "-b", "side"], CAROL, t(3));
+    std::fs::write(dir.path().join("side.rs"), "fn side() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "side work"],
+        CAROL,
+        t(3),
+    );
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    git(dir.path(), &["checkout", "-q", "main"], ALICE, t(4));
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\nfn more() {}\n").unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "grow keep"],
+        ALICE,
+        t(4),
+    );
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(4));
+
+    // The merge re-creates victim.rs — absent from both parents.
+    std::fs::write(dir.path().join("side.rs"), "fn side() {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("victim.rs"),
+        "fn reborn0() {}\nfn reborn1() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(5));
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            "-m",
+            "merge",
+        ],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The dead occupant's creation, edit, and deletion must not be
+    // attributed to the merge-created file (which itself accumulates
+    // nothing — merge churn stays excluded).
+    assert!(history.file(Path::new("victim.rs")).is_none());
+
+    // Sanity: unrelated files keep their history.
+    assert_eq!(
+        history.file(Path::new("side.rs")).unwrap().commit_frequency,
+        1
+    );
+}

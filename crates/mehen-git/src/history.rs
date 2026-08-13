@@ -260,14 +260,16 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // would double-count every line already attributed to the
         // merged commits (matching `git log --no-merges` / code-maat).
         // But a merge can still *create identity*: conflict resolution
-        // may commit a tree that renames a file present in the parents
-        // (`a.rs` in both parents, `b.rs` in the merged tree). Such
-        // merge-introduced renames — destination absent from every
-        // parent tree — must install aliases like any other rename, or
-        // the older commits accumulate under the vacated path while
-        // the surviving file reads an empty history.
+        // may commit a tree that renames a file present in a parent
+        // (`a.rs` in the parents, `b.rs` in the merged tree) or
+        // creates a file at a brand-new path. Such merge-introduced
+        // changes — destination absent from every parent tree — must
+        // install aliases and boundaries like any other commit, or
+        // older commits accumulate under vacated paths while the
+        // surviving files read an empty (or worse, a dead prior
+        // occupant's) history.
         let changes = if is_merge {
-            let introduced = merge_introduced_renames(repo, &commit)?;
+            let introduced = merge_introduced_changes(repo, &commit)?;
             if introduced.is_empty() {
                 continue;
             }
@@ -385,13 +387,16 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 }
                 continue;
             }
-            // First-visited (newest) rename wins when parallel branches
-            // renamed the same source differently — deterministic,
-            // though the losing lineage keeps only its own direct
-            // commits. A *consumed* entry is different: the occupant it
-            // redirected has been fully walked, so this older rename
-            // describes a previous occupant and installs alongside. A
-            // *tombstone* entry is reclaimable outright — unless a
+            // Install alongside any existing entries: ancestry scoping
+            // disambiguates at resolution time. When parallel branches
+            // renamed the same source differently and the merge kept
+            // both, each branch's pre-rename edits are ancestors of
+            // only their own rename and route to the right survivor;
+            // for shared ancestors (the common pre-branch lineage) the
+            // first-visited entry wins — deterministic under the
+            // deterministic walk order, and the shared history is
+            // counted once rather than duplicated into both survivors.
+            // A *tombstone* entry is reclaimable outright — unless a
             // change of this same commit resolved through it (the
             // fence is in active use) — because this rename explains
             // where the fenced-off occupant actually went (it was
@@ -399,12 +404,6 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // contributions move to the rename target and the fence
             // retires.
             let entries = aliases.entry(source.clone()).or_default();
-            if entries
-                .iter()
-                .any(|e| matches!(e.target, FileIdentity::Path(_)) && !e.consumed)
-            {
-                continue;
-            }
             let mut reclaimed = FileAccumulator::default();
             for (idx, entry) in entries.iter_mut().enumerate() {
                 if entry.consumed
@@ -505,6 +504,25 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // ── Phase 4: accumulate. Merge commits install identity only —
         // their churn is deliberately excluded (see above).
         if is_merge {
+            // A merge-introduced *addition* (conflict resolution
+            // creating a file at a path absent from every parent)
+            // establishes a fresh identity: older commits touching
+            // the path belong to a dead prior occupant. Merges never
+            // accumulate, so the usual delete-then-recreate fence
+            // (which needs an accumulated creation as proof) can
+            // never fire for them — install the boundary eagerly.
+            for change in &changes {
+                if change.is_addition {
+                    tombstones += 1;
+                    aliases
+                        .entry(change.path.clone())
+                        .or_default()
+                        .push(AliasEntry::new(
+                            FileIdentity::Tombstone(tombstones),
+                            info.id,
+                        ));
+                }
+            }
             continue;
         }
         let coupling_eligible = changes.len() <= MAX_COUPLING_CHANGESET;
@@ -692,17 +710,19 @@ fn is_descendant_of(
     }
 }
 
-/// Tree changes a merge commit itself introduced, filtered to renames
-/// whose destination exists in *no* parent tree: conflict resolution
-/// that committed a file present in some parent under a new path. The
-/// merge tree is compared against **every** parent — a rename whose
-/// source lives only in a non-first parent is invisible to the
+/// Tree changes a merge commit itself introduced: renames and
+/// additions whose destination path exists in *no* parent tree —
+/// conflict resolution that committed a file under a brand-new path.
+/// The merge tree is compared against **every** parent: a rename
+/// whose source lives only in a non-first parent is invisible to the
 /// first-parent diff (the destination looks like a plain addition).
-/// Everything else in a merge's diffs is either a parent's own
+/// Rename pairings win over plain additions for the same destination,
+/// and the first parent's pairing wins ties — deterministic parent
+/// order. Everything else in a merge's diffs is either a parent's own
 /// changes replayed (their commits are walked separately) or churn
 /// that `--no-merges` semantics deliberately exclude; accordingly the
 /// returned changes carry no churn (identity only, never accumulated).
-fn merge_introduced_renames(
+fn merge_introduced_changes(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
 ) -> Result<Vec<CommitFileChange>, GitError> {
@@ -717,47 +737,74 @@ fn merge_introduced_renames(
             .map_err(|e| internal(&e))?;
         parent_trees.push(parent.tree().map_err(|e| internal(&e))?);
     }
+    let diffs: Vec<Vec<TreeChange>> = parent_trees
+        .iter()
+        .map(|base| changes_between_trees(repo, Some(base), &to_tree))
+        .collect::<Result<_, _>>()?;
+
+    // A destination is merge-introduced only when no parent has it:
+    // if some parent does, that parent's own line performed (or
+    // already contained) the change, and walking its commits handles
+    // identity.
+    let in_any_parent = |path: &Path| -> Result<bool, GitError> {
+        for tree in &parent_trees {
+            if tree
+                .lookup_entry_by_path(path)
+                .map_err(|e| internal(&e))?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+
     let mut introduced: Vec<CommitFileChange> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    for diff_base in &parent_trees {
-        for change in changes_between_trees(repo, Some(diff_base), &to_tree)? {
+    // Renames first, across all parent diffs: a destination that some
+    // parent diff can pair with a source carries a lineage, which
+    // beats the addition-shaped view another parent diff has of it.
+    for diff in &diffs {
+        for change in diff {
             let TreeChange::Renamed {
                 path, source_path, ..
             } = change
             else {
                 continue;
             };
-            // First parent's pairing wins for a destination seen in
-            // several parent diffs — deterministic parent order.
-            if seen.contains(&path) {
-                continue;
-            }
-            let mut in_parent = false;
-            for tree in &parent_trees {
-                if tree
-                    .lookup_entry_by_path(&path)
-                    .map_err(|e| internal(&e))?
-                    .is_some()
-                {
-                    // The destination exists in a parent: that
-                    // parent's own line performed (or already
-                    // contained) the rename, and walking its commits
-                    // handles identity.
-                    in_parent = true;
-                    break;
-                }
-            }
-            if in_parent {
+            if seen.contains(path) || in_any_parent(path)? {
                 continue;
             }
             seen.insert(path.clone());
             introduced.push(CommitFileChange {
-                path,
-                source_path: Some(source_path),
+                path: path.clone(),
+                source_path: Some(source_path.clone()),
                 added: 0,
                 removed: 0,
                 is_deletion: false,
                 is_addition: false,
+            });
+        }
+    }
+    // Then plain additions: a merge-created file at a brand-new path
+    // establishes a fresh identity, fencing off any dead prior
+    // occupant of that path (see the boundary install in the walk).
+    for diff in &diffs {
+        for change in diff {
+            let TreeChange::Added { path, .. } = change else {
+                continue;
+            };
+            if seen.contains(path) || in_any_parent(path)? {
+                continue;
+            }
+            seen.insert(path.clone());
+            introduced.push(CommitFileChange {
+                path: path.clone(),
+                source_path: None,
+                added: 0,
+                removed: 0,
+                is_deletion: false,
+                is_addition: true,
             });
         }
     }

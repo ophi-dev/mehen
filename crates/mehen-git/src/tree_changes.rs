@@ -24,6 +24,15 @@ use std::path::{Path, PathBuf};
 
 use gix::diff::blob::{Algorithm, Diff, InternedInput, sources::byte_lines};
 use gix::diff::tree::recorder::Change;
+
+/// Convert a git tree path (raw bytes) to a `PathBuf` without lossy
+/// UTF-8 replacement: on Unix, `b"x\xff.py"` must stay distinct from
+/// a real file literally named `x\u{FFFD}.py` — a lossy conversion
+/// would collide the two and merge their changes (and their history
+/// accumulators) into one identity.
+fn path_from_git(path: &gix::bstr::BString) -> PathBuf {
+    gix::path::from_bstr(path.as_ref() as &gix::bstr::BStr).into_owned()
+}
 use gix::objs::TreeRefIter;
 
 use crate::GitError;
@@ -144,7 +153,7 @@ pub(crate) fn changes_between_trees(
             } => {
                 if entry_mode.is_blob() {
                     added.push(RenameSide {
-                        path: PathBuf::from(path.to_string()),
+                        path: path_from_git(&path),
                         oid,
                         broken: None,
                     });
@@ -158,7 +167,7 @@ pub(crate) fn changes_between_trees(
             } => {
                 if entry_mode.is_blob() {
                     deleted.push(RenameSide {
-                        path: PathBuf::from(path.to_string()),
+                        path: path_from_git(&path),
                         oid,
                         broken: None,
                     });
@@ -175,7 +184,7 @@ pub(crate) fn changes_between_trees(
                 // downstream blob reads never touch a gitlink OID (the
                 // submodule's commit object is not in this
                 // repository's odb).
-                let path = PathBuf::from(path.to_string());
+                let path = path_from_git(&path);
                 match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
                     (true, true) => modified.push((path, previous_oid, oid)),
                     (true, false) => changes.push(TreeChange::Deleted {
