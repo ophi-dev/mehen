@@ -232,17 +232,24 @@ pub fn range_touched_files(
 
         for info in walk {
             let info = info.map_err(|e| internal(&e))?;
-            // Merge commits replay their parents' changes; the
-            // parents' own commits are walked (mirroring the history
-            // walk's `--no-merges` accounting).
-            if info.parent_ids.len() > 1 {
-                continue;
-            }
             let commit = repo
                 .find_object(info.id)
                 .map_err(|e| internal(&e))?
                 .peel_to_commit()
                 .map_err(|e| internal(&e))?;
+            // Merge commits replay their parents' *content* changes
+            // (the parents' own commits are walked — mirroring the
+            // history walk's `--no-merges` accounting), but conflict
+            // resolution can change identity on its own: a merge-only
+            // deletion, recreation, or rename alters `history.*`
+            // metrics even when the endpoint trees are byte-identical
+            // and no non-merge commit touched the path.
+            if info.parent_ids.len() > 1 {
+                for path in history::merge_identity_paths(repo, &commit)? {
+                    touched.insert(path);
+                }
+                continue;
+            }
             let parent_tree = match commit.parent_ids().next() {
                 Some(parent_id) => Some(
                     parent_id

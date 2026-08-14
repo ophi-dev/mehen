@@ -2949,6 +2949,81 @@ fn merge_rename_scopes_exclude_independently_created_occupants() {
     assert_eq!(a.authors, 1, "carol's file stays carol's");
 }
 
+/// Merge-only identity changes count as touches: one merge's conflict
+/// resolution deletes a tracked path and a later merge restores it
+/// with the original blob — the endpoint trees are byte-identical and
+/// no non-merge commit touched the path, yet the head history now
+/// treats the file as a fresh zero-touch identity with different age,
+/// churn, and frequency. `range_touched_files` must surface it.
+#[test]
+fn range_touched_files_include_merge_only_identity_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
+    std::fs::write(dir.path().join("keep.py"), "k = 1\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+    let root = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(0));
+
+    // First diamond: the merge's tree drops a.py.
+    git(dir.path(), &["checkout", "-q", "-b", "one"], BOB, t(1));
+    std::fs::write(dir.path().join("keep.py"), "k = 1\nk2 = 2\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "side one"], BOB, t(1));
+    let side1 = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+    git(dir.path(), &["rm", "-q", "a.py"], BOB, t(2));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(2));
+    let m1 = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &root,
+            "-p",
+            &side1,
+            "-m",
+            "resolution drops a.py",
+        ],
+        BOB,
+        t(2),
+    );
+
+    // Second diamond off m1: the merge's tree restores a.py verbatim.
+    git(dir.path(), &["checkout", "-q", &m1], ALICE, t(3));
+    git(dir.path(), &["checkout", "-q", "-b", "two"], ALICE, t(3));
+    std::fs::write(dir.path().join("f2.py"), "f = 1\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "side two"], ALICE, t(3));
+    let side2 = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(3));
+    std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(4));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(4));
+    let m2 = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &m1,
+            "-p",
+            &side2,
+            "-m",
+            "resolution restores a.py",
+        ],
+        BOB,
+        t(4),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let touched = mehen_git::range_touched_files(&repo, &root, &m2).unwrap();
+    assert!(
+        touched.contains(&std::path::PathBuf::from("a.py")),
+        "merge-only identity change must count as a touch: {touched:?}"
+    );
+}
+
 /// A transient blob life inside the range must not promote a path
 /// that is a symlink at both endpoints: there is no analyzable text
 /// to hang a diff row on.

@@ -152,6 +152,13 @@ pub struct RepositoryHistory {
     /// (merge-introduced additions, which never accumulate
     /// contributions) — the basis for a synthesized zero entry's age.
     merge_creation_seconds: HashMap<PathBuf, i64>,
+    /// Files whose lineage crosses a path this platform cannot
+    /// represent (Windows, raw non-UTF-8 rename source): their
+    /// earlier commits, churn, and authorship are unreachable here,
+    /// so the per-file lookups report them unmeasurable rather than
+    /// publishing the truncated remainder as if it were the whole
+    /// history. Always empty on Unix.
+    truncated_lineages: std::collections::HashSet<PathBuf>,
 }
 
 impl RepositoryHistory {
@@ -159,6 +166,12 @@ impl RepositoryHistory {
     /// commit touched it — including files *deleted* at the walked
     /// rev, whose history diff baselines still read.
     pub fn file(&self, path: &Path) -> Option<&FileHistory> {
+        if self.truncated_lineages.contains(path) {
+            // The lineage crosses a platform-unrepresentable path:
+            // whatever accumulated is a truncated fabrication, not
+            // this file's history.
+            return None;
+        }
         self.files.get(path)
     }
 
@@ -175,7 +188,7 @@ impl RepositoryHistory {
     /// — it is measured (nothing ever happened to it), not
     /// unmeasurable like an untracked path.
     pub fn tracked_file(&self, path: &Path) -> Option<FileHistory> {
-        if !self.head_blobs.contains(path) {
+        if !self.head_blobs.contains(path) || self.truncated_lineages.contains(path) {
             return None;
         }
         Some(self.files.get(path).cloned().unwrap_or_else(|| {
@@ -309,6 +322,14 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
     // first-seen merge addition for a path is the one that created
     // the blob HEAD still carries.
     let mut merge_creation_seconds: HashMap<PathBuf, i64> = HashMap::new();
+    // Files whose lineage crosses a path this platform cannot
+    // represent (Windows, raw non-UTF-8 rename source): their earlier
+    // history is unreachable here, and publishing the truncated
+    // remainder would fabricate a young, single-author file — the
+    // per-file lookups report them unmeasurable instead. Always empty
+    // on Unix.
+    let mut truncated_lineages: std::collections::HashSet<PathBuf> =
+        std::collections::HashSet::new();
     // Every walked merge `(id, parents)` — including ones that
     // introduced no identity changes. The phase-2 delete-then-recreate
     // cut consults this to recognize a *bypassed* deletion: one whose
@@ -355,14 +376,18 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // occupant's) history.
         let (changes, non_blob_changes) = if is_merge {
             walked_merges.push((info.id, info.parent_ids.iter().copied().collect()));
-            let introduced = merge_introduced_changes(repo, &commit)?;
+            let mut merge_truncated: Vec<PathBuf> = Vec::new();
+            let introduced = merge_introduced_changes(repo, &commit, &mut merge_truncated)?;
+            truncated_lineages.extend(merge_truncated);
             if introduced.is_empty() {
                 continue;
             }
             // Identity only — merges never reach the coupling math.
             (introduced, 0)
         } else {
-            diff_against_first_parent(repo, &commit)?
+            let (changes, non_blob_changes, truncated) = diff_against_first_parent(repo, &commit)?;
+            truncated_lineages.extend(truncated);
+            (changes, non_blob_changes)
         };
 
         let seconds = commit_seconds(&commit)?;
@@ -860,6 +885,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         files,
         head_blobs,
         merge_creation_seconds,
+        truncated_lineages,
     })
 }
 
@@ -1203,6 +1229,7 @@ fn path_deleted_in_range(
 fn merge_introduced_changes(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
+    truncated: &mut Vec<PathBuf>,
 ) -> Result<Vec<CommitFileChange>, GitError> {
     let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
     let to_tree = commit.tree().map_err(|e| internal(&e))?;
@@ -1217,10 +1244,12 @@ fn merge_introduced_changes(
             .map_err(|e| internal(&e))?;
         parent_trees.push(parent.tree().map_err(|e| internal(&e))?);
     }
-    let diffs: Vec<Vec<TreeChange>> = parent_trees
-        .iter()
-        .map(|base| changes_between_trees(repo, Some(base), &to_tree).map(|tc| tc.changes))
-        .collect::<Result<_, _>>()?;
+    let mut diffs: Vec<Vec<TreeChange>> = Vec::with_capacity(parent_trees.len());
+    for base in &parent_trees {
+        let tc = changes_between_trees(repo, Some(base), &to_tree)?;
+        truncated.extend(tc.truncated_lineages);
+        diffs.push(tc.changes);
+    }
 
     // A destination is merge-introduced only when no parent has a
     // *blob* there: a parent holding a symlink or gitlink at the path
@@ -1773,6 +1802,26 @@ fn merge_introduced_changes(
     Ok(introduced)
 }
 
+/// The paths whose *identity* a merge commit changes — conflict-
+/// resolution creations, merge-only renames and deletions (with their
+/// sources), and discarded-occupant fences. `range_touched_files`
+/// consults this: such changes alter `history.*` metrics even when
+/// the endpoint trees are byte-identical and no non-merge commit
+/// touched the path.
+pub(crate) fn merge_identity_paths(
+    repo: &gix::Repository,
+    commit: &gix::Commit<'_>,
+) -> Result<Vec<PathBuf>, GitError> {
+    let mut truncated: Vec<PathBuf> = Vec::new();
+    let mut paths: Vec<PathBuf> = merge_introduced_changes(repo, commit, &mut truncated)?
+        .into_iter()
+        .flat_map(|change| std::iter::once(change.path).chain(change.source_path))
+        .collect();
+    // A lineage truncated at this merge changed identity too.
+    paths.extend(truncated);
+    Ok(paths)
+}
+
 /// The identity a historical change accumulates under: a real
 /// head-relative path, or a synthetic tombstone standing in for a dead
 /// prior occupant of a rename destination (or of a delete-then-
@@ -1947,7 +1996,7 @@ fn resolve_alias(
 fn diff_against_first_parent(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
-) -> Result<(Vec<CommitFileChange>, usize), GitError> {
+) -> Result<(Vec<CommitFileChange>, usize, Vec<PathBuf>), GitError> {
     let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
 
     let to_tree = commit.tree().map_err(|e| internal(&e))?;
@@ -1966,6 +2015,7 @@ fn diff_against_first_parent(
 
     let records = changes_between_trees(repo, parent_tree.as_ref(), &to_tree)?;
     let non_blob_changes = records.non_blob_changes;
+    let truncated_lineages = records.truncated_lineages;
     let records = records.changes;
     let mut changes = Vec::with_capacity(records.len());
     for change in records {
@@ -2048,7 +2098,7 @@ fn diff_against_first_parent(
         changes.push(file_change);
     }
 
-    Ok((changes, non_blob_changes))
+    Ok((changes, non_blob_changes, truncated_lineages))
 }
 
 /// Number of lines in a blob (a trailing fragment without `\n` counts

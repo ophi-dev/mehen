@@ -198,6 +198,15 @@ struct RenameSide {
 pub(crate) struct TreeChanges {
     pub(crate) changes: Vec<TreeChange>,
     pub(crate) non_blob_changes: usize,
+    /// Destinations of renames whose *source* path is not
+    /// representable on this platform (Windows, raw non-UTF-8 git
+    /// path): the rename was detected but its lineage link cannot be
+    /// expressed, so the destination's earlier history is
+    /// unreachable here. Consumers publishing per-file history mark
+    /// such files unmeasurable rather than reporting the truncated
+    /// remainder as if it were the whole history. Always empty on
+    /// Unix.
+    pub(crate) truncated_lineages: Vec<PathBuf>,
 }
 
 /// Blob-to-blob modifications between two trees — paths present in
@@ -268,6 +277,7 @@ pub(crate) fn changes_between_trees(
     let mut modified: Vec<(gix::bstr::BString, gix::ObjectId, gix::ObjectId)> = Vec::new();
     let mut changes: Vec<TreeChange> = Vec::new();
     let mut non_blob_changes: usize = 0;
+    let mut truncated_lineages: Vec<PathBuf> = Vec::new();
     // Non-blob additions/deletions are *paired* before counting: a
     // renamed symlink or gitlink is one changed identity, not two
     // changeset members — counting both records would inflate every
@@ -454,11 +464,13 @@ pub(crate) fn changes_between_trees(
         deleted,
         &broken_pairs,
         &mut non_blob_changes,
+        &mut truncated_lineages,
     )?;
 
     Ok(TreeChanges {
         changes,
         non_blob_changes,
+        truncated_lineages,
     })
 }
 
@@ -476,6 +488,7 @@ pub(crate) fn changes_between_trees(
 /// of a rename is emitted alone, a fully unrepresentable change bumps
 /// `non_blob_changes` — so the changeset *cardinality* every other
 /// file's coupling reads is identical across platforms.
+#[allow(clippy::too_many_arguments)]
 fn detect_renames(
     repo: &gix::Repository,
     changes: &mut Vec<TreeChange>,
@@ -483,6 +496,7 @@ fn detect_renames(
     mut deleted: Vec<RenameSide>,
     broken_pairs: &[(gix::bstr::BString, gix::ObjectId, gix::ObjectId)],
     non_blob_changes: &mut usize,
+    truncated_lineages: &mut Vec<PathBuf>,
 ) -> Result<(), GitError> {
     added.sort_by(|a, b| git_path_order(a.path.as_ref(), b.path.as_ref()));
     deleted.sort_by(|a, b| git_path_order(a.path.as_ref(), b.path.as_ref()));
@@ -620,6 +634,7 @@ fn detect_renames(
         push_renamed(
             changes,
             non_blob_changes,
+            truncated_lineages,
             &deleted[deleted_index],
             &added[added_index],
         );
@@ -638,9 +653,14 @@ fn detect_renames(
         .collect();
 
     // Fuzzy pass: content similarity, best match first; ties break by
-    // source then destination path. Blobs are materialized at most
-    // once each, and only when they clear the per-blob size cap and
-    // the total byte budget (checked via object headers first).
+    // source then destination path. The *deleted* side is loaded
+    // resident under the byte budget; the *added* side streams one
+    // blob at a time (per-blob cap only, each loaded exactly once),
+    // so every resident source is compared against **every** eligible
+    // destination regardless of path order — a per-side budget split
+    // could load two halves that share no real rename pair (e.g.
+    // eight edited 8-MiB renames whose destination names reverse the
+    // source order) and silently degrade all of them.
     if !remaining_added.is_empty()
         && !remaining_deleted.is_empty()
         // `checked_mul`: on a 32-bit target a pathological diff
@@ -653,41 +673,26 @@ fn detect_renames(
             .checked_mul(remaining_deleted.len())
             .is_some_and(|pairs| pairs <= RENAME_FUZZY_LIMIT)
     {
-        // Each side is guaranteed half the byte budget: handing the
-        // deleted side the whole pool would let a handful of large
-        // sources consume it entirely, load zero destinations, and
-        // degrade every recognizable rename to a deletion + addition.
-        // The added side then also reuses whatever the deleted side
-        // left unspent.
-        let deleted_blobs =
-            load_fuzzy_blobs(repo, &remaining_deleted, FUZZY_TOTAL_BYTE_BUDGET / 2)?;
-        // The added side spends whatever budget the deleted side left,
-        // keeping the total bounded even when both sides are large.
-        let deleted_bytes: u64 = deleted_blobs
-            .iter()
-            .flatten()
-            .map(|blob| blob.data.len() as u64)
-            .sum();
-        let added_blobs = load_fuzzy_blobs(
-            repo,
-            &remaining_added,
-            FUZZY_TOTAL_BYTE_BUDGET.saturating_sub(deleted_bytes),
-        )?;
+        let deleted_blobs = load_fuzzy_blobs(repo, &remaining_deleted, FUZZY_TOTAL_BYTE_BUDGET)?;
 
         let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
-        for (deleted_index, old_blob) in deleted_blobs.iter().enumerate() {
-            let Some(old_blob) = old_blob else { continue };
-            for (added_index, new_blob) in added_blobs.iter().enumerate() {
-                let Some(new_blob) = new_blob else { continue };
+        for (added_index, added_side) in remaining_added.iter().enumerate() {
+            if blob_size(repo, &added_side.oid)? > FUZZY_MAX_BLOB_BYTES {
+                continue;
+            }
+            let new_blob = FuzzyBlob {
+                data: read_blob_data(repo, &added_side.oid)?,
+            };
+            for (deleted_index, old_blob) in deleted_blobs.iter().enumerate() {
+                let Some(old_blob) = old_blob else { continue };
                 // A broken half must not "rename" onto its own other
                 // half — they were just judged dissimilar anyway.
                 if remaining_deleted[deleted_index].broken.is_some()
-                    && remaining_deleted[deleted_index].broken
-                        == remaining_added[added_index].broken
+                    && remaining_deleted[deleted_index].broken == added_side.broken
                 {
                     continue;
                 }
-                if let Some(similarity) = blob_similarity(old_blob, new_blob) {
+                if let Some(similarity) = blob_similarity(old_blob, &new_blob) {
                     candidates.push((similarity, deleted_index, added_index));
                 }
             }
@@ -719,6 +724,7 @@ fn detect_renames(
             push_renamed(
                 changes,
                 non_blob_changes,
+                truncated_lineages,
                 &remaining_deleted[deleted_index],
                 &remaining_added[added_index],
             );
@@ -804,6 +810,7 @@ fn detect_renames(
 fn push_renamed(
     changes: &mut Vec<TreeChange>,
     non_blob_changes: &mut usize,
+    truncated_lineages: &mut Vec<PathBuf>,
     source: &RenameSide,
     dest: &RenameSide,
 ) {
@@ -814,10 +821,19 @@ fn push_renamed(
             previous_oid: source.oid,
             oid: dest.oid,
         }),
-        (Some(path), None) => changes.push(TreeChange::Added {
-            path,
-            oid: dest.oid,
-        }),
+        (Some(path), None) => {
+            // The lineage link exists but cannot be expressed on this
+            // platform: the destination's earlier history is
+            // unreachable, and publishing the truncated remainder as
+            // if it were the whole history would fabricate a young,
+            // single-author file. Record the destination so history
+            // consumers mark it unmeasurable instead.
+            truncated_lineages.push(path.clone());
+            changes.push(TreeChange::Added {
+                path,
+                oid: dest.oid,
+            });
+        }
         (None, Some(source_path)) => changes.push(TreeChange::Deleted {
             path: source_path,
             oid: source.oid,
