@@ -33,15 +33,14 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     // error, scores as uncomputable (`None`), and never triggers the
     // repository walk below.
     for selector in &input.selectors {
-        if crate::history_metrics::is_unknown_history_key(selector.key.as_str()) {
+        if crate::history_metrics::is_invalid_history_selector(selector) {
             analysis_errors.push(AnalysisErrorRecord {
                 path: Utf8PathBuf::new(),
                 side: DiffSide::Head,
                 diagnostics: vec![ParseDiagnostic::warning(
                     "engine.unknown_metric",
                     format!(
-                        "unknown history metric `{}` (not one of the fixed `history.*` keys)",
-                        selector.key
+                        "unresolvable history selector `{selector}` (the fixed `history.*` keys publish root values only)",
                     ),
                 )],
             });
@@ -50,10 +49,13 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     // `history.*` selectors need repository histories. Root-load
     // failures surface as `analysis_errors` (this API has no fatal
     // channel); per-file lazy discovery still covers repositories the
-    // eager pass missed.
-    let histories = if crate::history_metrics::names_want_history(
-        input.selectors.iter().map(|s| s.key.as_str()),
-    ) {
+    // eager pass missed. Only *resolvable* history selectors trigger
+    // the walk — an invalid one can never read a value, so walking
+    // for it would be pure cost.
+    let histories = if input.selectors.iter().any(|s| {
+        s.key.as_str().starts_with("history.")
+            && !crate::history_metrics::is_invalid_history_selector(s)
+    }) {
         let loaded = RepoHistories::new();
         for root in &input.paths {
             if let Err(e) = loaded.load_root(root.as_std_path()) {
@@ -155,21 +157,24 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
             .iter()
             .map(|s| {
                 // A selector the space cannot back — any static
-                // metric on a history-only fallback, or any
-                // `history.*` metric on a file without recorded Git
-                // history — has no measurable value, and the
-                // missing-key `0.0` fallback must not rank the file
-                // on a fabricated one (worst-possible MI on an
-                // undecodable file; zero-age "worst offender" for an
-                // untracked file).
-                if crate::history_metrics::selector_available(
-                    s.key.as_str(),
-                    statics_available,
-                    history_available,
-                ) {
-                    Some(read_metric(s, &root))
-                } else {
+                // metric on a history-only fallback, any `history.*`
+                // metric on a file without recorded Git history, or a
+                // history selector no enrichment can resolve (typo'd
+                // key / non-root aggregator) — has no measurable
+                // value, and the missing-key `0.0` fallback must not
+                // rank the file on a fabricated one (worst-possible
+                // MI on an undecodable file; zero-age "worst
+                // offender" for an untracked file).
+                if crate::history_metrics::is_invalid_history_selector(s)
+                    || !crate::history_metrics::selector_available(
+                        s.key.as_str(),
+                        statics_available,
+                        history_available,
+                    )
+                {
                     None
+                } else {
+                    Some(read_metric(s, &root))
                 }
             })
             .collect();
@@ -1582,7 +1587,12 @@ mod tests {
             paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
             include: Vec::new(),
             exclude: Vec::new(),
-            selectors: vec![sel("history.commit_frequncy")],
+            selectors: vec![
+                sel("history.commit_frequncy"),
+                // Valid key, unsupported aggregator: enrichment
+                // publishes root keys only.
+                sel("history.commit_frequency.max"),
+            ],
             max_results: 10,
             config: AnalysisConfig::default(),
         };
@@ -1604,8 +1614,8 @@ mod tests {
             .expect("statically analyzed file still listed");
         assert_eq!(
             plain.scores,
-            vec![None],
-            "a typo'd key must score as uncomputable, not zero"
+            vec![None, None],
+            "unresolvable selectors must score as uncomputable, not zero"
         );
     }
 

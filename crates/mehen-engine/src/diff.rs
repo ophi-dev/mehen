@@ -225,10 +225,10 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
     // pass or fail policy against a fabricated `0.0` — and walking
     // the repository for it would be pure cost. Such thresholds are
     // pulled out here and surfaced as analysis errors on the report.
-    let (valid_thresholds, unknown_history_thresholds): (Vec<Threshold>, Vec<Threshold>) =
-        input.thresholds.drain(..).partition(|threshold| {
-            !history_metrics::is_unknown_history_key(threshold.selector.key.as_str())
-        });
+    let (valid_thresholds, unknown_history_thresholds): (Vec<Threshold>, Vec<Threshold>) = input
+        .thresholds
+        .drain(..)
+        .partition(|threshold| !history_metrics::is_invalid_history_selector(&threshold.selector));
     input.thresholds = valid_thresholds;
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
@@ -2286,11 +2286,20 @@ binary.md binary
         git_ok(dir.path(), &["tag", "typo-head"]);
 
         let repo = gix::discover(dir.path()).unwrap();
-        let thresholds = vec![Threshold::new(
-            "history.commit_frequncy".parse().unwrap(),
-            0.0,
-            Polarity::HigherIsWorse,
-        )];
+        let thresholds = vec![
+            Threshold::new(
+                "history.commit_frequncy".parse().unwrap(),
+                0.0,
+                Polarity::HigherIsWorse,
+            ),
+            // Valid key, unsupported aggregator: enrichment publishes
+            // root keys only, so this would read the `0.0` fallback.
+            Threshold::new(
+                "history.commit_frequency.max".parse().unwrap(),
+                -1.0,
+                Polarity::HigherIsWorse,
+            ),
+        ];
         let report = analyze_diff_in_repo(
             DiffInput {
                 from: "typo-base".to_string(),

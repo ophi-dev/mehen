@@ -48,6 +48,22 @@ pub(crate) fn is_unknown_history_key(name: &str) -> bool {
     name.starts_with("history.") && !mehen_core::keys::HISTORY_ALL.contains(&name)
 }
 
+/// Whether an engine-boundary selector cannot read a published
+/// history value at all: a `history.*` key outside the fixed family,
+/// **or** a valid key with a non-root aggregator — history enrichment
+/// publishes flat root keys only, so `history.commit_frequency.max`
+/// parses (key `history.commit_frequency`, aggregator `Max`) yet can
+/// never resolve, and would rank/gate everything on the `0.0`
+/// fallback.
+pub(crate) fn is_invalid_history_selector(selector: &mehen_core::MetricSelector) -> bool {
+    let key = selector.key.as_str();
+    if !key.starts_with("history.") {
+        return false;
+    }
+    is_unknown_history_key(key)
+        || !matches!(selector.aggregator, mehen_core::SelectorAggregator::Root)
+}
+
 /// Whether a selector name is one of the two static-dependent
 /// composites (`history.hotspot`, `history.churn.relative`) that
 /// [`inject_history_metrics`] omits when `with_composites` is false.

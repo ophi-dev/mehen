@@ -890,16 +890,17 @@ struct FuzzyBlob {
     data: Vec<u8>,
 }
 
-/// Budget-spending order for fuzzy-blob loading: ascending size, then
-/// basename, then full path. Real rename pairs have close byte sizes
-/// (≥50% span similarity bounds the ratio) and bulk moves usually
-/// keep basenames, so ordering *both* sides by this key keeps
-/// corresponding sources and destinations inside the same budget
-/// prefix even when their directory orders disagree — including
-/// byte-identical sizes, where the basename breaks the tie the same
-/// way on both sides. (Equal sizes *and* changed basenames carry no
-/// header-level pairing signal at all; those fall back to path
-/// order.)
+/// Budget-spending order for fuzzy-blob loading: ascending basename
+/// (raw bytes after the last `/`), then size, then full path. Bulk
+/// operations big enough to hit the byte budget overwhelmingly keep
+/// file names (directory restructures), so ordering *both* sides by
+/// basename first keeps corresponding sources and destinations inside
+/// the same budget prefix regardless of directory order **and** of
+/// size skew between the two sides (an edited rename may grow or
+/// shrink arbitrarily within the similarity threshold). Size then
+/// path break ties deterministically. Renames that change the
+/// basename carry no header-level pairing signal at all; those fall
+/// back to the remaining keys and stay bounded-degraded.
 fn fuzzy_budget_order(
     sizes: &[u64],
     entries: &[RenameSide],
@@ -910,9 +911,9 @@ fn fuzzy_budget_order(
         let bytes: &[u8] = path.as_ref();
         bytes.rsplit(|&c| c == b'/').next().unwrap_or(bytes)
     }
-    sizes[a]
-        .cmp(&sizes[b])
-        .then_with(|| basename(&entries[a].path).cmp(basename(&entries[b].path)))
+    basename(&entries[a].path)
+        .cmp(basename(&entries[b].path))
+        .then_with(|| sizes[a].cmp(&sizes[b]))
         .then_with(|| git_path_order(entries[a].path.as_ref(), entries[b].path.as_ref()))
 }
 

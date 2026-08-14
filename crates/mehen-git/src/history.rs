@@ -1603,6 +1603,11 @@ fn merge_introduced_changes(
             // then similarity) — the survivor's lineage.
             let mut supplier: Option<gix::ObjectId> = None;
             let mut best = 0.0_f64;
+            // Whether the budget (not content) prevented a conclusive
+            // answer somewhere for this path: guessing either way
+            // could fold unrelated lineages together or fence a real
+            // one, so such paths are marked unmeasurable instead.
+            let mut budget_limited = false;
             for (idx, (parent_id, tree)) in parent_ids.iter().zip(&parent_trees).enumerate() {
                 if idx == q_idx {
                     continue;
@@ -1619,9 +1624,14 @@ fn merge_introduced_changes(
                         lineage_budget -= cost;
                         blob_lineage_similarity(repo, &parent_oid, oid)?
                     }
-                    // Oversized (never loaded) or over budget: no
-                    // signal — not a similarity supplier.
-                    _ => None,
+                    // Oversized: never loaded — no signal by design.
+                    None => None,
+                    // Over budget: the answer exists but was not
+                    // affordable.
+                    Some(_) => {
+                        budget_limited = true;
+                        None
+                    }
                 };
                 if let Some(similarity) = similarity
                     && similarity >= RENAME_SIMILARITY
@@ -1632,6 +1642,13 @@ fn merge_introduced_changes(
                 }
             }
             let Some(supplier) = supplier else {
+                if budget_limited {
+                    // A similarity supplier may exist behind the
+                    // exhausted budget; without it no fence installs
+                    // and the walk would fold both branches' unrelated
+                    // histories into the survivor. Unmeasurable.
+                    truncated.push(path.clone());
+                }
                 // No parent continues the merged blob (conflict
                 // resolution rewrote it): ambiguous — leave identity
                 // handling to the ordinary walk.
@@ -1657,10 +1674,11 @@ fn merge_introduced_changes(
                 // (never loaded — matches `same_blob_lineage`).
                 None => false,
                 // Budget exhausted: no signal either way. Fencing on
-                // a guess could cut real lineages en masse in a
-                // pathological merge — leave the identity to the
-                // ordinary walk instead.
+                // a guess could cut real lineages; skipping the fence
+                // would fold a discarded occupant into the survivor.
+                // Unmeasurable.
                 Some(_) => {
+                    truncated.push(path.clone());
                     continue;
                 }
             };
