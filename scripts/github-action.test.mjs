@@ -5,6 +5,7 @@ import {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
   collectThresholdViolations,
+  diffJsonHasDocs,
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,
@@ -55,6 +56,24 @@ test("parseThresholds accepts whitespace around operators", () => {
   assert.equal(thresholds.get("loc.lloc"), 120);
 });
 
+test("diffJsonHasDocs detects the documentation section", () => {
+  // The docs rerun (a second full `mehen diff`) must only happen when
+  // the JSON payload actually carries a markdown section.
+  assert.equal(diffJsonHasDocs(JSON.stringify({ source_code: [] })), false);
+  assert.equal(
+    diffJsonHasDocs(JSON.stringify({ source_code: [], markdown: [] })),
+    false,
+  );
+  assert.equal(
+    diffJsonHasDocs(
+      JSON.stringify({ source_code: [], markdown: [{ path: "README.md" }] }),
+    ),
+    true,
+  );
+  assert.equal(diffJsonHasDocs("not json"), false);
+  assert.equal(diffJsonHasDocs(undefined), false);
+});
+
 test("isNotApplicable detects explicit flag and missing values", () => {
   assert.equal(isNotApplicable({ not_applicable: true, current: 0, baseline: 0 }), true);
   assert.equal(isNotApplicable({ current: null, baseline: null }), true);
@@ -78,6 +97,66 @@ test("formatMetricCell still renders normal values", () => {
     polarity: "lower-is-better",
   };
   assert.ok(formatMetricCell(metric, "main").startsWith("5 (main: 3)"));
+});
+
+test("formatMetricCell honors unavailable sides without claiming a trend", () => {
+  // A side flagged unavailable carries a numeric 0.0 placeholder that
+  // must not render as a real zero (or a green "improvement").
+  const base = {
+    name: "history.hotspot",
+    label: "Hotspot",
+    current: 0,
+    baseline: 12,
+    delta: 0,
+    polarity: "lower-is-better",
+  };
+  assert.equal(
+    formatMetricCell({ ...base, current_unavailable: true }, "main"),
+    "n/a (main: 12)",
+  );
+  assert.equal(
+    formatMetricCell({ ...base, baseline_unavailable: true }, "main"),
+    "0 (main: n/a)",
+  );
+  assert.equal(
+    formatMetricCell(
+      { ...base, current_unavailable: true, baseline_unavailable: true },
+      "main",
+    ),
+    "n/a",
+  );
+  assert.equal(
+    formatMetricCell({ ...base, current_unavailable: true, is_new: true }, "main"),
+    "n/a \u{1F195}",
+  );
+  assert.equal(
+    formatMetricCell(
+      { ...base, baseline_unavailable: true, is_deleted: true },
+      "main",
+    ),
+    "0 (was: n/a)",
+  );
+});
+
+test("collectThresholdViolations skips unavailable placeholder deltas", () => {
+  const diffs = [
+    {
+      path: "broken.py",
+      metrics: [
+        {
+          name: "cognitive",
+          label: "Cognitive",
+          current: 0,
+          baseline: 12,
+          delta: -12,
+          current_unavailable: true,
+          polarity: "lower-is-better",
+        },
+      ],
+    },
+  ];
+  const thresholds = new Map([["cognitive", 1]]);
+  assert.deepEqual(collectThresholdViolations(diffs, thresholds), []);
 });
 
 test("unionMetricColumns includes metrics only present in later files", () => {

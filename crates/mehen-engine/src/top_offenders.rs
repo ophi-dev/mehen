@@ -8,7 +8,7 @@
 //! the requested metric selectors. Per the rewrite plan §2.4:
 //! deterministic sorted output, ties broken by subsequent selectors.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
@@ -27,14 +27,62 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let mut entries: Vec<TopOffenderEntry> = Vec::new();
     let mut analysis_errors: Vec<AnalysisErrorRecord> = Vec::new();
+    // The engine boundary accepts arbitrary selector strings: a typo'd
+    // `history.*` key (the family is fixed — `keys::HISTORY_ALL`) can
+    // never read a published value, so it is surfaced as an analysis
+    // error, scores as uncomputable (`None`), and never triggers the
+    // repository walk below.
+    for selector in &input.selectors {
+        if crate::history_metrics::is_invalid_history_selector(selector) {
+            analysis_errors.push(AnalysisErrorRecord {
+                path: Utf8PathBuf::new(),
+                side: DiffSide::Head,
+                diagnostics: vec![ParseDiagnostic::warning(
+                    "engine.unknown_metric",
+                    format!(
+                        "unresolvable history selector `{selector}` (the fixed `history.*` keys publish root values only)",
+                    ),
+                )],
+            });
+        }
+    }
+    // `history.*` selectors need repository histories. Root-load
+    // failures surface as `analysis_errors` (this API has no fatal
+    // channel); per-file lazy discovery still covers repositories the
+    // eager pass missed. Only *resolvable* history selectors trigger
+    // the walk — an invalid one can never read a value, so walking
+    // for it would be pure cost.
+    let histories = if input.selectors.iter().any(|s| {
+        s.key.as_str().starts_with("history.")
+            && !crate::history_metrics::is_invalid_history_selector(s)
+    }) {
+        let loaded = RepoHistories::new();
+        for root in &input.paths {
+            if let Err(e) = loaded.load_root(root.as_std_path()) {
+                analysis_errors.push(AnalysisErrorRecord {
+                    path: root.clone(),
+                    side: DiffSide::Head,
+                    diagnostics: vec![ParseDiagnostic::warning(
+                        "engine.history_unavailable",
+                        format!("history metrics unavailable for {root}: {e}"),
+                    )],
+                });
+            }
+        }
+        Some(loaded)
+    } else {
+        None
+    };
     // Dedup files across roots. Without this, callers passing
     // overlapping paths (`.` plus `src`, or a directory plus a file
     // inside it) would rank the same file multiple times, crowding
     // out other files once `max_results` is applied.
     //
     // All roots share one normalized walk, then each result is mapped back
-    // through the first matching input root. Canonical keys also collapse
-    // symlink aliases that have different walked paths but the same target.
+    // through the first matching input root. Canonical keys collapse
+    // different *spellings* of one path (overlapping roots, directory
+    // symlinks) but keep a tracked symlink distinct from its target —
+    // each is its own repository entry with its own history.
     let mut seen: HashSet<Utf8PathBuf> = HashSet::new();
 
     for entry in walk_paths(&input.paths, &input.include, &input.exclude) {
@@ -44,36 +92,91 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         let Some(language) = detect_language(entry.as_path()) else {
             continue;
         };
-        let Ok(text) = std::fs::read_to_string(entry.as_std_path()) else {
-            continue;
-        };
-        let Some(analyzer) = registry.analyzer_for(language) else {
+        let analyzer = registry.analyzer_for(language);
+        if analyzer.is_none() {
             // Language detected but no analyzer registered (the
             // owning crate is feature-gated off in this build).
             // Surface as a non-fatal `analysis_error` so callers
             // can distinguish "no offenders" from "offenders
             // silently skipped" — matching the diff path's
-            // `record_unavailable` (rewrite plan §3.5).
+            // `record_unavailable` (rewrite plan §3.5). History
+            // metrics need no parser, so the file may still rank
+            // below on Git-only selectors.
             record_unavailable(&mut analysis_errors, &entry, language);
-            continue;
+        }
+        // History metrics don't depend on decoding or parsing the
+        // blob: a recognized file whose contents static analysis
+        // cannot handle — or whose language's analyzer is
+        // feature-gated off — still has repository history, and a
+        // history selector must rank it on real values (via an empty
+        // metric space) instead of silently dropping it. Static-only
+        // rankings keep skipping such files.
+        let history_entry = histories.as_ref().and_then(|h| h.file(entry.as_std_path()));
+        let analyzed_root = analyzer.and_then(|analyzer| {
+            let text = std::fs::read_to_string(entry.as_std_path()).ok()?;
+            let source = SourceFile::new(entry.clone(), language, text);
+            let analysis = analyzer.analyze(&source, &input.config).ok()?;
+            // Migrated analyzers can return `Ok(...)` with a
+            // partial tree alongside an `Error`/`Fatal`
+            // diagnostic when the file doesn't parse cleanly.
+            // Per §9.3 those analyses are incomplete; surfacing
+            // them in the offender list as if they were measured
+            // would mislead CI/policy callers.
+            if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
+                return None;
+            }
+            Some(analysis.root)
+        });
+        let statics_available = analyzed_root.is_some();
+        let history_available = history_entry.is_some();
+        let mut root = match (analyzed_root, history_available) {
+            (Some(root), _) => root,
+            (None, true) => mehen_core::MetricSpace::new(
+                mehen_core::SpaceId(0),
+                mehen_core::SpaceKind::Unit,
+                mehen_core::SourceSpan::empty(),
+            ),
+            (None, false) => continue,
         };
-        let source = SourceFile::new(entry.clone(), language, text);
-        let Ok(analysis) = analyzer.analyze(&source, &input.config) else {
-            continue;
-        };
-        // Migrated analyzers can return `Ok(...)` with a partial
-        // tree alongside an `Error`/`Fatal` diagnostic when the
-        // file doesn't parse cleanly. Per §9.3 those analyses are
-        // incomplete; surfacing them in the offender list as if
-        // they were measured would mislead CI/policy callers.
-        if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
-            continue;
+
+        // Fold the `history.*` family into the metric set so history
+        // selectors rank on real values. The static-dependent
+        // composites are omitted when no real analysis backs the
+        // space (see `inject_history_metrics`).
+        if let Some((fh, head_seconds)) = history_entry {
+            crate::history_metrics::inject_history_metrics(
+                &mut root.metrics,
+                &fh,
+                head_seconds,
+                statics_available,
+            );
         }
 
-        let scores: Vec<f64> = input
+        let scores: Vec<Option<f64>> = input
             .selectors
             .iter()
-            .map(|s| read_metric(s, &analysis.root))
+            .map(|s| {
+                // A selector the space cannot back — any static
+                // metric on a history-only fallback, any `history.*`
+                // metric on a file without recorded Git history, or a
+                // history selector no enrichment can resolve (typo'd
+                // key / non-root aggregator) — has no measurable
+                // value, and the missing-key `0.0` fallback must not
+                // rank the file on a fabricated one (worst-possible
+                // MI on an undecodable file; zero-age "worst
+                // offender" for an untracked file).
+                if crate::history_metrics::is_invalid_history_selector(s)
+                    || !crate::history_metrics::selector_available(
+                        s.key.as_str(),
+                        statics_available,
+                        history_available,
+                    )
+                {
+                    None
+                } else {
+                    Some(read_metric(s, &root))
+                }
+            })
             .collect();
 
         entries.push(TopOffenderEntry {
@@ -89,6 +192,23 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         entries.truncate(input.max_results);
     }
 
+    // Lazily discovered repositories whose history was unavailable
+    // (e.g. a shallow nested clone) must be visible to callers — their
+    // files were ranked on absent history, not a real zero.
+    if let Some(histories) = histories.as_ref() {
+        for (location, message) in histories.take_failures() {
+            analysis_errors.push(AnalysisErrorRecord {
+                path: Utf8PathBuf::from_path_buf(location.clone())
+                    .unwrap_or_else(|_| Utf8PathBuf::from(location.to_string_lossy().into_owned())),
+                side: DiffSide::Head,
+                diagnostics: vec![ParseDiagnostic::warning(
+                    "engine.history_unavailable",
+                    format!("history metrics unavailable: {message}"),
+                )],
+            });
+        }
+    }
+
     TopOffendersReport {
         schema_version: "1.0".to_string(),
         selectors: input.selectors.iter().map(|s| s.to_string()).collect(),
@@ -97,10 +217,14 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     }
 }
 
+/// Dedup key across overlapping roots and directory symlinks: the
+/// *parent* is canonicalized but the final component is preserved, so
+/// two spellings of one file collapse while a tracked symlink and its
+/// target remain distinct entries (each with its own history — see
+/// `canonical_file_path`).
 fn canonical_key(path: &Utf8PathBuf) -> Utf8PathBuf {
-    std::fs::canonicalize(path.as_std_path())
-        .ok()
-        .and_then(|path| Utf8PathBuf::try_from(path).ok())
+    canonical_file_path(path.as_std_path())
+        .and_then(|canonical| Utf8PathBuf::from_path_buf(canonical).ok())
         .unwrap_or_else(|| path.clone())
 }
 
@@ -159,16 +283,27 @@ fn cmp_entries(
     polarities: &[Polarity],
 ) -> std::cmp::Ordering {
     for (i, polarity) in polarities.iter().enumerate() {
-        let av = a.scores.get(i).copied().unwrap_or(0.0);
-        let bv = b.scores.get(i).copied().unwrap_or(0.0);
-        let base = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
-        let ord = match polarity {
-            // Worst-first: larger value is more concerning, so a > b
-            // should put `a` first → reverse the natural ordering.
-            Polarity::HigherIsWorse => base.reverse(),
-            // Worst-first: smaller value is more concerning, so a < b
-            // should put `a` first → use the natural ordering.
-            Polarity::HigherIsBetter => base,
+        let av = a.scores.get(i).copied().flatten();
+        let bv = b.scores.get(i).copied().flatten();
+        let ord = match (av, bv) {
+            // An uncomputable score ranks as least concerning under
+            // either polarity — it is *absent*, not a zero (which
+            // would be the *most* concerning value for a
+            // higher-is-better metric).
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+            (Some(av), Some(bv)) => {
+                let base = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
+                match polarity {
+                    // Worst-first: larger value is more concerning, so a > b
+                    // should put `a` first → reverse the natural ordering.
+                    Polarity::HigherIsWorse => base.reverse(),
+                    // Worst-first: smaller value is more concerning, so a < b
+                    // should put `a` first → use the natural ordering.
+                    Polarity::HigherIsBetter => base,
+                }
+            }
         };
         if ord != std::cmp::Ordering::Equal {
             return ord;
@@ -256,7 +391,7 @@ fn suffixed_lookup(
 
 use std::cmp::Ordering;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Mutex;
 use std::thread::available_parallelism;
@@ -282,7 +417,9 @@ pub struct TopOffendersOpts {
     /// `-` for lower-is-better. Without a prefix the metric's default polarity
     /// is used. Known names: `cyclomatic`, `cognitive`, `nom.functions`,
     /// `loc.lloc`, `mi.original`, `mi.sei`, `mi.visual_studio`,
-    /// `halstead.volume`, `abc`.
+    /// `halstead.volume`, `abc`. Namespaced keys (`sql.*`, `markdown.*`,
+    /// `history.*`) are accepted verbatim; `history.*` metrics require a git
+    /// repository and trigger a history walk of `HEAD`.
     #[clap(
         long = "metric",
         short = 'M',
@@ -330,7 +467,11 @@ pub struct TopOffendersOpts {
 struct CliMetricValue {
     name: &'static str,
     label: &'static str,
-    value: f64,
+    /// `None` (JSON `null`): the metric could not be computed for
+    /// this file — a static-dependent history composite on a file
+    /// whose static analysis is unavailable. Rendered as `n/a` and
+    /// ranked as least concerning, never as a fabricated zero.
+    value: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -343,7 +484,219 @@ struct TopOffendersCfg {
     selectors: Vec<CliMetricSelector>,
     language_override: Option<Language>,
     registry: Arc<AnalyzerRegistry>,
+    /// Per-repository histories at `HEAD` for every repository the
+    /// input roots belong to — present only when a `history.*` metric
+    /// was requested. Shared with the orchestrator, which drains
+    /// recorded lazy-discovery failures after the run.
+    history: Option<Arc<RepoHistories>>,
     results: Arc<Mutex<Vec<FileOffender>>>,
+}
+
+/// Lazily discovered `HEAD` histories, one per repository work dir.
+///
+/// Each analyzed file is mapped to its *innermost* containing
+/// repository by discovering from the file's (symlink-preserving,
+/// canonicalized) parent directory, so nested repositories found
+/// during traversal read their own history instead of zeros.
+/// Discovery results and walked histories are cached; repositories
+/// that cannot be opened or walked (e.g. a shallow nested clone) read
+/// the family as absent.
+struct RepoHistories {
+    state: Mutex<RepoHistoriesState>,
+}
+
+#[derive(Default)]
+struct RepoHistoriesState {
+    /// Canonical parent dir → canonical work dir (`None`: not in a
+    /// repository, or discovery failed).
+    dir_to_workdir: HashMap<PathBuf, Option<PathBuf>>,
+    /// Canonical work dir → lazily initialized `HEAD` history
+    /// (`None` inside an initialized cell: walk failed). The
+    /// `OnceLock` serializes each repository's cold walk across
+    /// workers while different repositories initialize concurrently.
+    histories: HashMap<PathBuf, Arc<std::sync::OnceLock<Option<mehen_git::RepositoryHistory>>>>,
+    /// Lazily discovered repositories that exist but whose history is
+    /// unavailable (shallow nested clone, walk failure). Recorded once
+    /// per location so callers can surface them instead of silently
+    /// ranking those files on zero-valued history.
+    failures: Vec<(PathBuf, String)>,
+}
+
+impl RepoHistories {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(RepoHistoriesState::default()),
+        }
+    }
+
+    /// Eagerly load the repository containing an explicitly analyzed
+    /// root, propagating errors — a requested history ranking must not
+    /// silently be all zeros because a root isn't in a (full) clone.
+    ///
+    /// A directory root (or a symlink to one) discovers from its
+    /// canonicalized target; a file or file-symlink root discovers
+    /// from its *lexical* parent so a tracked symlink pointing outside
+    /// its repository still resolves to the repository that tracks it.
+    fn load_root(&self, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let metadata = std::fs::metadata(root)
+            .map_err(|e| format!("cannot resolve path {}: {e}", root.display()))?;
+        let discover_from = if metadata.is_dir() {
+            std::fs::canonicalize(root)?
+        } else {
+            let parent = match root.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => Path::new("."),
+            };
+            std::fs::canonicalize(parent)?
+        };
+        let repo = match mehen_git::open_repo_at(&discover_from) {
+            Ok(repo) => repo,
+            // A directory root that is not itself inside Git may still
+            // *contain* repositories: per-file lookups discover the
+            // innermost repository lazily (see `file`), so an eager
+            // hard failure here would reject valid layouts like a
+            // container directory of checkouts. Files directly under
+            // such a root simply have no history. Genuine open
+            // failures (untrusted or unreadable repositories, shallow
+            // clones) still propagate.
+            Err(mehen_git::GitError::RepoNotFound) if metadata.is_dir() => {
+                let mut state = self.state.lock().expect("repo histories mutex poisoned");
+                state.dir_to_workdir.insert(discover_from, None);
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let workdir = repo
+            .workdir()
+            .ok_or("repository has no work dir (bare repository)")?
+            .to_path_buf();
+        let canonical_workdir = std::fs::canonicalize(&workdir)?;
+        let cell = {
+            let mut state = self.state.lock().expect("repo histories mutex poisoned");
+            state
+                .dir_to_workdir
+                .insert(discover_from, Some(canonical_workdir.clone()));
+            state
+                .histories
+                .entry(canonical_workdir)
+                .or_default()
+                .clone()
+        };
+        // Walk outside the state lock (other repositories keep
+        // loading); the cell serializes duplicate initializers.
+        let mut walk_error: Option<mehen_git::GitError> = None;
+        cell.get_or_init(|| match mehen_git::collect_history(&repo, "HEAD") {
+            Ok(history) => Some(history),
+            Err(e) => {
+                walk_error = Some(e);
+                None
+            }
+        });
+        match walk_error {
+            Some(e) => Err(e.into()),
+            None => Ok(()),
+        }
+    }
+
+    /// The per-file history entry and that repository's deterministic
+    /// "now" for one analyzed file. Untracked files and files outside
+    /// every discoverable repository read as absent.
+    ///
+    /// The lock is held only for cache reads/writes — repository
+    /// discovery and (expensive) cold history walks run unlocked so
+    /// concurrent workers analyzing other repositories never serialize
+    /// behind one walk. Each repository's cold walk runs exactly once:
+    /// workers racing the same repository block on its `OnceLock`
+    /// cell rather than launching duplicate walks.
+    fn file(&self, file_path: &Path) -> Option<(mehen_git::FileHistory, i64)> {
+        let canonical = canonical_file_path(file_path)?;
+        let parent = canonical.parent()?.to_path_buf();
+
+        let cached_workdir = {
+            let state = self.state.lock().expect("repo histories mutex poisoned");
+            state.dir_to_workdir.get(&parent).cloned()
+        };
+        let workdir = match cached_workdir {
+            Some(cached) => cached,
+            None => {
+                // A directory outside any repository is a normal case
+                // (RepoNotFound stays silent); a repository that
+                // exists but can't be used — e.g. a shallow nested
+                // clone — is a real failure that must not silently
+                // read as zero history.
+                let discovered = match mehen_git::open_repo_at(&parent) {
+                    Ok(repo) => repo.workdir().and_then(|wd| std::fs::canonicalize(wd).ok()),
+                    Err(mehen_git::GitError::RepoNotFound) => None,
+                    Err(e) => {
+                        log::warn!("history unavailable under {}: {e}", parent.display());
+                        let mut state = self.state.lock().expect("repo histories mutex poisoned");
+                        state.failures.push((parent.clone(), e.to_string()));
+                        None
+                    }
+                };
+                let mut state = self.state.lock().expect("repo histories mutex poisoned");
+                state
+                    .dir_to_workdir
+                    .entry(parent)
+                    .or_insert(discovered)
+                    .clone()
+            }
+        }?;
+
+        // Per-worktree cold-walk coordination: the first worker to
+        // reach a repository initializes its `OnceLock` while others
+        // block on that cell only — different repositories still load
+        // concurrently, and a large repository is walked exactly once
+        // instead of once per worker that races the cold cache.
+        let cell = {
+            let mut state = self.state.lock().expect("repo histories mutex poisoned");
+            state.histories.entry(workdir.clone()).or_default().clone()
+        };
+        let history = cell
+            .get_or_init(|| {
+                match mehen_git::open_repo_at(&workdir)
+                    .and_then(|repo| mehen_git::collect_history(&repo, "HEAD"))
+                {
+                    Ok(history) => Some(history),
+                    Err(e) => {
+                        log::warn!("history walk failed for {}: {e}", workdir.display());
+                        let mut state = self.state.lock().expect("repo histories mutex poisoned");
+                        state.failures.push((workdir.clone(), e.to_string()));
+                        None
+                    }
+                }
+            })
+            .as_ref()?;
+        let relative = canonical.strip_prefix(&workdir).ok()?;
+        // `tracked_file`, not `file`: a workspace path may be an
+        // untracked file (or a symlink) occupying a spot whose tracked
+        // blob HEAD deleted — the dead occupant's history is not this
+        // file's.
+        history
+            .tracked_file(relative)
+            .map(|fh| (fh, history.head_seconds))
+    }
+
+    /// Drain the recorded lazy-discovery failures (repositories that
+    /// exist but whose history was unavailable).
+    fn take_failures(&self) -> Vec<(PathBuf, String)> {
+        let mut state = self.state.lock().expect("repo histories mutex poisoned");
+        std::mem::take(&mut state.failures)
+    }
+}
+
+/// Canonicalize a file path *without resolving the final component*:
+/// a tracked symlink like `alias.py -> real.py` must keep its own
+/// (empty) history rather than borrowing the target file's churn and
+/// authorship. Directory components are still resolved so the result
+/// is comparable with the canonicalized repository work dir.
+fn canonical_file_path(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    Some(std::fs::canonicalize(parent).ok()?.join(file_name))
 }
 
 fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
@@ -360,21 +713,58 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         },
     };
 
-    let analyzer = match cfg.registry.analyzer_for(language) {
-        Some(a) => a,
-        None => return Ok(()),
+    let analyzer = cfg.registry.analyzer_for(language);
+
+    // History metrics don't depend on decoding or parsing the blob:
+    // a recognized file whose contents static analysis cannot handle
+    // (e.g. non-UTF-8 but non-binary) — or whose language's analyzer
+    // is feature-gated off in this build — still has repository
+    // history, and a history selector must rank it on real values
+    // instead of silently dropping it. Static-only rankings keep
+    // skipping such files (an all-zero row would be noise).
+    let history_entry = cfg.history.as_ref().and_then(|h| h.file(&path));
+
+    let analyzed_root = analyzer.and_then(|analyzer| {
+        let text = std::fs::read_to_string(&path).ok()?;
+        let source = SourceFile::new(utf8_path, language, text);
+        let analysis = analyzer
+            .analyze(&source, &mehen_core::AnalysisConfig::default())
+            .ok()?;
+        // A partial tree behind an `Error`/`Fatal` diagnostic is an
+        // incomplete measurement (§9.3): ranking on it — or feeding
+        // its truncated cognitive/SLOC values into the history
+        // composites — would mislead; fall back to history-only.
+        if crate::diff::has_blocking_diagnostic(&analysis.diagnostics) {
+            return None;
+        }
+        Some(analysis.root)
+    });
+    let statics_available = analyzed_root.is_some();
+    let history_available = history_entry.is_some();
+    let mut root = match (analyzed_root, history_available) {
+        (Some(root), _) => root,
+        (None, true) => mehen_core::MetricSpace::new(
+            mehen_core::SpaceId(0),
+            mehen_core::SpaceKind::Unit,
+            mehen_core::SourceSpan::empty(),
+        ),
+        (None, false) => return Ok(()),
     };
 
-    let text = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Ok(()),
-    };
-
-    let source = SourceFile::new(utf8_path, language, text);
-    let analysis = match analyzer.analyze(&source, &mehen_core::AnalysisConfig::default()) {
-        Ok(a) => a,
-        Err(_) => return Ok(()),
-    };
+    // Fold the `history.*` family into the metric set so history
+    // selectors rank on real values. Files without recorded history
+    // (untracked, outside every known work dir) read the family as
+    // *unavailable* below; the static-dependent composites are
+    // omitted when no real analysis backs the space (see
+    // `inject_history_metrics`).
+    if let Some((fh, head_seconds)) = history_entry {
+        crate::history_metrics::inject_history_metrics(
+            &mut root.metrics,
+            &fh,
+            head_seconds,
+            statics_available,
+        );
+    }
 
     let metrics: Vec<CliMetricValue> = cfg
         .selectors
@@ -382,7 +772,20 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         .map(|sel| CliMetricValue {
             name: sel.name,
             label: sel.label,
-            value: read_selector_metric(&analysis.root, sel),
+            // A selector the space cannot back — any static metric on
+            // a history-only fallback, or any `history.*` metric on a
+            // file without recorded Git history — has no measurable
+            // value, and the missing-key `0.0` fallback must not rank
+            // the file on a fabricated one.
+            value: if crate::history_metrics::selector_available(
+                sel.name,
+                statics_available,
+                history_available,
+            ) {
+                Some(read_selector_metric(&root, sel))
+            } else {
+                None
+            },
         })
         .collect();
 
@@ -396,12 +799,21 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
 
 fn cmp_offenders(a: &FileOffender, b: &FileOffender, selectors: &[CliMetricSelector]) -> Ordering {
     for (i, sel) in selectors.iter().enumerate() {
-        let av = a.metrics.get(i).map(|m| m.value).unwrap_or(0.0);
-        let bv = b.metrics.get(i).map(|m| m.value).unwrap_or(0.0);
-        let base = av.total_cmp(&bv);
-        let ord = match sel.polarity {
-            SelectorPolarity::LowerIsBetter => base.reverse(),
-            SelectorPolarity::HigherIsBetter => base,
+        let av = a.metrics.get(i).and_then(|m| m.value);
+        let bv = b.metrics.get(i).and_then(|m| m.value);
+        let ord = match (av, bv) {
+            // An uncomputable value ranks as least concerning under
+            // either polarity — absent, not zero.
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+            (Some(av), Some(bv)) => {
+                let base = av.total_cmp(&bv);
+                match sel.polarity {
+                    SelectorPolarity::LowerIsBetter => base.reverse(),
+                    SelectorPolarity::HigherIsBetter => base,
+                }
+            }
         };
         if ord != Ordering::Equal {
             return ord;
@@ -447,7 +859,14 @@ fn print_markdown_offenders(offenders: &[FileOffender], selectors: &[CliMetricSe
     for o in offenders {
         out.push_str(&format!("| {} |", o.path.display()));
         for mv in &o.metrics {
-            out.push_str(&format!(" {} |", format_value(mv.value)));
+            out.push_str(&format!(
+                " {} |",
+                match mv.value {
+                    Some(v) => format_value(v),
+                    // Uncomputable for this file (see `CliMetricValue::value`).
+                    None => "n/a".to_string(),
+                }
+            ));
         }
         out.push('\n');
     }
@@ -502,6 +921,22 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
     let include = mk_globset(opts.include);
     let exclude = mk_globset(opts.exclude);
 
+    // A `history.*` metric was explicitly requested: the ranking is
+    // meaningless without the repository walk, so failing to load it
+    // is a hard error rather than a silent all-zeros column.
+    let history = if crate::history_metrics::names_want_history(selectors.iter().map(|s| s.name)) {
+        let histories = RepoHistories::new();
+        for root in &opts.paths {
+            if let Err(e) = histories.load_root(root) {
+                log::error!("history metrics unavailable for {}: {e}", root.display());
+                process::exit(1);
+            }
+        }
+        Some(Arc::new(histories))
+    } else {
+        None
+    };
+
     let results: Arc<Mutex<Vec<FileOffender>>> = Arc::new(Mutex::new(Vec::new()));
     let registry = Arc::new(AnalyzerRegistry::default_set());
 
@@ -509,6 +944,7 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
         selectors: selectors.clone(),
         language_override,
         registry,
+        history: history.clone(),
         results: results.clone(),
     };
 
@@ -522,6 +958,24 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
     if let Err(e) = ConcurrentRunner::new(num_jobs, act_on_file).run(cfg, files_data) {
         log::error!("{e}");
         process::exit(1);
+    }
+
+    // A history metric was explicitly requested; a repository whose
+    // history could not be loaded during lazy discovery (e.g. a
+    // shallow nested clone found mid-traversal) means part of the
+    // ranking silently ran on absent history — that must fail the
+    // command, matching the eager root-load semantics.
+    if let Some(histories) = history.as_ref() {
+        let failures = histories.take_failures();
+        if !failures.is_empty() {
+            for (location, message) in &failures {
+                log::error!(
+                    "history metrics unavailable for {}: {message}",
+                    location.display()
+                );
+            }
+            process::exit(1);
+        }
     }
 
     let mut offenders = Arc::try_unwrap(results)
@@ -547,7 +1001,7 @@ mod tests {
         TopOffenderEntry {
             path: Utf8PathBuf::from(path),
             language: Language::Rust,
-            scores: scores.to_vec(),
+            scores: scores.iter().copied().map(Some).collect(),
         }
     }
 
@@ -619,6 +1073,32 @@ mod tests {
         // NaN primaries compare equal; secondary breaks the tie.
         assert_eq!(xs[0].path, "b.rs");
         assert_eq!(xs[1].path, "a.rs");
+    }
+
+    #[test]
+    fn uncomputable_score_ranks_least_concerning_under_either_polarity() {
+        // `None` marks a score that could not be computed (e.g. a
+        // history composite without static analysis). It must sort
+        // *after* every real value — including under higher-is-better
+        // polarity, where the old `0.0` fallback would have ranked
+        // the file as the very worst offender.
+        let none_entry = |path: &str| TopOffenderEntry {
+            path: Utf8PathBuf::from(path),
+            language: Language::Rust,
+            scores: vec![None],
+        };
+        for polarity in [Polarity::HigherIsWorse, Polarity::HigherIsBetter] {
+            let mut xs = [
+                none_entry("na.rs"),
+                entry("real_low.rs", &[1.0]),
+                entry("real_high.rs", &[50.0]),
+            ];
+            xs.sort_by(|a, b| cmp_entries(a, b, &[polarity]));
+            assert_eq!(
+                xs[2].path, "na.rs",
+                "uncomputable score must rank last for {polarity:?}"
+            );
+        }
     }
 
     #[test]
@@ -825,6 +1305,321 @@ mod tests {
     }
 
     #[test]
+    fn rank_top_offenders_ranks_history_selectors_on_real_values() {
+        // The exported API must honor `history.*` selectors just like
+        // the CLI path — a library caller supplying
+        // `history.commit_frequency` gets a history-based ranking, not
+        // all zeros in alphabetical order.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Mehen Test")
+                .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+                .env("GIT_COMMITTER_NAME", "Mehen Test")
+                .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        // aaa_calm.py sorts first alphabetically but has one commit;
+        // zzz_busy.py has two — the history ranking must invert the
+        // alphabetical order.
+        std::fs::write(dir.path().join("aaa_calm.py"), "a = 1\n").unwrap();
+        std::fs::write(dir.path().join("zzz_busy.py"), "z = 1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("zzz_busy.py"), "z = 1\ny = 2\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "two"]);
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("history.commit_frequency")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        assert!(report.analysis_errors.is_empty(), "no history-load errors");
+        let ranked: Vec<(&str, f64)> = report
+            .entries
+            .iter()
+            .map(|e| {
+                (
+                    e.path.file_name().unwrap_or(""),
+                    e.scores[0].expect("score computed"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ranked,
+            vec![("zzz_busy.py", 2.0), ("aaa_calm.py", 1.0)],
+            "history selector must drive the ranking"
+        );
+    }
+
+    #[test]
+    fn rank_top_offenders_ranks_undecodable_files_on_history() {
+        // A recognized file whose contents static analysis cannot
+        // decode still has repository history — the exported API must
+        // rank it (empty metric space + injection) instead of
+        // silently dropping it.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Mehen Test")
+                .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+                .env("GIT_COMMITTER_NAME", "Mehen Test")
+                .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\n").unwrap();
+        std::fs::write(dir.path().join("plain.py"), "y = 1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\nz = 2\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "two"]);
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("history.commit_frequency")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        let ranked: Vec<(&str, f64)> = report
+            .entries
+            .iter()
+            .map(|e| {
+                (
+                    e.path.file_name().unwrap_or(""),
+                    e.scores[0].expect("score computed"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ranked,
+            vec![("latin.py", 2.0), ("plain.py", 1.0)],
+            "undecodable file must rank on its history"
+        );
+    }
+
+    #[test]
+    fn rank_top_offenders_reports_composites_as_uncomputable_without_statics() {
+        // The static-dependent composites (`history.hotspot`,
+        // `history.churn.relative`) cannot be valued for a file whose
+        // static analysis is unavailable — the score must surface as
+        // `None` (JSON `null`) and rank least concerning, not as a
+        // fabricated `0.0` read through the missing-key fallback.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Mehen Test")
+                .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+                .env("GIT_COMMITTER_NAME", "Mehen Test")
+                .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        // latin.py is undecodable (Latin-1) but *busier* in history;
+        // plain.py decodes and has a real (possibly zero) hotspot.
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\n").unwrap();
+        std::fs::write(dir.path().join("plain.py"), "y = 1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\nz = 2\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "two"]);
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![
+                sel("history.hotspot"),
+                sel("history.churn.relative"),
+                sel("loc.lloc"),
+            ],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        let latin = report
+            .entries
+            .iter()
+            .find(|e| e.path.file_name() == Some("latin.py"))
+            .expect("undecodable file still ranked (history-only)");
+        assert_eq!(
+            latin.scores,
+            vec![None, None, None],
+            "composites *and* plain statics must be uncomputable, not zero"
+        );
+        let plain = report
+            .entries
+            .iter()
+            .find(|e| e.path.file_name() == Some("plain.py"))
+            .expect("decodable file ranked");
+        assert!(
+            plain.scores.iter().all(|s| s.is_some()),
+            "statically analyzed file keeps real composite values"
+        );
+        // Least concerning: the uncomputable entry sorts after the
+        // real (even zero-valued) one.
+        assert_eq!(
+            report.entries.last().map(|e| e.path.file_name()),
+            Some(Some("latin.py"))
+        );
+    }
+
+    #[test]
+    fn rank_top_offenders_marks_history_unavailable_for_untracked_files() {
+        // An untracked file has statics but no recorded Git history:
+        // its `history.*` scores must read as uncomputable (`None`)
+        // and rank least concerning — `history.age_months = 0` or
+        // `history.ownership = 0` would otherwise crown it the worst
+        // offender and crowd real tracked files out of the ranking.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Mehen Test")
+                .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+                .env("GIT_COMMITTER_NAME", "Mehen Test")
+                .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("tracked.py"), "x = 1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        // Present in the workspace only.
+        std::fs::write(dir.path().join("untracked.py"), "y = 1\n").unwrap();
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("history.commit_frequency")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        let score = |name: &str| {
+            report
+                .entries
+                .iter()
+                .find(|e| e.path.file_name() == Some(name))
+                .unwrap_or_else(|| panic!("{name} missing from {:?}", report.entries))
+                .scores[0]
+        };
+        assert_eq!(score("tracked.py"), Some(1.0));
+        assert_eq!(
+            score("untracked.py"),
+            None,
+            "no Git history means no measurable history score"
+        );
+        assert_eq!(
+            report.entries.last().map(|e| e.path.file_name()),
+            Some(Some("untracked.py")),
+            "unmeasured files rank least concerning"
+        );
+    }
+
+    #[test]
+    fn rank_top_offenders_rejects_unknown_history_selectors() {
+        // The engine boundary accepts arbitrary selector strings: a
+        // typo'd history key must surface as an analysis error and
+        // score as uncomputable — never as an all-zero ranking after
+        // a pointless repository walk.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("plain.py"), "y = 1\n").unwrap();
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![
+                sel("history.commit_frequncy"),
+                // Valid key, unsupported aggregator: enrichment
+                // publishes root keys only.
+                sel("history.commit_frequency.max"),
+            ],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        assert!(
+            report.analysis_errors.iter().any(|record| {
+                record
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "engine.unknown_metric")
+            }),
+            "the typo must be surfaced: {:?}",
+            report.analysis_errors
+        );
+        let plain = report
+            .entries
+            .iter()
+            .find(|e| e.path.file_name() == Some("plain.py"))
+            .expect("statically analyzed file still listed");
+        assert_eq!(
+            plain.scores,
+            vec![None, None],
+            "unresolvable selectors must score as uncomputable, not zero"
+        );
+    }
+
+    #[test]
     fn rank_top_offenders_skips_files_with_blocking_diagnostics() {
         use mehen_core::{AnalysisConfig, TopOffendersInput};
 
@@ -973,7 +1768,7 @@ binary.py binary
 
     #[cfg(unix)]
     #[test]
-    fn rank_top_offenders_dedupes_symlink_aliases() {
+    fn rank_top_offenders_keeps_symlink_aliases_distinct() {
         use std::os::unix::fs::symlink;
 
         use mehen_core::{AnalysisConfig, TopOffendersInput};
@@ -992,10 +1787,22 @@ binary.py binary
         };
         let report = rank_top_offenders(input);
 
+        // A tracked symlink is its own repository entry with its own
+        // (empty) history — collapsing it into its target would make
+        // history rankings depend on traversal order and diverge from
+        // the CLI path, which reports both identities. Dedup still
+        // collapses different *spellings* of one path (overlapping
+        // roots, directory symlinks) via parent canonicalization.
+        let mut names: Vec<&str> = report
+            .entries
+            .iter()
+            .filter_map(|e| e.path.file_name())
+            .collect();
+        names.sort_unstable();
         assert_eq!(
-            report.entries.len(),
-            1,
-            "a file and its symlink alias must be ranked once"
+            names,
+            vec!["alias.py", "source.py"],
+            "a file and its symlink alias are distinct identities"
         );
     }
 
@@ -1089,7 +1896,7 @@ binary.py binary
                 .map(|(n, v)| CliMetricValue {
                     name: n,
                     label: n,
-                    value: *v,
+                    value: Some(*v),
                 })
                 .collect(),
         }

@@ -1,0 +1,50 @@
+---
+title: "Sum of coupling"
+description: "How often a file changes together with other files — an architectural-significance signal."
+keywords: ["change coupling", "temporal coupling", "sum of coupling", "soc", "code-maat"]
+---
+
+**Change coupling** (temporal coupling) is the tendency of files to change *together* — a
+dependency signal that no static analysis can see, because it captures logical coupling through
+copy-paste, shared conventions, or protocol mirroring, not just imports. **Sum of Coupling (SoC)**
+collapses the pairwise idea to a single number per file: how much company a file keeps when it
+changes. Files with a high SoC sit at the architectural center of gravity — change them and
+something else usually has to move too.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `history.sum_of_coupling` | int | For each commit touching the file, the number of *other* files in that commit, summed over the file's history. |
+
+## Semantics
+
+- Commits touching **more than 30 files** don't contribute (code-maat's changeset-noise
+  threshold): bulk reformats and license-header sweeps would otherwise dominate every file's
+  score.
+- Merge commits don't contribute (their changesets replay the merged commits).
+- Renames keep accumulating onto the surviving file's identity.
+
+mehen ships the per-file SoC aggregate rather than pairwise coupling percentages — SoC fits the
+per-file metric model, and the research recommends it as the pragmatic first step before full
+pairwise analysis.
+
+## How to read it
+
+| Signal | Interpretation |
+|---|---|
+| Top-of-ranking SoC | The file is an architectural hub. Interface changes here are expensive; treat its design with corresponding care. |
+| High SoC on a file that "shouldn't" be central | Hidden logical coupling — often duplicated knowledge that wants a shared abstraction. |
+| Low SoC everywhere | Changes are well-localized; module boundaries are doing their job. |
+
+## References
+
+- code-maat `soc` / `coupling` analyses ([repo](https://github.com/adamtornhill/code-maat)).
+- Tornhill, A. (2015). *Your Code as a Crime Scene.* Pragmatic Bookshelf — temporal coupling
+  chapters.
+- [CodeScene change-coupling documentation](https://codescene.io/docs/guides/technical/temporal-coupling.html).
+
+## See also
+
+- [Commit frequency](/metrics/history/commit-frequency) — how often the file changes at all.
+- [Hotspot](/metrics/history/hotspot) — where frequency meets complexity.

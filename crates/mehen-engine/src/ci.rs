@@ -17,6 +17,15 @@ pub struct CiContext {
     pub event_name: String,
     pub base_ref: Option<String>,
     pub head_sha: Option<String>,
+    /// For `push` events, the payload's `before` revision — the tip of
+    /// the branch before the push. This is the correct diff baseline
+    /// for a multi-commit push (`HEAD~1` would only cover the final
+    /// commit). `None` when absent or all-zeros (branch creation).
+    pub before_sha: Option<String>,
+    /// For `push` events, the SHA of the *first* pushed commit. Its
+    /// parent is the analysis baseline for branch-creation pushes,
+    /// where the payload carries no usable `before` revision.
+    pub first_commit_sha: Option<String>,
     /// Files changed by the CI event, with the change status folded
     /// across the commits in that event. For GitHub `push` events the
     /// per-commit `added` / `modified` / `removed` arrays are walked in
@@ -47,6 +56,8 @@ fn detect_github_actions() -> Option<CiContext> {
         .filter(|s| !s.is_empty());
     let mut changed_files = None;
     let mut pr_number = None;
+    let mut before_sha = None;
+    let mut first_commit_sha = None;
 
     if let Ok(event_path) = std::env::var("GITHUB_EVENT_PATH")
         && let Ok(data) = std::fs::read_to_string(&event_path)
@@ -55,6 +66,21 @@ fn detect_github_actions() -> Option<CiContext> {
         match event_name.as_str() {
             "push" => {
                 changed_files = extract_push_changed_files(&payload);
+                // The all-zeros SHA marks a branch creation — there is
+                // no pre-push tip; `first_commit_sha`'s parent becomes
+                // the baseline instead.
+                before_sha = payload
+                    .get("before")
+                    .and_then(|b| b.as_str())
+                    .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '0'))
+                    .map(str::to_string);
+                first_commit_sha = payload
+                    .get("commits")
+                    .and_then(|c| c.as_array())
+                    .and_then(|commits| commits.first())
+                    .and_then(|commit| commit.get("id"))
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string);
             }
             "pull_request" => {
                 if let Some(pr) = payload.get("pull_request") {
@@ -87,6 +113,8 @@ fn detect_github_actions() -> Option<CiContext> {
         event_name,
         base_ref,
         head_sha,
+        before_sha,
+        first_commit_sha,
         changed_files,
         pr_number,
         repository,
@@ -95,6 +123,15 @@ fn detect_github_actions() -> Option<CiContext> {
 
 fn extract_push_changed_files(payload: &serde_json::Value) -> Option<Vec<ChangedFile>> {
     let commits = payload.get("commits")?.as_array()?;
+    // GitHub truncates the webhook `commits` array (documented cap:
+    // 20 entries); `size` carries the push's true commit count. A
+    // truncated array cannot be folded faithfully — report the
+    // payload as unavailable so callers use the tree diff instead.
+    if let Some(size) = payload.get("size").and_then(|v| v.as_u64())
+        && size as usize != commits.len()
+    {
+        return None;
+    }
     let mut by_path: std::collections::HashMap<PathBuf, ChangeStatus> =
         std::collections::HashMap::new();
 
@@ -149,16 +186,22 @@ fn extract_push_changed_files(payload: &serde_json::Value) -> Option<Vec<Changed
         }
     }
 
-    if by_path.is_empty() {
-        None
-    } else {
-        let mut sorted: Vec<ChangedFile> = by_path
-            .into_iter()
-            .map(|(path, status)| ChangedFile { path, status })
-            .collect();
-        sorted.sort_by(|a, b| a.path.cmp(&b.path));
-        Some(sorted)
-    }
+    // An *empty* fold is meaningful and distinct from an unavailable
+    // payload (`commits` missing entirely → `None` above): a push
+    // whose commits add a file and then remove it changes nothing, and
+    // callers must not fall back to a ref-range diff that would
+    // misreport the final commit's deletion.
+    let mut sorted: Vec<ChangedFile> = by_path
+        .into_iter()
+        .map(|(path, status)| ChangedFile {
+            path,
+            status,
+            // GitHub push payloads carry no rename information.
+            source_path: None,
+        })
+        .collect();
+    sorted.sort_by(|a, b| a.path.cmp(&b.path));
+    Some(sorted)
 }
 
 #[cfg(test)]
@@ -217,17 +260,19 @@ mod tests {
     }
 
     /// A file added then removed in the same push is a no-op against
-    /// the base — drop it entirely so the diff doesn't fight with a
-    /// path that no longer exists at either end.
+    /// the base — the fold is *empty* (`Some(vec![])`), which callers
+    /// must honor rather than falling back to a ref-range diff that
+    /// would misreport the final commit's deletion.
     #[test]
-    fn test_extract_push_add_then_remove_is_dropped() {
+    fn test_extract_push_add_then_remove_folds_to_empty() {
         let payload = serde_json::json!({
             "commits": [
                 {"added": ["src/scratch.rs"], "modified": [], "removed": []},
                 {"added": [], "modified": [], "removed": ["src/scratch.rs"]}
             ]
         });
-        assert!(extract_push_changed_files(&payload).is_none());
+        let files = extract_push_changed_files(&payload).expect("payload is available");
+        assert!(files.is_empty(), "add-then-remove folds to nothing");
     }
 
     /// A file modified then removed across the push is `Deleted` at
@@ -272,10 +317,44 @@ mod tests {
 
     #[test]
     fn test_extract_push_empty_commits() {
+        // An empty commits array is still an *available* payload with
+        // nothing changed — distinct from a payload with no `commits`
+        // key at all.
         let payload = serde_json::json!({
             "commits": []
         });
+        let files = extract_push_changed_files(&payload).expect("payload is available");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_extract_push_truncated_commits_are_unavailable() {
+        // GitHub caps the webhook `commits` array at 20 entries; when
+        // `size` says the push had more, the fold would miss files
+        // from the omitted commits — the payload must be reported as
+        // unavailable so the tree diff is used instead.
+        let payload = serde_json::json!({
+            "size": 25,
+            "commits": [
+                {"added": ["src/kept.rs"], "modified": [], "removed": []}
+            ]
+        });
         assert!(extract_push_changed_files(&payload).is_none());
+    }
+
+    #[test]
+    fn test_extract_push_complete_commits_with_size_fold_normally() {
+        let payload = serde_json::json!({
+            "size": 1,
+            "commits": [
+                {"added": ["src/new.rs"], "modified": [], "removed": []}
+            ]
+        });
+        let files = extract_push_changed_files(&payload).unwrap();
+        assert_eq!(
+            paths_with_status(&files),
+            vec![(PathBuf::from("src/new.rs"), ChangeStatus::Added)]
+        );
     }
 
     #[test]

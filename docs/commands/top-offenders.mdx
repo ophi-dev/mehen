@@ -52,7 +52,11 @@ matches it, so a deliberately targeted file can still be measured.
 ## Known metric names
 
 `cyclomatic`, `cognitive`, `nom.functions`, `loc.lloc`, `mi.original`, `mi.sei`, `mi.visual_studio`,
-`halstead.volume`, `abc`, plus the full Markdown family from
+`halstead.volume`, `abc`, the git history family (`history.churn.abs`, `history.churn.relative`,
+`history.age_months`, `history.authors`, `history.minor_contributors`, `history.ownership`,
+`history.commit_frequency`, `history.hotspot`, `history.sum_of_coupling`, `history.twr`,
+`history.bugfix_commits` — these require a full, non-shallow git clone (e.g. a CI checkout with
+`fetch-depth: 0`) and walk the history of `HEAD`), plus the full Markdown family from
 [Markdown metrics](/metrics/markdown/overview).
 
 ## Polarity

@@ -180,6 +180,11 @@ pub struct TopOffenderEntry {
     pub language: Language,
     /// One score per selector in [`TopOffendersInput::selectors`], in
     /// the same order. `scores[0]` is the primary ranking key; the rest
-    /// break ties.
-    pub scores: Vec<f64>,
+    /// break ties. `None` (JSON `null`) marks a score that could not
+    /// be computed for this file — e.g. a static-dependent history
+    /// composite (`history.hotspot`, `history.churn.relative`) on a
+    /// file whose static analysis is unavailable; such entries rank
+    /// as least concerning on that key rather than as a fabricated
+    /// zero.
+    pub scores: Vec<Option<f64>>,
 }

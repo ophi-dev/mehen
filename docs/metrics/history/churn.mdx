@@ -1,0 +1,58 @@
+---
+title: "Code churn"
+description: "Lines added and removed over a file's history, absolute and normalized by file size."
+keywords: ["churn", "relative churn", "code churn", "nagappan", "defect prediction"]
+---
+
+**Code churn** measures how much a file has changed over its history. mehen ships both variants
+from the literature:
+
+- **Absolute churn** — lines added + lines removed, summed across every commit that touched the
+  file. Matches code-maat's `abs-churn` and PyDriller's `(added + removed)` variant.
+- **Relative churn** — absolute churn normalized by the file's size at the analyzed revision.
+  Nagappan & Ball showed that *relative* churn predicts defect density well while *absolute*
+  churn is a poor predictor: 500 churned lines mean something very different in a 100-line file
+  than in a 10,000-line one.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `history.churn.abs` | int | `Σ (added + removed)` across the file's walked history. |
+| `history.churn.relative` | float | `churn.abs ÷ max(size, 1)` where size is the file's code-line count at the same revision. |
+
+The denominator is family-aware: source-code files use [`loc.sloc`](/metrics/code/sloc), SQL files
+use `sql.loc.code`, Markdown files use `markdown.loc.tloc`. A file whose analyzer published no
+line count falls back to a denominator of 1, keeping the value finite and deterministic.
+
+`history.churn.relative` is one of the **default [`mehen diff`](/commands/diff) columns**.
+
+## Semantics
+
+- Churn follows the file across **renames** — a renamed file keeps its accumulated churn instead
+  of resetting to zero.
+- **Merge commits churn nothing** (their first-parent diff would double-count every line already
+  attributed to the merged commits — the `git log --no-merges` convention).
+- **Binary and oversized blobs churn zero lines**: anything failing a NUL sniff or larger than
+  8 MiB is counted the way `git log --numstat` reports it (`-`), so a committed archive doesn't
+  count its bytes as "source lines".
+
+## How to read it
+
+| Signal | Interpretation |
+|---|---|
+| High relative churn, small file | The file is being rewritten over and over — a stability problem or a design that keeps not fitting. |
+| High absolute churn, low relative churn | A big file with proportionate change — usually fine. |
+| Rising churn in a diff | This change adds to an already-turbulent history; review accordingly. |
+
+## References
+
+- Nagappan, N. & Ball, T. (2005). *Use of Relative Code Churn Measures to Predict System Defect
+  Density.* ICSE 2005. [DOI](https://dl.acm.org/doi/10.1145/1062455.1062514).
+- [PyDriller process metrics](https://pydriller.readthedocs.io/en/latest/processmetrics.html).
+- code-maat `abs-churn` ([repo](https://github.com/adamtornhill/code-maat)).
+
+## See also
+
+- [Commit frequency](/metrics/history/commit-frequency) — how *often*, not how *much*.
+- [Hotspot](/metrics/history/hotspot) — change frequency × complexity.

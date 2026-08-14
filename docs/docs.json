@@ -165,6 +165,39 @@
         ]
       },
       {
+        "tab": "History metrics",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "metrics/history/overview"
+            ]
+          },
+          {
+            "group": "Change",
+            "pages": [
+              "metrics/history/churn",
+              "metrics/history/commit-frequency",
+              "metrics/history/age"
+            ]
+          },
+          {
+            "group": "People",
+            "pages": [
+              "metrics/history/ownership"
+            ]
+          },
+          {
+            "group": "Composites & risk",
+            "pages": [
+              "metrics/history/hotspot",
+              "metrics/history/sum-of-coupling",
+              "metrics/history/bug-risk"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "SQL metrics",
         "groups": [
           {

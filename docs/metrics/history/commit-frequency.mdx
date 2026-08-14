@@ -1,0 +1,41 @@
+---
+title: "Commit frequency"
+description: "How many commits touched a file — the change-frequency half of the hotspot signal."
+keywords: ["commit frequency", "change frequency", "revisions", "hotspot"]
+---
+
+**Commit frequency** counts the commits that touched a file over its walked history. Change
+frequency alone is a surprisingly strong signal — Tornhill's central observation is that most code
+is rarely touched, so the files a team returns to over and over are where structural problems (and
+future changes) concentrate. In Google's bug-prediction study, simply ranking files by the count of
+their bug-fixing commits performed nearly as well as more sophisticated schemes.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `history.commit_frequency` | int | Non-merge commits that touched the file, following renames. |
+
+## Semantics
+
+- **Renames don't reset the count** — a renamed file keeps its accumulated commit history.
+- **Merge commits are not counted** (the `git log --no-merges` convention): the merged commits
+  themselves are.
+- Each commit counts once per file it touches.
+
+## How to read it
+
+Raw frequency is context-dependent — a 10-commit file in a young repository can be hotter than a
+100-commit file in a decade-old one. Its main use is comparative (which files lead the ranking?)
+and as the change-frequency input to the [hotspot composite](/metrics/history/hotspot).
+
+## References
+
+- Tornhill, A. (2015). *Your Code as a Crime Scene.* Pragmatic Bookshelf.
+- Lewis, C. et al. (2013). *Does Bug Prediction Support Human Developers?* ICSE 2013 — the
+  "Rahman algorithm" finding on plain frequency ranking.
+
+## See also
+
+- [Hotspot](/metrics/history/hotspot) — frequency × cognitive complexity.
+- [Churn](/metrics/history/churn) — line volume rather than commit count.

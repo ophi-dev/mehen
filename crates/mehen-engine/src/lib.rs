@@ -28,6 +28,7 @@ mod detection;
 mod diff;
 mod dispatcher;
 mod git_attributes;
+mod history_metrics;
 mod metric_selector;
 mod registry;
 mod top_offenders;

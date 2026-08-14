@@ -1,0 +1,41 @@
+---
+title: "Code age"
+description: "Months since a file's last change — a stability proxy with a deterministic clock."
+keywords: ["code age", "stability", "code-maat", "crime scene"]
+---
+
+**Code age** is the time since a file last changed. It is a stability proxy: long-stable code has
+had its bugs shaken out and can often be treated as settled, while recently-churned code is where
+the risk lives. Tornhill uses age to find "islands of stability" worth extracting into packages —
+and, inversely, old code that suddenly starts changing again deserves attention.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `history.age_months` | float | `(analyzed revision's committer time − file's last change) ÷ 2,629,746 s` (the average Gregorian month), clamped at zero. |
+
+## The determinism wrinkle
+
+Age depends on "now" — and wall-clock time would make the same repository state produce different
+numbers on every run. mehen pins "now" to the **analyzed revision's committer timestamp**, so
+results are reproducible across runs and machines. The clamp at zero guards against clock-skewed
+commit metadata (a "last change" recorded after the analyzed revision).
+
+## How to read it
+
+| Signal | Interpretation |
+|---|---|
+| Old file, suddenly in a diff | Settled code being reopened — check the change against long-standing assumptions. |
+| Very young age, high [churn](/metrics/history/churn) | Actively evolving code; expect follow-up changes. |
+| Uniformly young ages across a module | The module hasn't stabilized — consider whether its design has converged before building on it. |
+
+## References
+
+- code-maat `age` analysis ([repo](https://github.com/adamtornhill/code-maat)).
+- Tornhill, A. (2015). *Your Code as a Crime Scene.* Pragmatic Bookshelf.
+
+## See also
+
+- [Churn](/metrics/history/churn) — how much has moved, regardless of when.
+- [Bug risk](/metrics/history/bug-risk) — time-decayed weighting of bug-fix history.

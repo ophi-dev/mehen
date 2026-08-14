@@ -1,0 +1,54 @@
+---
+title: "Bug risk"
+description: "Bug-fixing commit count and Google's Time-Weighted Risk — where fixes keep landing."
+keywords: ["bug prediction", "time-weighted risk", "twr", "fixcache", "google"]
+---
+
+Where bugs were fixed before is where bugs tend to appear again. mehen ships the two transparent
+forms of this signal from Google's bug-prediction study: a plain **bug-fix commit count** (the
+"Rahman algorithm" — which Google's developers preferred for its transparency, and which performed
+nearly as well as anything fancier) and **Time-Weighted Risk (TWR)**, which weights each fix by how
+recently it happened so that a file's ancient sins eventually stop counting against it.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `history.bugfix_commits` | int | Commits touching the file whose message matches the bug-fix heuristic. |
+| `history.twr` | float | `Σᵢ 1 / (1 + e^(−12·tᵢ + 12))` over the file's bug-fixing commits, where `tᵢ` is each fix's time normalized to `[0, 1]` across the walked history (0 = oldest commit, 1 = analyzed revision). |
+
+A fix at the analyzed revision contributes ~0.5; a fix at the start of history contributes
+effectively zero (~e⁻¹²). TWR is quantized to 10⁻⁹ before publication so that identical
+repositories produce bit-identical values across platforms.
+
+## The bug-fix heuristic
+
+TWR's honest weakness (acknowledged in the primary source) is that "bug-fixing commit" needs a
+definition. mehen uses a transparent whole-word match on the commit message: `fix`, `fixes`,
+`fixed`, `fixing`, `fixup`, `hotfix`, `bugfix`, `bug`, `bugs`. Word-boundary matching keeps
+`prefix` and `debugging` from counting; issue references like `#123` are deliberately **not**
+treated as bug markers, because on GitHub-style squash merges every PR commit carries one.
+
+## How to read it
+
+| Signal | Interpretation |
+|---|---|
+| High `bugfix_commits`, high TWR | Fixes keep landing here *recently* — the strongest "this file will bite again" signal. |
+| High `bugfix_commits`, low TWR | A formerly buggy file that has been quiet — probably rehabilitated. |
+| Rising TWR in a diff | The change touches a file in an active bug-fixing phase; extra review scrutiny is cheap insurance. |
+
+Present this signal modestly: Google's own deployment of TWR produced no significant change in
+developer behavior. It is a review-attention hint, not a verdict.
+
+## References
+
+- Lewis, C., Lin, Z., Sadowski, C., Zhu, X., Ou, R. & Whitehead Jr., E. J. (2013). *Does Bug
+  Prediction Support Human Developers? Findings from a Google Case Study.* ICSE 2013.
+  [PDF](https://users.soe.ucsc.edu/~ejw/papers/lewis-icse-2013.pdf).
+- Rahman, F., Posnett, D., Hindle, A., Barr, E. & Devanbu, P. (2011). *BugCache for inspections:
+  hit or miss?* ESEC/FSE 2011 — the frequency-ranking baseline.
+
+## See also
+
+- [Commit frequency](/metrics/history/commit-frequency) — all commits, not just fixes.
+- [Code age](/metrics/history/age) — general recency, without the bug-fix filter.

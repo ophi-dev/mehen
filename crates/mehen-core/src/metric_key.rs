@@ -77,4 +77,50 @@ pub mod keys {
     pub const NPA: &str = "npa";
     pub const NPM: &str = "npm";
     pub const WMC: &str = "wmc";
+    /// Rolled-up cognitive complexity as published onto the root
+    /// `MetricSpace` by the shared walker.
+    pub const COGNITIVE_SUM: &str = "cognitive.sum";
+
+    // SQL- and Markdown-analyzer-owned keys referenced by the engine's
+    // history composites (relative churn and hotspot read each
+    // language family's equivalents of `loc.sloc` / `cognitive.sum`).
+    pub const SQL_LOC_CODE: &str = "sql.loc.code";
+    pub const SQL_COGNITIVE_COMPLEXITY: &str = "sql.cognitive_complexity";
+    pub const MARKDOWN_LOC_TLOC: &str = "markdown.loc.tloc";
+    pub const MARKDOWN_COGNITIVE_COMPLEXITY: &str = "markdown.complexity.cognitive_complexity";
+
+    // Git history process metrics (`history.*` family, research
+    // foundation §6). Repository-scope: published by the engine's
+    // history enrichment, not by language analyzers.
+    pub const HISTORY_CHURN_ABS: &str = "history.churn.abs";
+    pub const HISTORY_CHURN_RELATIVE: &str = "history.churn.relative";
+    pub const HISTORY_AGE_MONTHS: &str = "history.age_months";
+    pub const HISTORY_AUTHORS: &str = "history.authors";
+    pub const HISTORY_MINOR_CONTRIBUTORS: &str = "history.minor_contributors";
+    pub const HISTORY_OWNERSHIP: &str = "history.ownership";
+    pub const HISTORY_COMMIT_FREQUENCY: &str = "history.commit_frequency";
+    pub const HISTORY_HOTSPOT: &str = "history.hotspot";
+    pub const HISTORY_SUM_OF_COUPLING: &str = "history.sum_of_coupling";
+    pub const HISTORY_TWR: &str = "history.twr";
+    pub const HISTORY_BUGFIX_COMMITS: &str = "history.bugfix_commits";
+
+    /// The complete `history.*` family. Unlike the extensible
+    /// language-owned namespaces, these engine-published keys are
+    /// fixed — selector parsing validates `history.*` names against
+    /// this set so a typo is rejected up front instead of triggering
+    /// the expensive repository walk and reading `0.0` through the
+    /// missing-key fallback.
+    pub const HISTORY_ALL: &[&str] = &[
+        HISTORY_CHURN_ABS,
+        HISTORY_CHURN_RELATIVE,
+        HISTORY_AGE_MONTHS,
+        HISTORY_AUTHORS,
+        HISTORY_MINOR_CONTRIBUTORS,
+        HISTORY_OWNERSHIP,
+        HISTORY_COMMIT_FREQUENCY,
+        HISTORY_HOTSPOT,
+        HISTORY_SUM_OF_COUPLING,
+        HISTORY_TWR,
+        HISTORY_BUGFIX_COMMITS,
+    ];
 }

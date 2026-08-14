@@ -29,6 +29,7 @@ use crate::ci;
 use crate::concurrent_files::mk_globset;
 use crate::detection::detect_language;
 use crate::git_attributes::GitAttributeFilter;
+use crate::history_metrics;
 use crate::metric_selector::{
     MetricSelector, Polarity as SelectorPolarity, default_selectors_for_language,
     parse_metric_selectors, read_metric as read_selector_metric,
@@ -51,7 +52,11 @@ pub fn analyze_diff(input: DiffInput) -> Result<DiffReport, DiffError> {
 }
 
 struct RevisionGitAttributeFilters {
-    base: GitAttributeFilter,
+    /// `None` when the base revision doesn't resolve locally (the
+    /// push-payload fallback after a force-push): baseline attributes
+    /// are unavailable, and deleted rows are then not attribute-
+    /// filtered rather than aborting the whole run.
+    base: Option<GitAttributeFilter>,
     head: GitAttributeFilter,
 }
 
@@ -61,23 +66,170 @@ impl RevisionGitAttributeFilters {
         from: &str,
         to: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let base = if repo.rev_parse_single(from).is_ok() {
+            Some(GitAttributeFilter::from_revision(repo, from)?)
+        } else {
+            log::warn!(
+                "baseline Git attributes unavailable ({from} does not resolve locally); deleted files are not attribute-filtered"
+            );
+            None
+        };
         Ok(Self {
-            base: GitAttributeFilter::from_revision(repo, from)?,
+            base,
             head: GitAttributeFilter::from_revision(repo, to)?,
         })
     }
 
     fn excludes(&mut self, file: &mehen_git::ChangedFile) -> std::io::Result<bool> {
         let filter = if file.status == ChangeStatus::Deleted {
-            &mut self.base
+            match self.base.as_mut() {
+                Some(base) => base,
+                None => return Ok(false),
+            }
         } else {
             &mut self.head
         };
         filter.excludes_relative_path(&file.path)
     }
+
+    /// Whether the base revision excludes `path`, for rename-source
+    /// eligibility. `None` baseline attributes exclude nothing.
+    fn base_excludes(&mut self, path: &Path) -> std::io::Result<bool> {
+        match self.base.as_mut() {
+            Some(base) => base.excludes_relative_path(path),
+            None => Ok(false),
+        }
+    }
+
+    /// Whether the head revision excludes `path`.
+    fn head_excludes(&mut self, path: &Path) -> std::io::Result<bool> {
+        self.head.excludes_relative_path(path)
+    }
 }
 
+/// The result of [`split_boundary_renames`]: the adjusted change list
+/// plus the split-rename *deletion* rows whose lineage history is
+/// already carried by their paired destination row — injecting the
+/// source lineage into those deletions too would count it twice
+/// (a `+1` on the destination and a full `-N` on the source).
+struct SplitChanges {
+    files: Vec<mehen_git::ChangedFile>,
+    history_suppressed_deletions: std::collections::HashSet<PathBuf>,
+}
+
+/// Split rename pairs whose two sides fall on different sides of a
+/// reporting boundary back into a deletion + addition.
+///
+/// A joined rename row is keyed by its *destination*, so a rename to
+/// an unsupported extension (`src/foo.py` → `archive/foo.txt`), out
+/// of the selected `--paths` scope, or into git-attribute-excluded
+/// territory (destination `linguist-generated` at head) would silently
+/// swallow the source file's disappearance — and a rename *across
+/// languages* (`.py` → `.rs`) would analyze the old blob with the new
+/// language's analyzer. A rename is kept joined only when both sides
+/// are selected, detect as the same language, and are
+/// attribute-eligible at their own revision (source at base,
+/// destination at head); otherwise each eligible side is reported on
+/// its own.
+fn split_boundary_renames(
+    changed: Vec<mehen_git::ChangedFile>,
+    selected: &dyn Fn(&Path) -> bool,
+    mut attribute_filters: Option<&mut RevisionGitAttributeFilters>,
+) -> std::io::Result<SplitChanges> {
+    let language_of = |p: &Path| {
+        Utf8PathBuf::try_from(p.to_path_buf())
+            .ok()
+            .and_then(|p| detect_language(&p))
+    };
+    let mut out = Vec::with_capacity(changed.len());
+    let mut history_suppressed_deletions = std::collections::HashSet::new();
+    for cf in changed {
+        let Some(source) = cf.source_path.clone() else {
+            out.push(cf);
+            continue;
+        };
+        // Attribute eligibility is per-side and per-revision: the
+        // source lived at base, the destination lives at head. Lookup
+        // failures propagate — treating an unreadable historical
+        // `.gitattributes` as "eligible" would silently bypass source
+        // exclusions and compute metrics from incomplete data.
+        let (src_attr_ok, dest_attr_ok) = match attribute_filters.as_deref_mut() {
+            Some(filters) => (
+                !filters.base_excludes(&source)?,
+                !filters.head_excludes(&cf.path)?,
+            ),
+            None => (true, true),
+        };
+        let dest_ok = selected(&cf.path) && dest_attr_ok;
+        let src_ok = selected(&source) && src_attr_ok;
+        let dest_lang = language_of(&cf.path);
+        let src_lang = language_of(&source);
+        if dest_ok && src_ok && dest_lang.is_some() && dest_lang == src_lang {
+            out.push(cf);
+            continue;
+        }
+        let emit_source = src_ok && src_lang.is_some();
+        let emit_dest = dest_ok && dest_lang.is_some();
+        if emit_source {
+            // When the paired destination row is also emitted, it
+            // carries the lineage history (via its retained
+            // `source_path`); the deletion row then reports the file
+            // *leaving this path* for static metrics only.
+            if emit_dest {
+                history_suppressed_deletions.insert(source.clone());
+            }
+            out.push(mehen_git::ChangedFile {
+                path: source.clone(),
+                status: ChangeStatus::Deleted,
+                source_path: None,
+            });
+        }
+        if emit_dest {
+            out.push(mehen_git::ChangedFile {
+                path: cf.path,
+                status: ChangeStatus::Added,
+                // The static baseline must not cross the boundary (an
+                // `Added` row reads no baseline blob), but the rename
+                // identity is preserved so *history* enrichment can
+                // still compare against the source lineage instead of
+                // manufacturing a full-history spike.
+                source_path: Some(source),
+            });
+        }
+    }
+    Ok(SplitChanges {
+        files: out,
+        history_suppressed_deletions,
+    })
+}
+
+/// Static inputs the history composites read (`history.hotspot` needs
+/// the cognitive sum, `history.churn.relative` the code-line count),
+/// per metric family. Staged into a split rename's synthetic baseline
+/// for injection and stripped afterwards — the keys are shared with
+/// displayed selectors.
+const COMPOSITE_INPUT_KEYS: [&str; 6] = [
+    mehen_core::keys::LOC_SLOC,
+    mehen_core::keys::COGNITIVE_SUM,
+    mehen_core::keys::SQL_LOC_CODE,
+    mehen_core::keys::SQL_COGNITIVE_COMPLEXITY,
+    mehen_core::keys::MARKDOWN_LOC_TLOC,
+    mehen_core::keys::MARKDOWN_COGNITIVE_COMPLEXITY,
+];
+
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
+    let mut input = input;
+    // The engine boundary accepts arbitrary threshold keys: a typo'd
+    // `history.*` key (the family is fixed — `keys::HISTORY_ALL`) can
+    // never read a published value, so evaluating it would silently
+    // pass or fail policy against a fabricated `0.0` — and walking
+    // the repository for it would be pure cost. Such thresholds are
+    // pulled out here and surfaced as analysis errors on the report.
+    let (valid_thresholds, unknown_history_thresholds): (Vec<Threshold>, Vec<Threshold>) = input
+        .thresholds
+        .drain(..)
+        .partition(|threshold| !history_metrics::is_invalid_history_selector(&threshold.selector));
+    input.thresholds = valid_thresholds;
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
     let mut git_attribute_filters = RevisionGitAttributeFilters::new(repo, &input.from, &input.to)
@@ -87,6 +239,73 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
                 input.from, input.to
             )))
         })?;
+    let changed = split_boundary_renames(
+        changed,
+        &|p: &Path| {
+            Utf8PathBuf::try_from(p.to_path_buf())
+                .map(|utf8| path_is_selected(&utf8, &input.paths))
+                .unwrap_or(false)
+        },
+        Some(&mut git_attribute_filters),
+    )
+    .map_err(|error| {
+        DiffError::Git(GitError::Internal(format!(
+            "failed to read Git attributes while splitting renames: {error}"
+        )))
+    })?
+    // Thresholds evaluate the head analysis only; deleted rows have no
+    // head side, so the deletion history suppression is irrelevant here.
+    .files;
+    // Thresholds against `history.*` keys need the repository history
+    // at the head revision (thresholds are evaluated against the head
+    // analysis only). Walked lazily — the family is opt-in.
+    let wants_history = history_metrics::names_want_history(
+        input.thresholds.iter().map(|t| t.selector.key.as_str()),
+    );
+    // `history.*` metrics change with every touch, not only when the
+    // endpoint trees differ: a file modified and restored within the
+    // range gained commit frequency and churn, and a head-side
+    // threshold can newly trip even though the endpoint diff has no
+    // row for it. Mirror the CLI diff's range-touch augmentation.
+    let changed = if wants_history {
+        let mut changed = changed;
+        let already: std::collections::HashSet<&PathBuf> =
+            changed.iter().map(|cf| &cf.path).collect();
+        let extra: Vec<mehen_git::ChangedFile> =
+            mehen_git::range_touched_files(repo, &input.from, &input.to)
+                .map_err(DiffError::Git)?
+                .into_iter()
+                .filter(|path| !already.contains(path))
+                .filter(|path| {
+                    // Unlike the CLI pipeline (whose documentation
+                    // section has no history columns), this API
+                    // analyzes Markdown and evaluates every threshold
+                    // against it — restored Markdown must be included
+                    // or a Git-only policy silently passes for it.
+                    // Undetected languages are skipped by the loop
+                    // anyway.
+                    Utf8PathBuf::try_from(path.clone())
+                        .ok()
+                        .and_then(|utf8| detect_language(&utf8))
+                        .is_some()
+                })
+                .map(|path| mehen_git::ChangedFile {
+                    path,
+                    status: ChangeStatus::Modified,
+                    source_path: None,
+                })
+                .collect();
+        drop(already);
+        changed.extend(extra);
+        changed
+    } else {
+        changed
+    };
+    let head_history = if wants_history {
+        Some(mehen_git::collect_history(repo, &input.to).map_err(DiffError::Git)?)
+    } else {
+        None
+    };
 
     let mut report = DiffReport {
         schema_version: "1.0".to_string(),
@@ -97,6 +316,19 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         analysis_errors: Vec::new(),
         threshold_violations: Vec::new(),
     };
+    for threshold in &unknown_history_thresholds {
+        report.analysis_errors.push(AnalysisErrorRecord {
+            path: Utf8PathBuf::new(),
+            side: DiffSide::Head,
+            diagnostics: vec![ParseDiagnostic::warning(
+                "engine.unknown_metric",
+                format!(
+                    "unknown history metric `{}` in threshold (not one of the fixed `history.*` keys); the threshold was not evaluated",
+                    threshold.selector.key
+                ),
+            )],
+        });
+    }
 
     for cf in changed {
         // mehen-git returns `PathBuf` paths; convert at the boundary.
@@ -122,52 +354,80 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
             continue;
         };
 
+        // Strict decode: analyzing lossy replacement text would
+        // measure *mutated* source — complexity and SLOC feeding the
+        // history composites (and every static threshold) would come
+        // from text that is not the blob's content. An undecodable
+        // side reads as unavailable instead, exactly like the CLI
+        // path: git-only history thresholds still evaluate below.
+        let decode = |bytes: Vec<u8>, side: DiffSide, report: &mut DiffReport| {
+            match String::from_utf8(bytes) {
+                Ok(text) => Some(text),
+                Err(_) => {
+                    report.analysis_errors.push(AnalysisErrorRecord {
+                        path: utf8_path.clone(),
+                        side,
+                        diagnostics: vec![ParseDiagnostic::warning(
+                            "engine.undecodable",
+                            "not valid UTF-8; static analysis unavailable for this side"
+                                .to_string(),
+                        )],
+                    });
+                    None
+                }
+            }
+        };
         let base_text = if cf.status == ChangeStatus::Added {
             None
         } else {
-            mehen_git::read_blob(repo, &input.from, &cf.path)
+            // Renamed files carry the baseline under their old path.
+            let base_path = cf.source_path.as_deref().unwrap_or(cf.path.as_path());
+            mehen_git::read_blob(repo, &input.from, base_path)
                 .map_err(DiffError::Git)?
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .and_then(|bytes| decode(bytes, DiffSide::Base, &mut report))
         };
         let head_text = if cf.status == ChangeStatus::Deleted {
             None
         } else {
             mehen_git::read_blob(repo, &input.to, &cf.path)
                 .map_err(DiffError::Git)?
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .and_then(|bytes| decode(bytes, DiffSide::Head, &mut report))
         };
 
         let analyzer = registry.analyzer_for(language);
-        let Some(analyzer) = analyzer else {
-            // Language detected but no analyzer registered (feature off);
-            // surface as a non-fatal analysis error.
+        if analyzer.is_none() {
+            // Language detected but no analyzer registered (feature
+            // off); surface as a non-fatal analysis error. Git-only
+            // history thresholds still evaluate through the fallback
+            // below — they need no parser.
             record_unavailable(&mut report, &utf8_path, language);
-            continue;
-        };
+        }
 
         let mut head_analysis: Option<LanguageAnalysis> = None;
-        for (text, side) in [
-            (base_text.as_deref(), DiffSide::Base),
-            (head_text.as_deref(), DiffSide::Head),
-        ] {
-            let Some(text) = text else { continue };
-            let source = SourceFile::new(utf8_path.clone(), language, text.to_string());
-            match analyzer.analyze(&source, &input.config) {
-                Ok(analysis) => {
-                    collect_diagnostics(&mut report, &utf8_path, side, &analysis);
-                    if matches!(side, DiffSide::Head) {
-                        head_analysis = Some(analysis);
+        if let Some(analyzer) = analyzer {
+            for (text, side) in [
+                (base_text.as_deref(), DiffSide::Base),
+                (head_text.as_deref(), DiffSide::Head),
+            ] {
+                let Some(text) = text else { continue };
+                let source = SourceFile::new(utf8_path.clone(), language, text.to_string());
+                match analyzer.analyze(&source, &input.config) {
+                    Ok(analysis) => {
+                        collect_diagnostics(&mut report, &utf8_path, side, &analysis);
+                        if matches!(side, DiffSide::Head) {
+                            head_analysis = Some(analysis);
+                        }
                     }
-                }
-                Err(err) => {
-                    report.analysis_errors.push(AnalysisErrorRecord {
-                        path: utf8_path.clone(),
-                        side,
-                        diagnostics: vec![ParseDiagnostic::error(
-                            "analysis.error",
-                            err.to_string(),
-                        )],
-                    });
+                    Err(err) => {
+                        report.analysis_errors.push(AnalysisErrorRecord {
+                            path: utf8_path.clone(),
+                            side,
+                            diagnostics: vec![ParseDiagnostic::error(
+                                "analysis.error",
+                                err.to_string(),
+                            )],
+                        });
+                    }
                 }
             }
         }
@@ -175,13 +435,92 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         // Threshold evaluation runs against the head analysis (the
         // post-change state) so policy gates like "head cyclomatic must
         // not exceed 30" mean what callers expect. Files with a
-        // blocking diagnostic on the head side are skipped — the
-        // analysis is incomplete and folding a partial number into a
-        // policy decision would be a false positive.
-        if let Some(analysis) = head_analysis.as_ref()
-            && !has_blocking_diagnostic(&analysis.diagnostics)
+        // blocking diagnostic on the head side skip *static*
+        // thresholds — the analysis is incomplete and folding a
+        // partial number into a policy decision would be a false
+        // positive — but parser-independent `history.*` thresholds
+        // still evaluate: their complete values come from the
+        // repository walk, and a malformed file must not silently
+        // pass a history policy.
+        let head_blocked = head_analysis
+            .as_ref()
+            .is_some_and(|analysis| has_blocking_diagnostic(&analysis.diagnostics));
+        // Whether the head-side per-file history lookup succeeded when
+        // a walk ran: `tracked_file` returning `None` (e.g. a lineage
+        // truncated by a platform-unrepresentable rename source) means
+        // history is unmeasurable for this file — `history.*`
+        // thresholds must be skipped, not read as `0.0` through the
+        // missing-key fallback (a commit-frequency limit would falsely
+        // pass, an ownership minimum falsely fail).
+        let head_history_available = match head_history.as_ref() {
+            Some(history) => history.tracked_file(cf.path.as_path()).is_some(),
+            None => true,
+        };
+        if let Some(analysis) = head_analysis.as_mut()
+            && !head_blocked
         {
-            evaluate_thresholds(&mut report, &utf8_path, &input.thresholds, analysis);
+            // Fold `history.*` into the head metric set first so
+            // history thresholds read real values. `tracked_file`,
+            // not `file`: a blob created purely by merge conflict
+            // resolution has no accumulator, and its synthesized
+            // zero-touch entry (with a real creation-based age) must
+            // back thresholds like any other measured value.
+            if let Some(history) = head_history.as_ref()
+                && let Some(fh) = history.tracked_file(cf.path.as_path())
+            {
+                history_metrics::inject_history_metrics(
+                    &mut analysis.root.metrics,
+                    &fh,
+                    history.head_seconds,
+                    true,
+                );
+            }
+            if head_history_available {
+                evaluate_thresholds(&mut report, &utf8_path, &input.thresholds, &analysis.root);
+            } else {
+                let static_thresholds: Vec<Threshold> = input
+                    .thresholds
+                    .iter()
+                    .filter(|t| !t.selector.key.as_str().starts_with("history."))
+                    .cloned()
+                    .collect();
+                evaluate_thresholds(&mut report, &utf8_path, &static_thresholds, &analysis.root);
+            }
+        } else if cf.status != ChangeStatus::Deleted
+            && head_history_available
+            && let Some(history) = head_history.as_ref()
+            && let Some(fh) = history.tracked_file(cf.path.as_path())
+        {
+            // Only *Git-only* history keys evaluate in this fallback:
+            // the composites (`history.hotspot`, relative churn) read
+            // cognitive complexity and SLOC from the unavailable
+            // static analysis, and injecting them into an empty space
+            // would score hotspot zero and divide churn by one.
+            let history_thresholds: Vec<Threshold> = input
+                .thresholds
+                .iter()
+                .filter(|t| {
+                    let key = t.selector.key.as_str();
+                    key.starts_with("history.")
+                        && key != mehen_core::keys::HISTORY_HOTSPOT
+                        && key != mehen_core::keys::HISTORY_CHURN_RELATIVE
+                })
+                .cloned()
+                .collect();
+            if !history_thresholds.is_empty() {
+                let mut space = MetricSpace::new(
+                    mehen_core::SpaceId(0),
+                    mehen_core::SpaceKind::Unit,
+                    mehen_core::SourceSpan::empty(),
+                );
+                history_metrics::inject_history_metrics(
+                    &mut space.metrics,
+                    &fh,
+                    history.head_seconds,
+                    false,
+                );
+                evaluate_thresholds(&mut report, &utf8_path, &history_thresholds, &space);
+            }
         }
 
         if matches!(language, mehen_core::Language::Markdown) {
@@ -201,10 +540,10 @@ fn evaluate_thresholds(
     report: &mut DiffReport,
     path: &Utf8PathBuf,
     thresholds: &[Threshold],
-    analysis: &LanguageAnalysis,
+    root: &MetricSpace,
 ) {
     for threshold in thresholds {
-        let actual = read_metric(&threshold.selector, &analysis.root);
+        let actual = read_metric(&threshold.selector, root);
         let violated = threshold.violated_by(actual);
         if violated {
             report.threshold_violations.push(ThresholdViolation {
@@ -344,6 +683,19 @@ struct MetricDiff {
     polarity: SelectorPolarity,
     is_new: bool,
     is_deleted: bool,
+    /// The side exists but this metric could not be computed for it —
+    /// a static-dependent history composite (`history.hotspot`,
+    /// `history.churn.relative`) on a side whose static analysis is
+    /// unavailable. The numeric field then holds a placeholder `0.0`
+    /// that must not be presented as a measurement: `delta` is forced
+    /// to `0.0` (no fabricated improvement/regression) and the
+    /// rendered cell reads `n/a`. Omitted from JSON when `false` so
+    /// ordinary rows keep their shape.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    current_unavailable: bool,
+    /// See `current_unavailable`, for the baseline side.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    baseline_unavailable: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -352,22 +704,27 @@ struct FileDiff {
     metrics: Vec<MetricDiff>,
     is_new: bool,
     is_deleted: bool,
+    /// Head-side function count read directly from the analysis (not
+    /// from the selected columns — the default set no longer includes
+    /// `nom.functions`), kept out of the JSON payload. Drives the
+    /// biggest-files-first report ordering.
+    #[serde(skip)]
+    functions: i64,
 }
 
 impl FileDiff {
     fn all_unchanged(&self) -> bool {
-        self.metrics.iter().all(|m| m.delta == 0.0)
+        // An unavailable side is *unknown*, not unchanged: its forced
+        // `delta == 0.0` claims no direction, but hiding the row would
+        // present "could not measure" as "measured, nothing changed".
+        self.metrics
+            .iter()
+            .all(|m| m.delta == 0.0 && !m.current_unavailable && !m.baseline_unavailable)
     }
 
     /// Sort key: total function count descending, then path ascending.
     fn sort_key(&self) -> (std::cmp::Reverse<i64>, PathBuf) {
-        let functions = self
-            .metrics
-            .iter()
-            .find(|m| m.name == "nom.functions")
-            .map(|m| m.current as i64)
-            .unwrap_or(0);
-        (std::cmp::Reverse(functions), self.path.clone())
+        (std::cmp::Reverse(self.functions), self.path.clone())
     }
 }
 
@@ -380,8 +737,11 @@ pub struct DiffOpts {
     #[clap(long)]
     to: Option<String>,
     /// Comma-separated metrics to compare
-    /// (default: cyclomatic,cognitive,nom.functions,loc.lloc,mi.visual_studio).
+    /// (default: cognitive,abc,mi.visual_studio,history.hotspot,history.churn.relative).
     /// Prefix with + for higher-is-better, - for lower-is-better.
+    /// Namespaced keys (`sql.*`, `markdown.*`, `history.*`) are accepted
+    /// verbatim; `history.*` metrics (including two of the defaults)
+    /// trigger a git history walk of both revisions.
     #[clap(long, short = 'M', value_delimiter = ',')]
     metrics: Vec<String>,
     /// Repository-relative files or directories to compare.
@@ -474,12 +834,115 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // 2. Get changed file list
     let repo = mehen_git::open_repo()?;
     let from_label = mehen_git::friendly_ref_label(&repo, &from_ref);
-    let changed = get_changed_files(&repo, &from_ref, &to_ref, &ci_ctx)?;
+    // The push payload describes the *event's* range; explicit
+    // `--from`/`--to` overrides compare a different one, where the
+    // payload holds no authority (an empty fold there must not blank
+    // out a real requested diff).
+    let refs_from_event = opts.from.is_none() && opts.to.is_none();
+    let changed = get_changed_files(&repo, &from_ref, &to_ref, &ci_ctx, refs_from_event)?;
+    // `history.*` metrics change with every touch, not only when the
+    // endpoint trees differ: a file modified in one range commit and
+    // reverted in a later one gained commit frequency, churn, and
+    // possibly bug-fix risk between the revisions, yet produces no
+    // endpoint diff row. When the request can read history columns
+    // (an explicit history selector, or default metrics — whose
+    // source-code set includes them), add such surviving touched
+    // paths as `Modified` rows: their static deltas are zero, and
+    // rows whose selected metrics all read zero still drop out of
+    // the report as unchanged.
+    let may_want_history = if opts.metrics.is_empty() {
+        true
+    } else {
+        history_metrics::names_want_history(
+            parse_metric_selectors(&opts.metrics).iter().map(|s| s.name),
+        )
+    };
+    // An authoritatively-empty push payload (branch created at an
+    // existing commit, or an add-then-remove push) means *nothing
+    // changed in this event* — and `resolve_refs`'s `HEAD~1` last
+    // resort is a guess at a range, not the event's range, so walking
+    // it would repopulate the report with the tip's previous commit.
+    let payload_authoritative_empty = refs_from_event
+        && ci_ctx.as_ref().is_some_and(|ctx| {
+            ctx.event_name == "push"
+                && ctx
+                    .changed_files
+                    .as_ref()
+                    .is_some_and(|files| files.is_empty())
+        });
+    let changed = if may_want_history
+        && !payload_authoritative_empty
+        && repo.rev_parse_single(from_ref.as_str()).is_ok()
+        && repo.rev_parse_single(to_ref.as_str()).is_ok()
+    {
+        let mut changed = changed;
+        let already: std::collections::HashSet<&PathBuf> =
+            changed.iter().map(|cf| &cf.path).collect();
+        let explicit = !opts.metrics.is_empty();
+        let extra: Vec<mehen_git::ChangedFile> =
+            mehen_git::range_touched_files(&repo, &from_ref, &to_ref)?
+                .into_iter()
+                .filter(|path| !already.contains(path))
+                .filter(|path| {
+                    // Only languages whose effective selectors read
+                    // history columns benefit from a synthetic row.
+                    // Markdown always routes to the documentation
+                    // pipeline (fixed columns, no history, no
+                    // unchanged-row filter), so a restored-content
+                    // README must never be resurrected here; under
+                    // default metrics, SQL's history-free defaults
+                    // exclude it too.
+                    let Ok(utf8_path) = Utf8PathBuf::try_from(path.clone()) else {
+                        return false;
+                    };
+                    let Some(language) = detect_language(&utf8_path) else {
+                        return false;
+                    };
+                    if matches!(language, Language::Markdown) {
+                        return false;
+                    }
+                    explicit
+                        || history_metrics::names_want_history(
+                            crate::metric_selector::default_metrics_for_language(language)
+                                .iter()
+                                .copied(),
+                        )
+                })
+                .map(|path| mehen_git::ChangedFile {
+                    path,
+                    status: ChangeStatus::Modified,
+                    source_path: None,
+                })
+                .collect();
+        drop(already);
+        changed.extend(extra);
+        changed
+    } else {
+        changed
+    };
 
     // 3. Filter files
     let include = mk_globset(opts.include);
     let exclude = mk_globset(opts.exclude);
     let paths = normalize_path_filters(&opts.paths);
+    let mut git_attribute_filters = opts
+        .ignore_git_attributes
+        .then(|| RevisionGitAttributeFilters::new(&repo, &from_ref, &to_ref))
+        .transpose()?;
+    // Shared selection predicate — the rename splitter and the main
+    // filter loop must agree, or a rename could be split here and then
+    // dropped there (or vice versa).
+    let is_selected = |p: &Path| {
+        legacy_path_is_selected(p, &paths)
+            && (include.is_empty() || include.is_match(p))
+            && (exclude.is_empty() || !exclude.is_match(p))
+    };
+    // Rename pairs straddling a path/language/attribute boundary fall
+    // back to a deletion + addition so neither side silently disappears.
+    let SplitChanges {
+        files: changed,
+        mut history_suppressed_deletions,
+    } = split_boundary_renames(changed, &is_selected, git_attribute_filters.as_mut())?;
     // When the caller passes explicit `--metric` names, that one list applies
     // to every file. With no `--metric`, defaults are resolved *per file's
     // language*: SQL files publish only `sql.*` keys, so the source-code
@@ -487,10 +950,6 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // unchanged (Codex P2). `explicit_metrics` selects between the two modes.
     let explicit_metrics = !opts.metrics.is_empty();
     let selectors = parse_metric_selectors(&opts.metrics);
-    let mut git_attribute_filters = opts
-        .ignore_git_attributes
-        .then(|| RevisionGitAttributeFilters::new(&repo, &from_ref, &to_ref))
-        .transpose()?;
 
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let analysis_config = AnalysisConfig::default();
@@ -499,10 +958,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     let mut markdown_files: Vec<mehen_git::ChangedFile> = Vec::new();
     for cf in changed {
         let p = &cf.path;
-        if !legacy_path_is_selected(p, &paths)
-            || (!include.is_empty() && !include.is_match(p))
-            || (!exclude.is_empty() && exclude.is_match(p))
-        {
+        if !is_selected(p) {
             continue;
         }
 
@@ -529,6 +985,77 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         filtered.push((cf, utf8_path, language));
     }
 
+    // History enrichment (`history.*`): repository-scope process
+    // metrics computed by one revision walk per side and folded into
+    // each file's metric set after static analysis. The walk costs one
+    // tree diff per commit, so it runs only when a file that survived
+    // filtering will actually read a history selector: any source file
+    // under an explicit history-bearing `--metrics` list, or any file
+    // whose *language defaults* include the history columns (SQL has
+    // its own history-free defaults, and Markdown files use the
+    // separate documentation pipeline — a SQL-only or docs-only diff
+    // must not pay for two full-history walks it never reads).
+    // Both sides are walked so history columns carry real deltas
+    // (e.g. commits/churn gained between base and head) instead of
+    // comparing against a phantom zero baseline.
+    let file_wants_history =
+        |(_, _, language): &(mehen_git::ChangedFile, Utf8PathBuf, Language)| {
+            if explicit_metrics {
+                history_metrics::names_want_history(selectors.iter().map(|s| s.name))
+            } else {
+                history_metrics::names_want_history(
+                    crate::metric_selector::default_metrics_for_language(*language)
+                        .iter()
+                        .copied(),
+                )
+            }
+        };
+
+    // A split deletion's lineage is only "carried elsewhere" when its
+    // paired destination row actually *reads* history columns: it must
+    // have entered the history-enriched source-code pipeline above
+    // (not been diverted to the documentation pipeline, or dropped by
+    // attribute filters or a non-UTF-8 path), and its effective
+    // selectors must include history metrics (a cross-language rename
+    // into SQL's history-free defaults reads none). Otherwise the
+    // deletion keeps its history as the lineage's only trace.
+    {
+        let history_consuming_sources: std::collections::HashSet<&PathBuf> = filtered
+            .iter()
+            .filter(|entry| file_wants_history(entry))
+            .filter_map(|(cf, _, _)| cf.source_path.as_ref())
+            .collect();
+        history_suppressed_deletions.retain(|src| history_consuming_sources.contains(src));
+    }
+
+    let histories: Option<(
+        Option<mehen_git::RepositoryHistory>,
+        mehen_git::RepositoryHistory,
+    )> = if filtered.iter().any(file_wants_history) {
+        // The head walk is a hard requirement — it feeds every
+        // history column. The *baseline* walk tolerates exactly one
+        // failure mode: an unresolvable revision (the payload fallback
+        // for a force-push keeps diffing with `from_ref` pointing at a
+        // commit that no longer exists locally). Baseline history
+        // columns then read as an empty baseline. Any other walk
+        // failure (corrupt or missing historical objects) still aborts
+        // — emitting full-history deltas from incomplete repository
+        // data would be silent garbage.
+        let base_history = match mehen_git::collect_history(&repo, &from_ref) {
+            Ok(history) => Some(history),
+            Err(GitError::RefNotFound(rev)) => {
+                log::warn!(
+                    "baseline history unavailable ({rev} does not resolve locally); history columns compare against an empty baseline"
+                );
+                None
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Some((base_history, mehen_git::collect_history(&repo, &to_ref)?))
+    } else {
+        None
+    };
+
     // 4. Compute metrics for each file via the per-language analyzer
     //    registry. The legacy `langs::get_function_spaces` pipeline is no
     //    longer used; we drive `LanguageAnalyzer::analyze` and read
@@ -554,11 +1081,24 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     for (cf, utf8_path, language) in &filtered {
         let is_deleted = cf.status == ChangeStatus::Deleted;
         let is_new = cf.status == ChangeStatus::Added;
+        // Renamed files carry the baseline under their old path — both
+        // the baseline blob and the baseline history live there.
+        let base_path = cf.source_path.as_deref().unwrap_or(cf.path.as_path());
 
-        let analyzer = match registry.analyzer_for(*language) {
-            Some(a) => a,
-            None => continue,
-        };
+        // No analyzer for a recognized language (the owning crate is
+        // feature-gated off in this build): static columns are
+        // unavailable, but repository history needs no parser — a
+        // requested Git-only selector must still produce a row via
+        // the synthetic history-only fallback below instead of the
+        // binary silently dropping the file.
+        let analyzer = registry.analyzer_for(*language);
+        if analyzer.is_none() {
+            log::warn!(
+                "{}: no analyzer registered for `{}` in this build; static columns unavailable",
+                cf.path.display(),
+                language.canonical()
+            );
+        }
 
         // Selectors for *this* file: the explicit list, or this language's
         // defaults. Register any new default columns into the display union.
@@ -575,6 +1115,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let mut analyze = |bytes: Vec<u8>, side: &str| -> Option<MetricSpace> {
+            let analyzer = analyzer.as_deref()?;
             let text = String::from_utf8(bytes).ok()?;
             let source = SourceFile::new(utf8_path.clone(), *language, text);
             let analysis = match analyzer.analyze(&source, &analysis_config) {
@@ -603,14 +1144,21 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             }
             if has_blocking_diagnostic(&analysis.diagnostics) {
                 analysis_failed = true;
+                // A partial tree behind an `Error`/`Fatal` diagnostic
+                // is not a measurement (§9.3): emitting its truncated
+                // statics — or blending them into the history
+                // composites — would mislead even though the run
+                // already exits non-zero. The side falls back to the
+                // history-only synthetic space below.
+                return None;
             }
             Some(analysis.root)
         };
 
-        let baseline_space: Option<MetricSpace> = if is_new {
+        let mut baseline_space: Option<MetricSpace> = if is_new {
             None
         } else {
-            match mehen_git::read_blob(&repo, &from_ref, &cf.path) {
+            match mehen_git::read_blob(&repo, &from_ref, base_path) {
                 Ok(Some(bytes)) => analyze(bytes, "baseline"),
                 Ok(None) => None,
                 Err(e) => {
@@ -620,7 +1168,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        let current_space: Option<MetricSpace> = if is_deleted {
+        let mut current_space: Option<MetricSpace> = if is_deleted {
             None
         } else {
             match mehen_git::read_blob(&repo, &to_ref, &cf.path) {
@@ -633,9 +1181,228 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+        // Fold the `history.*` family into each side's metric set, each
+        // against its own revision's history and head-relative "now".
+        // The baseline side of a renamed file reads its old path.
+        // The 🆕 flag is fixed *before* any baseline synthesis below —
+        // it reflects blob availability, not history availability.
+        let is_new_row = is_new && baseline_space.is_none();
+        // Whether each side's space is backed by real static
+        // analysis: the synthetic history-only fallbacks below carry
+        // no static inputs, and the composite keys are then omitted
+        // (hotspot would read a fabricated 0, relative churn would
+        // divide by 1). Consulted again when the selector table is
+        // built — the missing keys must surface as *unavailable*, not
+        // as a `0.0` that fakes an improvement. The split-rename
+        // baseline counts as backed exactly when its staged inputs
+        // were accepted.
+        let mut baseline_composites = true;
+        let mut current_composites = true;
+        // Whether each side's per-file history lookup succeeded when
+        // a walk ran: `tracked_file` returning `None` (e.g. a lineage
+        // truncated by a platform-unrepresentable rename source)
+        // means that side's history is unmeasurable — the Git-only
+        // selectors must read `n/a`, not a fabricated 0 through the
+        // missing-key fallback.
+        let mut baseline_history_available = true;
+        let mut current_history_available = true;
+        if let Some((base_history, head_history)) = histories.as_ref() {
+            baseline_composites = baseline_space.is_some();
+            current_composites = current_space.is_some();
+            // A split rename (`Added` row carrying `source_path`, e.g.
+            // a cross-language `a.py → a.rs`) has no baseline *blob*,
+            // but its baseline *history* is the source lineage. Give
+            // it a synthetic baseline space so history columns
+            // compare against real values instead of manufacturing a
+            // full-history spike. The history *composites* also read
+            // static inputs at the baseline revision — hotspot needs
+            // the source's cognitive complexity, relative churn its
+            // size — so exactly those inputs are staged from an
+            // analysis of the source blob for the injection below,
+            // then stripped again (their keys are shared with
+            // displayed selectors, which must keep reading 0 so the
+            // row keeps its new-file presentation and the paired
+            // deletion row isn't double-counted against).
+            let mut staged_composite_inputs = false;
+            if baseline_space.is_none()
+                && cf.source_path.is_some()
+                && base_history
+                    .as_ref()
+                    .is_some_and(|history| history.tracked_file(base_path).is_some())
+            {
+                let mut space = MetricSpace::new(
+                    mehen_core::SpaceId(0),
+                    mehen_core::SpaceKind::Unit,
+                    mehen_core::SourceSpan::empty(),
+                );
+                if let Ok(Some(bytes)) = mehen_git::read_blob(&repo, &from_ref, base_path)
+                    && let Ok(base_utf8) = Utf8PathBuf::try_from(base_path.to_path_buf())
+                    && let Some(base_language) = detect_language(&base_utf8)
+                    && let Some(base_analyzer) = registry.analyzer_for(base_language)
+                    && let Ok(text) = String::from_utf8(bytes)
+                {
+                    let base_source = SourceFile::new(base_utf8, base_language, text);
+                    if let Ok(base_analysis) = base_analyzer.analyze(&base_source, &analysis_config)
+                        && !has_blocking_diagnostic(&base_analysis.diagnostics)
+                    {
+                        for key in COMPOSITE_INPUT_KEYS {
+                            if let Some(value) = base_analysis
+                                .root
+                                .metrics
+                                .get(&mehen_core::MetricKey::new(key))
+                            {
+                                space.metrics.insert(key, value);
+                                staged_composite_inputs = true;
+                            }
+                        }
+                    }
+                }
+                baseline_space = Some(space);
+                baseline_composites = staged_composite_inputs;
+            }
+            // History metrics don't depend on decoding or parsing the
+            // blob: a side whose static analysis is unavailable (e.g.
+            // non-UTF-8 but non-binary content the analyzer rejects)
+            // still has valid repository history. Synthesize an empty
+            // space for such a side so history-only selectors read the
+            // real values instead of zero — static columns stay 0.
+            let empty_space = || {
+                MetricSpace::new(
+                    mehen_core::SpaceId(0),
+                    mehen_core::SpaceKind::Unit,
+                    mehen_core::SourceSpan::empty(),
+                )
+            };
+            if baseline_space.is_none()
+                && !is_new
+                && base_history
+                    .as_ref()
+                    .is_some_and(|history| history.tracked_file(base_path).is_some())
+            {
+                baseline_space = Some(empty_space());
+                baseline_composites = false;
+            }
+            if current_space.is_none()
+                && !is_deleted
+                && head_history.tracked_file(&cf.path).is_some()
+            {
+                current_space = Some(empty_space());
+                current_composites = false;
+            }
+            let mut sides: Vec<(
+                Option<&mut MetricSpace>,
+                &mehen_git::RepositoryHistory,
+                &Path,
+                bool,
+                bool,
+            )> = Vec::with_capacity(2);
+            // A split-rename deletion row's lineage is already carried
+            // by its paired destination row — injecting it here too
+            // would double-count the history (a +1 on the destination
+            // and a full -N on the source).
+            let deletion_history_suppressed =
+                is_deleted && history_suppressed_deletions.contains(&cf.path);
+            if deletion_history_suppressed {
+                // The suppressed source row's lineage is carried by
+                // its paired destination row: its history columns
+                // must read `n/a`, not a measured `0 (was: 0)` that
+                // falsely claims the source had zero history.
+                baseline_history_available = false;
+            }
+            if let Some(base_history) = base_history.as_ref()
+                && !deletion_history_suppressed
+            {
+                sides.push((
+                    baseline_space.as_mut(),
+                    base_history,
+                    base_path,
+                    baseline_composites,
+                    false,
+                ));
+            }
+            sides.push((
+                current_space.as_mut(),
+                head_history,
+                cf.path.as_path(),
+                current_composites,
+                true,
+            ));
+            for (space, history, path, with_composites, is_current) in sides {
+                // `tracked_file`, not `file`: each side's path exists
+                // at that side's revision, the head-blob gate keeps a
+                // dead prior occupant's history out, and a blob
+                // created purely by merge conflict resolution reads
+                // its synthesized zero-touch entry (real
+                // creation-based age) instead of nothing. A `None`
+                // here (e.g. a lineage truncated by a platform-
+                // unrepresentable rename source) means this side's
+                // history is *unmeasurable* — remembered per side so
+                // the selector table reads `n/a`, not a measured 0.
+                let fh = history.tracked_file(path);
+                if is_current {
+                    current_history_available = fh.is_some();
+                } else {
+                    baseline_history_available = fh.is_some();
+                }
+                if let Some(space) = space
+                    && let Some(fh) = fh
+                {
+                    history_metrics::inject_history_metrics(
+                        &mut space.metrics,
+                        &fh,
+                        history.head_seconds,
+                        with_composites,
+                    );
+                }
+            }
+            // The staged composite inputs did their job during
+            // injection; their keys are shared with displayed
+            // selectors (`cognitive` reads `cognitive.sum`, …), and
+            // leaving them would subtract the source's statics from
+            // this new row *and* double-count against the paired
+            // deletion row, which already carries them.
+            if staged_composite_inputs && let Some(space) = baseline_space.as_mut() {
+                for key in COMPOSITE_INPUT_KEYS {
+                    space.metrics.remove(&mehen_core::MetricKey::new(key));
+                }
+            }
+        }
+
         let metric_diffs: Vec<MetricDiff> = file_selectors
             .iter()
             .map(|sel| {
+                // A side whose static analysis is unavailable cannot
+                // value any analyzer-derived selector: the keys are
+                // absent from its synthetic history-only space, and
+                // the missing-key `0.0` fallback must not masquerade
+                // as a measurement — `cognitive 12 → 0` or `hotspot
+                // 12 → 0` would fake a full improvement in the diff
+                // columns. Git-only history selectors stay measurable.
+                //
+                // Symmetrically, a *requested but unresolvable*
+                // baseline walk (the force-push payload fallback keeps
+                // diffing while `from_ref` no longer resolves locally)
+                // leaves history selectors with no measured baseline —
+                // comparing the head's lifetime hotspot/churn against
+                // a numeric zero would render the entire history as a
+                // fresh regression and trip delta thresholds on
+                // fabricated values. New rows keep their 🆕 shape.
+                let baseline_history_missing = matches!(histories.as_ref(), Some((None, _)))
+                    && !is_new_row
+                    && sel.name.starts_with("history.");
+                let baseline_unavailable = baseline_history_missing
+                    || (baseline_space.is_some()
+                        && !history_metrics::selector_available(
+                            sel.name,
+                            baseline_composites,
+                            baseline_history_available,
+                        ));
+                let current_unavailable = current_space.is_some()
+                    && !history_metrics::selector_available(
+                        sel.name,
+                        current_composites,
+                        current_history_available,
+                    );
                 let baseline = baseline_space
                     .as_ref()
                     .map(|s| read_selector_metric(s, sel))
@@ -644,15 +1411,22 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                     .as_ref()
                     .map(|s| read_selector_metric(s, sel))
                     .unwrap_or(0.0);
+                let delta = if baseline_unavailable || current_unavailable {
+                    0.0
+                } else {
+                    current - baseline
+                };
                 MetricDiff {
                     name: sel.name,
                     label: sel.label,
                     current,
                     baseline,
-                    delta: current - baseline,
+                    delta,
                     polarity: sel.polarity,
-                    is_new: is_new && baseline_space.is_none(),
+                    is_new: is_new_row,
                     is_deleted,
+                    current_unavailable,
+                    baseline_unavailable,
                 }
             })
             .collect();
@@ -660,8 +1434,13 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         diffs.push(FileDiff {
             path: cf.path.clone(),
             metrics: metric_diffs,
-            is_new: is_new && baseline_space.is_none(),
+            is_new: is_new_row,
             is_deleted,
+            functions: current_space
+                .as_ref()
+                .and_then(|s| s.metrics.get(&mehen_core::MetricKey::new("nom.functions")))
+                .map(|v| v.as_f64() as i64)
+                .unwrap_or(0),
         });
     }
 
@@ -679,13 +1458,23 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         for cf in &markdown_files {
             let is_deleted = cf.status == ChangeStatus::Deleted;
             let is_candidate_new = cf.status == ChangeStatus::Added;
+            // Renamed docs carry the baseline under their old path.
+            let base_path = cf.source_path.as_deref().unwrap_or(cf.path.as_path());
             let base_metrics = if is_candidate_new {
                 None
             } else {
-                match mehen_git::read_blob(&repo, &from_ref, &cf.path) {
+                match mehen_git::read_blob(&repo, &from_ref, base_path) {
+                    // Analyze the baseline *as its old path*: Markdown
+                    // link/grounding metrics resolve relative
+                    // references from the file's location, so a
+                    // renamed doc's baseline must be evaluated from
+                    // the directory it actually lived in — otherwise a
+                    // link broken only by the move looks broken in the
+                    // baseline too and `--fail-on new-broken-link`
+                    // misses the regression.
                     Ok(Some(bytes)) => Some(mehen_markdown::analyze_markdown(
                         &String::from_utf8_lossy(&bytes),
-                        &cf.path,
+                        base_path,
                     )),
                     Ok(None) => None,
                     Err(e) => {
@@ -897,7 +1686,18 @@ fn resolve_refs(opts: &DiffOpts, ci_ctx: &Option<ci::CiContext>) -> (String, Str
             .from
             .clone()
             .unwrap_or_else(|| match ctx.event_name.as_str() {
-                "push" => "HEAD~1".to_string(),
+                // A multi-commit push must diff against the branch tip
+                // *before* the push (the payload's `before` SHA), not
+                // just the final commit's parent — otherwise renames
+                // and baselines from earlier commits in the push are
+                // invisible. A branch-creation push has no `before`;
+                // the parent of the *first pushed commit* is the right
+                // baseline there. `HEAD~1` remains the last resort.
+                "push" => ctx
+                    .before_sha
+                    .clone()
+                    .or_else(|| ctx.first_commit_sha.as_ref().map(|sha| format!("{sha}~1")))
+                    .unwrap_or_else(|| "HEAD~1".to_string()),
                 "pull_request" | "merge_group" => ctx
                     .base_ref
                     .as_ref()
@@ -919,22 +1719,79 @@ fn get_changed_files(
     from: &str,
     to: &str,
     ci_ctx: &Option<ci::CiContext>,
+    refs_from_event: bool,
 ) -> Result<Vec<mehen_git::ChangedFile>, GitError> {
-    // For push events with changed_files from payload, use those
-    // directly. The CI extractor folds per-commit `added` / `modified`
-    // / `removed` into a final per-path `ChangeStatus` so the diff
-    // downstream renders new/deleted files correctly (PR #95
-    // `pullrequestreview-4318662855`).
-    if let Some(ctx) = ci_ctx
+    // For push events, the payload's folded per-path statuses (PR #95)
+    // are a *fallback*: the real tree diff over the full push range is
+    // strictly more accurate — it carries rename identity (including
+    // break-rewrite recovery when a renamed file's old path was
+    // reused), correct type-change handling, and blob-only filtering.
+    // That applies to branch creations too: `resolve_refs` supplies
+    // the first pushed commit's parent there, so a resolvable baseline
+    // still yields a full-range tree diff with rename identity the
+    // payload can never express. The payload is used only when the
+    // refs don't resolve locally (a force-push discarded the `before`
+    // commit, or the branch's first commit is a root commit) — and
+    // only when the compared range *is* the event's range: explicit
+    // `--from`/`--to` overrides ask about a different range the
+    // payload knows nothing about.
+    if refs_from_event
+        && let Some(ctx) = ci_ctx
         && ctx.event_name == "push"
         && let Some(ref files) = ctx.changed_files
     {
-        return Ok(files.clone());
+        // An *empty* fold is authoritative: the push changed nothing
+        // net (add-then-remove), or a branch was created pointing at a
+        // commit that already existed — either way a ref-range diff
+        // (e.g. the `HEAD~1` last resort) would misreport the tip's
+        // last commit as this push's changes.
+        if files.is_empty() {
+            return Ok(files.clone());
+        }
+        // The payload fallback exists for exactly one failure mode:
+        // the push *baseline* not resolving locally (a force-push
+        // discarded the `before` commit, or a created branch's first
+        // commit is a root commit). Any other tree-diff failure —
+        // corrupt or missing objects in a resolvable range — must
+        // propagate rather than silently degrade to the payload's
+        // rename-less, type-change-less view.
+        if repo.rev_parse_single(from).is_err() {
+            log::warn!(
+                "falling back to the push payload's changed files ({from} does not resolve locally)"
+            );
+            // With the baseline unreadable, every baseline blob read
+            // downstream would fail and quietly turn `Modified` rows
+            // into fabricated full-value-vs-zero deltas, while
+            // `Deleted` rows (neither side analyzable) would vanish.
+            // Degrade honestly instead: modified files are presented
+            // as their current state only (an `Added` row, 🆕 in the
+            // report), and deletions are dropped with a warning.
+            let degraded = files
+                .iter()
+                .filter(|cf| {
+                    if cf.status == ChangeStatus::Deleted {
+                        log::warn!(
+                            "dropping deleted file {} from the report: its baseline \
+                             ({from}) is not available locally",
+                            cf.path.display()
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .map(|cf| mehen_git::ChangedFile {
+                    path: cf.path.clone(),
+                    status: ChangeStatus::Added,
+                    source_path: cf.source_path.clone(),
+                })
+                .collect();
+            return Ok(degraded);
+        }
     }
 
     mehen_git::changed_files(repo, from, to)
 }
-
 fn normalize_path_filters(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
         .iter()
@@ -1027,13 +1884,41 @@ fn format_metric_cell(md: &MetricDiff, from: &str) -> String {
     let current = format_f64(md.current);
 
     if md.is_new {
+        if md.current_unavailable {
+            return "n/a \u{1F195}".to_string(); // 🆕
+        }
         return format!("{current} \u{1F195}"); // 🆕
     }
 
     if md.is_deleted {
+        if md.baseline_unavailable {
+            // The deleted file's baseline value was never measurable;
+            // claiming "was: 0" (or a trend) would fabricate one.
+            return "0 (was: n/a)".to_string();
+        }
         let baseline = format_f64(md.baseline);
         let emoji = trend_emoji(md.delta, md.polarity);
         return format!("0 (was: {baseline}) {emoji}");
+    }
+
+    if md.current_unavailable || md.baseline_unavailable {
+        // One side (or both) could not be measured: show what is
+        // known, claim no direction — a trend emoji would assert an
+        // improvement/regression no measurement supports.
+        let cur = if md.current_unavailable {
+            "n/a".to_string()
+        } else {
+            current
+        };
+        if md.baseline_unavailable && md.current_unavailable {
+            return cur;
+        }
+        let base = if md.baseline_unavailable {
+            "n/a".to_string()
+        } else {
+            format_f64(md.baseline)
+        };
+        return format!("{cur} ({from}: {base})");
     }
 
     if md.delta == 0.0 {
@@ -1263,6 +2148,710 @@ binary.md binary
         assert_eq!(paths, vec!["kept.md"]);
     }
 
+    #[test]
+    fn analyze_diff_evaluates_history_thresholds_against_head_history() {
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("hot.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "history-base"]);
+
+        std::fs::write(dir.path().join("hot.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
+        git_ok(dir.path(), &["tag", "history-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![Threshold::new(
+            "history.commit_frequency".parse().unwrap(),
+            1.0,
+            Polarity::HigherIsWorse,
+        )];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "history-base".to_string(),
+                to: "history-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        // hot.py was touched by 2 commits at head — above the limit of 1.
+        assert_eq!(report.threshold_violations.len(), 1);
+        let v = &report.threshold_violations[0];
+        assert_eq!(v.path, "hot.py");
+        assert_eq!(v.evaluation.actual, 2.0);
+        assert!(v.evaluation.violated);
+    }
+
+    #[test]
+    fn analyze_diff_treats_undecodable_blobs_as_unavailable() {
+        // Invalid UTF-8 whose lossy replacement would still parse must
+        // not be analyzed: complexity/SLOC measured from mutated text
+        // would feed the history composites and static thresholds.
+        // The side reads as unavailable (recorded), and Git-only
+        // history thresholds still evaluate.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "latin-base"]);
+
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
+        git_ok(dir.path(), &["tag", "latin-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![
+            // Git-only: must still evaluate (2 commits > 1).
+            Threshold::new(
+                "history.commit_frequency".parse().unwrap(),
+                1.0,
+                Polarity::HigherIsWorse,
+            ),
+            // Static-dependent composite: must NOT evaluate against
+            // mutated text (any hotspot > -1 would trip if it did).
+            Threshold::new(
+                "history.hotspot".parse().unwrap(),
+                -1.0,
+                Polarity::HigherIsWorse,
+            ),
+        ];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "latin-base".to_string(),
+                to: "latin-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert!(
+            report.analysis_errors.iter().any(|record| {
+                record
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "engine.undecodable")
+            }),
+            "undecodable side must be recorded: {:?}",
+            report.analysis_errors
+        );
+        let violated: Vec<&str> = report
+            .threshold_violations
+            .iter()
+            .map(|v| v.evaluation.selector.key.as_str())
+            .collect();
+        assert!(
+            violated.contains(&"history.commit_frequency"),
+            "git-only threshold must still evaluate: {violated:?}"
+        );
+        assert!(
+            !violated.contains(&"history.hotspot"),
+            "a composite must not evaluate against mutated text: {violated:?}"
+        );
+    }
+
+    #[test]
+    fn analyze_diff_rejects_unknown_history_threshold_keys() {
+        // The engine boundary accepts arbitrary threshold keys: a
+        // typo'd history key must be surfaced as an analysis error
+        // and *not* evaluated — reading the unpublished key as `0.0`
+        // would silently pass (or, with a zero limit, fail) policy
+        // against a fabricated value.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("hot.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "typo-base"]);
+
+        std::fs::write(dir.path().join("hot.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
+        git_ok(dir.path(), &["tag", "typo-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![
+            Threshold::new(
+                "history.commit_frequncy".parse().unwrap(),
+                0.0,
+                Polarity::HigherIsWorse,
+            ),
+            // Valid key, unsupported aggregator: enrichment publishes
+            // root keys only, so this would read the `0.0` fallback.
+            Threshold::new(
+                "history.commit_frequency.max".parse().unwrap(),
+                -1.0,
+                Polarity::HigherIsWorse,
+            ),
+        ];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "typo-base".to_string(),
+                to: "typo-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert!(
+            report.threshold_violations.is_empty(),
+            "a typo'd key must not evaluate: {:?}",
+            report.threshold_violations
+        );
+        assert!(
+            report.analysis_errors.iter().any(|record| {
+                record
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "engine.unknown_metric")
+            }),
+            "the typo must be surfaced: {:?}",
+            report.analysis_errors
+        );
+    }
+
+    #[test]
+    fn analyze_diff_history_thresholds_cover_restored_files() {
+        // Modified in one range commit, restored in the next: the
+        // endpoint trees are identical, but the head history gained
+        // two commits and the threshold must still trip.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("wobbly.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "restored-base"]);
+
+        std::fs::write(dir.path().join("wobbly.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "grow"]);
+        std::fs::write(dir.path().join("wobbly.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "restore"]);
+        git_ok(dir.path(), &["tag", "restored-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![Threshold::new(
+            "history.commit_frequency".parse().unwrap(),
+            2.0,
+            Polarity::HigherIsWorse,
+        )];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "restored-base".to_string(),
+                to: "restored-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert_eq!(report.threshold_violations.len(), 1);
+        let v = &report.threshold_violations[0];
+        assert_eq!(v.path, "wobbly.py");
+        assert_eq!(v.evaluation.actual, 3.0);
+        assert!(v.evaluation.violated);
+    }
+
+    #[test]
+    fn history_thresholds_evaluate_despite_parser_failures() {
+        // A malformed head file skips static thresholds (incomplete
+        // analysis) but must not silently pass parser-independent
+        // history policies.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("broken.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "broken-base"]);
+
+        // Head revision: syntactically invalid Python.
+        std::fs::write(dir.path().join("broken.py"), "def broken(:\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "break it"]);
+        git_ok(dir.path(), &["tag", "broken-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![Threshold::new(
+            "history.commit_frequency".parse().unwrap(),
+            1.0,
+            Polarity::HigherIsWorse,
+        )];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "broken-base".to_string(),
+                to: "broken-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert_eq!(report.threshold_violations.len(), 1);
+        let v = &report.threshold_violations[0];
+        assert_eq!(v.path, "broken.py");
+        assert_eq!(v.evaluation.actual, 2.0);
+        assert!(v.evaluation.violated);
+    }
+
+    #[test]
+    fn blocked_parses_suppress_static_dependent_history_thresholds() {
+        // history.hotspot and history.churn.relative read cognitive
+        // complexity and SLOC from the unavailable analysis — they
+        // must not evaluate against an empty space (hotspot 0, churn
+        // divided by 1), while Git-only keys still do.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("broken.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "mixed-base"]);
+        std::fs::write(dir.path().join("broken.py"), "def broken(:\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "break it"]);
+        git_ok(dir.path(), &["tag", "mixed-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![
+            Threshold::new(
+                "history.commit_frequency".parse().unwrap(),
+                1.0,
+                Polarity::HigherIsWorse,
+            ),
+            // Limit -1 would be violated by *any* evaluated value —
+            // including the fabricated 0 an empty space would yield.
+            Threshold::new(
+                "history.hotspot".parse().unwrap(),
+                -1.0,
+                Polarity::HigherIsWorse,
+            ),
+            Threshold::new(
+                "history.churn.relative".parse().unwrap(),
+                -1.0,
+                Polarity::HigherIsWorse,
+            ),
+        ];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "mixed-base".to_string(),
+                to: "mixed-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        // Only the Git-only key evaluates against the fallback space.
+        assert_eq!(report.threshold_violations.len(), 1);
+        assert_eq!(
+            report.threshold_violations[0]
+                .evaluation
+                .selector
+                .key
+                .as_str(),
+            "history.commit_frequency"
+        );
+    }
+
+    #[test]
+    fn restored_markdown_evaluates_history_thresholds() {
+        // analyze_diff analyzes Markdown and evaluates thresholds on
+        // it — a restored README must not dodge a Git-only policy.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("README.md"), "# T\n\nStable.\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "md-thresh-base"]);
+        std::fs::write(dir.path().join("README.md"), "# T\n\nTemporary.\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "touch"]);
+        std::fs::write(dir.path().join("README.md"), "# T\n\nStable.\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "restore"]);
+        git_ok(dir.path(), &["tag", "md-thresh-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![Threshold::new(
+            "history.commit_frequency".parse().unwrap(),
+            2.0,
+            Polarity::HigherIsWorse,
+        )];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "md-thresh-base".to_string(),
+                to: "md-thresh-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert_eq!(report.threshold_violations.len(), 1);
+        let v = &report.threshold_violations[0];
+        assert_eq!(v.path, "README.md");
+        assert_eq!(v.evaluation.actual, 3.0);
+    }
+
+    #[test]
+    fn split_boundary_renames_keeps_same_language_in_scope_renames_joined() {
+        let rename = mehen_git::ChangedFile {
+            path: PathBuf::from("src/after.py"),
+            status: ChangeStatus::Modified,
+            source_path: Some(PathBuf::from("src/before.py")),
+        };
+        let out = split_boundary_renames(vec![rename], &|_| true, None)
+            .expect("no attribute filters")
+            .files;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, PathBuf::from("src/after.py"));
+        assert_eq!(out[0].status, ChangeStatus::Modified);
+        assert_eq!(
+            out[0].source_path.as_deref(),
+            Some(Path::new("src/before.py"))
+        );
+    }
+
+    #[test]
+    fn split_boundary_renames_reports_rename_to_unsupported_extension_as_deletion() {
+        // src/foo.py -> archive/foo.txt: the destination has no
+        // detectable language, so the Python file's disappearance must
+        // still be reported as a deletion instead of vanishing.
+        let rename = mehen_git::ChangedFile {
+            path: PathBuf::from("archive/foo.txt"),
+            status: ChangeStatus::Modified,
+            source_path: Some(PathBuf::from("src/foo.py")),
+        };
+        let out = split_boundary_renames(vec![rename], &|_| true, None)
+            .expect("no attribute filters")
+            .files;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, PathBuf::from("src/foo.py"));
+        assert_eq!(out[0].status, ChangeStatus::Deleted);
+        assert!(out[0].source_path.is_none());
+    }
+
+    #[test]
+    fn split_boundary_renames_splits_cross_language_renames() {
+        // A .py -> .rs rename must not analyze the Python baseline
+        // with the Rust analyzer: both sides are reported separately.
+        let rename = mehen_git::ChangedFile {
+            path: PathBuf::from("src/port.rs"),
+            status: ChangeStatus::Modified,
+            source_path: Some(PathBuf::from("src/port.py")),
+        };
+        let out = split_boundary_renames(vec![rename], &|_| true, None)
+            .expect("no attribute filters")
+            .files;
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].path, PathBuf::from("src/port.py"));
+        assert_eq!(out[0].status, ChangeStatus::Deleted);
+        assert_eq!(out[1].path, PathBuf::from("src/port.rs"));
+        assert_eq!(out[1].status, ChangeStatus::Added);
+    }
+
+    #[test]
+    fn split_boundary_renames_reports_rename_out_of_selected_scope_as_deletion() {
+        // With `--paths src`, a rename src/keep.py -> attic/keep.py
+        // must report the file leaving the scope.
+        let rename = mehen_git::ChangedFile {
+            path: PathBuf::from("attic/keep.py"),
+            status: ChangeStatus::Modified,
+            source_path: Some(PathBuf::from("src/keep.py")),
+        };
+        let selected = |p: &Path| p.starts_with("src");
+        let out = split_boundary_renames(vec![rename], &selected, None)
+            .expect("no attribute filters")
+            .files;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, PathBuf::from("src/keep.py"));
+        assert_eq!(out[0].status, ChangeStatus::Deleted);
+    }
+
+    #[test]
+    fn split_boundary_renames_splits_when_destination_is_attribute_excluded() {
+        // A rename whose destination becomes `linguist-generated` at
+        // head must still report the analyzable source's deletion —
+        // keeping the pair joined would let the head-side attribute
+        // check drop the whole row.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("hand_written.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "attr-rename-base"]);
+
+        git_ok(dir.path(), &["mv", "hand_written.py", "generated.py"]);
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "generated.py linguist-generated\n",
+        )
+        .unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "generate"]);
+        git_ok(dir.path(), &["tag", "attr-rename-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "attr-rename-base".to_string(),
+                to: "attr-rename-head".to_string(),
+                paths: Vec::new(),
+                thresholds: Vec::new(),
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        let paths: Vec<&str> = report.files.iter().map(|f| f.path.as_str()).collect();
+        // The source's deletion is reported; the attribute-excluded
+        // destination is not.
+        assert!(
+            paths.contains(&"hand_written.py"),
+            "source deletion must survive: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&"generated.py"),
+            "attribute-excluded destination must be dropped: {paths:?}"
+        );
+    }
+
+    /// A push-shaped [`ci::CiContext`] carrying a folded payload list.
+    fn push_ctx(files: Vec<mehen_git::ChangedFile>) -> ci::CiContext {
+        ci::CiContext {
+            provider: ci::CiProvider::GitHubActions,
+            event_name: "push".to_string(),
+            base_ref: None,
+            head_sha: None,
+            before_sha: None,
+            first_commit_sha: None,
+            changed_files: Some(files),
+            pr_number: None,
+            repository: None,
+        }
+    }
+
+    #[test]
+    fn push_events_prefer_the_tree_diff_over_the_payload() {
+        // A GitHub push payload reports a rename as removed + added
+        // (and a reused source path as Modified) with no rename
+        // identity. When the refs resolve locally, the real tree diff
+        // must win so the diff compares against the old path's
+        // baseline instead of a zero baseline / full-history spike.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("before.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "payload-base"]);
+        git_ok(dir.path(), &["mv", "before.py", "after.py"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "rename"]);
+        git_ok(dir.path(), &["tag", "payload-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let ctx = Some(push_ctx(vec![
+            mehen_git::ChangedFile {
+                path: PathBuf::from("before.py"),
+                status: ChangeStatus::Deleted,
+                source_path: None,
+            },
+            mehen_git::ChangedFile {
+                path: PathBuf::from("after.py"),
+                status: ChangeStatus::Added,
+                source_path: None,
+            },
+        ]));
+        let out = get_changed_files(&repo, "payload-base", "payload-head", &ctx, true).unwrap();
+        assert_eq!(out.len(), 1, "tree diff joins the rename: {out:?}");
+        assert_eq!(out[0].path, PathBuf::from("after.py"));
+        assert_eq!(out[0].status, ChangeStatus::Modified);
+        assert_eq!(out[0].source_path.as_deref(), Some(Path::new("before.py")));
+    }
+
+    #[test]
+    fn push_events_fall_back_to_the_payload_when_refs_unresolvable() {
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        let repo = gix::discover(dir.path()).unwrap();
+        let payload = vec![mehen_git::ChangedFile {
+            path: PathBuf::from("a.py"),
+            status: ChangeStatus::Added,
+            source_path: None,
+        }];
+        let ctx = Some(push_ctx(payload.clone()));
+        let out = get_changed_files(&repo, "no-such-ref", "also-missing", &ctx, true).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, payload[0].path);
+    }
+
+    #[test]
+    fn empty_push_payloads_are_authoritative_even_when_refs_resolve() {
+        // A push whose fold is empty (add-then-remove, or a branch
+        // created at an existing commit) changed nothing — the
+        // resolvable HEAD~1 range would misreport the tip's last
+        // commit as this push's changes.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("existing.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("tip.py"), "y = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "two"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let ctx = Some(push_ctx(Vec::new()));
+        // HEAD~1..HEAD resolves and would report tip.py; the empty
+        // payload must win.
+        let out = get_changed_files(&repo, "HEAD~1", "HEAD", &ctx, true).unwrap();
+        assert!(out.is_empty(), "empty payload is authoritative: {out:?}");
+    }
+
+    #[test]
+    fn explicit_refs_ignore_the_push_payload_entirely() {
+        // `--from`/`--to` overrides compare a range the event payload
+        // knows nothing about: neither an empty fold (which would
+        // blank out the report) nor an unresolvable-baseline fallback
+        // may apply.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("existing.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("tip.py"), "y = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "two"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let ctx = Some(push_ctx(Vec::new()));
+        let out = get_changed_files(&repo, "HEAD~1", "HEAD", &ctx, false).unwrap();
+        assert_eq!(out.len(), 1, "explicit range must be diffed: {out:?}");
+        assert_eq!(out[0].path, PathBuf::from("tip.py"));
+    }
+
+    #[test]
+    fn unresolvable_baseline_payloads_degrade_modified_and_drop_deleted() {
+        // With the baseline commit gone (force-push), every baseline
+        // blob read would fail downstream: a `Modified` row would
+        // fabricate a full-value-vs-zero delta and a `Deleted` row
+        // would vanish silently. The fallback must degrade honestly:
+        // modified files become current-state-only `Added` rows (🆕),
+        // deletions are dropped with a warning.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        let repo = gix::discover(dir.path()).unwrap();
+        let ctx = Some(push_ctx(vec![
+            mehen_git::ChangedFile {
+                path: PathBuf::from("kept.py"),
+                status: ChangeStatus::Modified,
+                source_path: None,
+            },
+            mehen_git::ChangedFile {
+                path: PathBuf::from("gone.py"),
+                status: ChangeStatus::Deleted,
+                source_path: None,
+            },
+            mehen_git::ChangedFile {
+                path: PathBuf::from("new.py"),
+                status: ChangeStatus::Added,
+                source_path: None,
+            },
+        ]));
+        let out = get_changed_files(&repo, "no-such-ref", "also-missing", &ctx, true).unwrap();
+        let mut rows: Vec<(&str, ChangeStatus)> = out
+            .iter()
+            .map(|f| (f.path.to_str().unwrap(), f.status))
+            .collect();
+        rows.sort_unstable_by_key(|(path, _)| *path);
+        assert_eq!(
+            rows,
+            vec![
+                ("kept.py", ChangeStatus::Added),
+                ("new.py", ChangeStatus::Added)
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_creation_pushes_prefer_the_full_range_tree_diff() {
+        // With `resolve_refs` supplying the first pushed commit's
+        // parent as the baseline, a branch-creation push gets a
+        // full-range tree diff (which carries rename identity the
+        // payload can never express). The payload — deliberately
+        // incomplete here — must lose when the baseline resolves.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("base.py"), "base = 0\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "main base"]);
+        // The "pushed branch": two commits on top of main.
+        std::fs::write(dir.path().join("first.py"), "a = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("second.py"), "b = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "two"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let ctx = push_ctx(vec![mehen_git::ChangedFile {
+            path: PathBuf::from("first.py"),
+            status: ChangeStatus::Added,
+            source_path: None,
+        }]);
+        // The baseline resolve_refs would supply: first pushed
+        // commit's parent = HEAD~2 here.
+        let out = get_changed_files(&repo, "HEAD~2", "HEAD", &Some(ctx), true).unwrap();
+        let mut paths: Vec<&str> = out.iter().filter_map(|f| f.path.to_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec!["first.py", "second.py"],
+            "the resolvable full-range tree diff must win over the payload"
+        );
+    }
+
     fn analysis_with_diagnostics(diagnostics: Vec<ParseDiagnostic>) -> LanguageAnalysis {
         LanguageAnalysis {
             language: Language::Rust,
@@ -1344,7 +2933,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &thresholds,
-            &analysis,
+            &analysis.root,
         );
         assert_eq!(report.threshold_violations.len(), 1);
         let v = &report.threshold_violations[0];
@@ -1367,7 +2956,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &thresholds,
-            &analysis,
+            &analysis.root,
         );
         assert!(report.threshold_violations.is_empty());
     }
@@ -1385,7 +2974,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &thresholds,
-            &analysis,
+            &analysis.root,
         );
         assert_eq!(report.threshold_violations.len(), 1);
         assert!(report.threshold_violations[0].evaluation.violated);
@@ -1415,7 +3004,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &thresholds,
-            &analysis,
+            &analysis.root,
         );
         // Only cyclomatic.sum exceeds its limit; cognitive.sum is fine.
         assert_eq!(report.threshold_violations.len(), 1);
@@ -1437,7 +3026,7 @@ binary.md binary
             &mut report,
             &Utf8PathBuf::from("src/main.rs"),
             &[],
-            &analysis,
+            &analysis.root,
         );
         assert!(report.threshold_violations.is_empty());
     }
@@ -1494,13 +3083,15 @@ binary.md binary
 
     #[test]
     fn test_parse_metric_selectors_defaults() {
+        // The §9.4 default comment set: one column per orthogonal
+        // dimension plus the two change-risk history signals.
         let selectors = parse_metric_selectors(&[]);
         assert_eq!(selectors.len(), 5);
-        assert_eq!(selectors[0].name, "cyclomatic");
-        assert_eq!(selectors[1].name, "cognitive");
-        assert_eq!(selectors[2].name, "nom.functions");
-        assert_eq!(selectors[3].name, "loc.lloc");
-        assert_eq!(selectors[4].name, "mi.visual_studio");
+        assert_eq!(selectors[0].name, "cognitive");
+        assert_eq!(selectors[1].name, "abc");
+        assert_eq!(selectors[2].name, "mi.visual_studio");
+        assert_eq!(selectors[3].name, "history.hotspot");
+        assert_eq!(selectors[4].name, "history.churn.relative");
     }
 
     #[test]
@@ -1638,6 +3229,8 @@ binary.md binary
             polarity: SelectorPolarity::LowerIsBetter,
             is_new: true,
             is_deleted: false,
+            current_unavailable: false,
+            baseline_unavailable: false,
         };
         assert_eq!(format_metric_cell(&md, "main"), "5 \u{1F195}");
     }
@@ -1653,6 +3246,8 @@ binary.md binary
             polarity: SelectorPolarity::LowerIsBetter,
             is_new: false,
             is_deleted: false,
+            current_unavailable: false,
+            baseline_unavailable: false,
         };
         assert_eq!(format_metric_cell(&md, "main"), "5 \u{26AA}");
     }
@@ -1668,6 +3263,8 @@ binary.md binary
             polarity: SelectorPolarity::LowerIsBetter,
             is_new: false,
             is_deleted: false,
+            current_unavailable: false,
+            baseline_unavailable: false,
         };
         assert_eq!(format_metric_cell(&md, "main"), "12 (main: 8) \u{1F534}");
     }
@@ -1683,8 +3280,53 @@ binary.md binary
             polarity: SelectorPolarity::LowerIsBetter,
             is_new: false,
             is_deleted: true,
+            current_unavailable: false,
+            baseline_unavailable: false,
         };
         assert_eq!(format_metric_cell(&md, "main"), "0 (was: 10) \u{1F7E2}");
+    }
+
+    #[test]
+    fn test_format_metric_cell_unavailable_sides_claim_no_trend() {
+        // A static-dependent composite on a side without static
+        // analysis is *unavailable*, not zero: the cell must not
+        // present the placeholder as a measurement or claim a trend
+        // (a green arrow for "hotspot 12 → 0" would fake a cleared
+        // hotspot).
+        let md = |current_unavailable: bool, baseline_unavailable: bool, is_new, is_deleted| {
+            MetricDiff {
+                name: "history.hotspot",
+                label: "Hotspot",
+                current: 0.0,
+                baseline: 12.0,
+                delta: 0.0,
+                polarity: SelectorPolarity::LowerIsBetter,
+                is_new,
+                is_deleted,
+                current_unavailable,
+                baseline_unavailable,
+            }
+        };
+        assert_eq!(
+            format_metric_cell(&md(true, false, false, false), "main"),
+            "n/a (main: 12)"
+        );
+        assert_eq!(
+            format_metric_cell(&md(false, true, false, false), "main"),
+            "0 (main: n/a)"
+        );
+        assert_eq!(
+            format_metric_cell(&md(true, true, false, false), "main"),
+            "n/a"
+        );
+        assert_eq!(
+            format_metric_cell(&md(true, false, true, false), "main"),
+            "n/a \u{1F195}"
+        );
+        assert_eq!(
+            format_metric_cell(&md(false, true, false, true), "main"),
+            "0 (was: n/a)"
+        );
     }
 
     #[test]
@@ -1700,18 +3342,22 @@ binary.md binary
                 polarity: SelectorPolarity::LowerIsBetter,
                 is_new: false,
                 is_deleted: false,
+                current_unavailable: false,
+                baseline_unavailable: false,
             }],
             is_new: false,
             is_deleted: false,
+            functions: 0,
         };
         assert!(diff.all_unchanged());
     }
 
-    #[test]
-    fn test_resolve_refs_explicit() {
-        let opts = DiffOpts {
-            from: Some("abc".to_string()),
-            to: Some("def".to_string()),
+    /// `DiffOpts` fixture for ref-resolution tests — only `from`/`to`
+    /// vary; everything else is the clap default.
+    fn resolve_refs_opts(from: Option<&str>, to: Option<&str>) -> DiffOpts {
+        DiffOpts {
+            from: from.map(str::to_string),
+            to: to.map(str::to_string),
             metrics: vec![],
             paths: vec![],
             include: vec![],
@@ -1720,7 +3366,12 @@ binary.md binary
             show_unchanged: false,
             ignore_git_attributes: true,
             fail_on: vec![],
-        };
+        }
+    }
+
+    #[test]
+    fn test_resolve_refs_explicit() {
+        let opts = resolve_refs_opts(Some("abc"), Some("def"));
         let (from, to) = resolve_refs(&opts, &None);
         assert_eq!(from, "abc");
         assert_eq!(to, "def");
@@ -1728,18 +3379,7 @@ binary.md binary
 
     #[test]
     fn test_resolve_refs_no_ci() {
-        let opts = DiffOpts {
-            from: None,
-            to: None,
-            metrics: vec![],
-            paths: vec![],
-            include: vec![],
-            exclude: vec![],
-            output_format: None,
-            show_unchanged: false,
-            ignore_git_attributes: true,
-            fail_on: vec![],
-        };
+        let opts = resolve_refs_opts(None, None);
         let (from, to) = resolve_refs(&opts, &None);
         assert_eq!(from, "main");
         assert_eq!(to, "HEAD");
@@ -1752,22 +3392,13 @@ binary.md binary
             event_name: "pull_request".to_string(),
             base_ref: Some("develop".to_string()),
             head_sha: Some("abc123".to_string()),
+            before_sha: None,
+            first_commit_sha: None,
             changed_files: None,
             pr_number: Some(42),
             repository: Some("owner/repo".to_string()),
         };
-        let opts = DiffOpts {
-            from: None,
-            to: None,
-            metrics: vec![],
-            paths: vec![],
-            include: vec![],
-            exclude: vec![],
-            output_format: None,
-            show_unchanged: false,
-            ignore_git_attributes: true,
-            fail_on: vec![],
-        };
+        let opts = resolve_refs_opts(None, None);
         let (from, to) = resolve_refs(&opts, &Some(ctx));
         assert_eq!(from, "origin/develop");
         assert_eq!(to, "abc123");
@@ -1780,24 +3411,59 @@ binary.md binary
             event_name: "push".to_string(),
             base_ref: None,
             head_sha: Some("def456".to_string()),
+            before_sha: None,
+            first_commit_sha: None,
             changed_files: None,
             pr_number: None,
             repository: Some("owner/repo".to_string()),
         };
-        let opts = DiffOpts {
-            from: None,
-            to: None,
-            metrics: vec![],
-            paths: vec![],
-            include: vec![],
-            exclude: vec![],
-            output_format: None,
-            show_unchanged: false,
-            ignore_git_attributes: true,
-            fail_on: vec![],
-        };
+        let opts = resolve_refs_opts(None, None);
         let (from, to) = resolve_refs(&opts, &Some(ctx));
         assert_eq!(from, "HEAD~1");
+        assert_eq!(to, "def456");
+    }
+
+    #[test]
+    fn test_resolve_refs_github_push_uses_payload_before_sha() {
+        // A multi-commit push must diff against the branch tip before
+        // the push, not just the final commit's parent — otherwise
+        // renames/baselines from earlier commits in the push vanish.
+        let ctx = ci::CiContext {
+            provider: ci::CiProvider::GitHubActions,
+            event_name: "push".to_string(),
+            base_ref: None,
+            head_sha: Some("def456".to_string()),
+            before_sha: Some("abc999".to_string()),
+            first_commit_sha: None,
+            changed_files: None,
+            pr_number: None,
+            repository: Some("owner/repo".to_string()),
+        };
+        let opts = resolve_refs_opts(None, None);
+        let (from, to) = resolve_refs(&opts, &Some(ctx));
+        assert_eq!(from, "abc999");
+        assert_eq!(to, "def456");
+    }
+
+    #[test]
+    fn test_resolve_refs_branch_creation_uses_first_pushed_parent() {
+        // Branch creation has no `before`; the parent of the first
+        // pushed commit is the right analysis baseline so files
+        // changed only in earlier pushed commits still show deltas.
+        let ctx = ci::CiContext {
+            provider: ci::CiProvider::GitHubActions,
+            event_name: "push".to_string(),
+            base_ref: None,
+            head_sha: Some("def456".to_string()),
+            before_sha: None,
+            first_commit_sha: Some("f1r5t".to_string()),
+            changed_files: None,
+            pr_number: None,
+            repository: Some("owner/repo".to_string()),
+        };
+        let opts = resolve_refs_opts(None, None);
+        let (from, to) = resolve_refs(&opts, &Some(ctx));
+        assert_eq!(from, "f1r5t~1");
         assert_eq!(to, "def456");
     }
 
@@ -2028,6 +3694,7 @@ src/archive.txt binary
             metrics: vec![],
             is_new: false,
             is_deleted: false,
+            functions: 0,
         }];
         let res = print_json(&diffs, None);
         assert!(res.is_ok(), "valid input must serialize cleanly");

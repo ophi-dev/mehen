@@ -52,3 +52,9 @@ aggregation rolls up to the file.
 Markdown documentation gets its own metric family — DMI, MRPC, MCC, link debt, filler/lazy risk, etc. —
 because functions, classes, and statements do not exist in prose. See
 [Markdown metrics](/metrics/markdown/overview).
+
+## History is separate too
+
+How a file *changed over time* — churn, code age, ownership, hotspots, change coupling, bug risk —
+is the `history.*` family, computed from repository history rather than from the parse tree. See
+[History metrics](/metrics/history/overview).

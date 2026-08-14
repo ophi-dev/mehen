@@ -464,3 +464,1637 @@ global-only.py linguist-vendored
         ]
     );
 }
+
+#[test]
+fn diff_reports_history_metrics_for_both_sides() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "sample.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "history-base"]);
+
+    write_python(dir.path(), "sample.py", "x = 1\ny = 2\nz = 3\nw = 4\n");
+    commit_all(dir.path(), "fix: append two lines");
+    git_ok(dir.path(), &["tag", "history-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "history-base",
+            "--to",
+            "history-head",
+            "--metrics",
+            "history.commit_frequency,history.churn.abs,history.bugfix_commits",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"].as_str(), Some("sample.py"));
+
+    let metric = |name: &str| -> (f64, f64) {
+        let m = files[0]["metrics"]
+            .as_array()
+            .expect("metrics array")
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing metric {name}"));
+        (
+            m["current"].as_f64().expect("current"),
+            m["baseline"].as_f64().expect("baseline"),
+        )
+    };
+
+    // Head history: 2 commits, 2+2 lines added; base history: 1 commit,
+    // 2 lines. Only the head commit message matches the bug-fix
+    // heuristic.
+    assert_eq!(metric("history.commit_frequency"), (2.0, 1.0));
+    assert_eq!(metric("history.churn.abs"), (4.0, 2.0));
+    assert_eq!(metric("history.bugfix_commits"), (1.0, 0.0));
+}
+
+#[test]
+fn diff_history_composites_read_na_when_head_is_undecodable() {
+    // A head side whose static analysis is unavailable (non-UTF-8
+    // content) cannot value the static-dependent composites. The keys
+    // are omitted from its synthetic space — and the diff must report
+    // them as *unavailable* (no fabricated `hotspot 12 → 0`
+    // improvement), while plain history metrics keep reading real
+    // values.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(
+        dir.path(),
+        "sample.py",
+        "def foo(x):\n    if x:\n        return 1\n    return 2\n",
+    );
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "na-base"]);
+
+    std::fs::write(
+        dir.path().join("sample.py"),
+        b"# caf\xe9\ndef foo(x):\n    if x:\n        return 1\n    return 3\n" as &[u8],
+    )
+    .expect("write undecodable head");
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "na-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "na-base",
+            "--to",
+            "na-head",
+            "--metrics",
+            "cognitive,history.hotspot,history.churn.relative,history.churn.abs",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    // The undecodable head is recorded as a failed analysis (exit is
+    // non-zero by design); the JSON payload must still be honest.
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    assert_eq!(files.len(), 1);
+    let metric = |name: &str| -> serde_json::Value {
+        files[0]["metrics"]
+            .as_array()
+            .expect("metrics array")
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing metric {name}"))
+            .clone()
+    };
+
+    for name in ["cognitive", "history.hotspot", "history.churn.relative"] {
+        let m = metric(name);
+        assert_eq!(
+            m["current_unavailable"].as_bool(),
+            Some(true),
+            "{name} must be flagged unavailable on the undecodable head"
+        );
+        assert_eq!(
+            m["delta"].as_f64(),
+            Some(0.0),
+            "{name} must not claim an improvement from the placeholder"
+        );
+    }
+    // The parser-independent metric still reads real history values on
+    // both sides and is not flagged.
+    let churn_abs = metric("history.churn.abs");
+    assert_eq!(churn_abs["current_unavailable"].as_bool(), None);
+    assert!(churn_abs["current"].as_f64().expect("current") > 0.0);
+}
+
+#[test]
+fn diff_reads_history_for_merge_created_zero_touch_files() {
+    // A blob created purely by merge conflict resolution has no walk
+    // accumulator (`RepositoryHistory::file` is `None`), but its
+    // synthesized zero-touch entry carries a real creation-based age
+    // — the diff must read it via `tracked_file` instead of
+    // fabricating `history.age_months = 0`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let date = |n: i64| format!("{} +0000", 1_700_000_000 + n * 100_000);
+    let git_at = |args: &[&str], n: i64| -> String {
+        let output = Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Mehen Test")
+            .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+            .env("GIT_COMMITTER_NAME", "Mehen Test")
+            .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+            .env("GIT_AUTHOR_DATE", date(n))
+            .env("GIT_COMMITTER_DATE", date(n))
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git stdout utf8")
+            .trim()
+            .to_string()
+    };
+    git_at(&["init", "-q", "-b", "main"], 0);
+    git_at(&["config", "commit.gpgsign", "false"], 0);
+    write_python(dir.path(), "a.py", "x = 1\n");
+    git_at(&["add", "-A"], 0);
+    git_at(&["commit", "-q", "-m", "root"], 0);
+    let root = git_at(&["rev-parse", "HEAD"], 0);
+
+    git_at(&["checkout", "-q", "-b", "side"], 1);
+    write_python(dir.path(), "b.py", "y = 1\n");
+    git_at(&["add", "-A"], 1);
+    git_at(&["commit", "-q", "-m", "side"], 1);
+    let side = git_at(&["rev-parse", "HEAD"], 1);
+
+    // The merge tree carries a file absent from both parents.
+    write_python(dir.path(), "merge_only.py", "m = 1\n");
+    git_at(&["add", "-A"], 2);
+    let tree = git_at(&["write-tree"], 2);
+    let merge = git_at(
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &root,
+            "-p",
+            &side,
+            "-m",
+            "merge with new file",
+        ],
+        2,
+    );
+    // Advance HEAD one commit (100 000 s) past the creating merge
+    // without touching the merge-created blob.
+    git_at(&["checkout", "-q", &merge], 3);
+    git_at(&["checkout", "-q", "-b", "after"], 3);
+    write_python(dir.path(), "a.py", "x = 1\nz = 2\n");
+    git_at(&["commit", "-q", "-am", "later"], 3);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            &root,
+            "--to",
+            "HEAD",
+            "--metrics",
+            "history.age_months",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let row = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array")
+        .iter()
+        .find(|f| f["path"].as_str() == Some("merge_only.py"))
+        .expect("merge-created file must have a row")
+        .clone();
+    let age = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.age_months"))
+        .expect("age metric present")["current"]
+        .as_f64()
+        .expect("current");
+    // Creation at t2, HEAD at t3: 100 000 seconds.
+    let expected = 100_000.0 / (30.436875 * 86_400.0);
+    assert!(
+        (age - expected).abs() < 1e-6,
+        "age must come from the creating merge, got {age}"
+    );
+}
+
+#[test]
+fn top_offenders_ranks_by_history_metrics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    // busy.py is touched by three commits, calm.py by one.
+    write_python(dir.path(), "busy.py", "a = 1\n");
+    write_python(dir.path(), "calm.py", "b = 1\n");
+    commit_all(dir.path(), "initial");
+    write_python(dir.path(), "busy.py", "a = 1\na2 = 2\n");
+    commit_all(dir.path(), "grow busy");
+    write_python(dir.path(), "busy.py", "a = 1\na2 = 2\na3 = 3\n");
+    commit_all(dir.path(), "grow busy more");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 2);
+    // Worst first: busy.py with 3 commits, then calm.py with 1.
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("busy.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(3.0));
+    assert!(
+        offenders[1]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("calm.py")
+    );
+    assert_eq!(offenders[1]["metrics"][0]["value"].as_f64(), Some(1.0));
+}
+
+#[test]
+fn diff_default_columns_include_history_hotspot_and_churn() {
+    // Research foundation §9.4: the default PR-comment set is
+    // Cognitive, ABC, MI, Hotspot, Churn — the last two computed from
+    // the git history walk without any explicit `--metrics`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(
+        dir.path(),
+        "sample.py",
+        "def foo(x):\n    if x:\n        return 1\n    return 2\n",
+    );
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "default-base"]);
+
+    write_python(
+        dir.path(),
+        "sample.py",
+        "def foo(x):\n    if x:\n        return 1\n    if x > 2:\n        return 3\n    return 2\n",
+    );
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "default-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "default-base",
+            "--to",
+            "default-head",
+            "--output-format",
+            "markdown",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(
+        stdout.contains("| File | Cognitive | ABC | MI | Hotspot | Churn |"),
+        "expected the §9.4 default column header, got:\n{stdout}"
+    );
+    assert!(stdout.contains("sample.py"), "row missing:\n{stdout}");
+}
+
+#[test]
+fn top_offenders_discovers_history_from_the_analyzed_paths() {
+    // `mehen top-offenders -M history.… /path/to/repo` must load
+    // *that* repository's history even when the process CWD is not
+    // inside it (or is inside a different repository).
+    let repo_dir = tempfile::tempdir().expect("repo tempdir");
+    init_git_repo(repo_dir.path());
+    write_python(repo_dir.path(), "tracked.py", "a = 1\n");
+    commit_all(repo_dir.path(), "one");
+    write_python(repo_dir.path(), "tracked.py", "a = 1\nb = 2\n");
+    commit_all(repo_dir.path(), "two");
+
+    let elsewhere = tempfile::tempdir().expect("non-repo tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(elsewhere.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            repo_dir.path().to_str().expect("UTF-8 temp path"),
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 1);
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("tracked.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn diff_joins_rename_pairs_and_carries_baseline_history() {
+    // A renamed file must appear once, compared against its old path's
+    // metrics and history — not as a deleted row plus a 🆕 row whose
+    // entire accumulated history shows up as a fresh delta.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "before.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "rename-base"]);
+
+    git_ok(dir.path(), &["mv", "before.py", "after.py"]);
+    write_python(dir.path(), "after.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "rename and extend");
+    git_ok(dir.path(), &["tag", "rename-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "rename-base",
+            "--to",
+            "rename-head",
+            "--metrics",
+            "loc.lloc,history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    // One joined row for the rename — not before.py deleted + after.py new.
+    assert_eq!(files.len(), 1, "expected one joined rename row: {files:?}");
+    assert_eq!(files[0]["path"].as_str(), Some("after.py"));
+    assert_eq!(files[0]["is_new"].as_bool(), Some(false));
+    assert_eq!(files[0]["is_deleted"].as_bool(), Some(false));
+
+    let metric = |name: &str| -> (f64, f64) {
+        let m = files[0]["metrics"]
+            .as_array()
+            .expect("metrics array")
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing metric {name}"));
+        (
+            m["current"].as_f64().expect("current"),
+            m["baseline"].as_f64().expect("baseline"),
+        )
+    };
+    // Static baseline comes from the old path (2 lines → 3 lines).
+    assert_eq!(metric("loc.lloc"), (3.0, 2.0));
+    // History baseline is the old path's history (1 commit → 2 commits,
+    // with the rename walk carrying identity across the rename).
+    assert_eq!(metric("history.commit_frequency"), (2.0, 1.0));
+}
+
+#[test]
+fn top_offenders_loads_history_for_every_repository_root() {
+    // Input roots spanning two repositories must each read their own
+    // repository's history rather than the first root's.
+    let repo_a = tempfile::tempdir().expect("repo a");
+    init_git_repo(repo_a.path());
+    write_python(repo_a.path(), "a.py", "a = 1\n");
+    commit_all(repo_a.path(), "one");
+    write_python(repo_a.path(), "a.py", "a = 1\nb = 2\n");
+    commit_all(repo_a.path(), "two");
+    write_python(repo_a.path(), "a.py", "a = 1\nb = 2\nc = 3\n");
+    commit_all(repo_a.path(), "three");
+
+    let repo_b = tempfile::tempdir().expect("repo b");
+    init_git_repo(repo_b.path());
+    write_python(repo_b.path(), "b.py", "b = 1\n");
+    commit_all(repo_b.path(), "only");
+
+    let elsewhere = tempfile::tempdir().expect("non-repo tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(elsewhere.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            repo_a.path().to_str().expect("UTF-8 temp path"),
+            repo_b.path().to_str().expect("UTF-8 temp path"),
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 2);
+    // a.py (3 commits in repo A) ranks above b.py (1 commit in repo B) —
+    // and b.py reads its own repo's history, not zero.
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("a.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(3.0));
+    assert!(
+        offenders[1]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("b.py")
+    );
+    assert_eq!(offenders[1]["metrics"][0]["value"].as_f64(), Some(1.0));
+}
+
+#[cfg(unix)]
+#[test]
+fn top_offenders_does_not_borrow_history_through_symlinks() {
+    // A tracked symlink `alias.py -> real.py` must keep its own
+    // (empty) history: canonicalizing the full path would resolve the
+    // final component and enrich the alias row with the target file's
+    // churn and commit count.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    write_python(dir.path(), "real.py", "r = 1\n");
+    commit_all(dir.path(), "one");
+    write_python(dir.path(), "real.py", "r = 1\ns = 2\n");
+    commit_all(dir.path(), "two");
+    std::os::unix::fs::symlink("real.py", dir.path().join("alias.py")).expect("symlink");
+    commit_all(dir.path(), "add alias symlink");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    let by_name = |suffix: &str| -> Option<f64> {
+        offenders
+            .iter()
+            .find(|o| o["path"].as_str().expect("path").ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing {suffix} in {offenders:?}"))["metrics"][0]["value"]
+            .as_f64()
+    };
+    // real.py has two content commits; the alias symlink has none of
+    // them (symlinks are non-blob entries in the history walk) — its
+    // history is unmeasurable, not zero.
+    assert_eq!(by_name("real.py"), Some(2.0));
+    assert_eq!(by_name("alias.py"), None);
+}
+
+#[test]
+fn top_offenders_loads_history_for_nested_repositories() {
+    // A nested repository discovered *during traversal* (not passed as
+    // its own root) must read its own history, not zeros from the
+    // outer repository.
+    let outer = tempfile::tempdir().expect("outer repo");
+    init_git_repo(outer.path());
+    write_python(outer.path(), "outer.py", "o = 1\n");
+    commit_all(outer.path(), "outer one");
+
+    let nested_dir = outer.path().join("vendor").join("inner");
+    std::fs::create_dir_all(&nested_dir).expect("nested dir");
+    init_git_repo(&nested_dir);
+    write_python(&nested_dir, "inner.py", "i = 1\n");
+    commit_all(&nested_dir, "inner one");
+    write_python(&nested_dir, "inner.py", "i = 1\nj = 2\n");
+    commit_all(&nested_dir, "inner two");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(outer.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    let by_name = |suffix: &str| -> f64 {
+        offenders
+            .iter()
+            .find(|o| o["path"].as_str().expect("path").ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing {suffix} in {offenders:?}"))["metrics"][0]["value"]
+            .as_f64()
+            .expect("value")
+    };
+    // inner.py reads the nested repository's 2 commits (outer sees it
+    // as untracked); outer.py reads its own single commit.
+    assert_eq!(by_name("inner.py"), 2.0);
+    assert_eq!(by_name("outer.py"), 1.0);
+}
+
+#[cfg(unix)]
+#[test]
+fn top_offenders_follows_directory_symlink_roots() {
+    // `mehen top-offenders -M history.… /outside/link-to-repo` where
+    // the link's parent is not a repository must discover the target
+    // repository instead of failing with RepoNotFound.
+    let repo_dir = tempfile::tempdir().expect("repo tempdir");
+    init_git_repo(repo_dir.path());
+    write_python(repo_dir.path(), "linked.py", "a = 1\n");
+    commit_all(repo_dir.path(), "one");
+    write_python(repo_dir.path(), "linked.py", "a = 1\nb = 2\n");
+    commit_all(repo_dir.path(), "two");
+
+    let outside = tempfile::tempdir().expect("non-repo tempdir");
+    let link = outside.path().join("link-to-repo");
+    std::os::unix::fs::symlink(repo_dir.path(), &link).expect("dir symlink");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(outside.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            link.to_str().expect("UTF-8 temp path"),
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 1);
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn cross_language_rename_to_markdown_keeps_deletion_history() {
+    // `a.py → a.md` splits into a deletion + addition, and the
+    // Markdown destination is routed to the documentation pipeline,
+    // which carries no history columns. The Python deletion row must
+    // therefore keep its baseline history — suppressing it too (as
+    // for a split whose destination stays in the source-code
+    // pipeline) would erase the lineage from the output entirely.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "md-base"]);
+
+    git_ok(dir.path(), &["mv", "a.py", "a.md"]);
+    commit_all(dir.path(), "convert to markdown");
+    git_ok(dir.path(), &["tag", "md-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "md-base",
+            "--to",
+            "md-head",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("a.py deletion row must survive: {files:?}"));
+    assert_eq!(row["is_deleted"].as_bool(), Some(true));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    // Two commits touched a.py before the conversion.
+    assert_eq!(metric["baseline"].as_f64(), Some(2.0));
+    assert_eq!(metric["current"].as_f64(), Some(0.0));
+}
+
+#[test]
+fn cross_language_rename_to_sql_keeps_deletion_history_under_defaults() {
+    // `a.py → a.sql` splits, and the SQL destination *stays* in the
+    // source-code pipeline — but under default metrics SQL's
+    // selectors are history-free, so the destination reads no history
+    // columns. The Python deletion row must keep its baseline history
+    // or the lineage vanishes from the default report.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "sql-base"]);
+
+    git_ok(dir.path(), &["mv", "a.py", "a.sql"]);
+    commit_all(dir.path(), "convert to sql");
+    git_ok(dir.path(), &["tag", "sql-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "sql-base",
+            "--to",
+            "sql-head",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("a.py deletion row must survive: {files:?}"));
+    assert_eq!(row["is_deleted"].as_bool(), Some(true));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.churn.relative"))
+        .unwrap_or_else(|| panic!("history.churn.relative must be present: {row:?}"));
+    // a.py churned lines across two commits before the conversion —
+    // the baseline history must not be suppressed.
+    let baseline = metric["baseline"].as_f64().expect("baseline");
+    assert!(baseline > 0.0, "baseline history suppressed: {metric:?}");
+}
+
+#[test]
+fn modified_then_reverted_files_report_history_deltas() {
+    // The endpoint trees are identical for a.py (modified in one
+    // range commit, reverted in the next), so the endpoint diff has
+    // no row — but the head history gained two commits and churn.
+    // With history selectors active the file must appear.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "revert-base"]);
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "grow");
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "revert");
+    git_ok(dir.path(), &["tag", "revert-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "revert-base",
+            "--to",
+            "revert-head",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("reverted file must appear: {files:?}"));
+    assert_eq!(row["is_new"].as_bool(), Some(false));
+    assert_eq!(row["is_deleted"].as_bool(), Some(false));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    assert_eq!(metric["baseline"].as_f64(), Some(1.0));
+    assert_eq!(metric["current"].as_f64(), Some(3.0));
+}
+
+#[test]
+fn non_utf8_content_still_reports_history_metrics() {
+    // Static analysis rejects non-UTF-8 (non-binary) content, but
+    // history metrics don't depend on decoding the blob: an explicit
+    // history selector must read real values, not zeros.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    // Latin-1 content: 0xE9 is invalid UTF-8 but contains no NUL.
+    std::fs::write(dir.path().join("a.py"), b"# caf\xe9\nx = 1\n").unwrap();
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "latin-base"]);
+
+    std::fs::write(dir.path().join("a.py"), b"# caf\xe9\nx = 1\ny = 2\n").unwrap();
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "latin-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "latin-base",
+            "--to",
+            "latin-head",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("non-UTF-8 file must appear: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    assert_eq!(metric["baseline"].as_f64(), Some(1.0));
+    assert_eq!(metric["current"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn authoritative_empty_push_payloads_suppress_history_augmentation() {
+    // A branch created at an existing commit: the payload's commit
+    // fold is authoritatively empty, but resolve_refs falls back to
+    // HEAD~1..HEAD. The history range augmentation must not
+    // repopulate the report with the tip's previous commit.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "old.py", "x = 1\n");
+    commit_all(dir.path(), "one");
+    write_python(dir.path(), "newer.py", "y = 2\n");
+    commit_all(dir.path(), "two");
+
+    let event = dir.path().join("event.json");
+    std::fs::write(
+        &event,
+        serde_json::json!({
+            "before": "0000000000000000000000000000000000000000",
+            "size": 0,
+            "commits": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args(["diff", "--output-format", "json"])
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_EVENT_NAME", "push")
+        .env("GITHUB_EVENT_PATH", &event)
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    assert!(
+        files.is_empty(),
+        "an authoritatively-empty push must stay empty: {files:?}"
+    );
+}
+
+#[test]
+fn history_diffs_support_annotated_tags() {
+    // Annotated tag objects must be peeled before the range walk —
+    // endpoint diffing and the history walks already peel them.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "-a", "-m", "release base", "ann-base"]);
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "-a", "-m", "release head", "ann-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "ann-base",
+            "--to",
+            "ann-head",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("a.py must appear: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    assert_eq!(metric["baseline"].as_f64(), Some(1.0));
+    assert_eq!(metric["current"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn reversed_ranges_report_history_decreases() {
+    // The touched-path augmentation must walk both sides of the
+    // range: comparing back from a tip whose extra commits modified
+    // and restored a file leaves identical endpoint trees, but the
+    // *baseline* history is richer and the decrease must be visible.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "rev-old"]);
+
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\nz = 3\n");
+    commit_all(dir.path(), "grow");
+    write_python(dir.path(), "a.py", "x = 1\ny = 2\n");
+    commit_all(dir.path(), "revert");
+    git_ok(dir.path(), &["tag", "rev-new"]);
+
+    // Reversed: from the newer tag back to the older one.
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "rev-new",
+            "--to",
+            "rev-old",
+            "--metrics",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .unwrap_or_else(|| panic!("from-side-only history must surface: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.commit_frequency"))
+        .expect("history.commit_frequency must be present");
+    assert_eq!(metric["baseline"].as_f64(), Some(3.0));
+    assert_eq!(metric["current"].as_f64(), Some(1.0));
+}
+
+#[test]
+fn restored_markdown_stays_out_of_history_augmentation() {
+    // Markdown routes to the documentation pipeline, which reads no
+    // history selectors and applies no unchanged-row filter: a
+    // modified-then-restored README must not be resurrected by the
+    // history augmentation under default metrics.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    std::fs::write(dir.path().join("README.md"), "# Title\n\nStable body.\n").unwrap();
+    write_python(dir.path(), "code.py", "x = 1\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "md-rev-base"]);
+
+    std::fs::write(dir.path().join("README.md"), "# Title\n\nTemporary body.\n").unwrap();
+    commit_all(dir.path(), "touch readme");
+    std::fs::write(dir.path().join("README.md"), "# Title\n\nStable body.\n").unwrap();
+    commit_all(dir.path(), "restore readme");
+    git_ok(dir.path(), &["tag", "md-rev-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "md-rev-base",
+            "--to",
+            "md-rev-head",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    if let Some(docs) = value.get("markdown").and_then(|d| d.as_array()) {
+        assert!(
+            !docs.iter().any(|f| f["path"].as_str() == Some("README.md")),
+            "an unchanged document must not be reported: {docs:?}"
+        );
+    }
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    assert!(
+        !files
+            .iter()
+            .any(|f| f["path"].as_str() == Some("README.md")),
+        "markdown must not enter the source-code table: {files:?}"
+    );
+}
+
+#[test]
+fn top_offenders_rank_non_utf8_files_on_history() {
+    // Static analysis cannot decode the Latin-1 file, but its
+    // repository history is real — a history selector must rank it
+    // instead of silently dropping it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\n").unwrap();
+    write_python(dir.path(), "plain.py", "y = 1\n");
+    commit_all(dir.path(), "base");
+    std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\nz = 2\n").unwrap();
+    commit_all(dir.path(), "grow latin");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    // latin.py leads with 2 commits; plain.py has 1.
+    assert_eq!(offenders.len(), 2, "non-UTF-8 file dropped: {offenders:?}");
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("latin.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn split_rename_history_composites_use_source_static_inputs() {
+    // Cross-language rename: the destination row's baseline hotspot
+    // must be cognitive.sum(source) × commit_frequency(source), not
+    // zero — otherwise the whole current hotspot masquerades as new.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    // Python with cognitive complexity 1 (one `if`).
+    let py = "def f(x):\n    if x:\n        return 1\n    return 0\n";
+    write_python(dir.path(), "a.py", py);
+    commit_all(dir.path(), "base");
+    write_python(
+        dir.path(),
+        "a.py",
+        "def f(x):\n    if x:\n        return 1\n    return 0\n\n\ndef g():\n    return 2\n",
+    );
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "split-base"]);
+
+    git_ok(dir.path(), &["mv", "a.py", "a.rs"]);
+    commit_all(dir.path(), "cross-language move");
+    git_ok(dir.path(), &["tag", "split-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "split-base",
+            "--to",
+            "split-head",
+            "--metrics",
+            "cognitive,history.hotspot",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+
+    // The Rust analyzer may reject the moved Python text (that is the
+    // point of a cross-language split) — assert on the report itself,
+    // not the exit code.
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.rs"))
+        .unwrap_or_else(|| panic!("split destination row must exist: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.hotspot"))
+        .expect("history.hotspot must be present");
+    // Source lineage at split-base: cognitive.sum = 1, two commits.
+    assert_eq!(
+        metric["baseline"].as_f64(),
+        Some(2.0),
+        "baseline hotspot must use the source's static inputs: {metric:?}"
+    );
+    // The staged composite inputs must not leak into displayed static
+    // selectors: the new row's cognitive baseline stays 0 (the paired
+    // deletion row already carries the source's static baseline, and
+    // leaking here would double-count it).
+    let cognitive = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("cognitive"))
+        .expect("cognitive must be present");
+    assert_eq!(
+        cognitive["baseline"].as_f64(),
+        Some(0.0),
+        "composite inputs leaked into displayed selectors: {cognitive:?}"
+    );
+    let deletion = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.py"))
+        .expect("deletion row must exist");
+    let deletion_cognitive = deletion["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("cognitive"))
+        .expect("cognitive must be present");
+    assert_eq!(deletion_cognitive["baseline"].as_f64(), Some(1.0));
+}
+
+#[test]
+fn top_offenders_history_supports_container_roots() {
+    // The root itself is not inside Git but contains a repository:
+    // per-file lazy discovery must resolve the nested repository
+    // instead of the eager root check failing the whole run.
+    let outer = tempfile::tempdir().expect("tempdir");
+    let proj = outer.path().join("proj");
+    std::fs::create_dir(&proj).unwrap();
+    init_git_repo(&proj);
+
+    write_python(&proj, "tracked.py", "x = 1\n");
+    commit_all(&proj, "one");
+    write_python(&proj, "tracked.py", "x = 1\ny = 2\n");
+    commit_all(&proj, "two");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(outer.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "container root must not fail: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 1, "{offenders:?}");
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("tracked.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn untracked_files_do_not_inherit_dead_occupant_history() {
+    // HEAD deleted the tracked file; an untracked workspace file now
+    // occupies the path. Ranking must not assign it the dead
+    // occupant's commits.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "ghost.py", "x = 1\n");
+    write_python(dir.path(), "alive.py", "y = 1\n");
+    commit_all(dir.path(), "base");
+    write_python(dir.path(), "ghost.py", "x = 1\nx2 = 2\n");
+    commit_all(dir.path(), "grow ghost");
+    git_ok(dir.path(), &["rm", "-q", "ghost.py"]);
+    commit_all(dir.path(), "drop ghost");
+
+    // An untracked file re-occupies the path in the workspace only.
+    write_python(dir.path(), "ghost.py", "unrelated = 1\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    let ghost = offenders
+        .iter()
+        .find(|o| o["path"].as_str().expect("path").ends_with("ghost.py"))
+        .expect("untracked file is still ranked");
+    assert!(
+        ghost["metrics"][0]["value"].is_null(),
+        "an untracked path has no measurable history — it must read null \
+         (and never the dead occupant's commits): {ghost:?}"
+    );
+}
+
+#[test]
+fn top_offenders_rank_unparsable_files_on_history_only() {
+    // A file with blocking parse errors has incomplete static metrics;
+    // ranking must fall back to history-only (empty static space)
+    // instead of feeding partial cognitive/SLOC values into the
+    // history composites.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "broken.py", "def broken(:\n");
+    write_python(dir.path(), "fine.py", "y = 1\n");
+    commit_all(dir.path(), "base");
+    write_python(dir.path(), "broken.py", "def broken(:\n# more\n");
+    commit_all(dir.path(), "grow broken");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "top-offenders",
+            "-M",
+            "history.commit_frequency",
+            "--output-format",
+            "json",
+            ".",
+        ])
+        .output()
+        .expect("failed to run mehen top-offenders");
+    assert!(
+        output.status.success(),
+        "top-offenders failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
+    let offenders = value.as_array().expect("offender array");
+    assert_eq!(offenders.len(), 2, "{offenders:?}");
+    assert!(
+        offenders[0]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("broken.py")
+    );
+    assert_eq!(offenders[0]["metrics"][0]["value"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn diff_reports_history_only_for_unparsable_files() {
+    // A malformed head file has no trustworthy static metrics: the
+    // row must show zeros for statics (not partial values blended
+    // into history composites) while history reads real values. The
+    // run still exits non-zero for the blocking diagnostics.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(dir.path(), "broken.py", "x = 1\n");
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "broken-cli-base"]);
+    write_python(dir.path(), "broken.py", "def broken(:\n");
+    commit_all(dir.path(), "break it");
+    git_ok(dir.path(), &["tag", "broken-cli-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "broken-cli-base",
+            "--to",
+            "broken-cli-head",
+            "--metrics",
+            "cognitive,history.commit_frequency,history.churn.relative",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        !output.status.success(),
+        "blocking diagnostics must fail the run"
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("broken.py"))
+        .unwrap_or_else(|| panic!("broken.py must appear: {files:?}"));
+    let metric = |name: &str| {
+        row["metrics"]
+            .as_array()
+            .expect("metrics array")
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing metric {name}"))
+            .clone()
+    };
+    // History is real; the partial static root was rejected.
+    assert_eq!(
+        metric("history.commit_frequency")["current"].as_f64(),
+        Some(2.0)
+    );
+    assert_eq!(metric("cognitive")["current"].as_f64(), Some(0.0));
+    // Static-dependent composites are omitted on the synthetic side:
+    // relative churn must not read absolute churn divided by 1.
+    assert_eq!(
+        metric("history.churn.relative")["current"].as_f64(),
+        Some(0.0)
+    );
+}
+
+#[test]
+fn split_rename_baselines_reject_blocked_source_analyses() {
+    // The split-rename baseline staging re-analyzes the *source* blob
+    // for composite inputs; a source with blocking parse errors must
+    // stage nothing (baseline hotspot 0) instead of partial
+    // cognitive/SLOC values.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    // Parseable prefix (cognitive 1) followed by a syntax error: a
+    // partial tree would report non-zero composite inputs.
+    let broken = "def f(x):\n    if x:\n        return 1\n    return 0\n\n\ndef broken(:\n";
+    write_python(dir.path(), "a.py", broken);
+    commit_all(dir.path(), "base");
+    write_python(
+        dir.path(),
+        "a.py",
+        "def f(x):\n    if x:\n        return 1\n    return 0\n\n\ndef broken(:\n# more\n",
+    );
+    commit_all(dir.path(), "grow");
+    git_ok(dir.path(), &["tag", "blocked-split-base"]);
+
+    git_ok(dir.path(), &["mv", "a.py", "a.rs"]);
+    commit_all(dir.path(), "cross-language move");
+    git_ok(dir.path(), &["tag", "blocked-split-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "blocked-split-base",
+            "--to",
+            "blocked-split-head",
+            "--metrics",
+            "history.commit_frequency,history.hotspot",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    let row = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some("a.rs"))
+        .unwrap_or_else(|| panic!("split destination row must exist: {files:?}"));
+    let metric = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.hotspot"))
+        .expect("history.hotspot must be present");
+    assert_eq!(
+        metric["baseline"].as_f64(),
+        Some(0.0),
+        "partial source statics staged into the synthetic baseline: {metric:?}"
+    );
+}

@@ -10,11 +10,13 @@
 
 #![deny(unsafe_code)]
 
+mod history;
+mod tree_changes;
+
+pub use history::{FileHistory, RepositoryHistory, collect_history};
+
 use std::fmt;
 use std::path::{Path, PathBuf};
-
-use gix::diff::tree::recorder::Change;
-use gix::objs::TreeRefIter;
 
 /// Collapses any trailing run of `\n` / `\r` into a single `\n`.
 ///
@@ -79,12 +81,40 @@ pub enum ChangeStatus {
 pub struct ChangedFile {
     pub path: PathBuf,
     pub status: ChangeStatus,
+    /// The pre-rename path when this change is a rename detected
+    /// between the two revisions (`status` is then `Modified`).
+    /// Callers should read the baseline side from this path.
+    pub source_path: Option<PathBuf>,
 }
 
 /// Discover a git repository from the current working directory.
 /// Fails fast on shallow clones.
 pub fn open_repo() -> Result<gix::Repository, GitError> {
-    let repo = gix::discover(".").map_err(|_| GitError::RepoNotFound)?;
+    open_repo_at(Path::new("."))
+}
+
+/// Discover the git repository containing `path` (walking up from it,
+/// like `gix::discover`). Fails fast on shallow clones — history-based
+/// features need the full commit graph.
+///
+/// Only genuine "there is no repository here" outcomes map to
+/// [`GitError::RepoNotFound`]; discovery/open *failures* (inaccessible
+/// directories, malformed metadata, trust errors) surface as
+/// [`GitError::Internal`] so callers can tell "not a repo" apart from
+/// "a repo we couldn't read".
+pub fn open_repo_at(path: &Path) -> Result<gix::Repository, GitError> {
+    let repo = gix::discover(path).map_err(|e| match &e {
+        gix::discover::Error::Discover(
+            gix::discover::upwards::Error::NoGitRepository { .. }
+            | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. }
+            | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. },
+        ) => GitError::RepoNotFound,
+        // A repository *was* found but failed the trust check: that is
+        // "a repo we couldn't read", not "no repo here" — mapping it to
+        // `RepoNotFound` would make history consumers silently rank
+        // the repo's files with missing `history.*` values.
+        _ => GitError::Internal(e.to_string()),
+    })?;
 
     if repo.is_shallow() {
         return Err(GitError::ShallowClone {
@@ -95,7 +125,18 @@ pub fn open_repo() -> Result<gix::Repository, GitError> {
     Ok(repo)
 }
 
-/// List files changed between two revisions via tree-to-tree diff.
+/// List files changed between two revisions via tree-to-tree diff with
+/// rename tracking (in-crate, git's `-M50%` semantics, fully
+/// deterministic — no repository/user configuration is consulted). A
+/// renamed file is reported once as `Modified` under its new path with
+/// [`ChangedFile::source_path`] set, instead of a deletion + addition
+/// pair with full-value metric deltas.
+///
+/// Only blob entries are reported: directories, symlinks, and gitlinks
+/// (submodules) carry no analyzable text. An entry changing *type*
+/// across the revisions is reported from the blob side — a file
+/// replaced by a submodule is that file's deletion, and vice versa —
+/// so downstream blob reads never touch a gitlink OID.
 pub fn changed_files(
     repo: &gix::Repository,
     from: &str,
@@ -104,36 +145,162 @@ pub fn changed_files(
     let from_tree = resolve_tree(repo, from)?;
     let to_tree = resolve_tree(repo, to)?;
 
-    let mut recorder = gix::diff::tree::Recorder::default();
-    gix::diff::tree(
-        TreeRefIter::from_bytes(&from_tree.data, from_tree.id.kind()),
-        TreeRefIter::from_bytes(&to_tree.data, to_tree.id.kind()),
-        gix::diff::tree::State::default(),
-        repo.objects.clone(),
-        &mut recorder,
-    )
-    .map_err(|e| GitError::Internal(e.to_string()))?;
-
-    let files = recorder
-        .records
+    let changes = tree_changes::changes_between_trees(repo, Some(&from_tree), &to_tree)?.changes;
+    let files = changes
         .into_iter()
-        .map(|change| {
-            let (path, status) = match change {
-                Change::Addition { path, .. } => {
-                    (PathBuf::from(path.to_string()), ChangeStatus::Added)
-                }
-                Change::Deletion { path, .. } => {
-                    (PathBuf::from(path.to_string()), ChangeStatus::Deleted)
-                }
-                Change::Modification { path, .. } => {
-                    (PathBuf::from(path.to_string()), ChangeStatus::Modified)
-                }
-            };
-            ChangedFile { path, status }
+        .map(|change| match change {
+            tree_changes::TreeChange::Added { path, .. } => ChangedFile {
+                path,
+                status: ChangeStatus::Added,
+                source_path: None,
+            },
+            tree_changes::TreeChange::Deleted { path, .. } => ChangedFile {
+                path,
+                status: ChangeStatus::Deleted,
+                source_path: None,
+            },
+            tree_changes::TreeChange::Modified { path, .. } => ChangedFile {
+                path,
+                status: ChangeStatus::Modified,
+                source_path: None,
+            },
+            tree_changes::TreeChange::Renamed {
+                path, source_path, ..
+            } => ChangedFile {
+                path,
+                status: ChangeStatus::Modified,
+                source_path: Some(source_path),
+            },
         })
         .collect();
 
     Ok(files)
+}
+
+/// Paths *touched* by non-merge commits in `from..to` that still exist
+/// in both endpoint trees, even when the endpoint-to-endpoint diff is
+/// empty for them (modified in one commit, reverted in a later one).
+///
+/// The endpoint tree diff is the right source for *static* metric
+/// deltas, but `history.*` metrics change with every touch: a file
+/// modified and restored within the range gained commit frequency,
+/// churn, and possibly bug-fix risk between the two revisions, and a
+/// diff limited to endpoint changes would silently omit it. Paths
+/// absent from either endpoint are excluded — a net-new-and-removed
+/// file has no row to hang a delta on.
+pub fn range_touched_files(
+    repo: &gix::Repository,
+    from: &str,
+    to: &str,
+) -> Result<Vec<PathBuf>, GitError> {
+    // Peel to commits: an annotated tag's own object id would fail
+    // the topological walker, which decodes its tips as commits.
+    let from_id = repo
+        .rev_parse_single(from)
+        .map_err(|_| GitError::RefNotFound(from.to_string()))?
+        .object()
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .peel_to_commit()
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .id;
+    let to_id = repo
+        .rev_parse_single(to)
+        .map_err(|_| GitError::RefNotFound(to.to_string()))?
+        .object()
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .peel_to_commit()
+        .map_err(|e| GitError::Internal(e.to_string()))?
+        .id;
+    let from_tree = resolve_tree(repo, from)?;
+    let to_tree = resolve_tree(repo, to)?;
+    let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
+
+    let mut touched: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    // Both directions: for a non-fast-forward range (sibling branches,
+    // or a reversed range) a file may have been touched only on the
+    // `from` side — its baseline history then differs from the head's
+    // even though the endpoint trees agree, and the resulting
+    // `history.*` decrease must still be reported.
+    for (tip, hidden) in [(to_id, from_id), (from_id, to_id)] {
+        let walk = gix::traverse::commit::topo::Builder::from_iters(
+            repo.objects.clone(),
+            [tip],
+            Some([hidden]),
+        )
+        .build()
+        .map_err(|e| internal(&e))?;
+
+        for info in walk {
+            let info = info.map_err(|e| internal(&e))?;
+            let commit = repo
+                .find_object(info.id)
+                .map_err(|e| internal(&e))?
+                .peel_to_commit()
+                .map_err(|e| internal(&e))?;
+            // Merge commits replay their parents' *content* changes
+            // (the parents' own commits are walked — mirroring the
+            // history walk's `--no-merges` accounting), but conflict
+            // resolution can change identity on its own: a merge-only
+            // deletion, recreation, or rename alters `history.*`
+            // metrics even when the endpoint trees are byte-identical
+            // and no non-merge commit touched the path.
+            if info.parent_ids.len() > 1 {
+                for path in history::merge_identity_paths(repo, &commit)? {
+                    touched.insert(path);
+                }
+                continue;
+            }
+            let parent_tree = match commit.parent_ids().next() {
+                Some(parent_id) => Some(
+                    parent_id
+                        .object()
+                        .map_err(|e| internal(&e))?
+                        .peel_to_commit()
+                        .map_err(|e| internal(&e))?
+                        .tree()
+                        .map_err(|e| internal(&e))?,
+                ),
+                None => None,
+            };
+            let commit_tree = commit.tree().map_err(|e| internal(&e))?;
+            for change in
+                tree_changes::changes_between_trees(repo, parent_tree.as_ref(), &commit_tree)?
+                    .changes
+            {
+                match change {
+                    tree_changes::TreeChange::Added { path, .. }
+                    | tree_changes::TreeChange::Deleted { path, .. }
+                    | tree_changes::TreeChange::Modified { path, .. } => {
+                        touched.insert(path);
+                    }
+                    tree_changes::TreeChange::Renamed {
+                        path, source_path, ..
+                    } => {
+                        touched.insert(path);
+                        touched.insert(source_path);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut survivors = Vec::new();
+    for path in touched {
+        // Both endpoints must hold *blob* entries — `changed_files`'
+        // blob-only contract. A path that is a symlink at both
+        // endpoints (with a transient blob life inside the range) has
+        // no analyzable text to hang a diff row on.
+        let blob_at = |tree: &gix::Tree<'_>| -> Result<bool, GitError> {
+            Ok(tree
+                .lookup_entry_by_path(&path)
+                .map_err(|e| internal(&e))?
+                .is_some_and(|entry| entry.mode().is_blob()))
+        };
+        if blob_at(&from_tree)? && blob_at(&to_tree)? {
+            survivors.push(path);
+        }
+    }
+    Ok(survivors)
 }
 
 /// Read file content at a specific revision. Returns `None` if the path

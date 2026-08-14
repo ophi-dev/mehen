@@ -42,16 +42,31 @@ pub(crate) const KNOWN_METRICS: &[MetricDef] = &[
     ("mi.visual_studio", "MI", Polarity::HigherIsBetter),
     ("halstead.volume", "Halstead Vol", Polarity::LowerIsBetter),
     ("abc", "ABC", Polarity::LowerIsBetter),
+    // Default-set history columns get curated labels; the rest of the
+    // `history.*` family is reachable via the namespaced-key path.
+    ("history.hotspot", "Hotspot", Polarity::LowerIsBetter),
+    ("history.churn.relative", "Churn", Polarity::LowerIsBetter),
 ];
 
 /// Default metric set for `diff` (kept here so both diff and top-offenders
 /// can surface the same fallback from a single source of truth).
+///
+/// One column per orthogonal dimension (research foundation §9.3/§9.4):
+/// control-flow understandability (`cognitive`), computational volume
+/// (`abc`), the one deliberate composite rollup (`mi.visual_studio`), and
+/// the two change-risk signals a *diff* comment actually needs — whether
+/// this is a fragile, frequently-touched file (`history.hotspot` =
+/// cognitive × commit frequency) and how much of the file the change
+/// moves, size-normalized (`history.churn.relative`). `cyclomatic` was
+/// dropped in favor of cognitive (the two correlate strongly) and
+/// `nom.functions`/`loc.lloc` in favor of the missing axes. The history
+/// columns trigger the repository history walk on default diffs.
 pub(crate) const DEFAULT_METRICS: &[&str] = &[
-    "cyclomatic",
     "cognitive",
-    "nom.functions",
-    "loc.lloc",
+    "abc",
     "mi.visual_studio",
+    "history.hotspot",
+    "history.churn.relative",
 ];
 
 /// Default selectors for SQL files. The source-code defaults
@@ -144,10 +159,12 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
                 polarity: polarity_override.unwrap_or(default_polarity),
             });
         } else if is_namespaced_metric(name) {
-            // Language-owned families (`sql.*`, `markdown.*`) publish flat keys
-            // that aren't in the source-code `KNOWN_METRICS` catalogue. Accept
-            // any such key verbatim so e.g. `--metric sql.change_risk_score`
-            // works. `read_metric` reads the bare key from the `MetricSpace`.
+            // Language-owned families (`sql.*`, `markdown.*`) and the
+            // engine-owned `history.*` family publish flat keys that aren't
+            // in the source-code `KNOWN_METRICS` catalogue. Accept any such
+            // key verbatim so e.g. `--metric sql.change_risk_score` or
+            // `--metric history.churn.abs` works. `read_metric` reads the
+            // bare key from the `MetricSpace`.
             // The name/label must be `'static`; leak the (short-lived, CLI-run)
             // string, matching `metric_set_key_for`'s fallback.
             let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
@@ -164,15 +181,23 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
     selectors
 }
 
-/// Whether `name` is a language-owned namespaced metric key (`sql.*`,
-/// `markdown.*`) that the CLI should accept even though it is not in the
-/// source-code `KNOWN_METRICS` catalogue.
+/// Whether `name` is a namespaced metric key that the CLI should accept even
+/// though it is not in the source-code `KNOWN_METRICS` catalogue: the
+/// language-owned families (`sql.*`, `markdown.*`) and the engine-owned git
+/// history family (`history.*`). The language namespaces are extensible and
+/// accepted by prefix; the `history.*` family is fixed and enumerated
+/// (`mehen_core::keys::HISTORY_ALL`), so a typo like
+/// `history.commit_frequncy` is rejected here — accepting it would trigger
+/// the expensive repository walk and then silently read `0.0` through the
+/// missing-key fallback (an all-zero ranking, or a diff with no rows).
 fn is_namespaced_metric(name: &str) -> bool {
-    name.starts_with("sql.") || name.starts_with("markdown.")
+    name.starts_with("sql.")
+        || name.starts_with("markdown.")
+        || mehen_core::keys::HISTORY_ALL.contains(&name)
 }
 
-/// Namespaced (`sql.*` / `markdown.*`) metric keys where a *larger* value is
-/// healthier. Substring inference is too crude (e.g.
+/// Namespaced (`sql.*` / `markdown.*` / `history.*`) metric keys where a
+/// *larger* value is healthier. Substring inference is too crude (e.g.
 /// `markdown.maintainability.artifact_debt_score` is a penalty despite
 /// containing "maintainability", and `sql.dialect.confidence` is
 /// higher-is-better), so the higher-is-better metrics are enumerated by exact
@@ -192,6 +217,11 @@ pub(crate) const NAMESPACED_HIGHER_IS_BETTER: &[&str] = &[
     "markdown.grounding.repository_grounding_score",
     "markdown.grounding.evidence_coverage_score",
     "markdown.links.information_scent_score",
+    // History process metrics where larger is healthier (research
+    // foundation §8): long-stable code and concentrated ownership are
+    // the low-risk end; every other `history.*` signal is a risk count.
+    mehen_core::keys::HISTORY_AGE_MONTHS,
+    mehen_core::keys::HISTORY_OWNERSHIP,
 ];
 
 /// Whether a namespaced metric key is higher-is-better (see
@@ -285,6 +315,30 @@ mod tests {
     }
 
     #[test]
+    fn default_history_columns_have_curated_labels_and_trigger_walk() {
+        // The §9.4 default set surfaces the two change-risk columns with
+        // human labels (not raw keys) in the PR-comment table header.
+        let selectors = parse_metric_selectors(&[]);
+        let hotspot = selectors
+            .iter()
+            .find(|s| s.name == "history.hotspot")
+            .expect("hotspot default present");
+        assert_eq!(hotspot.label, "Hotspot");
+        assert_eq!(hotspot.polarity, Polarity::LowerIsBetter);
+        let churn = selectors
+            .iter()
+            .find(|s| s.name == "history.churn.relative")
+            .expect("churn default present");
+        assert_eq!(churn.label, "Churn");
+        assert_eq!(churn.polarity, Polarity::LowerIsBetter);
+        // The default set must request history so `run_diff` walks it.
+        assert!(
+            crate::history_metrics::names_want_history(selectors.iter().map(|s| s.name)),
+            "defaults must trigger the history walk"
+        );
+    }
+
+    #[test]
     fn polarity_prefix_overrides_default() {
         let specs = vec!["+loc.lloc".to_string(), "-mi.visual_studio".to_string()];
         let selectors = parse_metric_selectors(&specs);
@@ -300,6 +354,23 @@ mod tests {
         let specs = vec!["nonexistent".to_string()];
         let selectors = parse_metric_selectors(&specs);
         assert!(selectors.is_empty());
+    }
+
+    #[test]
+    fn mistyped_history_metric_is_rejected() {
+        // The `history.*` family is fixed and enumerated: a typo must
+        // be rejected up front, not accepted by prefix — accepting it
+        // would trigger the expensive history walk and then read the
+        // unpublished key as `0.0` (an all-zero ranking / an empty
+        // diff instead of a warning).
+        let specs = vec!["history.commit_frequncy".to_string()];
+        assert!(parse_metric_selectors(&specs).is_empty());
+        // Every real key is still accepted verbatim.
+        for key in mehen_core::keys::HISTORY_ALL {
+            let selectors = parse_metric_selectors(&[key.to_string()]);
+            assert_eq!(selectors.len(), 1, "{key} must parse");
+            assert_eq!(selectors[0].name, *key);
+        }
     }
 
     #[test]
@@ -343,5 +414,52 @@ mod tests {
             default_namespaced_polarity("sql.modularity_health"),
             Polarity::HigherIsBetter
         );
+    }
+
+    #[test]
+    fn history_metrics_are_accepted_as_namespaced_selectors() {
+        // The engine-owned `history.*` family is not in KNOWN_METRICS but
+        // must be usable as a `diff`/`top-offenders` selector.
+        let specs = vec![
+            "history.churn.abs".to_string(),
+            "history.hotspot".to_string(),
+            "history.age_months".to_string(),
+        ];
+        let selectors = parse_metric_selectors(&specs);
+        assert_eq!(selectors.len(), 3);
+        assert_eq!(selectors[0].name, "history.churn.abs");
+        assert_eq!(selectors[1].name, "history.hotspot");
+        assert_eq!(selectors[2].name, "history.age_months");
+    }
+
+    #[test]
+    fn history_metric_default_polarity() {
+        // Long-stable code and concentrated ownership are the healthy end;
+        // every other history signal is a risk count.
+        assert_eq!(
+            default_namespaced_polarity("history.age_months"),
+            Polarity::HigherIsBetter
+        );
+        assert_eq!(
+            default_namespaced_polarity("history.ownership"),
+            Polarity::HigherIsBetter
+        );
+        for risk in [
+            "history.churn.abs",
+            "history.churn.relative",
+            "history.authors",
+            "history.minor_contributors",
+            "history.commit_frequency",
+            "history.hotspot",
+            "history.sum_of_coupling",
+            "history.twr",
+            "history.bugfix_commits",
+        ] {
+            assert_eq!(
+                default_namespaced_polarity(risk),
+                Polarity::LowerIsBetter,
+                "selector {risk}"
+            );
+        }
     }
 }
