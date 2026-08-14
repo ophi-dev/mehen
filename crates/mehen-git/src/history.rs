@@ -28,8 +28,9 @@ use std::path::{Path, PathBuf};
 
 use crate::GitError;
 use crate::tree_changes::{
-    RENAME_SIMILARITY, TreeChange, blob_lineage_similarity, blob_size, changes_between_trees,
-    count_lines, is_binary, line_diff_counts, read_blob_data, same_blob_lineage,
+    RENAME_SIMILARITY, TreeChange, blob_lineage_similarity, blob_modifications_between_trees,
+    blob_size, changes_between_trees, count_lines, is_binary, line_diff_counts, read_blob_data,
+    same_blob_lineage,
 };
 
 /// Average Gregorian month in seconds (30.436875 days), used to express
@@ -1370,6 +1371,105 @@ fn merge_introduced_changes(
                 install_destination_boundary: true,
                 alias_addition_floor: None,
                 discarded_occupant_fence: Some((parent_ids[q_idx], floor)),
+            });
+        }
+    }
+    // Byte-identical recreated occupants: a parent whose line deleted
+    // and recreated the path with content byte-equal to the blob the
+    // merge keeps leaves *no entry at all* in its parent-to-merge diff
+    // (exact OID equality erases the path), so the Modified-based pass
+    // above never sees a candidate — yet the recreation still ends at
+    // its deletion boundary. Without a fence it would accumulate under
+    // the survivor and its deletion would tombstone the shared
+    // pre-branch creation. Candidates are recovered by diffing each
+    // parent against its divergence base — the recreation is visible
+    // *there* whenever its content differs from the base (a recreation
+    // byte-equal to the base as well is a pure revert and reads as
+    // lineage continuation). Because both blobs are byte-equal, line
+    // continuity — not content — is the only survivor signal: the
+    // fence installs only when another parent carries the same blob
+    // through an uninterrupted line. If no parent does, the recreation
+    // is itself the survivor and the ordinary walk fence handles its
+    // older history.
+    for (q_idx, q_id) in parent_ids.iter().enumerate() {
+        if parent_ids.len() < 2 {
+            break;
+        }
+        // Divergence base for candidate detection; per-path floors
+        // are still derived from the chosen supplier below. For an
+        // octopus merge this approximates the divergence with the
+        // first other parent — a deeper true base only widens the
+        // candidate diff, and the boundary scan filters the excess.
+        let other = parent_ids[usize::from(q_idx == 0)];
+        let base = match repo.merge_base(other, *q_id) {
+            Ok(base) => base.detach(),
+            Err(gix::repository::merge_base::Error::NotFound { .. }) => continue,
+            Err(e) => return Err(GitError::Internal(e.to_string())),
+        };
+        let base_tree = repo
+            .find_object(base)
+            .map_err(|e| internal(&e))?
+            .peel_to_commit()
+            .map_err(|e| internal(&e))?
+            .tree()
+            .map_err(|e| internal(&e))?;
+        for (path, q_oid) in
+            blob_modifications_between_trees(repo, &base_tree, &parent_trees[q_idx])?
+        {
+            if seen.contains(&path) || fenced.contains(&(path.clone(), *q_id)) {
+                continue;
+            }
+            // Only the invisible case: the parent's endpoint blob is
+            // byte-equal to the merged blob. Anything else produced a
+            // parent-to-merge diff entry and was handled above.
+            if blob_oid_at(&to_tree, &path)? != Some(q_oid) {
+                continue;
+            }
+            // A supplier must carry the identical blob through an
+            // uninterrupted post-divergence line.
+            let mut supplier: Option<gix::ObjectId> = None;
+            for (idx, (parent_id, tree)) in parent_ids.iter().zip(&parent_trees).enumerate() {
+                if idx == q_idx || blob_oid_at(tree, &path)? != Some(q_oid) {
+                    continue;
+                }
+                let s_base = match repo.merge_base(*parent_id, *q_id) {
+                    Ok(base) => base.detach(),
+                    Err(gix::repository::merge_base::Error::NotFound { .. }) => continue,
+                    Err(e) => return Err(GitError::Internal(e.to_string())),
+                };
+                if path_deleted_in_range(repo, *parent_id, s_base, &path)? {
+                    continue;
+                }
+                supplier = Some(*parent_id);
+                break;
+            }
+            let Some(supplier) = supplier else {
+                continue;
+            };
+            let floor = match repo.merge_base(supplier, *q_id) {
+                Ok(base) => base.detach(),
+                Err(gix::repository::merge_base::Error::NotFound { .. }) => continue,
+                Err(e) => return Err(GitError::Internal(e.to_string())),
+            };
+            // The fence needs proof, not endpoint similarity: only a
+            // deletion on this parent's own post-divergence line makes
+            // the byte-equal blob a *recreation* rather than the
+            // surviving file itself.
+            if !path_deleted_in_range(repo, *q_id, floor, &path)? {
+                continue;
+            }
+            fenced.insert((path.clone(), *q_id));
+            introduced.push(CommitFileChange {
+                path: path.clone(),
+                source_path: None,
+                added: 0,
+                removed: 0,
+                is_deletion: false,
+                is_addition: false,
+                alias_scopes: None,
+                install_destination_boundary: true,
+                alias_addition_floor: None,
+                discarded_occupant_fence: Some((*q_id, Some(floor))),
             });
         }
     }

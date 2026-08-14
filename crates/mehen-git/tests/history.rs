@@ -4602,6 +4602,88 @@ fn similar_discarded_recreations_are_still_fenced_at_merges() {
     assert_eq!(a.authors, 2, "the similar recreation leaked in");
 }
 
+/// The discarded branch's recreation is *byte-identical* to the blob
+/// the merge keeps: neither parent-to-merge diff mentions the path at
+/// all (exact OID equality removes it from both diffs), so no
+/// `Modified` entry exists to hang a fence on. The recreated
+/// occupant's line still ends at the deletion boundary — its
+/// recreation must not accumulate under the survivor, and its
+/// deletion must not fence the shared root creation away.
+#[test]
+fn exact_content_discarded_recreations_are_fenced_at_merges() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // Retaining branch: grows the original.
+    git(dir.path(), &["checkout", "-q", "-b", "retain"], BOB, t(1));
+    let grown = "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\nfn kept_edit() {}\n";
+    std::fs::write(dir.path().join("a.rs"), grown).unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow a"], BOB, t(1));
+    let retain = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // Discard branch: delete, then recreate with content byte-equal
+    // to the retainer's grown blob — the exact OID match erases the
+    // path from both parent-to-merge diffs. Newer timestamps: walked
+    // before the retainer.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "discard", "main"],
+        ALICE,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], ALICE, t(2));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], ALICE, t(2));
+    std::fs::write(dir.path().join("a.rs"), grown).unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "recreate a byte-identical"],
+        CAROL,
+        t(3),
+    );
+    let discard = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    // The merge keeps the retaining parent's blob.
+    git(dir.path(), &["checkout", "-q", "-f", "retain"], BOB, t(4));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(4));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &retain,
+            "-p",
+            &discard,
+            "-m",
+            "keep the original",
+        ],
+        BOB,
+        t(4),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The survivor keeps its full lineage; carol's byte-identical
+    // recreation stays on its own dead line (its creation must
+    // neither appear here nor fence away the shared root creation).
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.churn_added, 5, "the shared creation was fenced away");
+    assert_eq!(a.authors, 2, "the identical recreation leaked in");
+}
+
 /// An octopus merge discarding *two* parents' independent occupants
 /// of the same path: each discarded parent needs its own fence — a
 /// per-path dedup would leave the second occupant unfenced.

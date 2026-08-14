@@ -534,6 +534,91 @@ fn diff_reports_history_metrics_for_both_sides() {
 }
 
 #[test]
+fn diff_history_composites_read_na_when_head_is_undecodable() {
+    // A head side whose static analysis is unavailable (non-UTF-8
+    // content) cannot value the static-dependent composites. The keys
+    // are omitted from its synthetic space — and the diff must report
+    // them as *unavailable* (no fabricated `hotspot 12 → 0`
+    // improvement), while plain history metrics keep reading real
+    // values.
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    write_python(
+        dir.path(),
+        "sample.py",
+        "def foo(x):\n    if x:\n        return 1\n    return 2\n",
+    );
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "na-base"]);
+
+    std::fs::write(
+        dir.path().join("sample.py"),
+        b"# caf\xe9\ndef foo(x):\n    if x:\n        return 1\n    return 3\n" as &[u8],
+    )
+    .expect("write undecodable head");
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "na-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "na-base",
+            "--to",
+            "na-head",
+            "--metrics",
+            "history.hotspot,history.churn.relative,history.churn.abs",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    // The undecodable head is recorded as a failed analysis (exit is
+    // non-zero by design); the JSON payload must still be honest.
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let files = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array");
+    assert_eq!(files.len(), 1);
+    let metric = |name: &str| -> serde_json::Value {
+        files[0]["metrics"]
+            .as_array()
+            .expect("metrics array")
+            .iter()
+            .find(|m| m["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing metric {name}"))
+            .clone()
+    };
+
+    for name in ["history.hotspot", "history.churn.relative"] {
+        let m = metric(name);
+        assert_eq!(
+            m["current_unavailable"].as_bool(),
+            Some(true),
+            "{name} must be flagged unavailable on the undecodable head"
+        );
+        assert_eq!(
+            m["delta"].as_f64(),
+            Some(0.0),
+            "{name} must not claim an improvement from the placeholder"
+        );
+    }
+    // The parser-independent metric still reads real history values on
+    // both sides and is not flagged.
+    let churn_abs = metric("history.churn.abs");
+    assert_eq!(churn_abs["current_unavailable"].as_bool(), None);
+    assert!(churn_abs["current"].as_f64().expect("current") > 0.0);
+}
+
+#[test]
 fn top_offenders_ranks_by_history_metrics() {
     let dir = tempfile::tempdir().expect("tempdir");
     init_git_repo(dir.path());

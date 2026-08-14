@@ -609,6 +609,19 @@ struct MetricDiff {
     polarity: SelectorPolarity,
     is_new: bool,
     is_deleted: bool,
+    /// The side exists but this metric could not be computed for it —
+    /// a static-dependent history composite (`history.hotspot`,
+    /// `history.churn.relative`) on a side whose static analysis is
+    /// unavailable. The numeric field then holds a placeholder `0.0`
+    /// that must not be presented as a measurement: `delta` is forced
+    /// to `0.0` (no fabricated improvement/regression) and the
+    /// rendered cell reads `n/a`. Omitted from JSON when `false` so
+    /// ordinary rows keep their shape.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    current_unavailable: bool,
+    /// See `current_unavailable`, for the baseline side.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    baseline_unavailable: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -627,7 +640,12 @@ struct FileDiff {
 
 impl FileDiff {
     fn all_unchanged(&self) -> bool {
-        self.metrics.iter().all(|m| m.delta == 0.0)
+        // An unavailable side is *unknown*, not unchanged: its forced
+        // `delta == 0.0` claims no direction, but hiding the row would
+        // present "could not measure" as "measured, nothing changed".
+        self.metrics
+            .iter()
+            .all(|m| m.delta == 0.0 && !m.current_unavailable && !m.baseline_unavailable)
     }
 
     /// Sort key: total function count descending, then path ascending.
@@ -1084,15 +1102,20 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         // The 🆕 flag is fixed *before* any baseline synthesis below —
         // it reflects blob availability, not history availability.
         let is_new_row = is_new && baseline_space.is_none();
+        // Whether each side's space is backed by real static
+        // analysis: the synthetic history-only fallbacks below carry
+        // no static inputs, and the composite keys are then omitted
+        // (hotspot would read a fabricated 0, relative churn would
+        // divide by 1). Consulted again when the selector table is
+        // built — the missing keys must surface as *unavailable*, not
+        // as a `0.0` that fakes an improvement. The split-rename
+        // baseline counts as backed exactly when its staged inputs
+        // were accepted.
+        let mut baseline_composites = true;
+        let mut current_composites = true;
         if let Some((base_history, head_history)) = histories.as_ref() {
-            // Whether each side's space is backed by real static
-            // analysis: the synthetic fallbacks below carry no static
-            // inputs, and the composite keys must then be omitted
-            // (hotspot would read a fabricated 0, relative churn
-            // would divide by 1). The split-rename baseline counts as
-            // backed exactly when its staged inputs were accepted.
-            let mut baseline_composites = baseline_space.is_some();
-            let mut current_composites = current_space.is_some();
+            baseline_composites = baseline_space.is_some();
+            current_composites = current_space.is_some();
             // A split rename (`Added` row carrying `source_path`, e.g.
             // a cross-language `a.py → a.rs`) has no baseline *blob*,
             // but its baseline *history* is the source lineage. Give
@@ -1226,6 +1249,17 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         let metric_diffs: Vec<MetricDiff> = file_selectors
             .iter()
             .map(|sel| {
+                // A side whose static analysis is unavailable cannot
+                // value the static-dependent composites; the keys are
+                // omitted there (`inject_history_metrics`), and the
+                // missing-key `0.0` fallback must not masquerade as a
+                // measurement — `hotspot 12 → 0` would fake a cleared
+                // hotspot in the default PR columns.
+                let is_composite = history_metrics::is_history_composite(sel.name);
+                let baseline_unavailable =
+                    baseline_space.is_some() && is_composite && !baseline_composites;
+                let current_unavailable =
+                    current_space.is_some() && is_composite && !current_composites;
                 let baseline = baseline_space
                     .as_ref()
                     .map(|s| read_selector_metric(s, sel))
@@ -1234,15 +1268,22 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                     .as_ref()
                     .map(|s| read_selector_metric(s, sel))
                     .unwrap_or(0.0);
+                let delta = if baseline_unavailable || current_unavailable {
+                    0.0
+                } else {
+                    current - baseline
+                };
                 MetricDiff {
                     name: sel.name,
                     label: sel.label,
                     current,
                     baseline,
-                    delta: current - baseline,
+                    delta,
                     polarity: sel.polarity,
                     is_new: is_new_row,
                     is_deleted,
+                    current_unavailable,
+                    baseline_unavailable,
                 }
             })
             .collect();
@@ -1700,13 +1741,41 @@ fn format_metric_cell(md: &MetricDiff, from: &str) -> String {
     let current = format_f64(md.current);
 
     if md.is_new {
+        if md.current_unavailable {
+            return "n/a \u{1F195}".to_string(); // 🆕
+        }
         return format!("{current} \u{1F195}"); // 🆕
     }
 
     if md.is_deleted {
+        if md.baseline_unavailable {
+            // The deleted file's baseline value was never measurable;
+            // claiming "was: 0" (or a trend) would fabricate one.
+            return "0 (was: n/a)".to_string();
+        }
         let baseline = format_f64(md.baseline);
         let emoji = trend_emoji(md.delta, md.polarity);
         return format!("0 (was: {baseline}) {emoji}");
+    }
+
+    if md.current_unavailable || md.baseline_unavailable {
+        // One side (or both) could not be measured: show what is
+        // known, claim no direction — a trend emoji would assert an
+        // improvement/regression no measurement supports.
+        let cur = if md.current_unavailable {
+            "n/a".to_string()
+        } else {
+            current
+        };
+        if md.baseline_unavailable && md.current_unavailable {
+            return cur;
+        }
+        let base = if md.baseline_unavailable {
+            "n/a".to_string()
+        } else {
+            format_f64(md.baseline)
+        };
+        return format!("{cur} ({from}: {base})");
     }
 
     if md.delta == 0.0 {
@@ -2878,6 +2947,8 @@ binary.md binary
             polarity: SelectorPolarity::LowerIsBetter,
             is_new: true,
             is_deleted: false,
+            current_unavailable: false,
+            baseline_unavailable: false,
         };
         assert_eq!(format_metric_cell(&md, "main"), "5 \u{1F195}");
     }
@@ -2893,6 +2964,8 @@ binary.md binary
             polarity: SelectorPolarity::LowerIsBetter,
             is_new: false,
             is_deleted: false,
+            current_unavailable: false,
+            baseline_unavailable: false,
         };
         assert_eq!(format_metric_cell(&md, "main"), "5 \u{26AA}");
     }
@@ -2908,6 +2981,8 @@ binary.md binary
             polarity: SelectorPolarity::LowerIsBetter,
             is_new: false,
             is_deleted: false,
+            current_unavailable: false,
+            baseline_unavailable: false,
         };
         assert_eq!(format_metric_cell(&md, "main"), "12 (main: 8) \u{1F534}");
     }
@@ -2923,8 +2998,53 @@ binary.md binary
             polarity: SelectorPolarity::LowerIsBetter,
             is_new: false,
             is_deleted: true,
+            current_unavailable: false,
+            baseline_unavailable: false,
         };
         assert_eq!(format_metric_cell(&md, "main"), "0 (was: 10) \u{1F7E2}");
+    }
+
+    #[test]
+    fn test_format_metric_cell_unavailable_sides_claim_no_trend() {
+        // A static-dependent composite on a side without static
+        // analysis is *unavailable*, not zero: the cell must not
+        // present the placeholder as a measurement or claim a trend
+        // (a green arrow for "hotspot 12 → 0" would fake a cleared
+        // hotspot).
+        let md = |current_unavailable: bool, baseline_unavailable: bool, is_new, is_deleted| {
+            MetricDiff {
+                name: "history.hotspot",
+                label: "Hotspot",
+                current: 0.0,
+                baseline: 12.0,
+                delta: 0.0,
+                polarity: SelectorPolarity::LowerIsBetter,
+                is_new,
+                is_deleted,
+                current_unavailable,
+                baseline_unavailable,
+            }
+        };
+        assert_eq!(
+            format_metric_cell(&md(true, false, false, false), "main"),
+            "n/a (main: 12)"
+        );
+        assert_eq!(
+            format_metric_cell(&md(false, true, false, false), "main"),
+            "0 (main: n/a)"
+        );
+        assert_eq!(
+            format_metric_cell(&md(true, true, false, false), "main"),
+            "n/a"
+        );
+        assert_eq!(
+            format_metric_cell(&md(true, false, true, false), "main"),
+            "n/a \u{1F195}"
+        );
+        assert_eq!(
+            format_metric_cell(&md(false, true, false, true), "main"),
+            "0 (was: n/a)"
+        );
     }
 
     #[test]
@@ -2940,6 +3060,8 @@ binary.md binary
                 polarity: SelectorPolarity::LowerIsBetter,
                 is_new: false,
                 is_deleted: false,
+                current_unavailable: false,
+                baseline_unavailable: false,
             }],
             is_new: false,
             is_deleted: false,

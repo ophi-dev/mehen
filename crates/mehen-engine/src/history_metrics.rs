@@ -33,6 +33,18 @@ pub(crate) fn names_want_history<'a>(mut names: impl Iterator<Item = &'a str>) -
     names.any(|name| name.starts_with("history."))
 }
 
+/// Whether a selector name is one of the two static-dependent
+/// composites (`history.hotspot`, `history.churn.relative`) that
+/// [`inject_history_metrics`] omits when `with_composites` is false.
+///
+/// Callers evaluating selectors against such a space must treat these
+/// as *unavailable* rather than letting the missing-key `0.0` fallback
+/// fabricate a value: a diff would report `-baseline` as an apparent
+/// improvement and a ranking would score the file as zero (Codex P2).
+pub(crate) fn is_history_composite(name: &str) -> bool {
+    name == keys::HISTORY_HOTSPOT || name == keys::HISTORY_CHURN_RELATIVE
+}
+
 /// Publish the `history.*` family onto a file's root metric set.
 ///
 /// `file` is the walked per-file history at the same revision the

@@ -131,10 +131,22 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
             );
         }
 
-        let scores: Vec<f64> = input
+        let scores: Vec<Option<f64>> = input
             .selectors
             .iter()
-            .map(|s| read_metric(s, &root))
+            .map(|s| {
+                // A static-dependent composite on a history-only space
+                // has no measurable value — its key was omitted above,
+                // and the missing-key `0.0` fallback must not rank the
+                // file on a fabricated zero.
+                if !statics_available
+                    && crate::history_metrics::is_history_composite(s.key.as_str())
+                {
+                    None
+                } else {
+                    Some(read_metric(s, &root))
+                }
+            })
             .collect();
 
         entries.push(TopOffenderEntry {
@@ -241,16 +253,27 @@ fn cmp_entries(
     polarities: &[Polarity],
 ) -> std::cmp::Ordering {
     for (i, polarity) in polarities.iter().enumerate() {
-        let av = a.scores.get(i).copied().unwrap_or(0.0);
-        let bv = b.scores.get(i).copied().unwrap_or(0.0);
-        let base = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
-        let ord = match polarity {
-            // Worst-first: larger value is more concerning, so a > b
-            // should put `a` first → reverse the natural ordering.
-            Polarity::HigherIsWorse => base.reverse(),
-            // Worst-first: smaller value is more concerning, so a < b
-            // should put `a` first → use the natural ordering.
-            Polarity::HigherIsBetter => base,
+        let av = a.scores.get(i).copied().flatten();
+        let bv = b.scores.get(i).copied().flatten();
+        let ord = match (av, bv) {
+            // An uncomputable score ranks as least concerning under
+            // either polarity — it is *absent*, not a zero (which
+            // would be the *most* concerning value for a
+            // higher-is-better metric).
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+            (Some(av), Some(bv)) => {
+                let base = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
+                match polarity {
+                    // Worst-first: larger value is more concerning, so a > b
+                    // should put `a` first → reverse the natural ordering.
+                    Polarity::HigherIsWorse => base.reverse(),
+                    // Worst-first: smaller value is more concerning, so a < b
+                    // should put `a` first → use the natural ordering.
+                    Polarity::HigherIsBetter => base,
+                }
+            }
         };
         if ord != std::cmp::Ordering::Equal {
             return ord;
@@ -414,7 +437,11 @@ pub struct TopOffendersOpts {
 struct CliMetricValue {
     name: &'static str,
     label: &'static str,
-    value: f64,
+    /// `None` (JSON `null`): the metric could not be computed for
+    /// this file — a static-dependent history composite on a file
+    /// whose static analysis is unavailable. Rendered as `n/a` and
+    /// ranked as least concerning, never as a fabricated zero.
+    value: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -713,7 +740,15 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         .map(|sel| CliMetricValue {
             name: sel.name,
             label: sel.label,
-            value: read_selector_metric(&root, sel),
+            // A static-dependent composite on a history-only space has
+            // no measurable value — its key was omitted above, and the
+            // missing-key `0.0` fallback must not rank the file on a
+            // fabricated zero.
+            value: if !statics_available && crate::history_metrics::is_history_composite(sel.name) {
+                None
+            } else {
+                Some(read_selector_metric(&root, sel))
+            },
         })
         .collect();
 
@@ -727,12 +762,21 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
 
 fn cmp_offenders(a: &FileOffender, b: &FileOffender, selectors: &[CliMetricSelector]) -> Ordering {
     for (i, sel) in selectors.iter().enumerate() {
-        let av = a.metrics.get(i).map(|m| m.value).unwrap_or(0.0);
-        let bv = b.metrics.get(i).map(|m| m.value).unwrap_or(0.0);
-        let base = av.total_cmp(&bv);
-        let ord = match sel.polarity {
-            SelectorPolarity::LowerIsBetter => base.reverse(),
-            SelectorPolarity::HigherIsBetter => base,
+        let av = a.metrics.get(i).and_then(|m| m.value);
+        let bv = b.metrics.get(i).and_then(|m| m.value);
+        let ord = match (av, bv) {
+            // An uncomputable value ranks as least concerning under
+            // either polarity — absent, not zero.
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+            (Some(av), Some(bv)) => {
+                let base = av.total_cmp(&bv);
+                match sel.polarity {
+                    SelectorPolarity::LowerIsBetter => base.reverse(),
+                    SelectorPolarity::HigherIsBetter => base,
+                }
+            }
         };
         if ord != Ordering::Equal {
             return ord;
@@ -778,7 +822,14 @@ fn print_markdown_offenders(offenders: &[FileOffender], selectors: &[CliMetricSe
     for o in offenders {
         out.push_str(&format!("| {} |", o.path.display()));
         for mv in &o.metrics {
-            out.push_str(&format!(" {} |", format_value(mv.value)));
+            out.push_str(&format!(
+                " {} |",
+                match mv.value {
+                    Some(v) => format_value(v),
+                    // Uncomputable for this file (see `CliMetricValue::value`).
+                    None => "n/a".to_string(),
+                }
+            ));
         }
         out.push('\n');
     }
@@ -913,7 +964,7 @@ mod tests {
         TopOffenderEntry {
             path: Utf8PathBuf::from(path),
             language: Language::Rust,
-            scores: scores.to_vec(),
+            scores: scores.iter().copied().map(Some).collect(),
         }
     }
 
@@ -985,6 +1036,32 @@ mod tests {
         // NaN primaries compare equal; secondary breaks the tie.
         assert_eq!(xs[0].path, "b.rs");
         assert_eq!(xs[1].path, "a.rs");
+    }
+
+    #[test]
+    fn uncomputable_score_ranks_least_concerning_under_either_polarity() {
+        // `None` marks a score that could not be computed (e.g. a
+        // history composite without static analysis). It must sort
+        // *after* every real value — including under higher-is-better
+        // polarity, where the old `0.0` fallback would have ranked
+        // the file as the very worst offender.
+        let none_entry = |path: &str| TopOffenderEntry {
+            path: Utf8PathBuf::from(path),
+            language: Language::Rust,
+            scores: vec![None],
+        };
+        for polarity in [Polarity::HigherIsWorse, Polarity::HigherIsBetter] {
+            let mut xs = [
+                none_entry("na.rs"),
+                entry("real_low.rs", &[1.0]),
+                entry("real_high.rs", &[50.0]),
+            ];
+            xs.sort_by(|a, b| cmp_entries(a, b, &[polarity]));
+            assert_eq!(
+                xs[2].path, "na.rs",
+                "uncomputable score must rank last for {polarity:?}"
+            );
+        }
     }
 
     #[test]
@@ -1241,7 +1318,12 @@ mod tests {
         let ranked: Vec<(&str, f64)> = report
             .entries
             .iter()
-            .map(|e| (e.path.file_name().unwrap_or(""), e.scores[0]))
+            .map(|e| {
+                (
+                    e.path.file_name().unwrap_or(""),
+                    e.scores[0].expect("score computed"),
+                )
+            })
             .collect();
         assert_eq!(
             ranked,
@@ -1297,12 +1379,91 @@ mod tests {
         let ranked: Vec<(&str, f64)> = report
             .entries
             .iter()
-            .map(|e| (e.path.file_name().unwrap_or(""), e.scores[0]))
+            .map(|e| {
+                (
+                    e.path.file_name().unwrap_or(""),
+                    e.scores[0].expect("score computed"),
+                )
+            })
             .collect();
         assert_eq!(
             ranked,
             vec![("latin.py", 2.0), ("plain.py", 1.0)],
             "undecodable file must rank on its history"
+        );
+    }
+
+    #[test]
+    fn rank_top_offenders_reports_composites_as_uncomputable_without_statics() {
+        // The static-dependent composites (`history.hotspot`,
+        // `history.churn.relative`) cannot be valued for a file whose
+        // static analysis is unavailable — the score must surface as
+        // `None` (JSON `null`) and rank least concerning, not as a
+        // fabricated `0.0` read through the missing-key fallback.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Mehen Test")
+                .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+                .env("GIT_COMMITTER_NAME", "Mehen Test")
+                .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        // latin.py is undecodable (Latin-1) but *busier* in history;
+        // plain.py decodes and has a real (possibly zero) hotspot.
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\n").unwrap();
+        std::fs::write(dir.path().join("plain.py"), "y = 1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\nz = 2\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "two"]);
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("history.hotspot"), sel("history.churn.relative")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        let latin = report
+            .entries
+            .iter()
+            .find(|e| e.path.file_name() == Some("latin.py"))
+            .expect("undecodable file still ranked (history-only)");
+        assert_eq!(
+            latin.scores,
+            vec![None, None],
+            "composites must be uncomputable, not zero"
+        );
+        let plain = report
+            .entries
+            .iter()
+            .find(|e| e.path.file_name() == Some("plain.py"))
+            .expect("decodable file ranked");
+        assert!(
+            plain.scores.iter().all(|s| s.is_some()),
+            "statically analyzed file keeps real composite values"
+        );
+        // Least concerning: the uncomputable entry sorts after the
+        // real (even zero-valued) one.
+        assert_eq!(
+            report.entries.last().map(|e| e.path.file_name()),
+            Some(Some("latin.py"))
         );
     }
 
@@ -1583,7 +1744,7 @@ binary.py binary
                 .map(|(n, v)| CliMetricValue {
                     name: n,
                     label: n,
-                    value: *v,
+                    value: Some(*v),
                 })
                 .collect(),
         }

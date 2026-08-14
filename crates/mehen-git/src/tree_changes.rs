@@ -198,6 +198,47 @@ pub(crate) struct TreeChanges {
     pub(crate) non_blob_changes: usize,
 }
 
+/// Blob-to-blob modifications between two trees — paths present in
+/// both with different content, as `(path, new_oid)`. No rename
+/// detection, no blob loads: a plain tree walk. Used by the merge
+/// identity handling to find paths a parent's line changed since its
+/// divergence even when the parent's endpoint blob is byte-equal to
+/// the merged tree (exact OID equality erases such paths from the
+/// parent-to-merge diff entirely).
+pub(crate) fn blob_modifications_between_trees(
+    repo: &gix::Repository,
+    base: &gix::Tree<'_>,
+    current: &gix::Tree<'_>,
+) -> Result<Vec<(PathBuf, gix::ObjectId)>, GitError> {
+    let mut recorder = gix::diff::tree::Recorder::default();
+    gix::diff::tree(
+        TreeRefIter::from_bytes(&base.data, base.id.kind()),
+        TreeRefIter::from_bytes(&current.data, current.id.kind()),
+        gix::diff::tree::State::default(),
+        repo.objects.clone(),
+        &mut recorder,
+    )
+    .map_err(|e| GitError::Internal(e.to_string()))?;
+
+    let mut modifications = Vec::new();
+    for change in recorder.records {
+        if let Change::Modification {
+            previous_entry_mode,
+            entry_mode,
+            oid,
+            path,
+            ..
+        } = change
+            && previous_entry_mode.is_blob()
+            && entry_mode.is_blob()
+            && let Some(path) = path_from_git(&path)
+        {
+            modifications.push((path, oid));
+        }
+    }
+    Ok(modifications)
+}
+
 /// Diff two trees (blob entries only, renames joined). `parent` of
 /// `None` means the empty tree (root commits).
 pub(crate) fn changes_between_trees(
@@ -236,6 +277,13 @@ pub(crate) fn changes_between_trees(
             } => {
                 if entry_mode.is_blob() {
                     let Some(path) = path_from_git(&path) else {
+                        // Count the unrepresentable leaf as an opaque
+                        // changed path (like a non-blob): coupling
+                        // cardinality is `changes + non_blob_changes`,
+                        // and dropping the entry entirely would give
+                        // the commit's *other* files a different
+                        // coupling count on Windows than on Unix.
+                        non_blob_changes += 1;
                         continue;
                     };
                     added.push(RenameSide {
@@ -255,6 +303,9 @@ pub(crate) fn changes_between_trees(
             } => {
                 if entry_mode.is_blob() {
                     let Some(path) = path_from_git(&path) else {
+                        // See the addition arm: keep the changeset
+                        // cardinality platform-independent.
+                        non_blob_changes += 1;
                         continue;
                     };
                     deleted.push(RenameSide {
@@ -278,6 +329,9 @@ pub(crate) fn changes_between_trees(
                 // submodule's commit object is not in this
                 // repository's odb).
                 let Some(path) = path_from_git(&path) else {
+                    // See the addition arm: keep the changeset
+                    // cardinality platform-independent.
+                    non_blob_changes += 1;
                     continue;
                 };
                 match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
