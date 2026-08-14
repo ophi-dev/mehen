@@ -374,21 +374,35 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // older commits accumulate under vacated paths while the
         // surviving files read an empty (or worse, a dead prior
         // occupant's) history.
-        let (changes, non_blob_changes) = if is_merge {
+        let (changes, non_blob_changes, commit_truncated) = if is_merge {
             walked_merges.push((info.id, info.parent_ids.iter().copied().collect()));
             let mut merge_truncated: Vec<PathBuf> = Vec::new();
             let introduced = merge_introduced_changes(repo, &commit, &mut merge_truncated)?;
-            truncated_lineages.extend(merge_truncated);
-            if introduced.is_empty() {
+            if introduced.is_empty() && merge_truncated.is_empty() {
                 continue;
             }
             // Identity only — merges never reach the coupling math.
-            (introduced, 0)
+            (introduced, 0, merge_truncated)
         } else {
-            let (changes, non_blob_changes, truncated) = diff_against_first_parent(repo, &commit)?;
-            truncated_lineages.extend(truncated);
-            (changes, non_blob_changes)
+            diff_against_first_parent(repo, &commit)?
         };
+        // Truncated-lineage markers are keyed by the *live* identity:
+        // the marker's path is the rename destination as of this
+        // commit, but a newer (already-walked) rename may have moved
+        // the file on — resolving through the pre-commit alias map
+        // lands the marker on the path `tracked_file` will actually
+        // be asked about. A tombstone resolution means the truncated
+        // line is already fenced off as dead: nothing to mark.
+        for path in commit_truncated {
+            if let (FileIdentity::Path(live), _, _) =
+                resolve_alias(repo, &mut ancestry, &aliases, &path, info.id, false)?
+            {
+                truncated_lineages.insert(live);
+            }
+        }
+        if is_merge && changes.is_empty() {
+            continue;
+        }
 
         let seconds = commit_seconds(&commit)?;
         if !is_merge {

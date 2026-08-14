@@ -676,10 +676,21 @@ fn detect_renames(
         let deleted_blobs = load_fuzzy_blobs(repo, &remaining_deleted, FUZZY_TOTAL_BYTE_BUDGET)?;
 
         let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
+        // The streamed side holds one blob at a time but is still
+        // I/O-bounded by its own cumulative budget: without it, one
+        // deletion against thousands of large additions would read
+        // and decompress an unbounded volume despite the documented
+        // cap. Oversized/over-budget destinations are skipped (not
+        // `break`): smaller later blobs may still fit, keeping the
+        // truncation deterministic in path order like
+        // `load_fuzzy_blobs`.
+        let mut stream_budget = FUZZY_TOTAL_BYTE_BUDGET;
         for (added_index, added_side) in remaining_added.iter().enumerate() {
-            if blob_size(repo, &added_side.oid)? > FUZZY_MAX_BLOB_BYTES {
+            let size = blob_size(repo, &added_side.oid)?;
+            if size > FUZZY_MAX_BLOB_BYTES || size > stream_budget {
                 continue;
             }
+            stream_budget -= size;
             let new_blob = FuzzyBlob {
                 data: read_blob_data(repo, &added_side.oid)?,
             };

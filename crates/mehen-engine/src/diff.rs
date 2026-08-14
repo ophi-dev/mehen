@@ -1153,6 +1153,14 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         // were accepted.
         let mut baseline_composites = true;
         let mut current_composites = true;
+        // Whether each side's per-file history lookup succeeded when
+        // a walk ran: `tracked_file` returning `None` (e.g. a lineage
+        // truncated by a platform-unrepresentable rename source)
+        // means that side's history is unmeasurable — the Git-only
+        // selectors must read `n/a`, not a fabricated 0 through the
+        // missing-key fallback.
+        let mut baseline_history_available = true;
+        let mut current_history_available = true;
         if let Some((base_history, head_history)) = histories.as_ref() {
             baseline_composites = baseline_space.is_some();
             current_composites = current_space.is_some();
@@ -1241,6 +1249,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 &mehen_git::RepositoryHistory,
                 &Path,
                 bool,
+                bool,
             )> = Vec::with_capacity(2);
             // A split-rename deletion row's lineage is already carried
             // by its paired destination row — injecting it here too
@@ -1256,6 +1265,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                     base_history,
                     base_path,
                     baseline_composites,
+                    false,
                 ));
             }
             sides.push((
@@ -1263,16 +1273,27 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 head_history,
                 cf.path.as_path(),
                 current_composites,
+                true,
             ));
-            for (space, history, path, with_composites) in sides {
+            for (space, history, path, with_composites, is_current) in sides {
                 // `tracked_file`, not `file`: each side's path exists
                 // at that side's revision, the head-blob gate keeps a
                 // dead prior occupant's history out, and a blob
                 // created purely by merge conflict resolution reads
                 // its synthesized zero-touch entry (real
-                // creation-based age) instead of nothing.
+                // creation-based age) instead of nothing. A `None`
+                // here (e.g. a lineage truncated by a platform-
+                // unrepresentable rename source) means this side's
+                // history is *unmeasurable* — remembered per side so
+                // the selector table reads `n/a`, not a measured 0.
+                let fh = history.tracked_file(path);
+                if is_current {
+                    current_history_available = fh.is_some();
+                } else {
+                    baseline_history_available = fh.is_some();
+                }
                 if let Some(space) = space
-                    && let Some(fh) = history.tracked_file(path)
+                    && let Some(fh) = fh
                 {
                     history_metrics::inject_history_metrics(
                         &mut space.metrics,
@@ -1322,10 +1343,14 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                         && !history_metrics::selector_available(
                             sel.name,
                             baseline_composites,
-                            true,
+                            baseline_history_available,
                         ));
                 let current_unavailable = current_space.is_some()
-                    && !history_metrics::selector_available(sel.name, current_composites, true);
+                    && !history_metrics::selector_available(
+                        sel.name,
+                        current_composites,
+                        current_history_available,
+                    );
                 let baseline = baseline_space
                     .as_ref()
                     .map(|s| read_selector_metric(s, sel))
