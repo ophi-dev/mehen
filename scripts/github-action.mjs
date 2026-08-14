@@ -535,12 +535,29 @@ function formatMetricCell(metric, baseLabel) {
   if (isNotApplicable(metric)) {
     return "—";
   }
-  const current = formatNumber(metric.current);
+  // A side flagged unavailable carries a numeric `0.0` placeholder
+  // that is *not* a measurement (static analysis was impossible for
+  // that side — undecodable content, blocking parse diagnostic, or a
+  // feature-gated analyzer). Render `n/a` and claim no trend, exactly
+  // like the native CLI table.
+  const currentUnavailable = metric.current_unavailable === true;
+  const baselineUnavailable = metric.baseline_unavailable === true;
+  const current = currentUnavailable ? "n/a" : formatNumber(metric.current);
   if (metric.is_new) {
     return `${current} \u{1F195}`;
   }
   if (metric.is_deleted) {
+    if (baselineUnavailable) {
+      return "0 (was: n/a)";
+    }
     return `0 (was: ${formatNumber(metric.baseline)}) ${trendEmoji(metric)}`;
+  }
+  if (currentUnavailable || baselineUnavailable) {
+    if (currentUnavailable && baselineUnavailable) {
+      return "n/a";
+    }
+    const baseline = baselineUnavailable ? "n/a" : formatNumber(metric.baseline);
+    return `${current} (${baseLabel}: ${baseline})`;
   }
   if (Number(metric.delta) === 0) {
     return `${current} \u{26AA}`;
@@ -569,6 +586,11 @@ function collectThresholdViolations(diffs, thresholds) {
   for (const file of diffs) {
     for (const metric of file.metrics || []) {
       if (isNotApplicable(metric)) {
+        continue;
+      }
+      // An unavailable side means the delta is a placeholder, not a
+      // measured change — never a threshold violation.
+      if (metric.current_unavailable === true || metric.baseline_unavailable === true) {
         continue;
       }
       const key = canonicalMetricName(metric.name || metric.label || "");

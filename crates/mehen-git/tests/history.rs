@@ -5120,6 +5120,181 @@ fn merge_created_untouched_blobs_read_zero_history_not_none() {
     );
 }
 
+/// Two parallel merges each conflict-create the same path; a later
+/// merge keeps one version and fences the other. The surviving
+/// zero-touch blob's synthesized age must come from *its* creating
+/// merge, not from the discarded occupant's — which the date-order
+/// walk visits first here (newer timestamps).
+#[test]
+fn discarded_parallel_merge_creations_do_not_misdate_the_survivor() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+    let root = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(0));
+
+    // A tiny two-branch diamond whose merge tree conflict-creates
+    // `a.rs` with the given content.
+    let mut creating_merge = |branch: &str, filler: &str, content: &str, n: i64| -> String {
+        git(
+            dir.path(),
+            &["checkout", "-q", "-b", branch, &root],
+            ALICE,
+            t(n),
+        );
+        std::fs::write(dir.path().join(filler), "fn f() {}\n").unwrap();
+        git(dir.path(), &["add", "-A"], ALICE, t(n));
+        git(dir.path(), &["commit", "-q", "-m", "filler"], ALICE, t(n));
+        let side = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(n));
+        std::fs::write(dir.path().join("a.rs"), content).unwrap();
+        git(dir.path(), &["add", "-A"], BOB, t(n + 1));
+        let tree = git_out(dir.path(), &["write-tree"], BOB, t(n + 1));
+        let merge = git_out(
+            dir.path(),
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &root,
+                "-p",
+                &side,
+                "-m",
+                "conflict-create a.rs",
+            ],
+            BOB,
+            t(n + 1),
+        );
+        std::fs::remove_file(dir.path().join("a.rs")).unwrap();
+        git(dir.path(), &["checkout", "-q", "-f", &root], ALICE, t(n));
+        merge
+    };
+
+    // Survivor created at t(2); discarded occupant created at t(4)
+    // (newer — walked first).
+    let survivor_merge = creating_merge("one", "f1.rs", "fn kept() {}\n", 1);
+    let discarded_merge = creating_merge("two", "f2.rs", "fn discarded_occupant_content() {}\n", 3);
+
+    // The outer merge keeps the survivor's blob.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-f", &survivor_merge],
+        ALICE,
+        t(5),
+    );
+    let tree = git_out(dir.path(), &["write-tree"], ALICE, t(5));
+    let outer = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &survivor_merge,
+            "-p",
+            &discarded_merge,
+            "-m",
+            "keep one version",
+        ],
+        ALICE,
+        t(5),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &outer).unwrap();
+
+    let fh = history
+        .tracked_file(Path::new("a.rs"))
+        .expect("tracked blob must be history-available");
+    assert_eq!(
+        fh.commit_frequency, 0,
+        "merge-only blob accumulates nothing"
+    );
+    // head = t(5), surviving creation = t(2): 300 000 seconds. The
+    // discarded occupant's creation (t(4), walked first) must not
+    // shrink this to 100 000.
+    let expected_months = 300_000.0 / (30.436875 * 86_400.0);
+    assert!(
+        (fh.age_months(history.head_seconds) - expected_months).abs() < 1e-9,
+        "age must come from the surviving creation, got {} months",
+        fh.age_months(history.head_seconds)
+    );
+}
+
+/// The exact-rename overflow fallback (> 10 000 same-content pairs)
+/// must keep basename affinity: a bulk move of identical stubs whose
+/// destination directories reverse the path-sorted order would
+/// otherwise be paired positionally, silently transferring commit
+/// history between files whose basenames match unambiguously.
+#[test]
+fn exact_rename_overflow_fallback_pairs_by_basename() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // One stub is seeded by a bug-fix commit — the marker that must
+    // follow its lineage through the move. `f000` sorts first on the
+    // source side while its destination (`d100/f000.rs`) sorts last,
+    // so positional pairing is maximally wrong for it.
+    let stub = "fn stub() {}\n";
+    std::fs::create_dir(dir.path().join("s")).unwrap();
+    std::fs::write(dir.path().join("s/f000.rs"), stub).unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(0));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "fix: seed f000"],
+        CAROL,
+        t(0),
+    );
+
+    // 100 more byte-identical stubs: 101 deletions × 101 additions
+    // in the move commit exceeds the 10 000-pair ranking budget.
+    for i in 1..101 {
+        std::fs::write(dir.path().join(format!("s/f{i:03}.rs")), stub).unwrap();
+    }
+    git(dir.path(), &["add", "-A"], ALICE, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "bulk stubs"],
+        ALICE,
+        t(1),
+    );
+
+    // Move every stub into its own directory, numbered so the sorted
+    // destination order *reverses* the source order.
+    for i in 0..101 {
+        let dest_dir = dir.path().join(format!("d{:03}", 100 - i));
+        std::fs::create_dir(&dest_dir).unwrap();
+        std::fs::rename(
+            dir.path().join(format!("s/f{i:03}.rs")),
+            dest_dir.join(format!("f{i:03}.rs")),
+        )
+        .unwrap();
+    }
+    git(dir.path(), &["add", "-A"], ALICE, t(2));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "bulk move"],
+        ALICE,
+        t(2),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    // f000's bug-fix creation must have followed *its* basename to
+    // d100/f000.rs — positional pairing would hand it to d000/f100.rs
+    // (the first destination in sorted order).
+    let bugfix_carrier = history.file(Path::new("d100/f000.rs")).unwrap();
+    assert_eq!(
+        bugfix_carrier.bugfix_commits, 1,
+        "the bug-fix lineage was paired onto the wrong destination"
+    );
+    let other = history.file(Path::new("d000/f100.rs")).unwrap();
+    assert_eq!(other.bugfix_commits, 0);
+}
+
 /// An octopus merge discarding *two* parents' independent occupants
 /// of the same path: each discarded parent needs its own fence — a
 /// per-path dedup would leave the second occupant unfenced.

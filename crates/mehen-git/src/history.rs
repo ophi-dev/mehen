@@ -714,7 +714,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
             // accumulate, so the usual delete-then-recreate fence
             // (which needs an accumulated creation as proof) can
             // never fire for them — install the boundary eagerly.
-            for change in &changes {
+            for (change, target) in changes.iter().zip(targets.iter()) {
                 if let Some((scope, floor)) = change.discarded_occupant_fence {
                     tombstones += 1;
                     let mut entry =
@@ -724,9 +724,17 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                     aliases.entry(change.path.clone()).or_default().push(entry);
                 }
                 if change.is_addition {
-                    merge_creation_seconds
-                        .entry(change.path.clone())
-                        .or_insert(seconds);
+                    // Record the creation time only when the addition
+                    // resolves to the live path: a parallel merge's
+                    // discarded occupant resolves through its fence to
+                    // a tombstone, and recording its (possibly newer,
+                    // first-walked) timestamp would misdate the
+                    // surviving zero-touch blob's age.
+                    if matches!(target, FileIdentity::Path(_)) {
+                        merge_creation_seconds
+                            .entry(change.path.clone())
+                            .or_insert(seconds);
+                    }
                     tombstones += 1;
                     aliases
                         .entry(change.path.clone())

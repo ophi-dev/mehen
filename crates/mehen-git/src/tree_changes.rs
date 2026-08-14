@@ -537,9 +537,14 @@ fn detect_renames(
     }
     if exact_overflow {
         // Pathological same-content fan-out (thousands of identical
-        // files churned at once): degrade to positional pairing in
-        // path order rather than ranking millions of pairs. Still
-        // deterministic; still exact-content renames.
+        // files churned at once): degrade to bounded pairing in path
+        // order rather than ranking millions of pairs. Basename
+        // affinity is kept — one hash pass per group — because purely
+        // positional pairing can cross-pair a bulk move whose
+        // destination directories reorder the path-sorted lists,
+        // silently transferring commit history between files whose
+        // basenames match unambiguously. Still deterministic; still
+        // exact-content renames.
         exact_candidates.clear();
         let mut added_by_oid: HashMap<gix::ObjectId, Vec<usize>> = HashMap::new();
         for (index, side) in added.iter().enumerate() {
@@ -547,16 +552,53 @@ fn detect_renames(
                 added_by_oid.entry(side.oid).or_default().push(index);
             }
         }
+        fn basename(path: &gix::bstr::BString) -> &[u8] {
+            let bytes: &[u8] = path.as_ref();
+            bytes.rsplit(|&c| c == b'/').next().unwrap_or(bytes)
+        }
         for (oid, added_indices) in added_by_oid {
             let Some(deleted_indices) = deleted_by_oid.get(&oid) else {
                 continue;
             };
-            for (&deleted_index, &added_index) in deleted_indices.iter().zip(added_indices.iter()) {
-                if deleted[deleted_index].broken.is_some()
+            let disallowed = |deleted_index: usize, added_index: usize| {
+                deleted[deleted_index].broken.is_some()
                     && deleted[deleted_index].broken == added[added_index].broken
+            };
+            let mut deleted_by_basename: HashMap<&[u8], std::collections::VecDeque<usize>> =
+                HashMap::new();
+            for &deleted_index in deleted_indices {
+                deleted_by_basename
+                    .entry(basename(&deleted[deleted_index].path))
+                    .or_default()
+                    .push_back(deleted_index);
+            }
+            let mut taken: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut unpaired_added: Vec<usize> = Vec::new();
+            for &added_index in &added_indices {
+                let mut chosen: Option<usize> = None;
+                if let Some(queue) = deleted_by_basename.get_mut(basename(&added[added_index].path))
+                    && let Some(pos) = queue.iter().position(|&d| !disallowed(d, added_index))
                 {
-                    continue;
+                    chosen = queue.remove(pos);
                 }
+                match chosen {
+                    Some(deleted_index) => {
+                        taken.insert(deleted_index);
+                        exact_candidates.push((0, deleted_index, added_index));
+                    }
+                    None => unpaired_added.push(added_index),
+                }
+            }
+            // Leftovers pair positionally, in path order.
+            let mut remaining_deleted = deleted_indices
+                .iter()
+                .copied()
+                .filter(|deleted_index| !taken.contains(deleted_index));
+            for &added_index in &unpaired_added {
+                let Some(deleted_index) = remaining_deleted.find(|&d| !disallowed(d, added_index))
+                else {
+                    break;
+                };
                 exact_candidates.push((0, deleted_index, added_index));
             }
         }
