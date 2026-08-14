@@ -5085,8 +5085,21 @@ fn merge_created_untouched_blobs_read_zero_history_not_none() {
         t(2),
     );
 
+    // Advance HEAD past the merge without touching the merge-created
+    // blob: its age must measure from the *creating merge*, not read
+    // an eternal zero pinned to whatever HEAD is now.
+    git(dir.path(), &["checkout", "-q", &merge], ALICE, t(3));
+    git(dir.path(), &["checkout", "-q", "-b", "after"], ALICE, t(3));
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\nfn a2() {}\n").unwrap();
+    git(
+        dir.path(),
+        &["commit", "-q", "-am", "later work"],
+        ALICE,
+        t(3),
+    );
+
     let repo = gix::discover(dir.path()).unwrap();
-    let history = collect_history(&repo, &merge).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
 
     // No non-merge commit touched it: no accumulator...
     assert!(history.file(Path::new("merge_only.rs")).is_none());
@@ -5097,10 +5110,13 @@ fn merge_created_untouched_blobs_read_zero_history_not_none() {
     assert_eq!(fh.commit_frequency, 0);
     assert_eq!(fh.churn_abs(), 0);
     assert_eq!(fh.authors, 0);
-    assert_eq!(
-        fh.age_months(history.head_seconds),
-        0.0,
-        "a merge-created blob cannot predate the revision introducing it"
+    // Age counts from the creating merge (t2) to HEAD (t3): 100 000
+    // seconds, not zero.
+    let expected_months = 100_000.0 / (30.436875 * 86_400.0);
+    assert!(
+        (fh.age_months(history.head_seconds) - expected_months).abs() < 1e-9,
+        "age must measure from the creating merge, got {}",
+        fh.age_months(history.head_seconds)
     );
 }
 

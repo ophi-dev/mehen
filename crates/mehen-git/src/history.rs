@@ -118,10 +118,11 @@ impl FileHistory {
 
     /// A tracked blob no walked (non-merge) commit ever touched —
     /// e.g. one created purely by merge conflict resolution. Every
-    /// count reads a legitimate zero; the last change is pinned to
-    /// the walked rev, so `age_months` reads 0 (the blob cannot be
-    /// older than the revision that introduced it).
-    fn untouched(head_seconds: i64) -> Self {
+    /// count reads a legitimate zero; the last change is the blob's
+    /// creation time (the introducing merge's timestamp, or the
+    /// walked rev when unknown), so `age_months` measures the time it
+    /// has sat untouched.
+    fn untouched(creation_seconds: i64) -> Self {
         Self {
             commit_frequency: 0,
             churn_added: 0,
@@ -129,7 +130,7 @@ impl FileHistory {
             authors: 0,
             minor_contributors: 0,
             ownership: 0.0,
-            last_change_seconds: head_seconds,
+            last_change_seconds: creation_seconds,
             sum_of_coupling: 0,
             bugfix_commits: 0,
             twr: 0.0,
@@ -147,6 +148,10 @@ pub struct RepositoryHistory {
     /// Blob paths present in the walked rev's tree, for
     /// [`tracked_file`](Self::tracked_file).
     head_blobs: std::collections::HashSet<PathBuf>,
+    /// Creation timestamps of conflict-resolution-created blobs
+    /// (merge-introduced additions, which never accumulate
+    /// contributions) — the basis for a synthesized zero entry's age.
+    merge_creation_seconds: HashMap<PathBuf, i64>,
 }
 
 impl RepositoryHistory {
@@ -173,12 +178,17 @@ impl RepositoryHistory {
         if !self.head_blobs.contains(path) {
             return None;
         }
-        Some(
-            self.files
-                .get(path)
-                .cloned()
-                .unwrap_or_else(|| FileHistory::untouched(self.head_seconds)),
-        )
+        Some(self.files.get(path).cloned().unwrap_or_else(|| {
+            // Age measures from the creating merge — pinning it to
+            // the walked rev would make an old, untouched blob read
+            // as newly changed forever.
+            FileHistory::untouched(
+                self.merge_creation_seconds
+                    .get(path)
+                    .copied()
+                    .unwrap_or(self.head_seconds),
+            )
+        }))
     }
 
     /// Number of files with recorded history.
@@ -291,6 +301,14 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
     // tombstone so the surviving file never inherits them.
     let mut aliases: HashMap<PathBuf, Vec<AliasEntry>> = HashMap::new();
     let mut tombstones: usize = 0;
+    // Conflict-resolution-created blobs (merge-introduced additions)
+    // never accumulate contributions, but their *creation time* is
+    // real history: `tracked_file` synthesizes their zero entry from
+    // it so `history.age_months` measures time since the creating
+    // merge instead of reading an eternal 0. Newest-first walk: the
+    // first-seen merge addition for a path is the one that created
+    // the blob HEAD still carries.
+    let mut merge_creation_seconds: HashMap<PathBuf, i64> = HashMap::new();
     // Every walked merge `(id, parents)` — including ones that
     // introduced no identity changes. The phase-2 delete-then-recreate
     // cut consults this to recognize a *bypassed* deletion: one whose
@@ -706,6 +724,9 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                     aliases.entry(change.path.clone()).or_default().push(entry);
                 }
                 if change.is_addition {
+                    merge_creation_seconds
+                        .entry(change.path.clone())
+                        .or_insert(seconds);
                     tombstones += 1;
                     aliases
                         .entry(change.path.clone())
@@ -828,6 +849,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         head_seconds,
         files,
         head_blobs,
+        merge_creation_seconds,
     })
 }
 
