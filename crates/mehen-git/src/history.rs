@@ -893,7 +893,12 @@ fn time_weighted_risk(bugfix_seconds: &[i64], first_seconds: i64, head_seconds: 
     if bugfix_seconds.is_empty() {
         return 0.0;
     }
-    let span = (head_seconds - first_seconds).max(0) as f64;
+    // Saturating: raw commit metadata can carry arbitrary i64
+    // timestamps (git objects can be written directly), and a
+    // repository spanning extreme negative and positive values would
+    // overflow a plain subtraction — a debug-build panic mid-walk, a
+    // silently wrapped TWR in release.
+    let span = head_seconds.saturating_sub(first_seconds).max(0) as f64;
     // Sort so the float summation order is independent of the walk
     // order (cross-platform determinism contract).
     let mut times: Vec<i64> = bugfix_seconds.to_vec();
@@ -905,7 +910,7 @@ fn time_weighted_risk(bugfix_seconds: &[i64], first_seconds: i64, head_seconds: 
                 // Single-commit histories: the fix is "now".
                 1.0
             } else {
-                (((s - first_seconds).max(0) as f64) / span).clamp(0.0, 1.0)
+                ((s.saturating_sub(first_seconds).max(0) as f64) / span).clamp(0.0, 1.0)
             };
             1.0 / (1.0 + (-TWR_STEEPNESS * t + TWR_OMEGA).exp())
         })
@@ -1613,6 +1618,83 @@ fn merge_introduced_changes(
                 alias_addition_floor: None,
                 discarded_occupant_fence: Some((*q_id, Some(floor))),
             });
+        }
+    }
+    // Unrelated parents (`--allow-unrelated-histories`) can hold
+    // *byte-identical* same-path roots: exact OID equality erases the
+    // path from every parent-to-merge diff, and the base-relative
+    // recovery pass above has no base to diff against — yet without a
+    // fence both independent root additions accumulate under the
+    // surviving path, doubling churn/frequency and merging unrelated
+    // authorship. The shape is rare, so the merged tree is enumerated
+    // only when some parent pair actually lacks a merge base: the
+    // first parent holding the merged blob supplies the survivor, and
+    // every *unrelated* other parent holding the identical blob gets
+    // an unfloored fence (no shared pre-branch history exists).
+    let related = |a: gix::ObjectId, b: gix::ObjectId| -> Result<bool, GitError> {
+        match repo.merge_base(a, b) {
+            Ok(_) => Ok(true),
+            Err(gix::repository::merge_base::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(GitError::Internal(e.to_string())),
+        }
+    };
+    let mut any_unrelated = false;
+    'pairs: for (i, a) in parent_ids.iter().enumerate() {
+        for b in &parent_ids[i + 1..] {
+            if !related(*a, *b)? {
+                any_unrelated = true;
+                break 'pairs;
+            }
+        }
+    }
+    if any_unrelated {
+        let mut recorder = gix::traverse::tree::Recorder::default();
+        to_tree
+            .traverse()
+            .breadthfirst(&mut recorder)
+            .map_err(|e| internal(&e))?;
+        for entry in recorder.records {
+            if !entry.mode.is_blob() {
+                continue;
+            }
+            let Some(path) = crate::tree_changes::path_from_git(&entry.filepath) else {
+                continue;
+            };
+            if seen.contains(&path) {
+                continue;
+            }
+            let mut supplier: Option<gix::ObjectId> = None;
+            for (parent_id, tree) in parent_ids.iter().zip(&parent_trees) {
+                if blob_oid_at(tree, &path)? == Some(entry.oid) {
+                    supplier = Some(*parent_id);
+                    break;
+                }
+            }
+            let Some(supplier) = supplier else {
+                continue;
+            };
+            for (parent_id, tree) in parent_ids.iter().zip(&parent_trees) {
+                if *parent_id == supplier
+                    || fenced.contains(&(path.clone(), *parent_id))
+                    || blob_oid_at(tree, &path)? != Some(entry.oid)
+                    || related(supplier, *parent_id)?
+                {
+                    continue;
+                }
+                fenced.insert((path.clone(), *parent_id));
+                introduced.push(CommitFileChange {
+                    path: path.clone(),
+                    source_path: None,
+                    added: 0,
+                    removed: 0,
+                    is_deletion: false,
+                    is_addition: false,
+                    alias_scopes: None,
+                    install_destination_boundary: true,
+                    alias_addition_floor: None,
+                    discarded_occupant_fence: Some((*parent_id, None)),
+                });
+            }
         }
     }
     Ok(introduced)

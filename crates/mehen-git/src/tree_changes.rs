@@ -25,7 +25,7 @@
 //! by a submodule is that file's deletion, and vice versa.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gix::diff::blob::{Algorithm, Diff, InternedInput, sources::byte_lines};
 use gix::diff::tree::recorder::Change;
@@ -65,14 +65,9 @@ pub(crate) fn same_blob_lineage(
 }
 
 /// Canonical, platform-independent ordering for repository paths: the
-/// underlying git path bytes. `PathBuf`'s own `Ord` may order
-/// differently across platforms (Windows `OsStr` ordering is not the
-/// byte ordering), which would let equally ranked rename tie-breaks
-/// pick different pairings per platform.
-fn git_path_order(a: &Path, b: &Path) -> std::cmp::Ordering {
-    a.as_os_str()
-        .as_encoded_bytes()
-        .cmp(b.as_os_str().as_encoded_bytes())
+/// raw git path bytes.
+fn git_path_order(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    a.cmp(b)
 }
 
 /// Convert a git tree path (raw bytes) to a `PathBuf` without lossy
@@ -84,8 +79,12 @@ fn git_path_order(a: &Path, b: &Path) -> std::cmp::Ordering {
 /// Returns `None` when the platform cannot represent the bytes as a
 /// native path (Windows requires valid UTF-8; the infallible gix
 /// conversion would *panic* there). Such a path cannot exist in a
-/// Windows checkout at all, so callers skip the entry instead of
-/// aborting the whole analysis. On Unix the conversion never fails.
+/// Windows checkout at all, so the diff pipeline keeps the raw bytes
+/// through rename detection and converts only when *emitting* a
+/// change — an unrepresentable result is then counted as one opaque
+/// changed path (coupling cardinality stays platform-independent,
+/// including for rename pairs) instead of aborting the analysis. On
+/// Unix the conversion never fails.
 pub(crate) fn path_from_git(path: &gix::bstr::BString) -> Option<PathBuf> {
     match gix::path::try_from_bstr(path.as_ref() as &gix::bstr::BStr) {
         Ok(p) => Some(p.into_owned()),
@@ -181,7 +180,10 @@ pub(crate) enum TreeChange {
 /// modification it came from (if any) so unpaired halves can be
 /// reassembled.
 struct RenameSide {
-    path: PathBuf,
+    /// Raw git path bytes — kept unconverted through rename pairing
+    /// so unrepresentable (Windows) paths still pair; conversion to a
+    /// platform path happens at emission.
+    path: gix::bstr::BString,
     oid: gix::ObjectId,
     /// Index into the broken-pairs table when this side came from a
     /// completely rewritten same-path modification (git `-B`).
@@ -263,7 +265,7 @@ pub(crate) fn changes_between_trees(
 
     let mut added: Vec<RenameSide> = Vec::new();
     let mut deleted: Vec<RenameSide> = Vec::new();
-    let mut modified: Vec<(PathBuf, gix::ObjectId, gix::ObjectId)> = Vec::new();
+    let mut modified: Vec<(gix::bstr::BString, gix::ObjectId, gix::ObjectId)> = Vec::new();
     let mut changes: Vec<TreeChange> = Vec::new();
     let mut non_blob_changes: usize = 0;
 
@@ -276,16 +278,6 @@ pub(crate) fn changes_between_trees(
                 ..
             } => {
                 if entry_mode.is_blob() {
-                    let Some(path) = path_from_git(&path) else {
-                        // Count the unrepresentable leaf as an opaque
-                        // changed path (like a non-blob): coupling
-                        // cardinality is `changes + non_blob_changes`,
-                        // and dropping the entry entirely would give
-                        // the commit's *other* files a different
-                        // coupling count on Windows than on Unix.
-                        non_blob_changes += 1;
-                        continue;
-                    };
                     added.push(RenameSide {
                         path,
                         oid,
@@ -302,12 +294,6 @@ pub(crate) fn changes_between_trees(
                 ..
             } => {
                 if entry_mode.is_blob() {
-                    let Some(path) = path_from_git(&path) else {
-                        // See the addition arm: keep the changeset
-                        // cardinality platform-independent.
-                        non_blob_changes += 1;
-                        continue;
-                    };
                     deleted.push(RenameSide {
                         path,
                         oid,
@@ -328,19 +314,21 @@ pub(crate) fn changes_between_trees(
                 // downstream blob reads never touch a gitlink OID (the
                 // submodule's commit object is not in this
                 // repository's odb).
-                let Some(path) = path_from_git(&path) else {
-                    // See the addition arm: keep the changeset
-                    // cardinality platform-independent.
-                    non_blob_changes += 1;
-                    continue;
-                };
                 match (previous_entry_mode.is_blob(), entry_mode.is_blob()) {
                     (true, true) => modified.push((path, previous_oid, oid)),
-                    (true, false) => changes.push(TreeChange::Deleted {
-                        path,
-                        oid: previous_oid,
-                    }),
-                    (false, true) => changes.push(TreeChange::Added { path, oid }),
+                    (true, false) => match path_from_git(&path) {
+                        Some(path) => changes.push(TreeChange::Deleted {
+                            path,
+                            oid: previous_oid,
+                        }),
+                        // Unrepresentable on this platform: still one
+                        // opaque changed path for coupling cardinality.
+                        None => non_blob_changes += 1,
+                    },
+                    (false, true) => match path_from_git(&path) {
+                        Some(path) => changes.push(TreeChange::Added { path, oid }),
+                        None => non_blob_changes += 1,
+                    },
                     // e.g. a submodule pointer bump: no analyzable
                     // text, but still a changed path in the changeset.
                     (false, false) => non_blob_changes += 1,
@@ -359,7 +347,7 @@ pub(crate) fn changes_between_trees(
     // are reassembled afterwards. Only worth attempting when there is
     // something to pair with — the common all-modifications diff pays
     // nothing here.
-    let mut broken_pairs: Vec<(PathBuf, gix::ObjectId, gix::ObjectId)> = Vec::new();
+    let mut broken_pairs: Vec<(gix::bstr::BString, gix::ObjectId, gix::ObjectId)> = Vec::new();
     // Two same-commit modifications can also hide a rename: swapping
     // two files through a temporary name leaves only two dissimilar
     // `Modified` entries whose blobs *cross-match exactly*. Detect the
@@ -384,7 +372,7 @@ pub(crate) fn changes_between_trees(
     let small_swap_scan =
         !has_loose_ends && modified.len() >= 2 && modified.len() <= SWAP_SCAN_MAX_MODIFICATIONS;
     // Path order keeps budget truncation deterministic.
-    modified.sort_by(|a, b| git_path_order(&a.0, &b.0));
+    modified.sort_by(|a, b| git_path_order(a.0.as_ref(), b.0.as_ref()));
     let mut break_budget = BREAK_TOTAL_BYTE_BUDGET;
     for (path, previous_oid, oid) in modified {
         // Worth breaking only when something could pair with a half:
@@ -421,13 +409,28 @@ pub(crate) fn changes_between_trees(
             }
         }
         changes.push(TreeChange::Modified {
-            path,
+            path: match path_from_git(&path) {
+                Some(path) => path,
+                None => {
+                    // Unrepresentable on this platform: one opaque
+                    // changed path for coupling cardinality.
+                    non_blob_changes += 1;
+                    continue;
+                }
+            },
             previous_oid,
             oid,
         });
     }
 
-    detect_renames(repo, &mut changes, added, deleted, &broken_pairs)?;
+    detect_renames(
+        repo,
+        &mut changes,
+        added,
+        deleted,
+        &broken_pairs,
+        &mut non_blob_changes,
+    )?;
 
     Ok(TreeChanges {
         changes,
@@ -442,15 +445,23 @@ pub(crate) fn changes_between_trees(
 /// [`TreeChange::Modified`]; every other unpaired entry is appended as
 /// a plain addition/deletion. Ordering and tie-breaks are by path so
 /// results are stable regardless of walk order.
+///
+/// Pairing runs on the raw git path bytes; conversion to platform
+/// paths happens at emission. A pair (or single) whose path is
+/// unrepresentable on this platform degrades — the representable half
+/// of a rename is emitted alone, a fully unrepresentable change bumps
+/// `non_blob_changes` — so the changeset *cardinality* every other
+/// file's coupling reads is identical across platforms.
 fn detect_renames(
     repo: &gix::Repository,
     changes: &mut Vec<TreeChange>,
     mut added: Vec<RenameSide>,
     mut deleted: Vec<RenameSide>,
-    broken_pairs: &[(PathBuf, gix::ObjectId, gix::ObjectId)],
+    broken_pairs: &[(gix::bstr::BString, gix::ObjectId, gix::ObjectId)],
+    non_blob_changes: &mut usize,
 ) -> Result<(), GitError> {
-    added.sort_by(|a, b| git_path_order(&a.path, &b.path));
-    deleted.sort_by(|a, b| git_path_order(&a.path, &b.path));
+    added.sort_by(|a, b| git_path_order(a.path.as_ref(), b.path.as_ref()));
+    deleted.sort_by(|a, b| git_path_order(a.path.as_ref(), b.path.as_ref()));
 
     // Exact pass: identical blob content is a certain rename. When an
     // OID has several candidates on either side (e.g. two identical
@@ -487,7 +498,7 @@ fn detect_renames(
                 continue;
             }
             exact_candidates.push((
-                path_affinity(&deleted[deleted_index].path, &side.path),
+                path_affinity(deleted[deleted_index].path.as_ref(), side.path.as_ref()),
                 deleted_index,
                 added_index,
             ));
@@ -528,8 +539,8 @@ fn detect_renames(
     }
     exact_candidates.sort_by(|a, b| {
         b.0.cmp(&a.0)
-            .then_with(|| git_path_order(&deleted[a.1].path, &deleted[b.1].path))
-            .then_with(|| git_path_order(&added[a.2].path, &added[b.2].path))
+            .then_with(|| git_path_order(deleted[a.1].path.as_ref(), deleted[b.1].path.as_ref()))
+            .then_with(|| git_path_order(added[a.2].path.as_ref(), added[b.2].path.as_ref()))
     });
 
     let mut deleted_taken = vec![false; deleted.len()];
@@ -540,12 +551,12 @@ fn detect_renames(
         }
         deleted_taken[deleted_index] = true;
         added_taken[added_index] = true;
-        changes.push(TreeChange::Renamed {
-            path: added[added_index].path.clone(),
-            source_path: deleted[deleted_index].path.clone(),
-            previous_oid: deleted[deleted_index].oid,
-            oid: added[added_index].oid,
-        });
+        push_renamed(
+            changes,
+            non_blob_changes,
+            &deleted[deleted_index],
+            &added[added_index],
+        );
     }
     let mut remaining_added: Vec<RenameSide> = added
         .into_iter()
@@ -603,10 +614,16 @@ fn detect_renames(
         candidates.sort_by(|a, b| {
             b.0.total_cmp(&a.0)
                 .then_with(|| {
-                    git_path_order(&remaining_deleted[a.1].path, &remaining_deleted[b.1].path)
+                    git_path_order(
+                        remaining_deleted[a.1].path.as_ref(),
+                        remaining_deleted[b.1].path.as_ref(),
+                    )
                 })
                 .then_with(|| {
-                    git_path_order(&remaining_added[a.2].path, &remaining_added[b.2].path)
+                    git_path_order(
+                        remaining_added[a.2].path.as_ref(),
+                        remaining_added[b.2].path.as_ref(),
+                    )
                 })
         });
 
@@ -618,12 +635,12 @@ fn detect_renames(
             }
             added_taken[added_index] = true;
             deleted_taken[deleted_index] = true;
-            changes.push(TreeChange::Renamed {
-                path: remaining_added[added_index].path.clone(),
-                source_path: remaining_deleted[deleted_index].path.clone(),
-                previous_oid: remaining_deleted[deleted_index].oid,
-                oid: remaining_added[added_index].oid,
-            });
+            push_renamed(
+                changes,
+                non_blob_changes,
+                &remaining_deleted[deleted_index],
+                &remaining_added[added_index],
+            );
         }
         remaining_added = remaining_added
             .into_iter()
@@ -653,11 +670,16 @@ fn detect_renames(
                 && unpaired_deleted.contains(&pair)
             {
                 let (path, previous_oid, oid) = &broken_pairs[pair];
-                changes.push(TreeChange::Modified {
-                    path: path.clone(),
-                    previous_oid: *previous_oid,
-                    oid: *oid,
-                });
+                match path_from_git(path) {
+                    Some(path) => changes.push(TreeChange::Modified {
+                        path,
+                        previous_oid: *previous_oid,
+                        oid: *oid,
+                    }),
+                    // Unrepresentable on this platform: one opaque
+                    // changed path for coupling cardinality.
+                    None => *non_blob_changes += 1,
+                }
                 reassembled[pair] = true;
             }
         }
@@ -667,41 +689,81 @@ fn detect_renames(
         if side.broken.is_some_and(|pair| reassembled[pair]) {
             continue;
         }
-        changes.push(TreeChange::Added {
-            path: side.path,
-            oid: side.oid,
-        });
+        match path_from_git(&side.path) {
+            Some(path) => changes.push(TreeChange::Added {
+                path,
+                oid: side.oid,
+            }),
+            None => *non_blob_changes += 1,
+        }
     }
     for side in remaining_deleted {
         if side.broken.is_some_and(|pair| reassembled[pair]) {
             continue;
         }
-        changes.push(TreeChange::Deleted {
-            path: side.path,
-            oid: side.oid,
-        });
+        match path_from_git(&side.path) {
+            Some(path) => changes.push(TreeChange::Deleted {
+                path,
+                oid: side.oid,
+            }),
+            None => *non_blob_changes += 1,
+        }
     }
 
     Ok(())
 }
 
+/// Emit a paired rename, degrading when a side's path is not
+/// representable on this platform: both sides convert → `Renamed`;
+/// destination only → `Added` (the lineage link is unexpressible —
+/// its source path cannot exist in a checkout here); source only →
+/// `Deleted`; neither → one opaque changed path. Every arm
+/// contributes exactly one changed identity, so coupling cardinality
+/// matches the platform where both paths convert.
+fn push_renamed(
+    changes: &mut Vec<TreeChange>,
+    non_blob_changes: &mut usize,
+    source: &RenameSide,
+    dest: &RenameSide,
+) {
+    match (path_from_git(&dest.path), path_from_git(&source.path)) {
+        (Some(path), Some(source_path)) => changes.push(TreeChange::Renamed {
+            path,
+            source_path,
+            previous_oid: source.oid,
+            oid: dest.oid,
+        }),
+        (Some(path), None) => changes.push(TreeChange::Added {
+            path,
+            oid: dest.oid,
+        }),
+        (None, Some(source_path)) => changes.push(TreeChange::Deleted {
+            path: source_path,
+            oid: source.oid,
+        }),
+        (None, None) => *non_blob_changes += 1,
+    }
+}
+
 /// Deterministic path-affinity score for pairing identical blobs:
 /// a matching basename dominates, then shared leading directory
-/// components, then shared trailing components.
-fn path_affinity(a: &Path, b: &Path) -> u64 {
+/// components, then shared trailing components. Operates on the raw
+/// git path bytes so the score is identical on every platform.
+fn path_affinity(a: &[u8], b: &[u8]) -> u64 {
     let mut score = 0u64;
-    if a.file_name().is_some() && a.file_name() == b.file_name() {
+    let base_a = a.rsplit(|&c| c == b'/').next().unwrap_or(a);
+    let base_b = b.rsplit(|&c| c == b'/').next().unwrap_or(b);
+    if !base_a.is_empty() && base_a == base_b {
         score += 1 << 32;
     }
     let prefix = a
-        .components()
-        .zip(b.components())
+        .split(|&c| c == b'/')
+        .zip(b.split(|&c| c == b'/'))
         .take_while(|(x, y)| x == y)
         .count() as u64;
     let suffix = a
-        .components()
-        .rev()
-        .zip(b.components().rev())
+        .rsplit(|&c| c == b'/')
+        .zip(b.rsplit(|&c| c == b'/'))
         .take_while(|(x, y)| x == y)
         .count() as u64;
     score + prefix * 1024 + suffix

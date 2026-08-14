@@ -4931,6 +4931,75 @@ fn unrelated_history_merges_fence_similar_discarded_occupants() {
     assert_eq!(a.commit_frequency, 1);
 }
 
+/// Unrelated histories whose roots hold *byte-identical* same-path
+/// blobs: exact OID equality erases the path from every
+/// parent-to-merge diff, and there is no merge base to diff a parent
+/// against — only the merged-tree enumeration pass can see the
+/// duplicate. Without its fence both root additions would accumulate
+/// under the surviving path, doubling churn and frequency and merging
+/// unrelated authorship.
+#[test]
+fn unrelated_history_merges_fence_byte_identical_occupants() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // Main line: the survivor.
+    let content = "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n";
+    std::fs::write(dir.path().join("a.rs"), content).unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(0));
+
+    // Orphan line: an unrelated root with the exact same bytes at the
+    // same path. Newer timestamp: walked before the main line.
+    git(
+        dir.path(),
+        &["checkout", "-q", "--orphan", "other"],
+        CAROL,
+        t(1),
+    );
+    git(dir.path(), &["rm", "-rfq", "."], CAROL, t(1));
+    std::fs::write(dir.path().join("a.rs"), content).unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "unrelated identical root"],
+        CAROL,
+        t(1),
+    );
+    let other = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(1));
+
+    // The merge keeps the main parent's tree.
+    git(dir.path(), &["checkout", "-q", "-f", "main"], BOB, t(2));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(2));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &other,
+            "-m",
+            "merge unrelated histories",
+        ],
+        BOB,
+        t(2),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // One creation, one author, one commit — not two of each.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.churn_added, 4, "the identical unrelated root leaked in");
+    assert_eq!(a.authors, 1, "unrelated authorship was merged");
+    assert_eq!(a.commit_frequency, 1, "commit frequency was doubled");
+}
+
 /// An octopus merge discarding *two* parents' independent occupants
 /// of the same path: each discarded parent needs its own fence — a
 /// per-path dedup would leave the second occupant unfenced.
