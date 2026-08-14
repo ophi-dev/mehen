@@ -260,6 +260,12 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
     // tombstone so the surviving file never inherits them.
     let mut aliases: HashMap<PathBuf, Vec<AliasEntry>> = HashMap::new();
     let mut tombstones: usize = 0;
+    // Every walked merge `(id, parents)` — including ones that
+    // introduced no identity changes. The phase-2 delete-then-recreate
+    // cut consults this to recognize a *bypassed* deletion: one whose
+    // path survived around it through another parent of a downstream
+    // merge (see below). Ids only; no tree work is done here.
+    let mut walked_merges: Vec<(gix::ObjectId, Vec<gix::ObjectId>)> = Vec::new();
 
     // Date-order traversal (`git rev-list --date-order`): commits come
     // newest-first by timestamp, but crucially *no parent is emitted
@@ -299,6 +305,7 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
         // surviving files read an empty (or worse, a dead prior
         // occupant's) history.
         let (changes, non_blob_changes) = if is_merge {
+            walked_merges.push((info.id, info.parent_ids.iter().copied().collect()));
             let introduced = merge_introduced_changes(repo, &commit)?;
             if introduced.is_empty() {
                 continue;
@@ -383,9 +390,97 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                     }
                 }
             }
-            if recreation_seen {
-                tombstones += 1;
-                let tombstone = FileIdentity::Tombstone(tombstones);
+            if !recreation_seen {
+                continue;
+            }
+            // A recreation-cut deletion may still be *bypassed*: an
+            // already-walked merge kept the path alive through another
+            // parent whose line never dropped it, discarding this
+            // deletion's branch. Then the recreation on this line is a
+            // dead occupant — not the live file's birth — and cutting
+            // here would tombstone the shared pre-branch creation away
+            // from the survivor. When the discarded recreation's blob
+            // differs from some endpoint the merge-time fences catch
+            // it; a recreation byte-identical to the surviving blob is
+            // invisible to every tree diff and only this walk-level
+            // check can see it. The bypass requires exact
+            // continuation: a merge parent that does not descend from
+            // this deletion, holds the very blob the merged tree
+            // keeps, and carries it over an uninterrupted line.
+            let mut bypass: Option<(gix::ObjectId, Option<gix::ObjectId>)> = None;
+            'merges: for (merge_id, parents) in &walked_merges {
+                let Some(merge_oid) = blob_oid_in_commit(repo, *merge_id, &change.path)? else {
+                    continue;
+                };
+                for q in parents {
+                    // The parent that carried this deletion into the
+                    // merge.
+                    if !is_descendant_of(repo, &mut ancestry, info.id, *q)? {
+                        continue;
+                    }
+                    for s in parents {
+                        if s == q
+                            || is_descendant_of(repo, &mut ancestry, info.id, *s)?
+                            || blob_oid_in_commit(repo, *s, &change.path)? != Some(merge_oid)
+                        {
+                            continue;
+                        }
+                        let floor = match repo.merge_base(*s, *q) {
+                            Ok(base) => Some(base.detach()),
+                            Err(gix::repository::merge_base::Error::NotFound { .. }) => None,
+                            Err(e) => return Err(GitError::Internal(e.to_string())),
+                        };
+                        if let Some(floor) = floor
+                            && path_deleted_in_range(repo, *s, floor, &change.path)?
+                        {
+                            continue;
+                        }
+                        bypass = Some((*q, floor));
+                        break 'merges;
+                    }
+                }
+            }
+            tombstones += 1;
+            let tombstone = FileIdentity::Tombstone(tombstones);
+            if let Some((scope, floor)) = bypass {
+                // Install the fence the merge would have installed had
+                // the recreation been visible to its diffs, and move
+                // the already-accumulated dead-line contributions (the
+                // recreation and its descendants up to the discarded
+                // parent) behind it. The deletion itself stays a touch
+                // on the surviving path, exactly like a merge-time
+                // fence leaves it.
+                let path_id = FileIdentity::Path(change.path.clone());
+                if let Some(acc) = files.get_mut(&path_id) {
+                    let contributions = std::mem::take(&mut acc.contributions);
+                    let mut kept = Vec::with_capacity(contributions.len());
+                    let mut moved: Vec<Contribution> = Vec::new();
+                    for c in contributions {
+                        if is_descendant_of(repo, &mut ancestry, info.id, c.commit)?
+                            && is_descendant_of(repo, &mut ancestry, c.commit, scope)?
+                        {
+                            moved.push(c);
+                        } else {
+                            kept.push(c);
+                        }
+                    }
+                    acc.has_addition = kept.iter().any(|c| c.is_addition);
+                    acc.contributions = kept;
+                    if acc.is_empty() {
+                        files.remove(&path_id);
+                    }
+                    if !moved.is_empty() {
+                        let dead = files.entry(tombstone.clone()).or_default();
+                        for c in moved {
+                            dead.push(c);
+                        }
+                    }
+                }
+                let mut entry = AliasEntry::new(tombstone, vec![scope]);
+                entry.floor = floor;
+                entry.from_discarded_occupant = true;
+                aliases.entry(change.path.clone()).or_default().push(entry);
+            } else {
                 aliases
                     .entry(change.path.clone())
                     .or_default()
@@ -904,6 +999,27 @@ fn is_descendant_of(
 /// candidate's lineage. The chain reads commit headers and per-commit
 /// tree lookups only, and runs just for the rare multi-parent-source
 /// merge rename.
+/// The blob OID at `path` in `commit`'s tree (`None`: absent or not a
+/// blob).
+fn blob_oid_in_commit(
+    repo: &gix::Repository,
+    commit: gix::ObjectId,
+    path: &Path,
+) -> Result<Option<gix::ObjectId>, GitError> {
+    let internal = |e: &dyn std::error::Error| GitError::Internal(e.to_string());
+    Ok(repo
+        .find_object(commit)
+        .map_err(|e| internal(&e))?
+        .peel_to_commit()
+        .map_err(|e| internal(&e))?
+        .tree()
+        .map_err(|e| internal(&e))?
+        .lookup_entry_by_path(path)
+        .map_err(|e| internal(&e))?
+        .filter(|entry| entry.mode().is_blob())
+        .map(|entry| entry.oid().to_owned()))
+}
+
 fn path_deleted_in_range(
     repo: &gix::Repository,
     tip: gix::ObjectId,
