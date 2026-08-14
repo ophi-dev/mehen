@@ -5,6 +5,7 @@ import {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
   collectThresholdViolations,
+  diffJsonHasDocs,
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,
@@ -53,6 +54,24 @@ test("parseThresholds accepts whitespace around operators", () => {
   assert.equal(thresholds.get("cyclomatic"), 5);
   assert.equal(thresholds.get("cognitive"), 4);
   assert.equal(thresholds.get("loc.lloc"), 120);
+});
+
+test("diffJsonHasDocs detects the documentation section", () => {
+  // The docs rerun (a second full `mehen diff`) must only happen when
+  // the JSON payload actually carries a markdown section.
+  assert.equal(diffJsonHasDocs(JSON.stringify({ source_code: [] })), false);
+  assert.equal(
+    diffJsonHasDocs(JSON.stringify({ source_code: [], markdown: [] })),
+    false,
+  );
+  assert.equal(
+    diffJsonHasDocs(
+      JSON.stringify({ source_code: [], markdown: [{ path: "README.md" }] }),
+    ),
+    true,
+  );
+  assert.equal(diffJsonHasDocs("not json"), false);
+  assert.equal(diffJsonHasDocs(undefined), false);
 });
 
 test("isNotApplicable detects explicit flag and missing values", () => {

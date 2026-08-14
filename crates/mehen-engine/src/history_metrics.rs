@@ -30,7 +30,22 @@ use mehen_git::FileHistory;
 /// family — the trigger for running the (comparatively expensive)
 /// repository history walk.
 pub(crate) fn names_want_history<'a>(mut names: impl Iterator<Item = &'a str>) -> bool {
-    names.any(|name| name.starts_with("history."))
+    // Only *valid* history keys trigger the walk: a typo'd key can
+    // never read a published value, so walking for it would be pure
+    // cost in service of a `0.0` fallback.
+    names.any(|name| name.starts_with("history.") && !is_unknown_history_key(name))
+}
+
+/// A `history.`-prefixed name that is not one of the fixed keys
+/// (`mehen_core::keys::HISTORY_ALL`). The CLI selector parser rejects
+/// these up front; the public engine boundaries (`rank_top_offenders`
+/// selectors, `DiffInput` thresholds) accept arbitrary strings, so
+/// they must be checked again there — an unvalidated typo would
+/// trigger the expensive repository walk only to read `0.0` through
+/// the missing-key fallback (an all-zero ranking, or a policy
+/// silently evaluated against zero).
+pub(crate) fn is_unknown_history_key(name: &str) -> bool {
+    name.starts_with("history.") && !mehen_core::keys::HISTORY_ALL.contains(&name)
 }
 
 /// Whether a selector name is one of the two static-dependent
@@ -54,6 +69,11 @@ pub(crate) fn is_history_composite(name: &str) -> bool {
 /// a "cleared" hotspot, a worst-possible MI on an undecodable file,
 /// or a zero-age "worst offender" that was never tracked by Git.
 pub(crate) fn selector_available(name: &str, statics: bool, history: bool) -> bool {
+    if is_unknown_history_key(name) {
+        // A typo'd history key has no published value under any
+        // circumstances — never "available".
+        return false;
+    }
     let needs_history = name.starts_with("history.");
     let needs_statics = !needs_history || is_history_composite(name);
     (statics || !needs_statics) && (history || !needs_history)

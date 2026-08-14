@@ -83,9 +83,13 @@ async function main() {
 
   // Phase F (§39): `mehen diff --output-format markdown` emits a
   // `<!-- mehen-docs -->` block whenever a changed Markdown file is in
-  // scope. Run a second invocation, extract just that block, and append
-  // it under the source-code section so one sticky comment carries both.
-  const docsSection = fetchMarkdownDocsSection(cli, diffArgs);
+  // scope. The JSON payload already says whether that is the case
+  // (its `markdown` array), so the second invocation — needed only
+  // for the *rendered* section — is skipped entirely when no Markdown
+  // file changed, and runs history-free when it is needed.
+  const docsSection = diffJsonHasDocs(diff.stdout)
+    ? fetchMarkdownDocsSection(cli, diffArgs)
+    : null;
   if (docsSection) {
     markdown = `${markdown.trimEnd()}\n\n${docsSection}\n`;
   }
@@ -297,17 +301,45 @@ function runCommand(command, args, options = {}) {
 }
 
 /**
+ * Whether the JSON diff payload carries a documentation section — the
+ * signal that a second (markdown-format) invocation would actually
+ * yield a `<!-- mehen-docs -->` block worth extracting.
+ */
+function diffJsonHasDocs(stdout) {
+  try {
+    const parsed = JSON.parse(typeof stdout === "string" ? stdout : "");
+    return Boolean(
+      parsed && Array.isArray(parsed.markdown) && parsed.markdown.length > 0,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Re-run `mehen diff --output-format markdown` with the same scope as
  * the JSON run, then carve out the `<!-- mehen-docs -->` section per
  * §39.1. Returns null when the section is absent (no Markdown files in
  * scope) or when the CLI fails — callers treat null as "just publish
  * the source-code section".
+ *
+ * The rerun is forced history-free: the docs section comes from the
+ * documentation pipeline (fixed `markdown.*` columns, never history),
+ * and this run's source-code section is discarded — without the
+ * override, the default history columns would make the rerun pay for
+ * two more full repository walks that feed nothing.
  */
 function fetchMarkdownDocsSection(cli, baseArgs) {
   const mdArgs = [...baseArgs];
   const fmtIdx = mdArgs.indexOf("--output-format");
   if (fmtIdx >= 0) {
     mdArgs[fmtIdx + 1] = "markdown";
+  }
+  const metricsIdx = mdArgs.indexOf("--metrics");
+  if (metricsIdx >= 0) {
+    mdArgs[metricsIdx + 1] = "cognitive";
+  } else {
+    mdArgs.push("--metrics", "cognitive");
   }
   let mdResult;
   try {
@@ -782,6 +814,7 @@ export {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
   collectThresholdViolations,
+  diffJsonHasDocs,
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,

@@ -27,15 +27,33 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let mut entries: Vec<TopOffenderEntry> = Vec::new();
     let mut analysis_errors: Vec<AnalysisErrorRecord> = Vec::new();
+    // The engine boundary accepts arbitrary selector strings: a typo'd
+    // `history.*` key (the family is fixed — `keys::HISTORY_ALL`) can
+    // never read a published value, so it is surfaced as an analysis
+    // error, scores as uncomputable (`None`), and never triggers the
+    // repository walk below.
+    for selector in &input.selectors {
+        if crate::history_metrics::is_unknown_history_key(selector.key.as_str()) {
+            analysis_errors.push(AnalysisErrorRecord {
+                path: Utf8PathBuf::new(),
+                side: DiffSide::Head,
+                diagnostics: vec![ParseDiagnostic::warning(
+                    "engine.unknown_metric",
+                    format!(
+                        "unknown history metric `{}` (not one of the fixed `history.*` keys)",
+                        selector.key
+                    ),
+                )],
+            });
+        }
+    }
     // `history.*` selectors need repository histories. Root-load
     // failures surface as `analysis_errors` (this API has no fatal
     // channel); per-file lazy discovery still covers repositories the
     // eager pass missed.
-    let histories = if input
-        .selectors
-        .iter()
-        .any(|s| s.key.as_str().starts_with("history."))
-    {
+    let histories = if crate::history_metrics::names_want_history(
+        input.selectors.iter().map(|s| s.key.as_str()),
+    ) {
         let loaded = RepoHistories::new();
         for root in &input.paths {
             if let Err(e) = loaded.load_root(root.as_std_path()) {
@@ -1546,6 +1564,48 @@ mod tests {
             report.entries.last().map(|e| e.path.file_name()),
             Some(Some("untracked.py")),
             "unmeasured files rank least concerning"
+        );
+    }
+
+    #[test]
+    fn rank_top_offenders_rejects_unknown_history_selectors() {
+        // The engine boundary accepts arbitrary selector strings: a
+        // typo'd history key must surface as an analysis error and
+        // score as uncomputable — never as an all-zero ranking after
+        // a pointless repository walk.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("plain.py"), "y = 1\n").unwrap();
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("history.commit_frequncy")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        assert!(
+            report.analysis_errors.iter().any(|record| {
+                record
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "engine.unknown_metric")
+            }),
+            "the typo must be surfaced: {:?}",
+            report.analysis_errors
+        );
+        let plain = report
+            .entries
+            .iter()
+            .find(|e| e.path.file_name() == Some("plain.py"))
+            .expect("statically analyzed file still listed");
+        assert_eq!(
+            plain.scores,
+            vec![None],
+            "a typo'd key must score as uncomputable, not zero"
         );
     }
 

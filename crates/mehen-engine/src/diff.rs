@@ -218,6 +218,18 @@ const COMPOSITE_INPUT_KEYS: [&str; 6] = [
 ];
 
 fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<DiffReport, DiffError> {
+    let mut input = input;
+    // The engine boundary accepts arbitrary threshold keys: a typo'd
+    // `history.*` key (the family is fixed — `keys::HISTORY_ALL`) can
+    // never read a published value, so evaluating it would silently
+    // pass or fail policy against a fabricated `0.0` — and walking
+    // the repository for it would be pure cost. Such thresholds are
+    // pulled out here and surfaced as analysis errors on the report.
+    let (valid_thresholds, unknown_history_thresholds): (Vec<Threshold>, Vec<Threshold>) =
+        input.thresholds.drain(..).partition(|threshold| {
+            !history_metrics::is_unknown_history_key(threshold.selector.key.as_str())
+        });
+    input.thresholds = valid_thresholds;
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let changed = mehen_git::changed_files(repo, &input.from, &input.to).map_err(DiffError::Git)?;
     let mut git_attribute_filters = RevisionGitAttributeFilters::new(repo, &input.from, &input.to)
@@ -304,6 +316,19 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         analysis_errors: Vec::new(),
         threshold_violations: Vec::new(),
     };
+    for threshold in &unknown_history_thresholds {
+        report.analysis_errors.push(AnalysisErrorRecord {
+            path: Utf8PathBuf::new(),
+            side: DiffSide::Head,
+            diagnostics: vec![ParseDiagnostic::warning(
+                "engine.unknown_metric",
+                format!(
+                    "unknown history metric `{}` in threshold (not one of the fixed `history.*` keys); the threshold was not evaluated",
+                    threshold.selector.key
+                ),
+            )],
+        });
+    }
 
     for cf in changed {
         // mehen-git returns `PathBuf` paths; convert at the boundary.
@@ -1280,8 +1305,25 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 // as a measurement — `cognitive 12 → 0` or `hotspot
                 // 12 → 0` would fake a full improvement in the diff
                 // columns. Git-only history selectors stay measurable.
-                let baseline_unavailable = baseline_space.is_some()
-                    && !history_metrics::selector_available(sel.name, baseline_composites, true);
+                //
+                // Symmetrically, a *requested but unresolvable*
+                // baseline walk (the force-push payload fallback keeps
+                // diffing while `from_ref` no longer resolves locally)
+                // leaves history selectors with no measured baseline —
+                // comparing the head's lifetime hotspot/churn against
+                // a numeric zero would render the entire history as a
+                // fresh regression and trip delta thresholds on
+                // fabricated values. New rows keep their 🆕 shape.
+                let baseline_history_missing = matches!(histories.as_ref(), Some((None, _)))
+                    && !is_new_row
+                    && sel.name.starts_with("history.");
+                let baseline_unavailable = baseline_history_missing
+                    || (baseline_space.is_some()
+                        && !history_metrics::selector_available(
+                            sel.name,
+                            baseline_composites,
+                            true,
+                        ));
                 let current_unavailable = current_space.is_some()
                     && !history_metrics::selector_available(sel.name, current_composites, true);
                 let baseline = baseline_space
@@ -2069,6 +2111,62 @@ binary.md binary
         assert_eq!(v.path, "hot.py");
         assert_eq!(v.evaluation.actual, 2.0);
         assert!(v.evaluation.violated);
+    }
+
+    #[test]
+    fn analyze_diff_rejects_unknown_history_threshold_keys() {
+        // The engine boundary accepts arbitrary threshold keys: a
+        // typo'd history key must be surfaced as an analysis error
+        // and *not* evaluated — reading the unpublished key as `0.0`
+        // would silently pass (or, with a zero limit, fail) policy
+        // against a fabricated value.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("hot.py"), "x = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "typo-base"]);
+
+        std::fs::write(dir.path().join("hot.py"), "x = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
+        git_ok(dir.path(), &["tag", "typo-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![Threshold::new(
+            "history.commit_frequncy".parse().unwrap(),
+            0.0,
+            Polarity::HigherIsWorse,
+        )];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "typo-base".to_string(),
+                to: "typo-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert!(
+            report.threshold_violations.is_empty(),
+            "a typo'd key must not evaluate: {:?}",
+            report.threshold_violations
+        );
+        assert!(
+            report.analysis_errors.iter().any(|record| {
+                record
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "engine.unknown_metric")
+            }),
+            "the typo must be surfaced: {:?}",
+            report.analysis_errors
+        );
     }
 
     #[test]
