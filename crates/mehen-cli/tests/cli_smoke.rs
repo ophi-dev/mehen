@@ -1794,7 +1794,7 @@ fn untracked_files_do_not_inherit_dead_occupant_history() {
 }
 
 #[test]
-fn top_offenders_rank_unparseable_files_on_history_only() {
+fn top_offenders_rank_unparsable_files_on_history_only() {
     // A file with blocking parse errors has incomplete static metrics;
     // ranking must fall back to history-only (empty static space)
     // instead of feeding partial cognitive/SLOC values into the
@@ -1840,7 +1840,7 @@ fn top_offenders_rank_unparseable_files_on_history_only() {
 }
 
 #[test]
-fn diff_reports_history_only_for_unparseable_files() {
+fn diff_reports_history_only_for_unparsable_files() {
     // A malformed head file has no trustworthy static metrics: the
     // row must show zeros for statics (not partial values blended
     // into history composites) while history reads real values. The

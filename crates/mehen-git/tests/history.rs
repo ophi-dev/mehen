@@ -2438,7 +2438,12 @@ fn non_utf8_paths_do_not_collide_with_replacement_character_paths() {
     let weird = std::ffi::OsStr::from_bytes(b"x\xff.py");
     let lookalike = "x\u{FFFD}.py";
 
-    std::fs::write(dir.path().join(weird), "w0 = 1\nw1 = 2\n").unwrap();
+    // Not every Unix filesystem accepts non-UTF-8 names (macOS APFS
+    // rejects the invalid byte with EILSEQ): the collision scenario
+    // cannot exist there, so there is nothing to test.
+    if std::fs::write(dir.path().join(weird), "w0 = 1\nw1 = 2\n").is_err() {
+        return;
+    }
     std::fs::write(dir.path().join(lookalike), "l0 = 1\nl1 = 2\nl2 = 3\n").unwrap();
     git(dir.path(), &["add", "-A"], ALICE, t(0));
     git(dir.path(), &["commit", "-q", "-m", "init"], ALICE, t(0));

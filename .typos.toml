@@ -81,3 +81,7 @@ Ccomment = "Ccomment"
 # sqruff recovers with an `Unparsable` node. Keep verbatim so the probe stays
 # reproducible.
 "SELCT" = "SELCT"
+# Latin-1 "café" written as raw bytes (`b"# caf\xe9\n"`) in non-UTF-8
+# fixture files across the git-history tests; the invalid byte splits
+# the word and the checker sees a bare `caf`.
+"caf" = "caf"
