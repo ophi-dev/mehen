@@ -5222,6 +5222,94 @@ fn discarded_parallel_merge_creations_do_not_misdate_the_survivor() {
     );
 }
 
+/// A merge conflict-creates `a.rs`; a later merge's identity-only
+/// change renames it to `b.rs`. The creation timestamp must be keyed
+/// by the *resolved* live path (`b.rs`) — keying by the addition's
+/// own path would leave the zero-touch `b.rs` with no entry and an
+/// age fabricated from HEAD.
+#[test]
+fn merge_created_then_merge_renamed_blobs_keep_their_creation_age() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+    let root = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(0));
+
+    // First diamond: the merge conflict-creates a.rs at t(2).
+    git(dir.path(), &["checkout", "-q", "-b", "one"], ALICE, t(1));
+    std::fs::write(dir.path().join("f1.rs"), "fn f1() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(1));
+    git(dir.path(), &["commit", "-q", "-m", "side one"], ALICE, t(1));
+    let side1 = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(1));
+    std::fs::write(dir.path().join("a.rs"), "fn created_by_merge() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(2));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(2));
+    let m1 = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &root,
+            "-p",
+            &side1,
+            "-m",
+            "conflict-create a.rs",
+        ],
+        BOB,
+        t(2),
+    );
+
+    // Second diamond off m1: the merge renames a.rs → b.rs at t(4).
+    git(dir.path(), &["checkout", "-q", &m1], ALICE, t(3));
+    git(dir.path(), &["checkout", "-q", "-b", "two"], ALICE, t(3));
+    std::fs::write(dir.path().join("f2.rs"), "fn f2() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(3));
+    git(dir.path(), &["commit", "-q", "-m", "side two"], ALICE, t(3));
+    let side2 = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(3));
+    git(dir.path(), &["mv", "a.rs", "b.rs"], BOB, t(4));
+    git(dir.path(), &["add", "-A"], BOB, t(4));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(4));
+    let m2 = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &m1,
+            "-p",
+            &side2,
+            "-m",
+            "rename a.rs to b.rs",
+        ],
+        BOB,
+        t(4),
+    );
+
+    // Advance HEAD one commit past the renaming merge.
+    git(dir.path(), &["checkout", "-q", &m2], ALICE, t(5));
+    git(dir.path(), &["checkout", "-q", "-b", "after"], ALICE, t(5));
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\nfn k2() {}\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "later"], ALICE, t(5));
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    let fh = history
+        .tracked_file(Path::new("b.rs"))
+        .expect("tracked blob must be history-available");
+    // head = t(5), creation = t(2): 300 000 seconds — not zero.
+    let expected_months = 300_000.0 / (30.436875 * 86_400.0);
+    assert!(
+        (fh.age_months(history.head_seconds) - expected_months).abs() < 1e-9,
+        "age must survive the merge rename, got {} months",
+        fh.age_months(history.head_seconds)
+    );
+}
+
 /// The exact-rename overflow fallback (> 10 000 same-content pairs)
 /// must keep basename affinity: a bulk move of identical stubs whose
 /// destination directories reverse the path-sorted order would

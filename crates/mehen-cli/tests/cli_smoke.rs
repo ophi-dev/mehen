@@ -619,6 +619,124 @@ fn diff_history_composites_read_na_when_head_is_undecodable() {
 }
 
 #[test]
+fn diff_reads_history_for_merge_created_zero_touch_files() {
+    // A blob created purely by merge conflict resolution has no walk
+    // accumulator (`RepositoryHistory::file` is `None`), but its
+    // synthesized zero-touch entry carries a real creation-based age
+    // — the diff must read it via `tracked_file` instead of
+    // fabricating `history.age_months = 0`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let date = |n: i64| format!("{} +0000", 1_700_000_000 + n * 100_000);
+    let git_at = |args: &[&str], n: i64| -> String {
+        let output = Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Mehen Test")
+            .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+            .env("GIT_COMMITTER_NAME", "Mehen Test")
+            .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+            .env("GIT_AUTHOR_DATE", date(n))
+            .env("GIT_COMMITTER_DATE", date(n))
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git stdout utf8")
+            .trim()
+            .to_string()
+    };
+    git_at(&["init", "-q", "-b", "main"], 0);
+    git_at(&["config", "commit.gpgsign", "false"], 0);
+    write_python(dir.path(), "a.py", "x = 1\n");
+    git_at(&["add", "-A"], 0);
+    git_at(&["commit", "-q", "-m", "root"], 0);
+    let root = git_at(&["rev-parse", "HEAD"], 0);
+
+    git_at(&["checkout", "-q", "-b", "side"], 1);
+    write_python(dir.path(), "b.py", "y = 1\n");
+    git_at(&["add", "-A"], 1);
+    git_at(&["commit", "-q", "-m", "side"], 1);
+    let side = git_at(&["rev-parse", "HEAD"], 1);
+
+    // The merge tree carries a file absent from both parents.
+    write_python(dir.path(), "merge_only.py", "m = 1\n");
+    git_at(&["add", "-A"], 2);
+    let tree = git_at(&["write-tree"], 2);
+    let merge = git_at(
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &root,
+            "-p",
+            &side,
+            "-m",
+            "merge with new file",
+        ],
+        2,
+    );
+    // Advance HEAD one commit (100 000 s) past the creating merge
+    // without touching the merge-created blob.
+    git_at(&["checkout", "-q", &merge], 3);
+    git_at(&["checkout", "-q", "-b", "after"], 3);
+    write_python(dir.path(), "a.py", "x = 1\nz = 2\n");
+    git_at(&["commit", "-q", "-am", "later"], 3);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            &root,
+            "--to",
+            "HEAD",
+            "--metrics",
+            "history.age_months",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "diff failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let row = value["source_code"]
+        .as_array()
+        .expect("source_code must be an array")
+        .iter()
+        .find(|f| f["path"].as_str() == Some("merge_only.py"))
+        .expect("merge-created file must have a row")
+        .clone();
+    let age = row["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("history.age_months"))
+        .expect("age metric present")["current"]
+        .as_f64()
+        .expect("current");
+    // Creation at t2, HEAD at t3: 100 000 seconds.
+    let expected = 100_000.0 / (30.436875 * 86_400.0);
+    assert!(
+        (age - expected).abs() < 1e-6,
+        "age must come from the creating merge, got {age}"
+    );
+}
+
+#[test]
 fn top_offenders_ranks_by_history_metrics() {
     let dir = tempfile::tempdir().expect("tempdir");
     init_git_repo(dir.path());

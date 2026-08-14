@@ -401,13 +401,17 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
             && !head_blocked
         {
             // Fold `history.*` into the head metric set first so
-            // history thresholds read real values.
+            // history thresholds read real values. `tracked_file`,
+            // not `file`: a blob created purely by merge conflict
+            // resolution has no accumulator, and its synthesized
+            // zero-touch entry (with a real creation-based age) must
+            // back thresholds like any other measured value.
             if let Some(history) = head_history.as_ref()
-                && let Some(fh) = history.file(cf.path.as_path())
+                && let Some(fh) = history.tracked_file(cf.path.as_path())
             {
                 history_metrics::inject_history_metrics(
                     &mut analysis.root.metrics,
-                    fh,
+                    &fh,
                     history.head_seconds,
                     true,
                 );
@@ -415,7 +419,7 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
             evaluate_thresholds(&mut report, &utf8_path, &input.thresholds, &analysis.root);
         } else if cf.status != ChangeStatus::Deleted
             && let Some(history) = head_history.as_ref()
-            && let Some(fh) = history.file(cf.path.as_path())
+            && let Some(fh) = history.tracked_file(cf.path.as_path())
         {
             // Only *Git-only* history keys evaluate in this fallback:
             // the composites (`history.hotspot`, relative churn) read
@@ -441,7 +445,7 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
                 );
                 history_metrics::inject_history_metrics(
                     &mut space.metrics,
-                    fh,
+                    &fh,
                     history.head_seconds,
                     false,
                 );
@@ -1146,7 +1150,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 && cf.source_path.is_some()
                 && base_history
                     .as_ref()
-                    .is_some_and(|history| history.file(base_path).is_some())
+                    .is_some_and(|history| history.tracked_file(base_path).is_some())
             {
                 let mut space = MetricSpace::new(
                     mehen_core::SpaceId(0),
@@ -1195,12 +1199,15 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 && !is_new
                 && base_history
                     .as_ref()
-                    .is_some_and(|history| history.file(base_path).is_some())
+                    .is_some_and(|history| history.tracked_file(base_path).is_some())
             {
                 baseline_space = Some(empty_space());
                 baseline_composites = false;
             }
-            if current_space.is_none() && !is_deleted && head_history.file(&cf.path).is_some() {
+            if current_space.is_none()
+                && !is_deleted
+                && head_history.tracked_file(&cf.path).is_some()
+            {
                 current_space = Some(empty_space());
                 current_composites = false;
             }
@@ -1233,12 +1240,18 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 current_composites,
             ));
             for (space, history, path, with_composites) in sides {
+                // `tracked_file`, not `file`: each side's path exists
+                // at that side's revision, the head-blob gate keeps a
+                // dead prior occupant's history out, and a blob
+                // created purely by merge conflict resolution reads
+                // its synthesized zero-touch entry (real
+                // creation-based age) instead of nothing.
                 if let Some(space) = space
-                    && let Some(fh) = history.file(path)
+                    && let Some(fh) = history.tracked_file(path)
                 {
                     history_metrics::inject_history_metrics(
                         &mut space.metrics,
-                        fh,
+                        &fh,
                         history.head_seconds,
                         with_composites,
                     );

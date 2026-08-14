@@ -725,14 +725,16 @@ pub fn collect_history(repo: &gix::Repository, rev: &str) -> Result<RepositoryHi
                 }
                 if change.is_addition {
                     // Record the creation time only when the addition
-                    // resolves to the live path: a parallel merge's
-                    // discarded occupant resolves through its fence to
-                    // a tombstone, and recording its (possibly newer,
-                    // first-walked) timestamp would misdate the
-                    // surviving zero-touch blob's age.
-                    if matches!(target, FileIdentity::Path(_)) {
+                    // resolves to a live path — and key it by that
+                    // *resolved* path: a parallel merge's discarded
+                    // occupant resolves through its fence to a
+                    // tombstone (skipped), and a merge-created file
+                    // later renamed by another merge resolves to its
+                    // final name, which is the key `tracked_file`
+                    // will look up.
+                    if let FileIdentity::Path(live) = target {
                         merge_creation_seconds
-                            .entry(change.path.clone())
+                            .entry(live.clone())
                             .or_insert(seconds);
                     }
                     tombstones += 1;
