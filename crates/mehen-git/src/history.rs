@@ -1583,6 +1583,9 @@ fn merge_introduced_changes(
     // each needs its own scoped fence.
     let mut fenced: std::collections::HashSet<(PathBuf, gix::ObjectId)> =
         std::collections::HashSet::new();
+    // Bounded: the similarity checks below load blobs, and a mass
+    // conflict resolution can put thousands of modified paths here.
+    let mut lineage_budget: u64 = MERGE_LINEAGE_BYTE_BUDGET;
     for (q_idx, diff) in diffs.iter().enumerate() {
         for change in diff {
             let TreeChange::Modified {
@@ -1611,7 +1614,16 @@ fn merge_introduced_changes(
                     supplier = Some(*parent_id);
                     break;
                 }
-                if let Some(similarity) = blob_lineage_similarity(repo, &parent_oid, oid)?
+                let similarity = match lineage_check_cost(repo, &parent_oid, oid)? {
+                    Some(cost) if cost <= lineage_budget => {
+                        lineage_budget -= cost;
+                        blob_lineage_similarity(repo, &parent_oid, oid)?
+                    }
+                    // Oversized (never loaded) or over budget: no
+                    // signal — not a similarity supplier.
+                    _ => None,
+                };
+                if let Some(similarity) = similarity
                     && similarity >= RENAME_SIMILARITY
                     && similarity > best
                 {
@@ -1636,7 +1648,23 @@ fn merge_introduced_changes(
             // consulted for a delete/recreate boundary since the
             // divergence — only an uninterrupted, similar version is
             // a genuine continuation needing no fence.
-            if same_blob_lineage(repo, previous_oid, oid)?
+            let continuation = match lineage_check_cost(repo, previous_oid, oid)? {
+                Some(cost) if cost <= lineage_budget => {
+                    lineage_budget -= cost;
+                    same_blob_lineage(repo, previous_oid, oid)?
+                }
+                // Oversized blobs conservatively don't continue
+                // (never loaded — matches `same_blob_lineage`).
+                None => false,
+                // Budget exhausted: no signal either way. Fencing on
+                // a guess could cut real lineages en masse in a
+                // pathological merge — leave the identity to the
+                // ordinary walk instead.
+                Some(_) => {
+                    continue;
+                }
+            };
+            if continuation
                 && match floor {
                     Some(base) => !path_deleted_in_range(repo, parent_ids[q_idx], base, path)?,
                     // No merge base (`--allow-unrelated-histories`):
@@ -1842,6 +1870,35 @@ fn merge_introduced_changes(
         }
     }
     Ok(introduced)
+}
+
+/// Cumulative blob-byte budget for one merge's discarded-occupant
+/// lineage checks: a mass conflict resolution can push thousands of
+/// `Modified` paths through similarity checks that load up to two
+/// 8-MiB blobs each, and without an aggregate cap a single merge
+/// could read gigabytes during the walk. Entries past the budget
+/// leave identity handling to the ordinary walk — no fence is
+/// installed on a guess.
+const MERGE_LINEAGE_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// The blob-byte cost of one lineage-similarity check, or `None`
+/// when a side exceeds the per-blob cap (such checks never load
+/// anything). Equal OIDs cost nothing.
+fn lineage_check_cost(
+    repo: &gix::Repository,
+    a: &gix::ObjectId,
+    b: &gix::ObjectId,
+) -> Result<Option<u64>, GitError> {
+    if a == b {
+        return Ok(Some(0));
+    }
+    let (size_a, size_b) = (blob_size(repo, a)?, blob_size(repo, b)?);
+    if size_a > crate::tree_changes::FUZZY_MAX_BLOB_BYTES
+        || size_b > crate::tree_changes::FUZZY_MAX_BLOB_BYTES
+    {
+        return Ok(None);
+    }
+    Ok(Some(size_a + size_b))
 }
 
 /// The paths whose *identity* a merge commit changes — conflict-

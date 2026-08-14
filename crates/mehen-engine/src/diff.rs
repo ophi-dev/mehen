@@ -445,6 +445,17 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
         let head_blocked = head_analysis
             .as_ref()
             .is_some_and(|analysis| has_blocking_diagnostic(&analysis.diagnostics));
+        // Whether the head-side per-file history lookup succeeded when
+        // a walk ran: `tracked_file` returning `None` (e.g. a lineage
+        // truncated by a platform-unrepresentable rename source) means
+        // history is unmeasurable for this file — `history.*`
+        // thresholds must be skipped, not read as `0.0` through the
+        // missing-key fallback (a commit-frequency limit would falsely
+        // pass, an ownership minimum falsely fail).
+        let head_history_available = match head_history.as_ref() {
+            Some(history) => history.tracked_file(cf.path.as_path()).is_some(),
+            None => true,
+        };
         if let Some(analysis) = head_analysis.as_mut()
             && !head_blocked
         {
@@ -464,8 +475,19 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
                     true,
                 );
             }
-            evaluate_thresholds(&mut report, &utf8_path, &input.thresholds, &analysis.root);
+            if head_history_available {
+                evaluate_thresholds(&mut report, &utf8_path, &input.thresholds, &analysis.root);
+            } else {
+                let static_thresholds: Vec<Threshold> = input
+                    .thresholds
+                    .iter()
+                    .filter(|t| !t.selector.key.as_str().starts_with("history."))
+                    .cloned()
+                    .collect();
+                evaluate_thresholds(&mut report, &utf8_path, &static_thresholds, &analysis.root);
+            }
         } else if cf.status != ChangeStatus::Deleted
+            && head_history_available
             && let Some(history) = head_history.as_ref()
             && let Some(fh) = history.tracked_file(cf.path.as_path())
         {

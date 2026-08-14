@@ -115,7 +115,7 @@ const RENAME_FUZZY_LIMIT: usize = 10_000;
 /// multi-gigabyte binary must not be materialized and diffed just to
 /// rule out a rename. Sizes are checked via object headers before any
 /// data is loaded. Exact renames still match at any size.
-const FUZZY_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const FUZZY_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Total bytes the fuzzy pass may materialize per tree diff. Applied
 /// in sorted path order, so truncation under pressure is deterministic.
@@ -680,12 +680,9 @@ fn detect_renames(
         // I/O-bounded by its own cumulative budget: without it, one
         // deletion against thousands of large additions would read
         // and decompress an unbounded volume despite the documented
-        // cap. Like `load_fuzzy_blobs`, the budget is spent in
-        // ascending (size, path) order so that both sides sample the
-        // *same size region* — real rename pairs have close byte
-        // sizes, and a path-ordered prefix on one side against a
-        // size-ordered prefix on the other could otherwise be
-        // disjoint. Over-budget destinations are skipped (not
+        // cap. The budget is spent in the same [`fuzzy_budget_order`]
+        // as the resident side so both sample corresponding
+        // candidates. Over-budget destinations are skipped (not
         // `break`): smaller later blobs may still fit, keeping the
         // truncation deterministic.
         let mut added_sizes = Vec::with_capacity(remaining_added.len());
@@ -693,14 +690,7 @@ fn detect_renames(
             added_sizes.push(blob_size(repo, &side.oid)?);
         }
         let mut added_order: Vec<usize> = (0..remaining_added.len()).collect();
-        added_order.sort_by(|&a, &b| {
-            added_sizes[a].cmp(&added_sizes[b]).then_with(|| {
-                git_path_order(
-                    remaining_added[a].path.as_ref(),
-                    remaining_added[b].path.as_ref(),
-                )
-            })
-        });
+        added_order.sort_by(|&a, &b| fuzzy_budget_order(&added_sizes, &remaining_added, a, b));
         let mut stream_budget = FUZZY_TOTAL_BYTE_BUDGET;
         for added_index in added_order {
             let added_side = &remaining_added[added_index];
@@ -900,17 +890,38 @@ struct FuzzyBlob {
     data: Vec<u8>,
 }
 
+/// Budget-spending order for fuzzy-blob loading: ascending size, then
+/// basename, then full path. Real rename pairs have close byte sizes
+/// (≥50% span similarity bounds the ratio) and bulk moves usually
+/// keep basenames, so ordering *both* sides by this key keeps
+/// corresponding sources and destinations inside the same budget
+/// prefix even when their directory orders disagree — including
+/// byte-identical sizes, where the basename breaks the tie the same
+/// way on both sides. (Equal sizes *and* changed basenames carry no
+/// header-level pairing signal at all; those fall back to path
+/// order.)
+fn fuzzy_budget_order(
+    sizes: &[u64],
+    entries: &[RenameSide],
+    a: usize,
+    b: usize,
+) -> std::cmp::Ordering {
+    fn basename(path: &gix::bstr::BString) -> &[u8] {
+        let bytes: &[u8] = path.as_ref();
+        bytes.rsplit(|&c| c == b'/').next().unwrap_or(bytes)
+    }
+    sizes[a]
+        .cmp(&sizes[b])
+        .then_with(|| basename(&entries[a].path).cmp(basename(&entries[b].path)))
+        .then_with(|| git_path_order(entries[a].path.as_ref(), entries[b].path.as_ref()))
+}
+
 /// Materialize each entry's blob for similarity testing, or `None`
 /// when the blob exceeds the per-blob cap or the remaining byte
 /// budget. Sizes come from object headers, so an oversized blob (a
 /// replaced multi-gigabyte binary) is never loaded into memory just to
-/// rule out a rename. Budget is spent in ascending (size, path) order:
-/// real rename pairs have close byte sizes (≥50% span similarity
-/// bounds the ratio), so ordering *both* sides by size keeps
-/// corresponding sources and destinations inside the same budget
-/// prefix even when their path orders disagree — a path-ordered
-/// prefix could load two halves that share no real pair. Still
-/// deterministic.
+/// rule out a rename. Budget is spent in [`fuzzy_budget_order`] so
+/// both sides sample corresponding candidates. Still deterministic.
 fn load_fuzzy_blobs(
     repo: &gix::Repository,
     entries: &[RenameSide],
@@ -921,11 +932,7 @@ fn load_fuzzy_blobs(
         sizes.push(blob_size(repo, &side.oid)?);
     }
     let mut order: Vec<usize> = (0..entries.len()).collect();
-    order.sort_by(|&a, &b| {
-        sizes[a]
-            .cmp(&sizes[b])
-            .then_with(|| git_path_order(entries[a].path.as_ref(), entries[b].path.as_ref()))
-    });
+    order.sort_by(|&a, &b| fuzzy_budget_order(&sizes, entries, a, b));
     let mut remaining = budget;
     let mut blobs: Vec<Option<FuzzyBlob>> = (0..entries.len()).map(|_| None).collect();
     for index in order {
