@@ -5138,7 +5138,7 @@ fn discarded_parallel_merge_creations_do_not_misdate_the_survivor() {
 
     // A tiny two-branch diamond whose merge tree conflict-creates
     // `a.rs` with the given content.
-    let mut creating_merge = |branch: &str, filler: &str, content: &str, n: i64| -> String {
+    let creating_merge = |branch: &str, filler: &str, content: &str, n: i64| -> String {
         git(
             dir.path(),
             &["checkout", "-q", "-b", branch, &root],
