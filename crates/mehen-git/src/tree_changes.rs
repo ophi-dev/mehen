@@ -36,11 +36,10 @@ use crate::GitError;
 /// Similarity threshold for rename detection (git's `-M50%` default).
 pub(crate) const RENAME_SIMILARITY: f64 = 0.5;
 
-/// Upper bound on deletion×addition pairs examined by fuzzy rename
-/// tracking within one tree diff. Exact (same-blob) renames are always
-/// detected by `gix`; beyond this budget, inexact renames degrade to a
-/// deletion + addition.
-const RENAME_FUZZY_LIMIT: usize = 10_000;
+/// Upper bound on deletion×addition pairs examined by either fuzzy
+/// rename pass. Exact (same-blob) renames are always detected by `gix`;
+/// beyond this budget, inexact renames degrade to deletion + addition.
+const RENAME_FUZZY_PAIR_LIMIT: usize = 10_000;
 
 /// Blobs larger than this never enter a fuzzy similarity pass. Sizes
 /// are checked through object headers before data is materialized;
@@ -468,13 +467,21 @@ fn detect_renames(
         partition_fuzzy_budget(repo, exact.added, FUZZY_TOTAL_BYTE_BUDGET)?;
     let (fuzzy_deleted, mut remaining_deleted) =
         partition_fuzzy_budget(repo, exact.deleted, FUZZY_TOTAL_BYTE_BUDGET)?;
-    let fuzzy = run_rewrite_tracker(
-        repo,
-        &mut diff_cache,
-        fuzzy_added,
-        fuzzy_deleted,
-        Some(RENAME_SIMILARITY as f32),
-    )?;
+    let fuzzy = if fuzzy_pairs_within_limit(fuzzy_added.len(), fuzzy_deleted.len()) {
+        run_rewrite_tracker(
+            repo,
+            &mut diff_cache,
+            fuzzy_added,
+            fuzzy_deleted,
+            Some(RENAME_SIMILARITY as f32),
+        )?
+    } else {
+        RewriteMatches {
+            renames: Vec::new(),
+            added: fuzzy_added,
+            deleted: fuzzy_deleted,
+        }
+    };
     for (source, destination) in fuzzy.renames {
         push_renamed(
             changes,
@@ -520,7 +527,11 @@ fn run_rewrite_tracker(
     let mut tracker = gix::diff::rewrites::Tracker::new(gix::diff::Rewrites {
         copies: None,
         percentage,
-        limit: RENAME_FUZZY_LIMIT,
+        // The public docs and gix-diff 0.66 implementation disagree
+        // about whether this value bounds files or permutations. The
+        // caller enforces our pair budget before enabling similarity,
+        // so disable this version-dependent internal limit.
+        limit: 0,
         track_empty: false,
     });
 
@@ -671,10 +682,7 @@ fn match_remaining_by_spanhash(
 ) -> Result<(), GitError> {
     if added.is_empty()
         || deleted.is_empty()
-        || !added
-            .len()
-            .checked_mul(deleted.len())
-            .is_some_and(|pairs| pairs <= RENAME_FUZZY_LIMIT)
+        || !fuzzy_pairs_within_limit(added.len(), deleted.len())
     {
         return Ok(());
     }
@@ -746,6 +754,12 @@ fn match_remaining_by_spanhash(
         .filter_map(|(side, taken)| (!taken).then_some(side))
         .collect();
     Ok(())
+}
+
+fn fuzzy_pairs_within_limit(added: usize, deleted: usize) -> bool {
+    added
+        .checked_mul(deleted)
+        .is_some_and(|pairs| pairs <= RENAME_FUZZY_PAIR_LIMIT)
 }
 
 fn reassemble_broken_pairs(
@@ -1091,5 +1105,12 @@ mod tests {
     fn is_binary_detects_nul_in_sniff_window() {
         assert!(is_binary(b"PK\x03\x04\x00binary"));
         assert!(!is_binary(b"plain text\nwith lines\n"));
+    }
+
+    #[test]
+    fn fuzzy_pair_budget_is_explicit_and_overflow_safe() {
+        assert!(fuzzy_pairs_within_limit(100, 100));
+        assert!(!fuzzy_pairs_within_limit(101, 100));
+        assert!(!fuzzy_pairs_within_limit(usize::MAX, 2));
     }
 }
