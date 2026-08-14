@@ -36,10 +36,10 @@ revision). Instead, mehen walks the repository history reachable from the analyz
 per revision and folds per-file statistics into each file's metric set after static analysis:
 
 - **Deterministic by construction.** The walk is a pure function of the repository state at the
-  analyzed revision: commits are visited in `--date-order` topological order, diffs use mehen's own
-  [configuration-independent rename detection](/concepts/architecture), and "now" for
-  [code age](/metrics/history/age) is the analyzed revision's committer timestamp — never
-  wall-clock time. Two machines analyzing the same commit always report identical values.
+  analyzed revision: commits are visited in `--date-order` topological order, rename matching uses
+  pinned `gix` rewrite options over raw object bytes (ignoring local diff config and attributes),
+  and "now" for [code age](/metrics/history/age) is the analyzed revision's committer timestamp —
+  never wall-clock time. Two machines analyzing the same commit always report identical values.
 - **Rename-aware identity.** A file renamed along the way accumulates **one** history: statistics
   follow the file across renames instead of resetting. Delete-then-recreate sequences split
   identity, so a new file that reuses an old path does not inherit the dead file's history —

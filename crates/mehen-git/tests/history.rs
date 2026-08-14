@@ -436,6 +436,72 @@ fn changed_files_joins_rename_pairs() {
 }
 
 #[test]
+fn rename_detection_ignores_diff_configuration_and_attributes() {
+    // Explicit rewrite options and a raw-object resource cache must
+    // make the result independent of repository/user diff settings.
+    // Marking Rust files as binary through attributes would suppress
+    // fuzzy matching in the porcelain-style resource pipeline.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
+    git(
+        dir.path(),
+        &["config", "commit.gpgsign", "false"],
+        ALICE,
+        T_JAN,
+    );
+    git(
+        dir.path(),
+        &["config", "diff.renames", "false"],
+        ALICE,
+        T_JAN,
+    );
+    git(
+        dir.path(),
+        &["config", "diff.renameLimit", "1"],
+        ALICE,
+        T_JAN,
+    );
+    git(
+        dir.path(),
+        &["config", "diff.algorithm", "minimal"],
+        ALICE,
+        T_JAN,
+    );
+
+    std::fs::write(dir.path().join(".gitattributes"), "*.rs -diff\n").unwrap();
+    let lines: Vec<String> = (0..10).map(|i| format!("fn f{i}() {{}}")).collect();
+    std::fs::write(dir.path().join("before.rs"), lines.join("\n") + "\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_JAN);
+    git(dir.path(), &["commit", "-q", "-m", "base"], ALICE, T_JAN);
+    git(dir.path(), &["tag", "raw-diff-base"], ALICE, T_JAN);
+
+    let mut edited = lines;
+    edited[0] = "fn f0_changed() {}".to_string();
+    edited[9] = "fn f9_changed() {}".to_string();
+    std::fs::remove_file(dir.path().join("before.rs")).unwrap();
+    std::fs::write(dir.path().join("after.rs"), edited.join("\n") + "\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, T_FEB);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "rename and edit"],
+        ALICE,
+        T_FEB,
+    );
+    git(dir.path(), &["tag", "raw-diff-head"], ALICE, T_FEB);
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let changed = mehen_git::changed_files(&repo, "raw-diff-base", "raw-diff-head").unwrap();
+
+    assert_eq!(changed.len(), 1, "rename must stay joined: {changed:?}");
+    assert_eq!(changed[0].path, Path::new("after.rs"));
+    assert_eq!(changed[0].status, mehen_git::ChangeStatus::Modified);
+    assert_eq!(
+        changed[0].source_path.as_deref(),
+        Some(Path::new("before.rs"))
+    );
+}
+
+#[test]
 fn changed_files_reports_type_changes_from_the_blob_side() {
     // A blob replaced by a gitlink must surface as the blob's
     // *deletion*, not a `Modified` row whose baseline/head reads would
@@ -902,11 +968,11 @@ fn heavily_rewritten_files_stay_modified_when_nothing_pairs() {
 }
 
 #[test]
-fn identical_blob_renames_pair_by_path_affinity() {
+fn identical_blob_renames_prefer_matching_basenames() {
     // Two identical files swapped between directories: src/foo.rs →
     // tests/foo.rs and tests/bar.rs → src/bar.rs. Pairing by
-    // lexicographic order would cross the lineages; path affinity
-    // (matching basenames) must keep each file with its own history.
+    // lexicographic order would cross the lineages; gix's matching
+    // basename preference keeps each file with its own history.
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
     git(
@@ -1106,12 +1172,11 @@ fn empty_blob_additions_and_deletions_do_not_pair_as_renames() {
 }
 
 #[test]
-fn exact_rename_pairs_use_global_affinity_ranking() {
-    // Identical blobs: deletions at src/a/foo.rs + tests/b/foo.rs,
-    // additions at new/foo.rs + src/c/foo.rs. A greedy per-destination
-    // match in lexical order would give new/foo.rs the src/a source;
-    // global ranking must assign the strongly prefix-matching
-    // src/a/foo.rs → src/c/foo.rs pair first.
+fn exact_rename_ties_follow_gix_path_order() {
+    // Every source and destination has identical content and basename,
+    // so repository data cannot identify a uniquely correct pairing.
+    // Keep the deterministic path-order tie-break supplied by gix
+    // instead of layering a project-specific directory heuristic on it.
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"], ALICE, T_JAN);
     git(
@@ -1160,8 +1225,8 @@ fn exact_rename_pairs_use_global_affinity_ranking() {
             .display()
             .to_string()
     };
-    assert_eq!(source_of("src/c/foo.rs"), "src/a/foo.rs");
-    assert_eq!(source_of("new/foo.rs"), "tests/b/foo.rs");
+    assert_eq!(source_of("new/foo.rs"), "src/a/foo.rs");
+    assert_eq!(source_of("src/c/foo.rs"), "tests/b/foo.rs");
 }
 
 #[test]

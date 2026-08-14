@@ -17,11 +17,11 @@
 //! Walk semantics match the common reference implementations
 //! (code-maat, PyDriller, `git log --no-merges --numstat`):
 //! merge commits are skipped and every other commit is diffed against
-//! its first parent (or the empty tree for root commits). Renames are
-//! detected (git-style `-M50%` similarity tracking, implemented
-//! in-crate so it never depends on machine configuration): a renamed
-//! file keeps its accumulated history under its head-relative path,
-//! and a pure rename churns no lines.
+//! its first parent (or the empty tree for root commits). Renames use
+//! `gix` rewrite plumbing with pinned `-M50%` options and a raw-object,
+//! attribute-free diff pipeline, so machine configuration cannot alter
+//! identity. A renamed file keeps its accumulated history under its
+//! head-relative path, and a pure rename churns no lines.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -2106,10 +2106,10 @@ fn resolve_alias(
 }
 
 /// Diff `commit` against its first parent (or the empty tree for root
-/// commits) with in-crate rename tracking, and compute line-level
-/// churn per changed blob. Also returns the count of changed non-blob
-/// leaf paths (symlinks, gitlinks) — they carry no analyzable text but
-/// still belong to the commit's changeset for coupling cardinality.
+/// commits) with deterministic `gix` rewrite tracking, and compute
+/// line-level churn per changed blob. Also returns the count of changed
+/// non-blob leaf paths (symlinks, gitlinks) — they carry no analyzable
+/// text but still belong to the commit's changeset for coupling.
 fn diff_against_first_parent(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,

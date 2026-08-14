@@ -126,11 +126,11 @@ pub fn open_repo_at(path: &Path) -> Result<gix::Repository, GitError> {
 }
 
 /// List files changed between two revisions via tree-to-tree diff with
-/// rename tracking (in-crate, git's `-M50%` semantics, fully
-/// deterministic — no repository/user configuration is consulted). A
-/// renamed file is reported once as `Modified` under its new path with
-/// [`ChangedFile::source_path`] set, instead of a deletion + addition
-/// pair with full-value metric deltas.
+/// deterministic `gix` rewrite tracking (`-M50%` semantics over raw
+/// object bytes, with pinned options and no repository/user diff
+/// configuration or attributes). A renamed file is reported once as
+/// `Modified` under its new path with [`ChangedFile::source_path`] set,
+/// instead of a deletion + addition pair with full-value metric deltas.
 ///
 /// Only blob entries are reported: directories, symlinks, and gitlinks
 /// (submodules) carry no analyzable text. An entry changing *type*
