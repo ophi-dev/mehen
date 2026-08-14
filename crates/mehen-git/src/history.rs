@@ -1259,9 +1259,10 @@ fn merge_introduced_changes(
         parent_trees.push(parent.tree().map_err(|e| internal(&e))?);
     }
     let mut diffs: Vec<Vec<TreeChange>> = Vec::with_capacity(parent_trees.len());
-    for base in &parent_trees {
+    let mut truncated_candidates: Vec<(usize, PathBuf)> = Vec::new();
+    for (q_idx, base) in parent_trees.iter().enumerate() {
         let tc = changes_between_trees(repo, Some(base), &to_tree)?;
-        truncated.extend(tc.truncated_lineages);
+        truncated_candidates.extend(tc.truncated_lineages.into_iter().map(|path| (q_idx, path)));
         diffs.push(tc.changes);
     }
 
@@ -1294,6 +1295,33 @@ fn merge_introduced_changes(
                 .filter(|entry| entry.mode().is_blob())
                 .map(|entry| entry.oid().to_owned()))
         };
+
+    // A truncation marker from a *discarded* parent's diff must not
+    // poison the survivor: when another parent's blob at the path
+    // continues the merged blob (exact, or similar at the rename
+    // threshold), the surviving lineage flows through that parent and
+    // the raw-path rename this diff paired says nothing about it.
+    for (q_idx, path) in truncated_candidates {
+        let Some(merged_oid) = blob_oid_at(&to_tree, &path)? else {
+            truncated.push(path);
+            continue;
+        };
+        let mut supplied_by_other = false;
+        for (idx, tree) in parent_trees.iter().enumerate() {
+            if idx == q_idx {
+                continue;
+            }
+            if let Some(parent_oid) = blob_oid_at(tree, &path)?
+                && (parent_oid == merged_oid || same_blob_lineage(repo, &parent_oid, &merged_oid)?)
+            {
+                supplied_by_other = true;
+                break;
+            }
+        }
+        if !supplied_by_other {
+            truncated.push(path);
+        }
+    }
 
     let mut introduced: Vec<CommitFileChange> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();

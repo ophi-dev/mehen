@@ -680,13 +680,31 @@ fn detect_renames(
         // I/O-bounded by its own cumulative budget: without it, one
         // deletion against thousands of large additions would read
         // and decompress an unbounded volume despite the documented
-        // cap. Oversized/over-budget destinations are skipped (not
+        // cap. Like `load_fuzzy_blobs`, the budget is spent in
+        // ascending (size, path) order so that both sides sample the
+        // *same size region* — real rename pairs have close byte
+        // sizes, and a path-ordered prefix on one side against a
+        // size-ordered prefix on the other could otherwise be
+        // disjoint. Over-budget destinations are skipped (not
         // `break`): smaller later blobs may still fit, keeping the
-        // truncation deterministic in path order like
-        // `load_fuzzy_blobs`.
+        // truncation deterministic.
+        let mut added_sizes = Vec::with_capacity(remaining_added.len());
+        for side in &remaining_added {
+            added_sizes.push(blob_size(repo, &side.oid)?);
+        }
+        let mut added_order: Vec<usize> = (0..remaining_added.len()).collect();
+        added_order.sort_by(|&a, &b| {
+            added_sizes[a].cmp(&added_sizes[b]).then_with(|| {
+                git_path_order(
+                    remaining_added[a].path.as_ref(),
+                    remaining_added[b].path.as_ref(),
+                )
+            })
+        });
         let mut stream_budget = FUZZY_TOTAL_BYTE_BUDGET;
-        for (added_index, added_side) in remaining_added.iter().enumerate() {
-            let size = blob_size(repo, &added_side.oid)?;
+        for added_index in added_order {
+            let added_side = &remaining_added[added_index];
+            let size = added_sizes[added_index];
             if size > FUZZY_MAX_BLOB_BYTES || size > stream_budget {
                 continue;
             }
@@ -886,24 +904,39 @@ struct FuzzyBlob {
 /// when the blob exceeds the per-blob cap or the remaining byte
 /// budget. Sizes come from object headers, so an oversized blob (a
 /// replaced multi-gigabyte binary) is never loaded into memory just to
-/// rule out a rename. Entries are visited in the caller's
-/// (path-sorted) order, keeping budget truncation deterministic.
+/// rule out a rename. Budget is spent in ascending (size, path) order:
+/// real rename pairs have close byte sizes (≥50% span similarity
+/// bounds the ratio), so ordering *both* sides by size keeps
+/// corresponding sources and destinations inside the same budget
+/// prefix even when their path orders disagree — a path-ordered
+/// prefix could load two halves that share no real pair. Still
+/// deterministic.
 fn load_fuzzy_blobs(
     repo: &gix::Repository,
     entries: &[RenameSide],
     budget: u64,
 ) -> Result<Vec<Option<FuzzyBlob>>, GitError> {
-    let mut remaining = budget;
-    let mut blobs = Vec::with_capacity(entries.len());
+    let mut sizes = Vec::with_capacity(entries.len());
     for side in entries {
-        let size = blob_size(repo, &side.oid)?;
+        sizes.push(blob_size(repo, &side.oid)?);
+    }
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| {
+        sizes[a]
+            .cmp(&sizes[b])
+            .then_with(|| git_path_order(entries[a].path.as_ref(), entries[b].path.as_ref()))
+    });
+    let mut remaining = budget;
+    let mut blobs: Vec<Option<FuzzyBlob>> = (0..entries.len()).map(|_| None).collect();
+    for index in order {
+        let size = sizes[index];
         if size > FUZZY_MAX_BLOB_BYTES || size > remaining {
-            blobs.push(None);
             continue;
         }
         remaining -= size;
-        let data = read_blob_data(repo, &side.oid)?;
-        blobs.push(Some(FuzzyBlob { data }));
+        blobs[index] = Some(FuzzyBlob {
+            data: read_blob_data(repo, &entries[index].oid)?,
+        });
     }
     Ok(blobs)
 }

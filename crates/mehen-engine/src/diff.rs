@@ -354,6 +354,29 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
             continue;
         };
 
+        // Strict decode: analyzing lossy replacement text would
+        // measure *mutated* source — complexity and SLOC feeding the
+        // history composites (and every static threshold) would come
+        // from text that is not the blob's content. An undecodable
+        // side reads as unavailable instead, exactly like the CLI
+        // path: git-only history thresholds still evaluate below.
+        let decode = |bytes: Vec<u8>, side: DiffSide, report: &mut DiffReport| {
+            match String::from_utf8(bytes) {
+                Ok(text) => Some(text),
+                Err(_) => {
+                    report.analysis_errors.push(AnalysisErrorRecord {
+                        path: utf8_path.clone(),
+                        side,
+                        diagnostics: vec![ParseDiagnostic::warning(
+                            "engine.undecodable",
+                            "not valid UTF-8; static analysis unavailable for this side"
+                                .to_string(),
+                        )],
+                    });
+                    None
+                }
+            }
+        };
         let base_text = if cf.status == ChangeStatus::Added {
             None
         } else {
@@ -361,14 +384,14 @@ fn analyze_diff_in_repo(input: DiffInput, repo: &gix::Repository) -> Result<Diff
             let base_path = cf.source_path.as_deref().unwrap_or(cf.path.as_path());
             mehen_git::read_blob(repo, &input.from, base_path)
                 .map_err(DiffError::Git)?
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .and_then(|bytes| decode(bytes, DiffSide::Base, &mut report))
         };
         let head_text = if cf.status == ChangeStatus::Deleted {
             None
         } else {
             mehen_git::read_blob(repo, &input.to, &cf.path)
                 .map_err(DiffError::Git)?
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .and_then(|bytes| decode(bytes, DiffSide::Head, &mut report))
         };
 
         let analyzer = registry.analyzer_for(language);
@@ -1257,6 +1280,13 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             // and a full -N on the source).
             let deletion_history_suppressed =
                 is_deleted && history_suppressed_deletions.contains(&cf.path);
+            if deletion_history_suppressed {
+                // The suppressed source row's lineage is carried by
+                // its paired destination row: its history columns
+                // must read `n/a`, not a measured `0 (was: 0)` that
+                // falsely claims the source had zero history.
+                baseline_history_available = false;
+            }
             if let Some(base_history) = base_history.as_ref()
                 && !deletion_history_suppressed
             {
@@ -2136,6 +2166,80 @@ binary.md binary
         assert_eq!(v.path, "hot.py");
         assert_eq!(v.evaluation.actual, 2.0);
         assert!(v.evaluation.violated);
+    }
+
+    #[test]
+    fn analyze_diff_treats_undecodable_blobs_as_unavailable() {
+        // Invalid UTF-8 whose lossy replacement would still parse must
+        // not be analyzed: complexity/SLOC measured from mutated text
+        // would feed the history composites and static thresholds.
+        // The side reads as unavailable (recorded), and Git-only
+        // history thresholds still evaluate.
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+        git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+        git_ok(dir.path(), &["tag", "latin-base"]);
+
+        std::fs::write(dir.path().join("latin.py"), b"# caf\xe9\nx = 1\ny = 2\n").unwrap();
+        git_ok(dir.path(), &["add", "-A"]);
+        git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
+        git_ok(dir.path(), &["tag", "latin-head"]);
+
+        let repo = gix::discover(dir.path()).unwrap();
+        let thresholds = vec![
+            // Git-only: must still evaluate (2 commits > 1).
+            Threshold::new(
+                "history.commit_frequency".parse().unwrap(),
+                1.0,
+                Polarity::HigherIsWorse,
+            ),
+            // Static-dependent composite: must NOT evaluate against
+            // mutated text (any hotspot > -1 would trip if it did).
+            Threshold::new(
+                "history.hotspot".parse().unwrap(),
+                -1.0,
+                Polarity::HigherIsWorse,
+            ),
+        ];
+        let report = analyze_diff_in_repo(
+            DiffInput {
+                from: "latin-base".to_string(),
+                to: "latin-head".to_string(),
+                paths: Vec::new(),
+                thresholds,
+                config: AnalysisConfig::default(),
+            },
+            &repo,
+        )
+        .unwrap();
+
+        assert!(
+            report.analysis_errors.iter().any(|record| {
+                record
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "engine.undecodable")
+            }),
+            "undecodable side must be recorded: {:?}",
+            report.analysis_errors
+        );
+        let violated: Vec<&str> = report
+            .threshold_violations
+            .iter()
+            .map(|v| v.evaluation.selector.key.as_str())
+            .collect();
+        assert!(
+            violated.contains(&"history.commit_frequency"),
+            "git-only threshold must still evaluate: {violated:?}"
+        );
+        assert!(
+            !violated.contains(&"history.hotspot"),
+            "a composite must not evaluate against mutated text: {violated:?}"
+        );
     }
 
     #[test]
