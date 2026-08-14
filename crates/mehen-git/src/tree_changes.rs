@@ -268,6 +268,17 @@ pub(crate) fn changes_between_trees(
     let mut modified: Vec<(gix::bstr::BString, gix::ObjectId, gix::ObjectId)> = Vec::new();
     let mut changes: Vec<TreeChange> = Vec::new();
     let mut non_blob_changes: usize = 0;
+    // Non-blob additions/deletions are *paired* before counting: a
+    // renamed symlink or gitlink is one changed identity, not two
+    // changeset members — counting both records would inflate every
+    // other file's coupling and could push a changeset over the
+    // noise cutoff. Pairing is exact (same entry kind, same OID),
+    // mirroring how such entries actually move; kind/OID multisets
+    // suffice since only the *count* feeds coupling cardinality.
+    let mut non_blob_added: HashMap<(gix::object::tree::EntryKind, gix::ObjectId), usize> =
+        HashMap::new();
+    let mut non_blob_deleted: HashMap<(gix::object::tree::EntryKind, gix::ObjectId), usize> =
+        HashMap::new();
 
     for change in recorder.records {
         match change {
@@ -284,7 +295,7 @@ pub(crate) fn changes_between_trees(
                         broken: None,
                     });
                 } else {
-                    non_blob_changes += 1;
+                    *non_blob_added.entry((entry_mode.kind(), oid)).or_insert(0) += 1;
                 }
             }
             Change::Deletion {
@@ -300,7 +311,9 @@ pub(crate) fn changes_between_trees(
                         broken: None,
                     });
                 } else {
-                    non_blob_changes += 1;
+                    *non_blob_deleted
+                        .entry((entry_mode.kind(), oid))
+                        .or_insert(0) += 1;
                 }
             }
             Change::Modification {
@@ -335,6 +348,17 @@ pub(crate) fn changes_between_trees(
                 }
             }
         }
+    }
+
+    // Fold the paired non-blob moves: an add/delete pair of the same
+    // kind and OID collapses to one changed identity, unpaired
+    // records count individually.
+    for (key, added_count) in non_blob_added {
+        let deleted_count = non_blob_deleted.remove(&key).unwrap_or(0);
+        non_blob_changes += added_count.max(deleted_count);
+    }
+    for (_, deleted_count) in non_blob_deleted {
+        non_blob_changes += deleted_count;
     }
 
     // Break-rewrite pass (git `-B`): a same-path modification whose
@@ -577,9 +601,24 @@ fn detect_renames(
     // the total byte budget (checked via object headers first).
     if !remaining_added.is_empty()
         && !remaining_deleted.is_empty()
-        && remaining_added.len() * remaining_deleted.len() <= RENAME_FUZZY_LIMIT
+        // `checked_mul`: on a 32-bit target a pathological diff
+        // (tens of thousands of surviving entries per side) would
+        // overflow the pair count — a debug panic, or a release wrap
+        // to a tiny number that *enables* the nested scan the limit
+        // exists to prevent.
+        && remaining_added
+            .len()
+            .checked_mul(remaining_deleted.len())
+            .is_some_and(|pairs| pairs <= RENAME_FUZZY_LIMIT)
     {
-        let deleted_blobs = load_fuzzy_blobs(repo, &remaining_deleted, FUZZY_TOTAL_BYTE_BUDGET)?;
+        // Each side is guaranteed half the byte budget: handing the
+        // deleted side the whole pool would let a handful of large
+        // sources consume it entirely, load zero destinations, and
+        // degrade every recognizable rename to a deletion + addition.
+        // The added side then also reuses whatever the deleted side
+        // left unspent.
+        let deleted_blobs =
+            load_fuzzy_blobs(repo, &remaining_deleted, FUZZY_TOTAL_BYTE_BUDGET / 2)?;
         // The added side spends whatever budget the deleted side left,
         // keeping the total bounded even when both sides are large.
         let deleted_bytes: u64 = deleted_blobs

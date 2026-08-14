@@ -5000,6 +5000,110 @@ fn unrelated_history_merges_fence_byte_identical_occupants() {
     assert_eq!(a.commit_frequency, 1, "commit frequency was doubled");
 }
 
+/// A renamed symlink is one changed identity, not two changeset
+/// members: the tree diff reports it as a non-blob deletion plus a
+/// non-blob addition, and counting both would inflate every other
+/// file's coupling in the same commit.
+#[test]
+#[cfg(unix)]
+fn symlink_renames_count_once_in_coupling_cardinality() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
+    std::os::unix::fs::symlink("a.py", dir.path().join("alias.py")).unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // One commit: edit a.py and rename the symlink. The changeset has
+    // two identities (the file, the moved link) — a.py's coupling
+    // must read 1, not 2.
+    git(dir.path(), &["mv", "alias.py", "alias2.py"], ALICE, t(1));
+    std::fs::write(dir.path().join("a.py"), "x = 1\ny = 2\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "edit + move link"],
+        ALICE,
+        t(1),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, "HEAD").unwrap();
+
+    let a = history.file(Path::new("a.py")).unwrap();
+    // Root commit: a.py + symlink = 1 other; edit commit: a.py +
+    // moved symlink = 1 other. A double-counted rename would read 3.
+    assert_eq!(
+        a.sum_of_coupling, 2,
+        "the symlink rename was counted as two changeset members"
+    );
+}
+
+/// A blob created purely by merge conflict resolution — never touched
+/// by any walked non-merge commit — is *tracked with an all-zero
+/// history*, not unmeasurable: `tracked_file` must return a zero
+/// entry (rankable as legitimately calm) rather than `None` (which
+/// reads as an untracked file and renders every history column
+/// `n/a`).
+#[test]
+fn merge_created_untouched_blobs_read_zero_history_not_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(0));
+
+    git(dir.path(), &["checkout", "-q", "-b", "side"], BOB, t(1));
+    std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(1));
+    git(dir.path(), &["commit", "-q", "-m", "side"], BOB, t(1));
+    let side = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // The merge tree carries a file absent from both parents —
+    // conflict-resolution-created.
+    std::fs::write(dir.path().join("merge_only.rs"), "fn m() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], BOB, t(2));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(2));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            "-m",
+            "merge with new file",
+        ],
+        BOB,
+        t(2),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // No non-merge commit touched it: no accumulator...
+    assert!(history.file(Path::new("merge_only.rs")).is_none());
+    // ...but the blob is tracked, so its history is a measured zero.
+    let fh = history
+        .tracked_file(Path::new("merge_only.rs"))
+        .expect("tracked blob must be history-available");
+    assert_eq!(fh.commit_frequency, 0);
+    assert_eq!(fh.churn_abs(), 0);
+    assert_eq!(fh.authors, 0);
+    assert_eq!(
+        fh.age_months(history.head_seconds),
+        0.0,
+        "a merge-created blob cannot predate the revision introducing it"
+    );
+}
+
 /// An octopus merge discarding *two* parents' independent occupants
 /// of the same path: each discarded parent needs its own fence — a
 /// per-path dedup would leave the second occupant unfenced.

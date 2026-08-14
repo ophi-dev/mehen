@@ -103,4 +103,24 @@ pub mod keys {
     pub const HISTORY_SUM_OF_COUPLING: &str = "history.sum_of_coupling";
     pub const HISTORY_TWR: &str = "history.twr";
     pub const HISTORY_BUGFIX_COMMITS: &str = "history.bugfix_commits";
+
+    /// The complete `history.*` family. Unlike the extensible
+    /// language-owned namespaces, these engine-published keys are
+    /// fixed — selector parsing validates `history.*` names against
+    /// this set so a typo is rejected up front instead of triggering
+    /// the expensive repository walk and reading `0.0` through the
+    /// missing-key fallback.
+    pub const HISTORY_ALL: &[&str] = &[
+        HISTORY_CHURN_ABS,
+        HISTORY_CHURN_RELATIVE,
+        HISTORY_AGE_MONTHS,
+        HISTORY_AUTHORS,
+        HISTORY_MINOR_CONTRIBUTORS,
+        HISTORY_OWNERSHIP,
+        HISTORY_COMMIT_FREQUENCY,
+        HISTORY_HOTSPOT,
+        HISTORY_SUM_OF_COUPLING,
+        HISTORY_TWR,
+        HISTORY_BUGFIX_COMMITS,
+    ];
 }

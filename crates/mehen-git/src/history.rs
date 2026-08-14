@@ -115,6 +115,26 @@ impl FileHistory {
         let delta = head_seconds.saturating_sub(self.last_change_seconds);
         (delta.max(0) as f64) / SECONDS_PER_MONTH
     }
+
+    /// A tracked blob no walked (non-merge) commit ever touched —
+    /// e.g. one created purely by merge conflict resolution. Every
+    /// count reads a legitimate zero; the last change is pinned to
+    /// the walked rev, so `age_months` reads 0 (the blob cannot be
+    /// older than the revision that introduced it).
+    fn untouched(head_seconds: i64) -> Self {
+        Self {
+            commit_frequency: 0,
+            churn_added: 0,
+            churn_removed: 0,
+            authors: 0,
+            minor_contributors: 0,
+            ownership: 0.0,
+            last_change_seconds: head_seconds,
+            sum_of_coupling: 0,
+            bugfix_commits: 0,
+            twr: 0.0,
+        }
+    }
 }
 
 /// Per-file history statistics for an entire repository at a fixed rev.
@@ -143,11 +163,22 @@ impl RepositoryHistory {
     /// symlink — occupying a path whose tracked blob HEAD deleted has
     /// no history of its own, and returning the dead occupant's would
     /// assign it someone else's commits, churn, and authors.
-    pub fn tracked_file(&self, path: &Path) -> Option<&FileHistory> {
+    ///
+    /// A tracked blob *without* an accumulator (created purely by
+    /// merge conflict resolution, never touched by a walked non-merge
+    /// commit) reads a legitimate all-zero history rather than `None`
+    /// — it is measured (nothing ever happened to it), not
+    /// unmeasurable like an untracked path.
+    pub fn tracked_file(&self, path: &Path) -> Option<FileHistory> {
         if !self.head_blobs.contains(path) {
             return None;
         }
-        self.files.get(path)
+        Some(
+            self.files
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| FileHistory::untouched(self.head_seconds)),
+        )
     }
 
     /// Number of files with recorded history.
@@ -872,7 +903,17 @@ fn finalize_file(acc: FileAccumulator, first_seconds: i64, head_seconds: i64) ->
         authors,
         minor_contributors,
         ownership,
-        last_change_seconds: last_change_seconds.max(0),
+        // Signed: valid raw commit metadata can be pre-epoch, and
+        // clamping the timestamp itself would misreport `age_months`
+        // for a pre-epoch analyzed revision (the elapsed difference
+        // is clamped where it is computed instead). `i64::MIN` only
+        // survives an accumulator with no contributions; pin it to
+        // the walked rev so the degenerate age reads 0.
+        last_change_seconds: if last_change_seconds == i64::MIN {
+            head_seconds
+        } else {
+            last_change_seconds
+        },
         sum_of_coupling,
         bugfix_commits: bugfix_seconds.len() as u64,
         twr: time_weighted_risk(&bugfix_seconds, first_seconds, head_seconds),

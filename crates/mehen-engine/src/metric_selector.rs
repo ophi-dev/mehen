@@ -184,9 +184,16 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
 /// Whether `name` is a namespaced metric key that the CLI should accept even
 /// though it is not in the source-code `KNOWN_METRICS` catalogue: the
 /// language-owned families (`sql.*`, `markdown.*`) and the engine-owned git
-/// history family (`history.*`).
+/// history family (`history.*`). The language namespaces are extensible and
+/// accepted by prefix; the `history.*` family is fixed and enumerated
+/// (`mehen_core::keys::HISTORY_ALL`), so a typo like
+/// `history.commit_frequncy` is rejected here — accepting it would trigger
+/// the expensive repository walk and then silently read `0.0` through the
+/// missing-key fallback (an all-zero ranking, or a diff with no rows).
 fn is_namespaced_metric(name: &str) -> bool {
-    name.starts_with("sql.") || name.starts_with("markdown.") || name.starts_with("history.")
+    name.starts_with("sql.")
+        || name.starts_with("markdown.")
+        || mehen_core::keys::HISTORY_ALL.contains(&name)
 }
 
 /// Namespaced (`sql.*` / `markdown.*` / `history.*`) metric keys where a
@@ -347,6 +354,23 @@ mod tests {
         let specs = vec!["nonexistent".to_string()];
         let selectors = parse_metric_selectors(&specs);
         assert!(selectors.is_empty());
+    }
+
+    #[test]
+    fn mistyped_history_metric_is_rejected() {
+        // The `history.*` family is fixed and enumerated: a typo must
+        // be rejected up front, not accepted by prefix — accepting it
+        // would trigger the expensive history walk and then read the
+        // unpublished key as `0.0` (an all-zero ranking / an empty
+        // diff instead of a warning).
+        let specs = vec!["history.commit_frequncy".to_string()];
+        assert!(parse_metric_selectors(&specs).is_empty());
+        // Every real key is still accepted verbatim.
+        for key in mehen_core::keys::HISTORY_ALL {
+            let selectors = parse_metric_selectors(&[key.to_string()]);
+            assert_eq!(selectors.len(), 1, "{key} must parse");
+            assert_eq!(selectors[0].name, *key);
+        }
     }
 
     #[test]

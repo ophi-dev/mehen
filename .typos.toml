@@ -46,6 +46,9 @@ inh = "inh"
 # value parser (`src/diff.rs` rejects unknown names via clap).
 borken = "borken"
 hihg = "hihg"
+# Intentional typo in the negative-path test for `history.*` selector
+# validation (`metric_selector.rs` rejects unknown history keys).
+frequncy = "frequncy"
 # Intentional name of a removed language parser
 Ccomment = "Ccomment"
 "Winn" = "Winn"

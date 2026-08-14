@@ -651,7 +651,7 @@ impl RepoHistories {
         // file's.
         history
             .tracked_file(relative)
-            .map(|fh| (fh.clone(), history.head_seconds))
+            .map(|fh| (fh, history.head_seconds))
     }
 
     /// Drain the recorded lazy-discovery failures (repositories that
