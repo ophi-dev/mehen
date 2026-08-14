@@ -1279,6 +1279,26 @@ fn merge_introduced_changes(
                                         *parent_id,
                                         base_commit.id,
                                         source_path,
+                                    )?
+                                    // The *supplier* must continue the
+                                    // base lineage too: a supplier
+                                    // whose own line deleted and
+                                    // recreated the source after the
+                                    // base renamed its *recreation* —
+                                    // the other parent's retained
+                                    // original is a different
+                                    // (discarded) occupant. Widening
+                                    // would route that original into
+                                    // the rename target while the
+                                    // addition floor rejects the
+                                    // supplier's actual recreation,
+                                    // stranding its edits; keep the
+                                    // alias supplier-only instead.
+                                    && !path_deleted_in_range(
+                                        repo,
+                                        supplier,
+                                        base_commit.id,
+                                        source_path,
                                     )?;
                                 if shares && addition_floor.is_none() {
                                     // Additions through a multi-parent
@@ -1470,7 +1490,13 @@ fn merge_introduced_changes(
             if same_blob_lineage(repo, previous_oid, oid)?
                 && match floor {
                     Some(base) => !path_deleted_in_range(repo, parent_ids[q_idx], base, path)?,
-                    None => true,
+                    // No merge base (`--allow-unrelated-histories`):
+                    // the parents cannot share a lineage, so endpoint
+                    // similarity between two independently created
+                    // files proves nothing — fence the discarded
+                    // occupant (with no floor: there is no shared
+                    // pre-branch history to protect).
+                    None => false,
                 }
             {
                 continue;

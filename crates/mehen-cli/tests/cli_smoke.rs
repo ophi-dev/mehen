@@ -569,7 +569,7 @@ fn diff_history_composites_read_na_when_head_is_undecodable() {
             "--to",
             "na-head",
             "--metrics",
-            "history.hotspot,history.churn.relative,history.churn.abs",
+            "cognitive,history.hotspot,history.churn.relative,history.churn.abs",
             "--output-format",
             "json",
         ])
@@ -598,7 +598,7 @@ fn diff_history_composites_read_na_when_head_is_undecodable() {
             .clone()
     };
 
-    for name in ["history.hotspot", "history.churn.relative"] {
+    for name in ["cognitive", "history.hotspot", "history.churn.relative"] {
         let m = metric(name);
         assert_eq!(
             m["current_unavailable"].as_bool(),
@@ -941,18 +941,18 @@ fn top_offenders_does_not_borrow_history_through_symlinks() {
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("top-offenders output must be JSON");
     let offenders = value.as_array().expect("offender array");
-    let by_name = |suffix: &str| -> f64 {
+    let by_name = |suffix: &str| -> Option<f64> {
         offenders
             .iter()
             .find(|o| o["path"].as_str().expect("path").ends_with(suffix))
             .unwrap_or_else(|| panic!("missing {suffix} in {offenders:?}"))["metrics"][0]["value"]
             .as_f64()
-            .expect("value")
     };
     // real.py has two content commits; the alias symlink has none of
-    // them (symlinks are non-blob entries in the history walk).
-    assert_eq!(by_name("real.py"), 2.0);
-    assert_eq!(by_name("alias.py"), 0.0);
+    // them (symlinks are non-blob entries in the history walk) — its
+    // history is unmeasurable, not zero.
+    assert_eq!(by_name("real.py"), Some(2.0));
+    assert_eq!(by_name("alias.py"), None);
 }
 
 #[test]
@@ -1786,10 +1786,10 @@ fn untracked_files_do_not_inherit_dead_occupant_history() {
         .iter()
         .find(|o| o["path"].as_str().expect("path").ends_with("ghost.py"))
         .expect("untracked file is still ranked");
-    assert_eq!(
-        ghost["metrics"][0]["value"].as_f64(),
-        Some(0.0),
-        "the dead occupant's history leaked into the untracked file: {ghost:?}"
+    assert!(
+        ghost["metrics"][0]["value"].is_null(),
+        "an untracked path has no measurable history — it must read null \
+         (and never the dead occupant's commits): {ghost:?}"
     );
 }
 

@@ -4768,6 +4768,169 @@ fn revert_style_discarded_recreations_are_fenced_at_merges() {
     assert_eq!(a.commit_frequency, 2, "creation + deletion touch");
 }
 
+/// A merge rename whose *supplier* deleted and recreated the source
+/// after the divergence, while another parent retained the original:
+/// the alias must stay supplier-only. Widening to the retaining
+/// parent (whose endpoint blob does continue the base) would set an
+/// addition floor that rejects the supplier's actual recreation —
+/// stranding its edits under the vanished source — and route the
+/// retained original into the rename target.
+#[test]
+fn merge_rename_scopes_stay_supplier_only_when_the_supplier_recreated_the_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // c0: the original.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+
+    // Retaining branch: unrelated work; a.rs keeps the original.
+    git(dir.path(), &["checkout", "-q", "-b", "retain"], BOB, t(1));
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\nfn keep2() {}\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "grow keep"], BOB, t(1));
+    let retain = git_out(dir.path(), &["rev-parse", "HEAD"], BOB, t(1));
+
+    // Mover branch: delete the original, recreate something unrelated
+    // at the same path. Newer timestamps: walked before the retainer.
+    git(
+        dir.path(),
+        &["checkout", "-q", "-b", "mover", "main"],
+        ALICE,
+        t(2),
+    );
+    git(dir.path(), &["rm", "-q", "a.rs"], ALICE, t(2));
+    git(dir.path(), &["commit", "-q", "-m", "drop a"], ALICE, t(2));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn n0() {}\nfn n1() {}\nfn n2() {}\nfn n3() {}\nfn n4() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(3));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "recreate a"],
+        CAROL,
+        t(3),
+    );
+    let mover = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(3));
+
+    // The merge renames the *recreation* to b.rs (the merged tree has
+    // no a.rs): the mover's diff pairs `a.rs → b.rs` exactly, so the
+    // mover is the supplier.
+    git(dir.path(), &["checkout", "-q", "-f", "mover"], BOB, t(4));
+    git(dir.path(), &["mv", "a.rs", "b.rs"], BOB, t(4));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(4));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &retain,
+            "-p",
+            &mover,
+            "-m",
+            "rename the recreation",
+        ],
+        BOB,
+        t(4),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The survivor is carol's recreation, moved: exactly its own
+    // churn (5 lines) — not the 4-line root creation the retaining
+    // parent held.
+    let b = history.file(Path::new("b.rs")).unwrap();
+    assert_eq!(b.churn_added, 5, "the recreation's edits were stranded");
+    assert_eq!(b.authors, 1, "the retained original leaked into b.rs");
+    assert_eq!(b.commit_frequency, 1);
+    assert!(history.file(Path::new("a.rs")).is_none());
+}
+
+/// `--allow-unrelated-histories`: the merged parents have no merge
+/// base, so two similar same-path blobs cannot share a lineage —
+/// endpoint similarity proves nothing. The discarded parent's
+/// independently created occupant must be fenced (with no floor:
+/// there is no shared pre-branch history to protect).
+#[test]
+fn unrelated_history_merges_fence_similar_discarded_occupants() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = |n: i64| 1_700_000_000 + n * 100_000;
+    git(dir.path(), &["init", "-q", "-b", "main"], ALICE, t(0));
+
+    // Main line: the survivor.
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn a3() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("keep.rs"), "fn keep() {}\n").unwrap();
+    git(dir.path(), &["add", "-A"], ALICE, t(0));
+    git(dir.path(), &["commit", "-q", "-m", "root"], ALICE, t(0));
+    let main = git_out(dir.path(), &["rev-parse", "HEAD"], ALICE, t(0));
+
+    // Orphan line: an unrelated root whose a.rs happens to be ≥50%
+    // similar. Newer timestamps: walked before the main line.
+    git(
+        dir.path(),
+        &["checkout", "-q", "--orphan", "other"],
+        CAROL,
+        t(1),
+    );
+    git(dir.path(), &["rm", "-rfq", "."], CAROL, t(1));
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "fn a0() {}\nfn a1() {}\nfn a2() {}\nfn imposter() {}\n",
+    )
+    .unwrap();
+    git(dir.path(), &["add", "-A"], CAROL, t(1));
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "unrelated root"],
+        CAROL,
+        t(1),
+    );
+    let other = git_out(dir.path(), &["rev-parse", "HEAD"], CAROL, t(1));
+
+    // The merge keeps the main parent's tree.
+    git(dir.path(), &["checkout", "-q", "-f", "main"], BOB, t(2));
+    let tree = git_out(dir.path(), &["write-tree"], BOB, t(2));
+    let merge = git_out(
+        dir.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &other,
+            "-m",
+            "merge unrelated histories",
+        ],
+        BOB,
+        t(2),
+    );
+
+    let repo = gix::discover(dir.path()).unwrap();
+    let history = collect_history(&repo, &merge).unwrap();
+
+    // The survivor keeps only its own line; carol's independent
+    // occupant stays fenced despite the endpoint similarity.
+    let a = history.file(Path::new("a.rs")).unwrap();
+    assert_eq!(a.churn_added, 4, "the unrelated occupant leaked in");
+    assert_eq!(a.authors, 1, "the unrelated occupant's author leaked in");
+    assert_eq!(a.commit_frequency, 1);
+}
+
 /// An octopus merge discarding *two* parents' independent occupants
 /// of the same path: each discarded parent needs its own fence — a
 /// per-path dedup would leave the second occupant unfenced.

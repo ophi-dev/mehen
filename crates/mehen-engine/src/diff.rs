@@ -1011,10 +1011,20 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         // the baseline blob and the baseline history live there.
         let base_path = cf.source_path.as_deref().unwrap_or(cf.path.as_path());
 
-        let analyzer = match registry.analyzer_for(*language) {
-            Some(a) => a,
-            None => continue,
-        };
+        // No analyzer for a recognized language (the owning crate is
+        // feature-gated off in this build): static columns are
+        // unavailable, but repository history needs no parser — a
+        // requested Git-only selector must still produce a row via
+        // the synthetic history-only fallback below instead of the
+        // binary silently dropping the file.
+        let analyzer = registry.analyzer_for(*language);
+        if analyzer.is_none() {
+            log::warn!(
+                "{}: no analyzer registered for `{}` in this build; static columns unavailable",
+                cf.path.display(),
+                language.canonical()
+            );
+        }
 
         // Selectors for *this* file: the explicit list, or this language's
         // defaults. Register any new default columns into the display union.
@@ -1031,6 +1041,7 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let mut analyze = |bytes: Vec<u8>, side: &str| -> Option<MetricSpace> {
+            let analyzer = analyzer.as_deref()?;
             let text = String::from_utf8(bytes).ok()?;
             let source = SourceFile::new(utf8_path.clone(), *language, text);
             let analysis = match analyzer.analyze(&source, &analysis_config) {
@@ -1250,16 +1261,16 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|sel| {
                 // A side whose static analysis is unavailable cannot
-                // value the static-dependent composites; the keys are
-                // omitted there (`inject_history_metrics`), and the
-                // missing-key `0.0` fallback must not masquerade as a
-                // measurement — `hotspot 12 → 0` would fake a cleared
-                // hotspot in the default PR columns.
-                let is_composite = history_metrics::is_history_composite(sel.name);
-                let baseline_unavailable =
-                    baseline_space.is_some() && is_composite && !baseline_composites;
-                let current_unavailable =
-                    current_space.is_some() && is_composite && !current_composites;
+                // value any analyzer-derived selector: the keys are
+                // absent from its synthetic history-only space, and
+                // the missing-key `0.0` fallback must not masquerade
+                // as a measurement — `cognitive 12 → 0` or `hotspot
+                // 12 → 0` would fake a full improvement in the diff
+                // columns. Git-only history selectors stay measurable.
+                let baseline_unavailable = baseline_space.is_some()
+                    && !history_metrics::selector_available(sel.name, baseline_composites, true);
+                let current_unavailable = current_space.is_some()
+                    && !history_metrics::selector_available(sel.name, current_composites, true);
                 let baseline = baseline_space
                     .as_ref()
                     .map(|s| read_selector_metric(s, sel))

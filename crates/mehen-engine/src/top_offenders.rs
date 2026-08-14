@@ -108,7 +108,8 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
             Some(analysis.root)
         });
         let statics_available = analyzed_root.is_some();
-        let mut root = match (analyzed_root, history_entry.is_some()) {
+        let history_available = history_entry.is_some();
+        let mut root = match (analyzed_root, history_available) {
             (Some(root), _) => root,
             (None, true) => mehen_core::MetricSpace::new(
                 mehen_core::SpaceId(0),
@@ -135,16 +136,22 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
             .selectors
             .iter()
             .map(|s| {
-                // A static-dependent composite on a history-only space
-                // has no measurable value — its key was omitted above,
-                // and the missing-key `0.0` fallback must not rank the
-                // file on a fabricated zero.
-                if !statics_available
-                    && crate::history_metrics::is_history_composite(s.key.as_str())
-                {
-                    None
-                } else {
+                // A selector the space cannot back — any static
+                // metric on a history-only fallback, or any
+                // `history.*` metric on a file without recorded Git
+                // history — has no measurable value, and the
+                // missing-key `0.0` fallback must not rank the file
+                // on a fabricated one (worst-possible MI on an
+                // undecodable file; zero-age "worst offender" for an
+                // untracked file).
+                if crate::history_metrics::selector_available(
+                    s.key.as_str(),
+                    statics_available,
+                    history_available,
+                ) {
                     Some(read_metric(s, &root))
+                } else {
+                    None
                 }
             })
             .collect();
@@ -710,7 +717,8 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         Some(analysis.root)
     });
     let statics_available = analyzed_root.is_some();
-    let mut root = match (analyzed_root, history_entry.is_some()) {
+    let history_available = history_entry.is_some();
+    let mut root = match (analyzed_root, history_available) {
         (Some(root), _) => root,
         (None, true) => mehen_core::MetricSpace::new(
             mehen_core::SpaceId(0),
@@ -723,8 +731,9 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
     // Fold the `history.*` family into the metric set so history
     // selectors rank on real values. Files without recorded history
     // (untracked, outside every known work dir) read the family as
-    // 0.0; the static-dependent composites are omitted when no real
-    // analysis backs the space (see `inject_history_metrics`).
+    // *unavailable* below; the static-dependent composites are
+    // omitted when no real analysis backs the space (see
+    // `inject_history_metrics`).
     if let Some((fh, head_seconds)) = history_entry {
         crate::history_metrics::inject_history_metrics(
             &mut root.metrics,
@@ -740,14 +749,19 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         .map(|sel| CliMetricValue {
             name: sel.name,
             label: sel.label,
-            // A static-dependent composite on a history-only space has
-            // no measurable value — its key was omitted above, and the
-            // missing-key `0.0` fallback must not rank the file on a
-            // fabricated zero.
-            value: if !statics_available && crate::history_metrics::is_history_composite(sel.name) {
-                None
-            } else {
+            // A selector the space cannot back — any static metric on
+            // a history-only fallback, or any `history.*` metric on a
+            // file without recorded Git history — has no measurable
+            // value, and the missing-key `0.0` fallback must not rank
+            // the file on a fabricated one.
+            value: if crate::history_metrics::selector_available(
+                sel.name,
+                statics_available,
+                history_available,
+            ) {
                 Some(read_selector_metric(&root, sel))
+            } else {
+                None
             },
         })
         .collect();
@@ -1435,7 +1449,11 @@ mod tests {
             paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
             include: Vec::new(),
             exclude: Vec::new(),
-            selectors: vec![sel("history.hotspot"), sel("history.churn.relative")],
+            selectors: vec![
+                sel("history.hotspot"),
+                sel("history.churn.relative"),
+                sel("loc.lloc"),
+            ],
             max_results: 10,
             config: AnalysisConfig::default(),
         };
@@ -1447,8 +1465,8 @@ mod tests {
             .expect("undecodable file still ranked (history-only)");
         assert_eq!(
             latin.scores,
-            vec![None, None],
-            "composites must be uncomputable, not zero"
+            vec![None, None, None],
+            "composites *and* plain statics must be uncomputable, not zero"
         );
         let plain = report
             .entries
@@ -1464,6 +1482,70 @@ mod tests {
         assert_eq!(
             report.entries.last().map(|e| e.path.file_name()),
             Some(Some("latin.py"))
+        );
+    }
+
+    #[test]
+    fn rank_top_offenders_marks_history_unavailable_for_untracked_files() {
+        // An untracked file has statics but no recorded Git history:
+        // its `history.*` scores must read as uncomputable (`None`)
+        // and rank least concerning — `history.age_months = 0` or
+        // `history.ownership = 0` would otherwise crown it the worst
+        // offender and crowd real tracked files out of the ranking.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Mehen Test")
+                .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+                .env("GIT_COMMITTER_NAME", "Mehen Test")
+                .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("tracked.py"), "x = 1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        // Present in the workspace only.
+        std::fs::write(dir.path().join("untracked.py"), "y = 1\n").unwrap();
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec![sel("history.commit_frequency")],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+        };
+        let report = rank_top_offenders(input);
+        let score = |name: &str| {
+            report
+                .entries
+                .iter()
+                .find(|e| e.path.file_name() == Some(name))
+                .unwrap_or_else(|| panic!("{name} missing from {:?}", report.entries))
+                .scores[0]
+        };
+        assert_eq!(score("tracked.py"), Some(1.0));
+        assert_eq!(
+            score("untracked.py"),
+            None,
+            "no Git history means no measurable history score"
+        );
+        assert_eq!(
+            report.entries.last().map(|e| e.path.file_name()),
+            Some(Some("untracked.py")),
+            "unmeasured files rank least concerning"
         );
     }
 

@@ -45,6 +45,20 @@ pub(crate) fn is_history_composite(name: &str) -> bool {
     name == keys::HISTORY_HOTSPOT || name == keys::HISTORY_CHURN_RELATIVE
 }
 
+/// Whether a selector can be honestly valued given what backs the
+/// metric space. Git-only selectors (the `history.*` family minus its
+/// two static-dependent composites) need repository history; the
+/// composites need both history and static analysis; every other
+/// selector needs static analysis. Reading an unavailable selector
+/// through the missing-key `0.0` fallback would fabricate a value —
+/// a "cleared" hotspot, a worst-possible MI on an undecodable file,
+/// or a zero-age "worst offender" that was never tracked by Git.
+pub(crate) fn selector_available(name: &str, statics: bool, history: bool) -> bool {
+    let needs_history = name.starts_with("history.");
+    let needs_statics = !needs_history || is_history_composite(name);
+    (statics || !needs_statics) && (history || !needs_history)
+}
+
 /// Publish the `history.*` family onto a file's root metric set.
 ///
 /// `file` is the walked per-file history at the same revision the
