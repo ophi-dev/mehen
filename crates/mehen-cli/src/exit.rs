@@ -7,10 +7,13 @@
 pub enum ExitCode {
     Success = 0,
     /// Setup, IO, git, parser fatal, unsupported-language, or invalid-state
-    /// error. Also covers "analysis errors" diagnostics on `mehen metrics`.
+    /// error. Also covers "analysis errors" diagnostics on `mehen metrics`
+    /// and configured `mehen.toml` metric-threshold violations — every
+    /// quality gate fails with the generic non-zero code so CI treats
+    /// them uniformly.
     SetupError = 1,
-    /// Threshold or policy failure. Reserved for `mehen diff` and
-    /// `mehen top-offenders`.
+    /// Documentation policy failure (`mehen diff --fail-on`) and JSON
+    /// emission failures inside `mehen diff` keep this historical code.
     ThresholdFailure = 2,
     /// Invalid machine-output serialization state.
     SerializationError = 3,

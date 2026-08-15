@@ -58,6 +58,38 @@ mehen diff --from main --to HEAD --paths src --output-format markdown
 
 Quickstart: <https://mehen.ophi.dev/quickstart>.
 
+## Configuration
+
+Drop a `mehen.toml` (or `.mehen.toml`) anywhere at or above the directory you run `mehen` from —
+discovery walks upward, and `--config <PATH>` pins an explicit file:
+
+```toml
+[thresholds]
+cognitive = 15         # higher-is-worse metrics: the limit is a maximum
+"loc.lloc" = 500
+mi.visual_studio = 40  # higher-is-better metrics (mi.*): the limit is a minimum
+
+[languages.python.thresholds]
+cognitive = 10         # overrides the global limit for Python files only
+```
+
+Every command that reports a configured metric enforces it: `mehen metrics` checks the full
+metric set of the analyzed file, while `mehen diff` (head side) and `mehen top-offenders` check
+the metrics selected for output — across *all* analyzed files, not just the displayed rows. Any
+crossed limit prints a grouped report on stderr and fails the command with exit code 1:
+
+```text
+  × 2 metric threshold violations (config: /repo/mehen.toml)
+  │
+  │ src/app/core.py
+  │   cognitive = 23 — exceeds max 10  [languages.python]
+  │   loc.lloc = 640 — exceeds max 500  [thresholds]
+  help: raise or remove the limit in the config table shown, or refactor the file below it.
+```
+
+Configuration mistakes fail fast with a caret into the TOML source and a suggestion ("unknown
+metric `cognitve` … did you mean `cognitive`?"), so a typo can never silently disable a gate.
+
 ## GitHub Action
 
 Drop the action into a workflow to publish per-PR metric trends:

@@ -39,19 +39,32 @@ fn main() {
         std::process::exit(ExitCode::SetupError.into());
     };
 
-    let code = run(command);
+    // Repository-local configuration (`mehen.toml` / `.mehen.toml`,
+    // or an explicit `--config`). A malformed config is a setup
+    // error: failing loudly here beats silently running without the
+    // thresholds the user wrote down. The rendered diagnostic points
+    // at the offending key inside the TOML source.
+    let config = match mehen_engine::load_config(cli.config.as_deref()) {
+        Ok(config) => config,
+        Err(e) => {
+            eprint!("{}", mehen_engine::render_config_error(&e));
+            std::process::exit(ExitCode::SetupError.into());
+        }
+    };
+
+    let code = run(command, config.as_ref());
     std::process::exit(code.into());
 }
 
-fn run(command: Command) -> ExitCode {
+fn run(command: Command, config: Option<&mehen_engine::ConfigFile>) -> ExitCode {
     match command {
-        Command::Metrics(args) => commands::metrics(args),
+        Command::Metrics(args) => commands::metrics(args, config),
         Command::Diff(opts) => {
-            mehen_engine::run_diff(opts);
+            mehen_engine::run_diff(opts, config);
             ExitCode::Success
         }
         Command::TopOffenders(opts) => {
-            mehen_engine::run_top_offenders(opts);
+            mehen_engine::run_top_offenders(opts, config);
             ExitCode::Success
         }
     }

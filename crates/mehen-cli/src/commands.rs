@@ -14,7 +14,7 @@ use mehen_report::render_metrics_json;
 use crate::args::{MetricsArgs, OutputFormat, Profile};
 use crate::exit::ExitCode;
 
-pub(crate) fn metrics(args: MetricsArgs) -> ExitCode {
+pub(crate) fn metrics(args: MetricsArgs, config: Option<&mehen_engine::ConfigFile>) -> ExitCode {
     let path = match Utf8PathBuf::try_from(args.path.clone()) {
         Ok(p) => p,
         Err(_) => {
@@ -70,7 +70,32 @@ pub(crate) fn metrics(args: MetricsArgs) -> ExitCode {
     {
         return exit;
     }
-    exit_code_from_report(&report)
+    let report_exit = exit_code_from_report(&report);
+    if !matches!(report_exit, ExitCode::Success) {
+        // Blocking diagnostics mean the metrics are partial (§9.3):
+        // exit 1 without threshold-gating numbers from a broken parse.
+        return report_exit;
+    }
+
+    // Configured metric thresholds (`mehen.toml`): `mehen metrics`
+    // reports the full metric set, so every configured threshold that
+    // matches a key this file publishes is evaluated against the root
+    // space. Violations print a grouped report on stderr and fail the
+    // command with the generic failure code (exit 1).
+    if let Some(config) = config {
+        let mut breaches =
+            config
+                .thresholds
+                .evaluate(report.path.as_str(), language, &report.root, None);
+        if !breaches.is_empty() {
+            eprint!(
+                "{}",
+                mehen_engine::render_threshold_report(&mut breaches, &config.path)
+            );
+            return ExitCode::SetupError;
+        }
+    }
+    ExitCode::Success
 }
 
 /// Map the `--profile` flag to an [`AnalysisConfig`]. Until plan §3.6
@@ -92,8 +117,9 @@ fn config_for_profile(profile: Profile) -> AnalysisConfig {
 
 /// Map a `MetricsReport`'s diagnostic severities to a CLI exit code per
 /// the diagnostic contract (rewrite plan §9.3): `Warning` is exit 0,
-/// `Error`/`Fatal` are exit 1. Threshold violations (exit 2) are not
-/// emitted by `mehen metrics`.
+/// `Error`/`Fatal` are exit 1. Configured `mehen.toml` threshold
+/// violations are handled separately in [`metrics`] (also exit 1) and
+/// only on reports without blocking diagnostics.
 fn exit_code_from_report(report: &MetricsReport) -> ExitCode {
     let has_error_or_fatal = report.diagnostics.iter().any(|d| {
         matches!(

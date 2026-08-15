@@ -819,14 +819,17 @@ fn parse_fail_on_flag(raw: &str) -> Result<FailOn, clap::Error> {
     }
 }
 
-pub fn run_diff(opts: DiffOpts) {
-    if let Err(e) = run_diff_inner(opts) {
+pub fn run_diff(opts: DiffOpts, config: Option<&crate::config_file::ConfigFile>) {
+    if let Err(e) = run_diff_inner(opts, config) {
         log::error!("{e}");
         std::process::exit(1);
     }
 }
 
-fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
+fn run_diff_inner(
+    opts: DiffOpts,
+    config: Option<&crate::config_file::ConfigFile>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Resolve refs
     let ci_ctx = ci::detect();
     let (from_ref, to_ref) = resolve_refs(&opts, &ci_ctx);
@@ -1068,6 +1071,12 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     //    metrics from a broken parse must not pass CI silently.
     let mut diffs = Vec::new();
     let mut analysis_failed = false;
+    // Configured metric thresholds (`mehen.toml`): evaluated per file
+    // against the *head* side of the metrics this diff reports.
+    let threshold_policy = config
+        .map(|c| &c.thresholds)
+        .filter(|policy| !policy.is_empty());
+    let mut threshold_breaches: Vec<crate::config_file::ThresholdBreach> = Vec::new();
     // The union of selectors actually displayed, in first-seen order. With
     // explicit `--metric` this is just `selectors`; with per-language defaults
     // it accumulates each language's default columns as files are seen, so a
@@ -1431,6 +1440,27 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect();
 
+        // Configured thresholds gate the head side of the metrics
+        // this file reports; a deleted file has no head side to gate.
+        // Keys the head space does not publish — statics behind a
+        // blocked parse or an unavailable analyzer, history on an
+        // untracked path — are skipped by `evaluate`, never read as a
+        // fabricated `0.0`. Evaluation happens *before* the
+        // unchanged-row filter below: an unchanged-but-over-limit
+        // metric still fails the gate even when its row is hidden.
+        if let Some(policy) = threshold_policy
+            && !is_deleted
+            && let Some(space) = current_space.as_ref()
+        {
+            let names: Vec<&str> = file_selectors.iter().map(|s| s.name).collect();
+            threshold_breaches.extend(policy.evaluate(
+                &cf.path.display().to_string(),
+                *language,
+                space,
+                Some(&names),
+            ));
+        }
+
         diffs.push(FileDiff {
             path: cf.path.clone(),
             metrics: metric_diffs,
@@ -1546,11 +1576,31 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Configured metric thresholds (`mehen.toml`): print the report
+    // before the doc gate below so a combined failure still surfaces
+    // both; the exit itself happens after the doc gate to keep its
+    // historical exit code (2) stable.
+    if !threshold_breaches.is_empty()
+        && let Some(config) = config
+    {
+        eprint!(
+            "{}",
+            crate::config_file::render_threshold_report(&mut threshold_breaches, &config.path)
+        );
+    }
+
     // --fail-on check.
     let failures = evaluate_fail_on(&opts.fail_on, &doc_files);
     if !failures.is_empty() {
         log::error!("--fail-on threshold crossed: {}", failures.join(", "));
         std::process::exit(2);
+    }
+
+    // Exit 1: configured quality gates fail with the generic failure
+    // code (`mehen.toml` threshold contract); the report was printed
+    // above.
+    if !threshold_breaches.is_empty() {
+        std::process::exit(1);
     }
 
     // Per the diagnostic contract (rewrite plan §9.3), recoverable
