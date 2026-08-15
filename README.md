@@ -89,6 +89,7 @@ crossed limit prints a grouped report on stderr and fails the command with exit 
 
 Configuration mistakes fail fast with a caret into the TOML source and a suggestion ("unknown
 metric `cognitve` … did you mean `cognitive`?"), so a typo can never silently disable a gate.
+Full reference: <https://mehen.ophi.dev/configuration>.
 
 ## GitHub Action
 
@@ -123,6 +124,8 @@ Everything else lives in the docs site:
   object-touch risk, SQL Halstead, and composite scores via `mehen-sql` (sqruff-backed).
 - [Commands](https://mehen.ophi.dev/commands/overview) — `mehen metrics`, `mehen diff`,
   `mehen top-offenders`.
+- [Configuration](https://mehen.ophi.dev/configuration) — `mehen.toml` thresholds and
+  per-language overrides.
 - [Developers guide](https://mehen.ophi.dev/developers/overview) — build, test, contribute, add a
   language.
 

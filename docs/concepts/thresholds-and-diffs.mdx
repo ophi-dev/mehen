@@ -1,12 +1,33 @@
 ---
 title: "Thresholds and diffs"
-description: "How `mehen diff` thresholds gate the GitHub Action."
-keywords: ["thresholds", "diff", "gating", "ci"]
+description: "How mehen.toml thresholds and `mehen diff` gating compose in CI."
+keywords: ["thresholds", "diff", "gating", "ci", "mehen.toml"]
 ---
 
-The [GitHub Action](/guides/github-action) accepts a `thresholds` input that gates PRs on adverse
-per-file metric deltas. This page explains how thresholds compose with the JSON output of
-`mehen diff` and how to write your own gating logic in CI.
+mehen offers two per-metric gating mechanisms: repository-local
+[`mehen.toml` thresholds](/configuration) evaluated inside the binary against **absolute values**,
+and the [GitHub Action](/guides/github-action)'s `thresholds` input evaluated against **per-file
+deltas**. This page explains how they differ, how they compose with the JSON output of
+`mehen diff`, and how to write your own gating logic in CI.
+
+## Repository thresholds (mehen.toml)
+
+A `mehen.toml` at the repository root gates every command — locally, in pre-commit hooks, and in
+any CI system:
+
+```toml
+[thresholds]
+cognitive = 15
+"loc.lloc" = 500
+
+[languages.python.thresholds]
+cognitive = 10
+```
+
+`mehen metrics`, `mehen diff` (head side), and `mehen top-offenders` exit `1` when a reported
+metric crosses its limit, after a grouped stderr report that names the config table to adjust.
+Limits bound where a metric may *be*: a file over the limit fails the gate even if the current
+change didn't move it. Full reference: [Configuration](/configuration).
 
 ## Action threshold input
 
@@ -25,6 +46,10 @@ violation:
 
 - Counts toward the `violations` output.
 - Fails the action when `fail-on-threshold: true` (default).
+
+Delta limits bound how far a single PR may move a metric in the adverse direction; they say
+nothing about the absolute level a file already sits at. Combine them with
+[`mehen.toml` thresholds](/configuration) to bound both.
 
 ## Adverse direction
 
@@ -56,6 +81,8 @@ jq '.files[] | select(.deltas.cyclomatic.delta > 5)' metrics-diff.json
 
 ## See also
 
+- [Configuration](/configuration) — `mehen.toml` reference: absolute thresholds, per-language
+  overrides, the violation report.
 - [GitHub Action](/guides/github-action) — full input/output reference.
 - [Commands → diff](/commands/diff) — `mehen diff` CLI reference.
 - [Output formats](/concepts/output-formats) — JSON shape.

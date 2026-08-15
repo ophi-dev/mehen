@@ -21,6 +21,7 @@ mehen metrics [OPTIONS] <PATH>
 | `--format <FORMAT>` | `json` | One of `json`, `markdown`, `yaml`, `toml`. |
 | `--pretty` | off | Pretty-print JSON output. |
 | `--profile <PROFILE>` | `default` | One of `default`, `ci`, `strict`. |
+| `--config <PATH>` | discovered | Pin a [configuration file](/configuration) instead of discovering `mehen.toml` upward from the working directory. |
 
 ## Examples
 
@@ -57,8 +58,16 @@ mehen metrics [OPTIONS] <PATH>
 | Code | Meaning |
 |---|---|
 | 0 | Success. |
-| 1 | IO error, unsupported language, or analyzer-fatal diagnostic on this file. |
+| 1 | IO error, unsupported language, or analyzer-fatal diagnostic on this file. Also: a [configured metric threshold](/configuration) crossed, after the report is emitted. |
 | 3 | Invalid serialization state — should not happen in production runs. |
+
+## Configured thresholds
+
+When a [`mehen.toml`](/configuration) is present, every configured threshold that matches a metric
+this file publishes is evaluated against the report — the language's override table wins over the
+global one. Crossed limits print a grouped violation report on stderr after the report lands on
+stdout, and the command exits `1`. Files with blocking parse diagnostics exit `1` without
+threshold evaluation: partial metrics are never gated.
 
 ## What gets reported
 

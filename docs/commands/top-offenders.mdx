@@ -26,6 +26,7 @@ mehen top-offenders [OPTIONS] --metric <METRICS> <PATHS>...
 | `--no-ignore` | off | Disable ignore-file and Git-attribute filtering. Hidden children remain excluded. |
 | `-j, --num-jobs <N>` | platform default | Number of parser jobs. |
 | `-l, --language-type <LANG>` | auto | Language type override (skip auto-detection). |
+| `--config <PATH>` | discovered | Pin a [configuration file](/configuration) instead of discovering `mehen.toml` upward from the working directory. |
 
 ## File discovery
 
@@ -104,12 +105,19 @@ The output ordering is fully deterministic: same visible paths, ignore configura
 head ref → byte-identical report. Tie-breaking falls back to the next `--metric`, then to the
 repository-relative path. There is no sampling and no file-system-order dependence.
 
+## Configured thresholds
+
+When a [`mehen.toml`](/configuration) is present, the configured limits for the selected
+`--metric` names are checked against **every analyzed file** — not just the displayed top N, so a
+violation cannot hide below `--max-results`. The ranking still prints in full; crossed limits then
+print a grouped report on stderr and the command exits `1`.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | Success. |
-| 1 | IO, parser-fatal, or unsupported-language error. |
+| 1 | IO, parser-fatal, or unsupported-language error. Also: a [configured metric threshold](/configuration) crossed, after the ranking is emitted. |
 
 ## See also
 
