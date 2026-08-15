@@ -102,7 +102,7 @@ gix = { version = "^0.86", default-features = false, features = ["attributes", "
 antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.29.0" }
 antlr_rust_codegen = { package = "antlr-rust-codegen", version = "=0.29.0" }
 
-tree-sitter = "=0.26.11"
+tree-sitter = "=0.26.12"
 # Per-language grammars (`tree-sitter-c`, `tree-sitter-go`,
 # `tree-sitter-pwsh`)
 # are pinned inline in their consuming analyzer crate. xtask reaches
