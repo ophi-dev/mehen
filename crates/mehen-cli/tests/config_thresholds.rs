@@ -391,6 +391,32 @@ fn top_offenders_ignores_thresholds_for_unselected_metrics() {
 }
 
 #[test]
+fn top_offenders_gates_published_aggregate_selectors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // `cognitive.max` is a published aggregate key: configurable as a
+    // threshold and selectable as a ranking column, so the gate fires.
+    write_file(
+        dir.path(),
+        "mehen.toml",
+        "[thresholds]\n\"cognitive.max\" = 1\n",
+    );
+    write_file(dir.path(), "sample.py", COMPLEX_PY);
+
+    let output = mehen()
+        .current_dir(dir.path())
+        .args(["top-offenders", "-M", "cognitive.max", "."])
+        .output()
+        .expect("failed to run mehen top-offenders");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("cognitive.max = 3 — exceeds max 1"),
+        "aggregate selectors must be gated: {stderr}"
+    );
+}
+
+#[test]
 fn diff_exits_one_when_head_side_crosses_threshold() {
     let dir = tempfile::tempdir().expect("tempdir");
     git_ok(dir.path(), &["init", "-q", "-b", "main"]);

@@ -173,6 +173,27 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
                 label: leaked,
                 polarity: polarity_override.unwrap_or_else(|| default_namespaced_polarity(name)),
             });
+        } else if let Ok(canonical) = crate::config_file::canonical_metric_key(name) {
+            // Any other key the shared source-code publishers emit — the
+            // same catalogue `mehen.toml` threshold validation resolves
+            // against: `cognitive.max`, `loc.sloc`, `nom.functions.max`
+            // (aggregate aliases resolve to their published spelling), …
+            // The selector reads the canonical key; the user's spelling
+            // stays as the column label. Without this branch a documented,
+            // configurable metric could not be selected as a column, so
+            // its configured gate could never fire in diff/top-offenders.
+            let canonical: &'static str = Box::leak(canonical.into_boxed_str());
+            let label: &'static str = Box::leak(name.to_string().into_boxed_str());
+            let default_polarity = if canonical.starts_with("mi.") {
+                Polarity::HigherIsBetter
+            } else {
+                default_namespaced_polarity(canonical)
+            };
+            selectors.push(MetricSelector {
+                name: canonical,
+                label,
+                polarity: polarity_override.unwrap_or(default_polarity),
+            });
         } else {
             log::warn!("Unknown metric '{name}', skipping.");
         }
@@ -354,6 +375,30 @@ mod tests {
         let specs = vec!["nonexistent".to_string()];
         let selectors = parse_metric_selectors(&specs);
         assert!(selectors.is_empty());
+    }
+
+    #[test]
+    fn published_catalogue_keys_are_accepted_as_selectors() {
+        // Every key the shared publishers emit — the catalogue
+        // `mehen.toml` validation resolves against — must be
+        // selectable as a column, or a documented, configurable
+        // threshold could never fire in diff/top-offenders.
+        let specs = vec![
+            "cognitive.max".to_string(),
+            "loc.sloc".to_string(),
+            "nom.functions.max".to_string(),
+        ];
+        let selectors = parse_metric_selectors(&specs);
+        let names: Vec<&str> = selectors.iter().map(|s| s.name).collect();
+        // Aggregate aliases resolve to the published spelling; labels
+        // keep the user's spelling.
+        assert_eq!(names, ["cognitive.max", "loc.sloc", "nom.functions_max"]);
+        assert_eq!(selectors[2].label, "nom.functions.max");
+        for selector in &selectors {
+            assert_eq!(selector.polarity, Polarity::LowerIsBetter);
+        }
+        // Unpublished near-misses stay rejected.
+        assert!(parse_metric_selectors(&["cognitive.maximum".to_string()]).is_empty());
     }
 
     #[test]

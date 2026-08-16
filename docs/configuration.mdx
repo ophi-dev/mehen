@@ -52,12 +52,14 @@ A value exactly at the limit passes. mehen knows the direction for every metric 
 same polarity rules that drive [`mehen top-offenders`](/commands/top-offenders#polarity) ranking
 and diff trend arrows.
 
-Metric names are the same ones `--metric` accepts: the source-code families (`cognitive`,
-`cyclomatic`, `loc.*`, `halstead.*`, `mi.*`, `abc`, `nargs`, `nexit`, `nom.*`, `npa.*`, `npm.*`,
-`wmc`, including aggregate spellings such as `cognitive.max`), the fixed
-[history family](/metrics/history/overview) (`history.hotspot`, `history.churn.relative`, …), and
-the namespaced [SQL](/metrics/sql/overview) and [Markdown](/metrics/markdown/overview) families
-(`sql.*`, `markdown.*`).
+Metric names are the same ones `--metric` accepts — the relationship goes both ways, so any
+configurable key is also selectable as a diff/top-offenders column: the source-code families
+(`cognitive`, `cyclomatic`, `loc.*`, `halstead.*`, `mi.*`, `abc`, `nargs`, `nexit`, `nom.*`,
+`npa.*`, `npm.*`, `wmc`, including aggregate spellings such as `cognitive.max` or
+`nom.functions.max`), the fixed [history family](/metrics/history/overview) (`history.hotspot`,
+`history.churn.relative`, …), and the namespaced [SQL](/metrics/sql/overview) and
+[Markdown](/metrics/markdown/overview) families (`sql.*`, `markdown.*`). Names that no analyzer
+publishes — a bare `mi`, an invented `cognitive.maximum` — are rejected when the config loads.
 
 ## Per-language overrides
 
@@ -160,6 +162,8 @@ metric references.
 The gates are complementary: the Action input limits how much a PR may *move* a metric, while
 `mehen.toml` limits where the metric may *be*. A repository that adopts a `mehen.toml` gets the
 same gating locally, in pre-commit hooks, and in any CI system — not only in the GitHub Action.
+When the gate fires inside the Action, the PR comment and the `report_json` / `report_markdown`
+outputs still publish with the complete report before the workflow step fails.
 
 ## See also
 

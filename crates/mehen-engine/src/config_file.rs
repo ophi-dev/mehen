@@ -187,7 +187,7 @@ const PUBLISHED_METRIC_KEYS: &[&str] = &[
 ];
 
 /// Why a metric name failed to resolve to a published key.
-enum ResolveError {
+pub(crate) enum ResolveError {
     /// A `history.*` name outside the fixed family.
     UnknownHistory,
     /// Everything else the resolver cannot map to a published key.
@@ -212,8 +212,10 @@ enum ResolveError {
 /// Because evaluation reads exactly the canonical key, "accepted at
 /// load time" and "readable at evaluation time" agree by
 /// construction: a name this function accepts can fire, a name it
-/// rejects never could.
-fn canonical_metric_key(name: &str) -> Result<String, ResolveError> {
+/// rejects never could. `parse_metric_selectors` resolves `--metric`
+/// names through the same function, so every key the config can gate
+/// is also selectable as a diff/top-offenders column.
+pub(crate) fn canonical_metric_key(name: &str) -> Result<String, ResolveError> {
     if name == "history" || name.starts_with("history.") {
         return if keys::HISTORY_ALL.contains(&name) {
             Ok(name.to_string())
@@ -426,11 +428,16 @@ pub struct ThresholdBreach {
     pub source_table: String,
 }
 
-/// One configured limit: the user's spelling (for reporting) plus the
-/// numeric limit. Keyed by canonical metric key in the policy tables.
+/// One configured limit: the user's spelling and the config table it
+/// sits in (both for reporting) plus the numeric limit. Keyed by
+/// canonical metric key in the policy tables.
 #[derive(Debug, Clone)]
 struct ThresholdEntry {
     spelling: String,
+    /// Dotted table path as the user wrote it (`thresholds`,
+    /// `thresholds.loc` for a nested header, `languages.py.thresholds`
+    /// with the alias preserved).
+    table: String,
     limit: f64,
 }
 
@@ -442,31 +449,28 @@ struct ThresholdEntry {
 #[derive(Debug, Clone, Default)]
 pub struct ThresholdPolicy {
     global: BTreeMap<String, ThresholdEntry>,
-    /// `(language, table path as written, thresholds)`, sorted by
-    /// canonical language id for deterministic iteration.
-    per_language: Vec<(Language, String, BTreeMap<String, ThresholdEntry>)>,
+    /// Sorted by canonical language id for deterministic iteration.
+    per_language: Vec<(Language, BTreeMap<String, ThresholdEntry>)>,
 }
 
 impl ThresholdPolicy {
     /// True when no thresholds are configured at all.
     pub fn is_empty(&self) -> bool {
-        self.global.is_empty() && self.per_language.iter().all(|(_, _, t)| t.is_empty())
+        self.global.is_empty() && self.per_language.iter().all(|(_, t)| t.is_empty())
     }
 
-    /// The effective `canonical metric → (entry, table path)` map for
-    /// one language: the language override wins over the global
-    /// limit, metric by metric.
-    fn resolved_for(&self, language: Language) -> BTreeMap<&str, (&ThresholdEntry, &str)> {
-        let mut resolved: BTreeMap<&str, (&ThresholdEntry, &str)> = self
+    /// The effective `canonical metric → entry` map for one language:
+    /// the language override wins over the global limit, metric by
+    /// metric.
+    fn resolved_for(&self, language: Language) -> BTreeMap<&str, &ThresholdEntry> {
+        let mut resolved: BTreeMap<&str, &ThresholdEntry> = self
             .global
             .iter()
-            .map(|(canonical, entry)| (canonical.as_str(), (entry, "thresholds")))
+            .map(|(canonical, entry)| (canonical.as_str(), entry))
             .collect();
-        if let Some((_, table, overrides)) =
-            self.per_language.iter().find(|(l, _, _)| *l == language)
-        {
+        if let Some((_, overrides)) = self.per_language.iter().find(|(l, _)| *l == language) {
             for (canonical, entry) in overrides {
-                resolved.insert(canonical.as_str(), (entry, table.as_str()));
+                resolved.insert(canonical.as_str(), entry);
             }
         }
         resolved
@@ -496,7 +500,7 @@ impl ThresholdPolicy {
         let selected: Option<Vec<String>> =
             only_metrics.map(|names| names.iter().map(|name| canonical_for_match(name)).collect());
         let mut breaches = Vec::new();
-        for (canonical, (entry, table)) in self.resolved_for(language) {
+        for (canonical, entry) in self.resolved_for(language) {
             if let Some(selected) = &selected
                 && !selected.iter().any(|name| name == canonical)
             {
@@ -521,7 +525,7 @@ impl ThresholdPolicy {
                     value,
                     limit: entry.limit,
                     polarity,
-                    source_table: table.to_string(),
+                    source_table: entry.table.clone(),
                 });
             }
         }
@@ -650,7 +654,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
     };
 
     let mut global: BTreeMap<String, ThresholdEntry> = BTreeMap::new();
-    let mut per_language: Vec<(Language, String, BTreeMap<String, ThresholdEntry>)> = Vec::new();
+    let mut per_language: Vec<(Language, BTreeMap<String, ThresholdEntry>)> = Vec::new();
 
     for (key, value) in &root {
         match key.as_str() {
@@ -672,7 +676,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                              (aliases like `py`, `ts`, `rb` are accepted)",
                         )
                     })?;
-                    if per_language.iter().any(|(l, _, _)| *l == language) {
+                    if per_language.iter().any(|(l, _)| *l == language) {
                         return Err(ctx
                             .error_at(
                                 lang_key,
@@ -691,13 +695,12 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                     let lang_ctx = format!("languages.{lang_key}");
                     let lang_table = expect_table(lang_value, &lang_ctx, &ctx)?;
                     let mut thresholds: BTreeMap<String, ThresholdEntry> = BTreeMap::new();
-                    let mut threshold_table = format!("{lang_ctx}.thresholds");
                     for (sub_key, sub_value) in lang_table {
                         match sub_key.as_str() {
                             "thresholds" => {
-                                threshold_table = format!("{lang_ctx}.thresholds");
-                                let table = expect_table(sub_value, &threshold_table, &ctx)?;
-                                collect_thresholds(table, &threshold_table, &mut thresholds, &ctx)?;
+                                let threshold_ctx = format!("{lang_ctx}.thresholds");
+                                let table = expect_table(sub_value, &threshold_ctx, &ctx)?;
+                                collect_thresholds(table, &threshold_ctx, &mut thresholds, &ctx)?;
                             }
                             other => {
                                 return Err(ctx
@@ -712,7 +715,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                             }
                         }
                     }
-                    per_language.push((language, threshold_table, thresholds));
+                    per_language.push((language, thresholds));
                 }
             }
             other => {
@@ -731,7 +734,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
         }
     }
 
-    per_language.sort_by_key(|(language, _, _)| language.canonical());
+    per_language.sort_by_key(|(language, _)| language.canonical());
 
     Ok(ConfigFile {
         path: path.to_path_buf(),
@@ -764,11 +767,17 @@ fn expect_table<'v>(
 ///
 /// TOML turns a dotted key (`loc.lloc = 500`) into nested tables, so
 /// nested tables are folded back into dotted metric names — the
-/// quoted spelling (`"loc.lloc" = 500`) and the dotted spelling are
+/// quoted spelling (`"loc.lloc" = 500`), the dotted spelling, and a
+/// nested header (`[thresholds.loc]` with `lloc = 500`) are
 /// equivalent. Because equivalence extends to canonical aliases
 /// (`cognitive` vs `cognitive.sum`), two spellings of one logical
 /// metric in the same table are rejected as a duplicate instead of
 /// one silently overwriting the other.
+///
+/// Each entry records the table path and key spelling to *report*: the
+/// dotted spelling when it appears verbatim in the source, otherwise
+/// the nested-header form — so a violation's `[table]` pointer names a
+/// table the user actually wrote.
 fn collect_thresholds(
     table: &toml::Table,
     context: &str,
@@ -788,12 +797,38 @@ fn collect_thresholds(
             } else {
                 format!("{prefix}.{key}")
             };
+            // TOML erases whether the user wrote `loc.lloc = 500`
+            // under [thresholds] or `lloc = 500` under
+            // [thresholds.loc]; the source text is the ground truth
+            // for which table the report should point at.
+            let (report_table, report_spelling) =
+                if prefix.is_empty() || ctx.text.contains(metric.as_str()) {
+                    (context.to_string(), metric.clone())
+                } else {
+                    (format!("{context}.{prefix}"), key.clone())
+                };
             match value {
                 toml::Value::Integer(i) => {
-                    insert_threshold(&metric, *i as f64, context, out, ctx)?;
+                    insert_threshold(
+                        &metric,
+                        report_spelling,
+                        report_table,
+                        *i as f64,
+                        context,
+                        out,
+                        ctx,
+                    )?;
                 }
                 toml::Value::Float(f) => {
-                    insert_threshold(&metric, *f, context, out, ctx)?;
+                    insert_threshold(
+                        &metric,
+                        report_spelling,
+                        report_table,
+                        *f,
+                        context,
+                        out,
+                        ctx,
+                    )?;
                 }
                 toml::Value::Table(nested) => {
                     walk(nested, &metric, context, out, ctx)?;
@@ -819,8 +854,11 @@ fn collect_thresholds(
     walk(table, "", context, out, ctx)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_threshold(
     metric: &str,
+    spelling: String,
+    table: String,
     limit: f64,
     context: &str,
     out: &mut BTreeMap<String, ThresholdEntry>,
@@ -859,7 +897,8 @@ fn insert_threshold(
     out.insert(
         canonical,
         ThresholdEntry {
-            spelling: metric.to_string(),
+            spelling,
+            table,
             limit,
         },
     );
@@ -1010,13 +1049,13 @@ pub fn render_threshold_report(breaches: &mut [ThresholdBreach], config_path: &P
             message.push_str(&format!("\n\n{}", breach.path));
         }
         let comparison = match breach.polarity {
-            Polarity::HigherIsWorse => format!("exceeds max {}", format_limit(breach.limit)),
-            Polarity::HigherIsBetter => format!("below min {}", format_limit(breach.limit)),
+            Polarity::HigherIsWorse => format!("exceeds max {}", format_number(breach.limit)),
+            Polarity::HigherIsBetter => format!("below min {}", format_number(breach.limit)),
         };
         message.push_str(&format!(
             "\n  {} = {} — {comparison}  [{}]",
             breach.metric,
-            format_limit(breach.value),
+            format_number(breach.value),
             breach.source_table
         ));
     }
@@ -1060,14 +1099,13 @@ fn render_diagnostic(diagnostic: &dyn miette::Diagnostic) -> String {
     rendered
 }
 
-/// Integer-like values render without decimals, everything else with
-/// two (mirrors the top-offenders table formatting).
-fn format_limit(v: f64) -> String {
-    if v == v.trunc() && v.abs() < 1e18 {
-        format!("{}", v as i64)
-    } else {
-        format!("{v:.2}")
-    }
+/// Shortest exact decimal for a metric value or limit (Rust's `f64`
+/// `Display` round-trips): `23` stays `23`, `12.4` stays `12.4`, and a
+/// close crossing like `0.504` over a `0.503` limit keeps every digit
+/// instead of rounding both sides to an impossible-looking `0.50 >
+/// 0.50`.
+fn format_number(v: f64) -> String {
+    format!("{v}")
 }
 
 #[cfg(test)]
@@ -1116,11 +1154,12 @@ mod tests {
     fn parses_language_override_with_alias() {
         let config = parse("[languages.py.thresholds]\ncognitive = 10\n").expect("valid config");
         assert_eq!(config.thresholds.per_language.len(), 1);
-        let (language, table, thresholds) = &config.thresholds.per_language[0];
+        let (language, thresholds) = &config.thresholds.per_language[0];
         assert_eq!(*language, Language::Python);
+        let entry = thresholds.get("cognitive.sum").expect("entry present");
+        assert_eq!(entry.limit, 10.0);
         // The table path preserves the alias exactly as written.
-        assert_eq!(table, "languages.py.thresholds");
-        assert_eq!(thresholds.get("cognitive.sum").map(|e| e.limit), Some(10.0));
+        assert_eq!(entry.table, "languages.py.thresholds");
     }
 
     #[test]
@@ -1386,6 +1425,49 @@ mod tests {
     }
 
     #[test]
+    fn nested_table_headers_are_attributed_to_their_leaf_table() {
+        // `[thresholds.loc]` + `lloc = 500` and `[thresholds]` +
+        // `loc.lloc = 500` are the same TOML structure; the report
+        // must point at the spelling the user actually wrote.
+        let space = space_with(&[("loc.lloc", 640.0)]);
+
+        let nested = parse("[thresholds.loc]\nlloc = 500\n").expect("valid config");
+        let breaches = nested
+            .thresholds
+            .evaluate("a.py", Language::Python, &space, None);
+        assert_eq!(breaches.len(), 1);
+        assert_eq!(breaches[0].metric, "lloc");
+        assert_eq!(breaches[0].source_table, "thresholds.loc");
+
+        let dotted = parse("[thresholds]\nloc.lloc = 500\n").expect("valid config");
+        let breaches = dotted
+            .thresholds
+            .evaluate("a.py", Language::Python, &space, None);
+        assert_eq!(breaches.len(), 1);
+        assert_eq!(breaches[0].metric, "loc.lloc");
+        assert_eq!(breaches[0].source_table, "thresholds");
+    }
+
+    #[test]
+    fn report_preserves_precision_on_close_crossings() {
+        // Rounding both sides to two decimals would render an
+        // impossible-looking `0.5 — exceeds max 0.5`.
+        let mut breaches = vec![ThresholdBreach {
+            path: "a.py".to_string(),
+            metric: "sql.change_risk_score".to_string(),
+            value: 0.504,
+            limit: 0.503,
+            polarity: Polarity::HigherIsWorse,
+            source_table: "thresholds".to_string(),
+        }];
+        let report = render_threshold_report(&mut breaches, Path::new("mehen.toml"));
+        assert!(
+            report.contains("sql.change_risk_score = 0.504 — exceeds max 0.503"),
+            "{report}"
+        );
+    }
+
+    #[test]
     fn validator_accepts_every_key_real_analyzers_publish() {
         // The `PUBLISHED_METRIC_KEYS` catalogue must not drift behind
         // the publishers in `mehen-metrics::state`: analyze real
@@ -1479,7 +1561,7 @@ mod tests {
         // report, so the pointer names a table that exists.
         let cognitive = "cognitive = 23 — exceeds max 15  [languages.py.thresholds]";
         let lloc = "loc.lloc = 640 — exceeds max 500  [thresholds]";
-        let mi = "mi.visual_studio = 12.40 — below min 40  [thresholds]";
+        let mi = "mi.visual_studio = 12.4 — below min 40  [thresholds]";
         for line in [cognitive, lloc, mi, "src/app/core.py", "src/util.rs"] {
             assert!(report.contains(line), "missing `{line}` in:\n{report}");
         }

@@ -9,6 +9,7 @@ import {
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,
+  isGateFailureReport,
   isNotApplicable,
   parseList,
   parseThresholds,
@@ -16,6 +17,24 @@ import {
   renderFooter,
   unionMetricColumns,
 } from "./github-action.mjs";
+
+test("isGateFailureReport accepts a complete diff JSON payload", () => {
+  assert.equal(isGateFailureReport('{"source_code": [], "markdown": []}'), true);
+  assert.equal(
+    isGateFailureReport('{"source_code": [{"path": "a.py"}]}'),
+    true,
+  );
+});
+
+test("isGateFailureReport rejects partial or non-JSON output", () => {
+  // A setup/IO failure leaves stdout empty or truncated — that must
+  // keep failing fast instead of being treated as a quality gate.
+  assert.equal(isGateFailureReport(""), false);
+  assert.equal(isGateFailureReport("error: not json"), false);
+  assert.equal(isGateFailureReport('{"source_code": '), false);
+  assert.equal(isGateFailureReport('{"markdown": []}'), false);
+  assert.equal(isGateFailureReport(undefined), false);
+});
 
 test("parseList uses explicit separators only", () => {
   assert.deepEqual(parseList("src"), ["src"]);

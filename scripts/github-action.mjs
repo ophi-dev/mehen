@@ -71,7 +71,7 @@ async function main() {
   const cli = prepareMehen();
   const version = detectMehenVersion(cli);
   const diffArgs = buildDiffArgs();
-  const diff = runMehen(cli, diffArgs);
+  const diff = runMehen(cli, diffArgs, { acceptGateOutput: isGateFailureReport });
   const reportsDir = process.env.RUNNER_TEMP || os.tmpdir();
   const reportJson = path.join(reportsDir, `mehen-diff-${Date.now()}.json`);
   fs.writeFileSync(reportJson, `${diff.stdout.trim()}\n`, "utf8");
@@ -111,6 +111,16 @@ async function main() {
   if (violations.length > 0 && boolInput("FAIL_ON_THRESHOLD", true)) {
     console.error(
       `Mehen threshold check failed with ${violations.length} violation(s).`,
+    );
+    process.exit(1);
+  }
+
+  // A deferred quality-gate failure from the diff itself (configured
+  // `mehen.toml` thresholds): the comment and report outputs above
+  // landed with the complete report; now the workflow step fails.
+  if (diff.gateStatus) {
+    console.error(
+      `mehen diff exited with status ${diff.gateStatus}: a configured quality gate failed (see the report above).`,
     );
     process.exit(1);
   }
@@ -259,7 +269,7 @@ function parseVersionOutput(stdout) {
   return "";
 }
 
-function runMehen(cli, args) {
+function runMehen(cli, args, options = {}) {
   console.log(`Running: ${[cli.command, ...cli.args, ...args].join(" ")}`);
   const result = spawnSync(cli.command, [...cli.args, ...args], {
     encoding: "utf8",
@@ -270,6 +280,21 @@ function runMehen(cli, args) {
     throw result.error;
   }
   if (result.status !== 0) {
+    // A nonzero exit that still produced the requested report is a
+    // quality-gate failure (`mehen.toml` thresholds exit 1, `--fail-on`
+    // documentation gates exit 2), not a broken run: surface the
+    // stderr report in the log, keep the stdout report so the PR
+    // comment and outputs still land, and let the caller defer the
+    // failure. Everything else keeps failing fast.
+    if (
+      typeof options.acceptGateOutput === "function" &&
+      options.acceptGateOutput(result.stdout)
+    ) {
+      if (result.stderr) {
+        process.stderr.write(result.stderr);
+      }
+      return { ...result, gateStatus: result.status };
+    }
     if (result.stdout) {
       console.error(result.stdout);
     }
@@ -282,6 +307,21 @@ function runMehen(cli, args) {
     process.stderr.write(result.stderr);
   }
   return result;
+}
+
+/**
+ * Whether a failing `mehen diff --output-format json` invocation still
+ * emitted its complete report — the marker that the nonzero exit is a
+ * quality gate (configured `mehen.toml` thresholds), not a setup/IO
+ * error whose stdout would be empty or partial.
+ */
+function isGateFailureReport(stdout) {
+  try {
+    const parsed = JSON.parse(typeof stdout === "string" ? stdout : "");
+    return Boolean(parsed && Array.isArray(parsed.source_code));
+  } catch {
+    return false;
+  }
 }
 
 function runCommand(command, args, options = {}) {
@@ -343,7 +383,13 @@ function fetchMarkdownDocsSection(cli, baseArgs) {
   }
   let mdResult;
   try {
-    mdResult = runMehen(cli, mdArgs);
+    // The rerun trips the same configured quality gates as the main
+    // diff (exit 1 with the markdown report on stdout); accept any
+    // non-empty output so the docs section still reaches the comment.
+    mdResult = runMehen(cli, mdArgs, {
+      acceptGateOutput: (stdout) =>
+        typeof stdout === "string" && stdout.trim().length > 0,
+    });
   } catch (error) {
     console.warn(
       `mehen diff --output-format markdown failed (docs section will be omitted): ${error.message}`,
@@ -818,6 +864,7 @@ export {
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,
+  isGateFailureReport,
   isNotApplicable,
   parseList,
   parseThresholds,
