@@ -343,9 +343,9 @@ impl miette::Diagnostic for ConfigError {
 }
 
 /// Builds [`ConfigError`]s that point back into the configuration
-/// source. Spans are recovered by locating the offending key text —
-/// exact enough for a caret, with a graceful span-less fallback when
-/// the key cannot be found verbatim.
+/// source. Spans come straight from the span-preserving TOML parse
+/// tree ([`toml::de::DeTable`]), so every label points at the exact
+/// occurrence — never at a same-spelled key elsewhere in the file.
 struct ErrorContext<'a> {
     text: &'a str,
     path: &'a Path,
@@ -362,26 +362,8 @@ impl ErrorContext<'_> {
         ConfigError::new(message)
     }
 
-    /// An error labeled at the first occurrence of `key` in the
-    /// source (falling back to the key's last dotted segment, then to
-    /// a span-less error).
+    /// An error labeled at an exact byte range from the parse tree.
     fn error_at(
-        &self,
-        key: &str,
-        label: impl Into<String>,
-        message: impl Into<String>,
-    ) -> ConfigError {
-        let mut error = ConfigError::new(message);
-        if let Some((offset, len)) = key_span(self.text, key) {
-            error.0.source_code = Some(self.named_source());
-            error.0.labels = vec![LabeledSpan::at(offset..offset + len, label.into())];
-        }
-        error
-    }
-
-    /// An error labeled at an exact byte range (used for TOML syntax
-    /// errors, which carry their own span).
-    fn error_at_span(
         &self,
         span: std::ops::Range<usize>,
         label: impl Into<String>,
@@ -392,17 +374,6 @@ impl ErrorContext<'_> {
         error.0.labels = vec![LabeledSpan::at(span, label.into())];
         error
     }
-}
-
-/// Locate `key` in the configuration text: the full spelling first
-/// (`loc.lloc`), then the last dotted segment (`lloc`) for keys the
-/// user wrote as nested tables.
-fn key_span(text: &str, key: &str) -> Option<(usize, usize)> {
-    if let Some(offset) = text.find(key) {
-        return Some((offset, key.len()));
-    }
-    let segment = key.rsplit('.').next()?;
-    text.find(segment).map(|offset| (offset, segment.len()))
 }
 
 /// One crossed threshold: the measured value, the configured limit,
@@ -639,14 +610,20 @@ fn repository_boundary(start: &Path) -> Option<PathBuf> {
 
 /// Parse and validate configuration text. `path` is used for the
 /// diagnostic source name and report messages.
+///
+/// Parsing goes through the span-preserving [`toml::de::DeTable`]
+/// tree, so every diagnostic label and every breach's `[table]`
+/// attribution derives from the exact source location of the entry —
+/// not from a text search that a same-spelled key elsewhere in the
+/// file could defeat.
 fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
     let ctx = ErrorContext { text, path };
-    let root: toml::Table = match text.parse() {
+    let root = match toml::de::DeTable::parse(text) {
         Ok(root) => root,
         Err(e) => {
             let message = format!("invalid TOML: {}", e.message());
             let error = match e.span() {
-                Some(span) => ctx.error_at_span(span, "syntax error here", message),
+                Some(span) => ctx.error_at(span, "syntax error here", message),
                 None => ctx.error(message),
             };
             return Err(error.with_help("fix the TOML syntax; see https://toml.io for the format"));
@@ -656,8 +633,9 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
     let mut global: BTreeMap<String, ThresholdEntry> = BTreeMap::new();
     let mut per_language: Vec<(Language, BTreeMap<String, ThresholdEntry>)> = Vec::new();
 
-    for (key, value) in &root {
-        match key.as_str() {
+    for (key, value) in root.get_ref() {
+        let key_str: &str = key.get_ref().as_ref();
+        match key_str {
             "thresholds" => {
                 let table = expect_table(value, "thresholds", &ctx)?;
                 collect_thresholds(table, "thresholds", &mut global, &ctx)?;
@@ -665,11 +643,12 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
             "languages" => {
                 let table = expect_table(value, "languages", &ctx)?;
                 for (lang_key, lang_value) in table {
-                    let language = lang_key.parse::<Language>().map_err(|_| {
+                    let lang_str: &str = lang_key.get_ref().as_ref();
+                    let language = lang_str.parse::<Language>().map_err(|_| {
                         ctx.error_at(
-                            lang_key,
+                            lang_key.span(),
                             "not a recognized language",
-                            format!("unknown language `{lang_key}` in [languages]"),
+                            format!("unknown language `{lang_str}` in [languages]"),
                         )
                         .with_help(
                             "use a language identifier such as python, typescript, rust, go, … \
@@ -679,10 +658,10 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                     if per_language.iter().any(|(l, _)| *l == language) {
                         return Err(ctx
                             .error_at(
-                                lang_key,
+                                lang_key.span(),
                                 "same language configured twice",
                                 format!(
-                                    "duplicate [languages.{lang_key}] section — another key \
+                                    "duplicate [languages.{lang_str}] section — another key \
                                      already configures `{}`",
                                     language.canonical()
                                 ),
@@ -692,11 +671,11 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                                  per language",
                             ));
                     }
-                    let lang_ctx = format!("languages.{lang_key}");
+                    let lang_ctx = format!("languages.{lang_str}");
                     let lang_table = expect_table(lang_value, &lang_ctx, &ctx)?;
                     let mut thresholds: BTreeMap<String, ThresholdEntry> = BTreeMap::new();
                     for (sub_key, sub_value) in lang_table {
-                        match sub_key.as_str() {
+                        match sub_key.get_ref().as_ref() {
                             "thresholds" => {
                                 let threshold_ctx = format!("{lang_ctx}.thresholds");
                                 let table = expect_table(sub_value, &threshold_ctx, &ctx)?;
@@ -705,7 +684,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                             other => {
                                 return Err(ctx
                                     .error_at(
-                                        other,
+                                        sub_key.span(),
                                         "unrecognized key",
                                         format!("unknown key `{other}` in [{lang_ctx}]"),
                                     )
@@ -725,7 +704,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                 }
                 return Err(ctx
                     .error_at(
-                        other,
+                        key.span(),
                         "unrecognized key",
                         format!("unknown top-level key `{other}`"),
                     )
@@ -745,21 +724,22 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
     })
 }
 
-fn expect_table<'v>(
-    value: &'v toml::Value,
+fn expect_table<'v, 'i>(
+    value: &'v toml::Spanned<toml::de::DeValue<'i>>,
     context: &str,
     ctx: &ErrorContext<'_>,
-) -> Result<&'v toml::Table, ConfigError> {
-    value.as_table().ok_or_else(|| {
-        ctx.error_at(
-            context,
+) -> Result<&'v toml::de::DeTable<'i>, ConfigError> {
+    match value.get_ref() {
+        toml::de::DeValue::Table(table) => Ok(table),
+        other => Err(ctx.error_at(
+            value.span(),
             "not a table",
             format!(
                 "`{context}` must be a table (as in [{context}]), got {}",
-                value.type_str()
+                other.type_str()
             ),
-        )
-    })
+        )),
+    }
 }
 
 /// Flatten one thresholds table into canonical `metric → limit`
@@ -779,64 +759,43 @@ fn expect_table<'v>(
 /// the nested-header form — so a violation's `[table]` pointer names a
 /// table the user actually wrote.
 fn collect_thresholds(
-    table: &toml::Table,
+    table: &toml::de::DeTable<'_>,
     context: &str,
     out: &mut BTreeMap<String, ThresholdEntry>,
     ctx: &ErrorContext<'_>,
 ) -> Result<(), ConfigError> {
     fn walk(
-        table: &toml::Table,
+        table: &toml::de::DeTable<'_>,
         prefix: &str,
         context: &str,
         out: &mut BTreeMap<String, ThresholdEntry>,
         ctx: &ErrorContext<'_>,
     ) -> Result<(), ConfigError> {
         for (key, value) in table {
+            let key_str: &str = key.get_ref().as_ref();
             let metric = if prefix.is_empty() {
-                key.clone()
+                key_str.to_string()
             } else {
-                format!("{prefix}.{key}")
+                format!("{prefix}.{key_str}")
             };
-            // TOML erases whether the user wrote `loc.lloc = 500`
-            // under [thresholds] or `lloc = 500` under
-            // [thresholds.loc]; the source text is the ground truth
-            // for which table the report should point at.
-            let (report_table, report_spelling) =
-                if prefix.is_empty() || ctx.text.contains(metric.as_str()) {
-                    (context.to_string(), metric.clone())
-                } else {
-                    (format!("{context}.{prefix}"), key.clone())
-                };
-            match value {
-                toml::Value::Integer(i) => {
-                    insert_threshold(
-                        &metric,
-                        report_spelling,
-                        report_table,
-                        *i as f64,
-                        context,
-                        out,
-                        ctx,
-                    )?;
+            match value.get_ref() {
+                toml::de::DeValue::Integer(i) => {
+                    let limit = i64::from_str_radix(i.as_str(), i.radix())
+                        .map(|v| v as f64)
+                        .unwrap_or(f64::NAN);
+                    insert_threshold(&metric, key, prefix, limit, context, out, ctx)?;
                 }
-                toml::Value::Float(f) => {
-                    insert_threshold(
-                        &metric,
-                        report_spelling,
-                        report_table,
-                        *f,
-                        context,
-                        out,
-                        ctx,
-                    )?;
+                toml::de::DeValue::Float(f) => {
+                    let limit = f.as_str().parse::<f64>().unwrap_or(f64::NAN);
+                    insert_threshold(&metric, key, prefix, limit, context, out, ctx)?;
                 }
-                toml::Value::Table(nested) => {
+                toml::de::DeValue::Table(nested) => {
                     walk(nested, &metric, context, out, ctx)?;
                 }
                 other => {
                     return Err(ctx
                         .error_at(
-                            &metric,
+                            value.span(),
                             "limit must be numeric",
                             format!(
                                 "`{context}.{metric}` must be a number (the metric's limit), \
@@ -854,21 +813,62 @@ fn collect_thresholds(
     walk(table, "", context, out, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Which table/key spelling the user actually wrote for one numeric
+/// leaf, derived from the leaf key's own line (located by its exact
+/// span, so occurrences elsewhere in the file — other tables,
+/// comments — cannot interfere).
+///
+/// TOML erases the difference between `loc.lloc = 500` under
+/// `[thresholds]` and `lloc = 500` under `[thresholds.loc]`; the text
+/// immediately before the leaf key on its line disambiguates: the
+/// dotted spelling puts the parent segments there (`loc.`), the
+/// nested header leaves the line to start at the leaf. Partially
+/// dotted forms (`b.c = 1` under `[thresholds.a]`) attribute to the
+/// deepest written header (`thresholds.a`) with the dotted remainder
+/// (`b.c`) as the reported key.
+fn written_spelling(
+    text: &str,
+    key_span: std::ops::Range<usize>,
+    prefix: &str,
+    leaf: &str,
+    context: &str,
+) -> (String, String) {
+    if prefix.is_empty() {
+        return (context.to_string(), leaf.to_string());
+    }
+    let line_start = text[..key_span.start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let before = &text[line_start..key_span.start];
+    let segments: Vec<&str> = prefix.split('.').collect();
+    for split in 0..segments.len() {
+        let spelled = segments[split..].join(".");
+        if before.ends_with(&format!("{spelled}.")) {
+            let table = if split == 0 {
+                context.to_string()
+            } else {
+                format!("{context}.{}", segments[..split].join("."))
+            };
+            return (table, format!("{spelled}.{leaf}"));
+        }
+    }
+    (format!("{context}.{prefix}"), leaf.to_string())
+}
+
 fn insert_threshold(
     metric: &str,
-    spelling: String,
-    table: String,
+    key: &toml::Spanned<toml::de::DeString<'_>>,
+    prefix: &str,
     limit: f64,
     context: &str,
     out: &mut BTreeMap<String, ThresholdEntry>,
     ctx: &ErrorContext<'_>,
 ) -> Result<(), ConfigError> {
-    let canonical = validate_metric_name(metric, context, ctx)?;
+    let canonical = validate_metric_name(metric, key.span(), context, ctx)?;
     if !limit.is_finite() {
         return Err(ctx
             .error_at(
-                metric,
+                key.span(),
                 "non-finite limit",
                 format!("`{context}.{metric}` must be a finite number, got `{limit}`"),
             )
@@ -885,7 +885,7 @@ fn insert_threshold(
         };
         return Err(ctx
             .error_at(
-                metric,
+                key.span(),
                 "duplicate threshold",
                 format!("duplicate threshold for `{canonical}` in [{context}]: {spelled}"),
             )
@@ -894,6 +894,13 @@ fn insert_threshold(
                  disable the stricter gate",
             ));
     }
+    let (table, spelling) = written_spelling(
+        ctx.text,
+        key.span(),
+        prefix,
+        key.get_ref().as_ref(),
+        context,
+    );
     out.insert(
         canonical,
         ThresholdEntry {
@@ -908,9 +915,10 @@ fn insert_threshold(
 /// Validate a configured metric name and return its canonical
 /// published key. A name no analyzer can publish is rejected at load
 /// time with a suggestion — otherwise the threshold would be a gate
-/// that can never fire.
+/// that can never fire. `span` is the key's exact source location.
 fn validate_metric_name(
     name: &str,
+    span: std::ops::Range<usize>,
     context: &str,
     ctx: &ErrorContext<'_>,
 ) -> Result<String, ConfigError> {
@@ -918,7 +926,7 @@ fn validate_metric_name(
         Ok(canonical) => Ok(canonical),
         Err(ResolveError::UnknownHistory) => Err(ctx
             .error_at(
-                name,
+                span,
                 "not a history metric",
                 format!("unknown history metric `{name}` in [{context}]"),
             )
@@ -949,7 +957,7 @@ fn validate_metric_name(
             };
             Err(ctx
                 .error_at(
-                    name,
+                    span,
                     "not a published metric",
                     format!("unknown metric `{name}` in [{context}]"),
                 )
@@ -1446,6 +1454,27 @@ mod tests {
         assert_eq!(breaches.len(), 1);
         assert_eq!(breaches[0].metric, "loc.lloc");
         assert_eq!(breaches[0].source_table, "thresholds");
+    }
+
+    #[test]
+    fn override_attribution_is_not_fooled_by_spellings_elsewhere() {
+        // The dotted `loc.lloc` occurrence in the *global* table must
+        // not make the nested-header override report a dotted spelling
+        // under a `[languages.py.thresholds]` header that was never
+        // written: each entry's attribution derives from its own
+        // source span, not from a file-wide text search.
+        let config = parse(
+            "[thresholds]\n\"loc.lloc\" = 1000\n\n[languages.py.thresholds.loc]\nlloc = 10\n",
+        )
+        .expect("valid config");
+        let space = space_with(&[("loc.lloc", 640.0)]);
+        let breaches = config
+            .thresholds
+            .evaluate("a.py", Language::Python, &space, None);
+        assert_eq!(breaches.len(), 1);
+        assert_eq!(breaches[0].metric, "lloc");
+        assert_eq!(breaches[0].source_table, "languages.py.thresholds.loc");
+        assert_eq!(breaches[0].limit, 10.0);
     }
 
     #[test]
