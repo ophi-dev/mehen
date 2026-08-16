@@ -48,7 +48,7 @@ use miette::{LabeledSpan, NamedSource};
 
 use mehen_core::{Language, MetricKey, MetricSpace, Polarity, keys};
 
-use crate::metric_selector::{is_namespaced_higher_is_better, metric_set_key_for};
+use crate::metric_selector::{is_higher_is_better_metric, metric_set_key_for};
 
 /// Recognized configuration file names, in preference order.
 pub(crate) const CONFIG_FILE_NAMES: &[&str] = &["mehen.toml", ".mehen.toml"];
@@ -484,6 +484,9 @@ impl ThresholdPolicy {
             else {
                 continue;
             };
+            if !value_is_measurable(root, canonical) {
+                continue;
+            }
             let polarity = polarity_for_metric(canonical);
             let violated = match polarity {
                 Polarity::HigherIsWorse => value > entry.limit,
@@ -504,12 +507,30 @@ impl ThresholdPolicy {
     }
 }
 
+/// Whether a present metric value is a real measurement for this
+/// space, as opposed to a published N/A sentinel.
+/// `sql.modularity_health` emits `0.0` when the file has no CTEs (the
+/// score is only meaningful for CTE-bearing files, per
+/// `mehen-sql::composite`): gating the sentinel would fail every
+/// ordinary non-CTE SQL file under a higher-is-better minimum, while a
+/// genuine zero on a CTE-bearing file must keep gating — so
+/// applicability is read from the co-published `sql.cte.count`.
+fn value_is_measurable(root: &MetricSpace, canonical: &str) -> bool {
+    if canonical != "sql.modularity_health" {
+        return true;
+    }
+    root.metrics
+        .get(&MetricKey::new("sql.cte.count"))
+        .is_none_or(|count| count.as_f64() > 0.0)
+}
+
 /// Whether a configured limit is a minimum (higher-is-better metric)
-/// or a maximum (everything else). Mirrors the ranking/diff polarity
-/// defaults: `mi.*` and the enumerated namespaced quality scores are
-/// higher-is-better. Applied to canonical keys.
+/// or a maximum (everything else). Shares the ranking/diff polarity
+/// source of truth ([`is_higher_is_better_metric`]): `mi.*`, the
+/// Halstead program level, and the enumerated namespaced quality
+/// scores are higher-is-better. Applied to canonical keys.
 fn polarity_for_metric(name: &str) -> Polarity {
-    if name.starts_with("mi.") || is_namespaced_higher_is_better(name) {
+    if is_higher_is_better_metric(name) {
         Polarity::HigherIsBetter
     } else {
         Polarity::HigherIsWorse
@@ -820,12 +841,16 @@ fn collect_thresholds(
 ///
 /// TOML erases the difference between `loc.lloc = 500` under
 /// `[thresholds]` and `lloc = 500` under `[thresholds.loc]`; the text
-/// immediately before the leaf key on its line disambiguates: the
-/// dotted spelling puts the parent segments there (`loc.`), the
-/// nested header leaves the line to start at the leaf. Partially
-/// dotted forms (`b.c = 1` under `[thresholds.a]`) attribute to the
-/// deepest written header (`thresholds.a`) with the dotted remainder
-/// (`b.c`) as the reported key.
+/// immediately before the leaf key on its line disambiguates: a
+/// dotted assignment puts the parent segments there, a nested header
+/// leaves the line to start at the leaf. Parent segments are matched
+/// per TOML key syntax — bare, `"quoted"`, or `'quoted'`, with
+/// optional whitespace around the dots — so legal spellings like
+/// `"loc" . lloc = 500` attribute to `[thresholds]` rather than to a
+/// `[thresholds.loc]` header that was never written. Partially dotted
+/// forms (`b.c = 1` under `[thresholds.a]`) attribute to the deepest
+/// written header (`thresholds.a`) with the dotted remainder (`b.c`)
+/// as the reported key.
 fn written_spelling(
     text: &str,
     key_span: std::ops::Range<usize>,
@@ -839,18 +864,50 @@ fn written_spelling(
     let line_start = text[..key_span.start]
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
-    let before = &text[line_start..key_span.start];
+    let mut rest = text[line_start..key_span.start].trim_end();
+    // A quoted leaf's span may exclude its quotes; drop the opening
+    // quote so the dot search below sees the delimiter.
+    rest = rest.strip_suffix(['"', '\'']).unwrap_or(rest).trim_end();
     let segments: Vec<&str> = prefix.split('.').collect();
-    for split in 0..segments.len() {
+    // Consume `<segment> .` pairs backwards, per TOML key syntax.
+    let mut matched = 0;
+    while matched < segments.len() {
+        let Some(after_dot) = rest.strip_suffix('.') else {
+            break;
+        };
+        let candidate = after_dot.trim_end();
+        let segment = segments[segments.len() - 1 - matched];
+        let remaining = if let Some(remaining) = candidate
+            .strip_suffix(&format!("\"{segment}\""))
+            .or_else(|| candidate.strip_suffix(&format!("'{segment}'")))
+        {
+            remaining
+        } else if let Some(remaining) = candidate.strip_suffix(segment) {
+            // A bare match must not butt up against more identifier
+            // characters (`xloc.` is not the segment `loc`).
+            let boundary = remaining
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-'));
+            if !boundary {
+                break;
+            }
+            remaining
+        } else {
+            break;
+        };
+        rest = remaining.trim_end();
+        matched += 1;
+    }
+    if matched > 0 {
+        let split = segments.len() - matched;
         let spelled = segments[split..].join(".");
-        if before.ends_with(&format!("{spelled}.")) {
-            let table = if split == 0 {
-                context.to_string()
-            } else {
-                format!("{context}.{}", segments[..split].join("."))
-            };
-            return (table, format!("{spelled}.{leaf}"));
-        }
+        let table = if split == 0 {
+            context.to_string()
+        } else {
+            format!("{context}.{}", segments[..split].join("."))
+        };
+        return (table, format!("{spelled}.{leaf}"));
     }
     (format!("{context}.{prefix}"), leaf.to_string())
 }
@@ -1070,7 +1127,8 @@ pub fn render_threshold_report(breaches: &mut [ThresholdBreach], config_path: &P
     let report = ThresholdReport {
         message,
         help: Some(
-            "raise or remove the limit in the config table shown, or refactor the file below it."
+            "adjust or remove the limit in the config table shown, or bring the file back \
+             within it."
                 .to_string(),
         ),
     };
@@ -1475,6 +1533,79 @@ mod tests {
         assert_eq!(breaches[0].metric, "lloc");
         assert_eq!(breaches[0].source_table, "languages.py.thresholds.loc");
         assert_eq!(breaches[0].limit, 10.0);
+    }
+
+    #[test]
+    fn dotted_spellings_with_quotes_or_whitespace_attribute_to_their_table() {
+        // TOML permits whitespace around dots and quoted segments in
+        // dotted keys; all of these live in [thresholds] and must not
+        // be attributed to a [thresholds.loc] header that was never
+        // written.
+        let space = space_with(&[("loc.lloc", 640.0)]);
+        for config_text in [
+            "[thresholds]\nloc . lloc = 500\n",
+            "[thresholds]\n\"loc\" . lloc = 500\n",
+            "[thresholds]\nloc.\"lloc\" = 500\n",
+        ] {
+            let config = parse(config_text).expect("valid config");
+            let breaches = config
+                .thresholds
+                .evaluate("a.py", Language::Python, &space, None);
+            assert_eq!(breaches.len(), 1, "{config_text}");
+            assert_eq!(breaches[0].source_table, "thresholds", "{config_text}");
+            assert_eq!(breaches[0].metric, "loc.lloc", "{config_text}");
+        }
+    }
+
+    #[test]
+    fn halstead_level_is_gated_as_a_minimum() {
+        // Program level is inverse difficulty (L = 1/D): larger is
+        // healthier, unlike the rest of the halstead family.
+        let config = parse("[thresholds]\n\"halstead.level\" = 0.2\n").expect("valid config");
+        let below = space_with(&[("halstead.level", 0.1)]);
+        let breaches = config
+            .thresholds
+            .evaluate("a.py", Language::Python, &below, None);
+        assert_eq!(breaches.len(), 1);
+        assert_eq!(breaches[0].polarity, Polarity::HigherIsBetter);
+        let above = space_with(&[("halstead.level", 0.3)]);
+        assert!(
+            config
+                .thresholds
+                .evaluate("a.py", Language::Python, &above, None)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn sql_modularity_na_sentinel_is_not_gated() {
+        let config = parse("[thresholds]\n\"sql.modularity_health\" = 50\n").expect("valid config");
+        // No CTEs: the published 0.0 is an N/A sentinel, not a score —
+        // a minimum must not fail every ordinary non-CTE SQL file.
+        let na = space_with(&[("sql.modularity_health", 0.0), ("sql.cte.count", 0.0)]);
+        assert!(
+            config
+                .thresholds
+                .evaluate("q.sql", Language::Sql, &na, None)
+                .is_empty()
+        );
+        // A CTE-bearing file still gates — including a genuine zero.
+        let scored = space_with(&[("sql.modularity_health", 0.0), ("sql.cte.count", 2.0)]);
+        assert_eq!(
+            config
+                .thresholds
+                .evaluate("q.sql", Language::Sql, &scored, None)
+                .len(),
+            1
+        );
+        let low = space_with(&[("sql.modularity_health", 30.0), ("sql.cte.count", 2.0)]);
+        assert_eq!(
+            config
+                .thresholds
+                .evaluate("q.sql", Language::Sql, &low, None)
+                .len(),
+            1
+        );
     }
 
     #[test]

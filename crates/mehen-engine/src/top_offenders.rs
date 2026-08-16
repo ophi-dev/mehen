@@ -322,11 +322,7 @@ fn cmp_entries(
 /// nexit, npa, npm, wmc) is higher-is-worse. This mirrors the legacy
 /// `KNOWN_METRICS` catalog and the rewrite plan §5.1 metric contract.
 fn default_polarity_for(selector: &MetricSelector) -> Polarity {
-    let key = selector.key.as_str();
-    if key.starts_with("mi.")
-        || key == "mi"
-        || crate::metric_selector::is_namespaced_higher_is_better(key)
-    {
+    if crate::metric_selector::is_higher_is_better_metric(selector.key.as_str()) {
         Polarity::HigherIsBetter
     } else {
         Polarity::HigherIsWorse

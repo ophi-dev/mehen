@@ -85,7 +85,7 @@ crossed limit prints a grouped report on stderr and fails the command with exit 
   │ src/app/core.py
   │   cognitive = 23 — exceeds max 10  [languages.python.thresholds]
   │   loc.lloc = 640 — exceeds max 500  [thresholds]
-  help: raise or remove the limit in the config table shown, or refactor the file below it.
+  help: adjust or remove the limit in the config table shown, or bring the file back within it.
 ```
 
 Configuration mistakes fail fast with a caret into the TOML source and a suggestion ("unknown

@@ -184,10 +184,10 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
             // its configured gate could never fire in diff/top-offenders.
             let canonical: &'static str = Box::leak(canonical.into_boxed_str());
             let label: &'static str = Box::leak(name.to_string().into_boxed_str());
-            let default_polarity = if canonical.starts_with("mi.") {
+            let default_polarity = if is_higher_is_better_metric(canonical) {
                 Polarity::HigherIsBetter
             } else {
-                default_namespaced_polarity(canonical)
+                Polarity::LowerIsBetter
             };
             selectors.push(MetricSelector {
                 name: canonical,
@@ -249,6 +249,20 @@ pub(crate) const NAMESPACED_HIGHER_IS_BETTER: &[&str] = &[
 /// [`NAMESPACED_HIGHER_IS_BETTER`]).
 pub(crate) fn is_namespaced_higher_is_better(name: &str) -> bool {
     NAMESPACED_HIGHER_IS_BETTER.contains(&name)
+}
+
+/// Whether a metric key — source-code or namespaced — is
+/// higher-is-better. The single source of truth shared by the config
+/// threshold polarity, the published-catalogue selector branch, and
+/// the post-1.0 ranking polarity: `mi.*` variants, the Halstead
+/// program level (`L = 1/D` — inverse difficulty, so larger is the
+/// healthier direction, unlike the rest of the `halstead.*` family),
+/// and the enumerated namespaced quality scores.
+pub(crate) fn is_higher_is_better_metric(key: &str) -> bool {
+    key == "mi"
+        || key.starts_with("mi.")
+        || key == "halstead.level"
+        || is_namespaced_higher_is_better(key)
 }
 
 /// Default polarity for a namespaced metric, by *exact* key. Users can always
