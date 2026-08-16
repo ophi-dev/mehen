@@ -115,14 +115,15 @@ mehen::thresholds
   × 2 metric threshold violations (config: /repo/mehen.toml)
   │
   │ src/app/core.py
-  │   cognitive = 23 — exceeds max 10  [languages.python.thresholds]
-  │   loc.lloc = 640 — exceeds max 500  [thresholds]
-  help: adjust or remove the limit in the config table shown, or bring the file back within it.
+  │   cognitive = 23 — exceeds max 10  (set by languages.python.thresholds)
+  │   loc.lloc = 640 — exceeds max 500  (set by thresholds)
+  help: adjust or remove the limit at the configuration path shown, or bring the file back within it.
 ```
 
-Each line names the measured value, the crossed limit, and the config table that set it, so the
-fix — either direction — is one jump away. Violations are sorted by path, then metric, for
-deterministic CI logs. Colors engage only on a terminal with `NO_COLOR` unset. With
+Each line names the measured value, the crossed limit, and the configuration path that set it
+(language aliases preserved as written), so the fix — either direction — is one jump away.
+Violations are sorted by path, then metric, for deterministic CI logs. Colors engage only on a
+terminal with `NO_COLOR` unset. With
 `--output-format json`, `mehen diff` additionally embeds the violations as a top-level
 `threshold_violations` array (present only when the gate fired), so machine consumers can tell a
 quality-gate exit from an analysis failure.
@@ -149,10 +150,10 @@ mehen::config
   help: did you mean `cognitive`?
 ```
 
-The command fails with exit `1` before any analysis runs. One exception to load-time strictness:
-the `sql.*` and `markdown.*` namespaces are extensible and accepted verbatim, so verify those
-spellings against the [SQL](/metrics/sql/overview) and [Markdown](/metrics/markdown/overview)
-metric references.
+The command fails with exit `1` before any analysis runs. Namespaced `sql.*` and `markdown.*`
+names validate against the owning analyzer's published catalogue too (including the dynamic
+`sql.statement.kind_count.<kind>` and `sql.dialect.is_<dialect>` families), so
+`sql.modularit_health` is caught just like `cognitve`.
 
 ## Relationship to other gates
 

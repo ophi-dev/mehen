@@ -83,16 +83,15 @@ crossed limit prints a grouped report on stderr and fails the command with exit 
   × 2 metric threshold violations (config: /repo/mehen.toml)
   │
   │ src/app/core.py
-  │   cognitive = 23 — exceeds max 10  [languages.python.thresholds]
-  │   loc.lloc = 640 — exceeds max 500  [thresholds]
-  help: adjust or remove the limit in the config table shown, or bring the file back within it.
+  │   cognitive = 23 — exceeds max 10  (set by languages.python.thresholds)
+  │   loc.lloc = 640 — exceeds max 500  (set by thresholds)
+  help: adjust or remove the limit at the configuration path shown, or bring the file back within it.
 ```
 
 Configuration mistakes fail fast with a caret into the TOML source and a suggestion ("unknown
-metric `cognitve` … did you mean `cognitive`?"): names that no analyzer publishes are rejected at
-load time. The extensible `sql.*` and `markdown.*` namespaces are the one exception — they are
-accepted verbatim, so verify those spellings against the metric reference. Full reference:
-<https://mehen.ophi.dev/configuration>.
+metric `cognitve` … did you mean `cognitive`?"): every metric name is validated against the keys
+the analyzers actually publish — including the `sql.*` and `markdown.*` namespaces — so a typo
+can never silently disable a gate. Full reference: <https://mehen.ophi.dev/configuration>.
 
 ## GitHub Action
 

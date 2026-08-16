@@ -190,6 +190,9 @@ const PUBLISHED_METRIC_KEYS: &[&str] = &[
 pub(crate) enum ResolveError {
     /// A `history.*` name outside the fixed family.
     UnknownHistory,
+    /// A `sql.*` / `markdown.*` name the owning analyzer never
+    /// publishes.
+    UnknownNamespaced,
     /// Everything else the resolver cannot map to a published key.
     Unknown,
 }
@@ -223,8 +226,31 @@ pub(crate) fn canonical_metric_key(name: &str) -> Result<String, ResolveError> {
             Err(ResolveError::UnknownHistory)
         };
     }
-    if name.starts_with("sql.") || name.starts_with("markdown.") {
-        return Ok(name.to_string());
+    if name.starts_with("sql.") {
+        // The SQL analyzer owns its namespace: validate against its
+        // published catalogue (fixed keys + enum-backed dynamic
+        // families) so a typo can never become a gate that cannot
+        // fire. Builds without the SQL analyzer cannot know the
+        // catalogue and accept the name verbatim.
+        #[cfg(feature = "lang-sql")]
+        {
+            return if mehen_sql::is_published_metric_key(name) {
+                Ok(name.to_string())
+            } else {
+                Err(ResolveError::UnknownNamespaced)
+            };
+        }
+        #[cfg(not(feature = "lang-sql"))]
+        {
+            return Ok(name.to_string());
+        }
+    }
+    if name.starts_with("markdown.") {
+        return if mehen_markdown::is_published_metric_key(name) {
+            Ok(name.to_string())
+        } else {
+            Err(ResolveError::UnknownNamespaced)
+        };
     }
     let key = metric_set_key_for(name);
     if PUBLISHED_METRIC_KEYS.contains(&key) {
@@ -386,7 +412,10 @@ impl ErrorContext<'_> {
 pub struct ThresholdBreach {
     /// Display path of the offending file.
     pub path: String,
-    /// The metric exactly as spelled in the config file.
+    /// The metric's dotted key path within [`ThresholdBreach::source_table`]
+    /// (e.g. `loc.lloc`). Derived from the parse tree, so every TOML
+    /// spelling — dotted keys, nested headers, inline tables, quoting,
+    /// escapes — reports the same path.
     pub metric: String,
     /// Measured value at the evaluated (head) side.
     pub value: f64,
@@ -395,23 +424,25 @@ pub struct ThresholdBreach {
     /// Whether the limit is a maximum (`HigherIsWorse`) or a minimum
     /// (`HigherIsBetter`).
     pub polarity: Polarity,
-    /// The exact config table that set the limit, as written —
-    /// `thresholds`, or e.g. `languages.py.thresholds` with the
-    /// user's alias preserved. Rendered as `[<table>]` in the report
-    /// so the pointer matches a table that actually exists in the
-    /// file.
+    /// Key path of the threshold table that set the limit —
+    /// `thresholds`, or `languages.py.thresholds` with the language
+    /// alias preserved (it is a real parsed key, not a spelling
+    /// variant). Rendered as `set by <path>` in the report; combined
+    /// with [`ThresholdBreach::metric`] it forms the entry's full
+    /// configuration key path.
     pub source_table: String,
 }
 
-/// One configured limit: the user's spelling and the config table it
-/// sits in (both for reporting) plus the numeric limit. Keyed by
-/// canonical metric key in the policy tables.
+/// One configured limit: the dotted metric path and the table it sits
+/// in (both parse-tree data, for reporting) plus the numeric limit.
+/// Keyed by canonical metric key in the policy tables.
 #[derive(Debug, Clone)]
 struct ThresholdEntry {
+    /// Dotted metric path within `table` (e.g. `loc.lloc`) — every
+    /// TOML spelling of the same entry normalizes to this path.
     spelling: String,
-    /// Dotted table path as the user wrote it (`thresholds`,
-    /// `thresholds.loc` for a nested header, `languages.py.thresholds`
-    /// with the alias preserved).
+    /// Key path of the owning threshold table (`thresholds`,
+    /// `languages.py.thresholds` with the alias preserved).
     table: String,
     limit: f64,
 }
@@ -772,17 +803,13 @@ fn expect_table<'v, 'i>(
 ///
 /// TOML turns a dotted key (`loc.lloc = 500`) into nested tables, so
 /// nested tables are folded back into dotted metric names — the
-/// quoted spelling (`"loc.lloc" = 500`), the dotted spelling, and a
-/// nested header (`[thresholds.loc]` with `lloc = 500`) are
-/// equivalent. Because equivalence extends to canonical aliases
-/// (`cognitive` vs `cognitive.sum`), two spellings of one logical
-/// metric in the same table are rejected as a duplicate instead of
-/// one silently overwriting the other.
-///
-/// Each entry records the table path and key spelling to *report*: the
-/// dotted spelling when it appears verbatim in the source, otherwise
-/// the nested-header form — so a violation's `[table]` pointer names a
-/// table the user actually wrote.
+/// quoted spelling (`"loc.lloc" = 500`), the dotted spelling, a
+/// nested header (`[thresholds.loc]` with `lloc = 500`), and an
+/// inline table (`loc = { lloc = 500 }`) are all the same entry.
+/// Because equivalence extends to canonical aliases (`cognitive` vs
+/// `cognitive.sum`), two spellings of one logical metric in the same
+/// table are rejected as a duplicate instead of one silently
+/// overwriting the other.
 fn collect_thresholds(
     table: &toml::de::DeTable<'_>,
     context: &str,
@@ -803,6 +830,13 @@ fn collect_thresholds(
             } else {
                 format!("{prefix}.{key_str}")
             };
+            // Attribution is pure parse-tree data: the threshold
+            // table's key path (`context`, language aliases
+            // preserved) plus the dotted metric path within it. TOML
+            // spellings — dotted keys, nested headers, inline tables,
+            // quoting, escapes — all normalize to the same paths, so
+            // the report never claims a literal spelling and cannot
+            // point at anything that does not exist semantically.
             match value.get_ref() {
                 toml::de::DeValue::Integer(i) => {
                     // `as_str` keeps the lexical spelling, including
@@ -811,7 +845,7 @@ fn collect_thresholds(
                     let limit = i64::from_str_radix(&i.as_str().replace('_', ""), i.radix())
                         .map(|v| v as f64)
                         .unwrap_or(f64::NAN);
-                    insert_threshold(&metric, key, prefix, limit, context, out, ctx)?;
+                    insert_threshold(&metric, key, limit, context, out, ctx)?;
                 }
                 toml::de::DeValue::Float(f) => {
                     let limit = f
@@ -819,7 +853,7 @@ fn collect_thresholds(
                         .replace('_', "")
                         .parse::<f64>()
                         .unwrap_or(f64::NAN);
-                    insert_threshold(&metric, key, prefix, limit, context, out, ctx)?;
+                    insert_threshold(&metric, key, limit, context, out, ctx)?;
                 }
                 toml::de::DeValue::Table(nested) => {
                     walk(nested, &metric, context, out, ctx)?;
@@ -845,98 +879,9 @@ fn collect_thresholds(
     walk(table, "", context, out, ctx)
 }
 
-/// Which table/key spelling the user actually wrote for one numeric
-/// leaf, derived from the leaf key's own line (located by its exact
-/// span, so occurrences elsewhere in the file — other tables,
-/// comments — cannot interfere).
-///
-/// TOML erases the difference between `loc.lloc = 500` under
-/// `[thresholds]` and `lloc = 500` under `[thresholds.loc]`; the text
-/// immediately before the leaf key on its line disambiguates: a
-/// dotted assignment puts the parent segments there, a nested header
-/// leaves the line to start at the leaf. Parent segments are matched
-/// per TOML key syntax — bare, `"quoted"`, or `'quoted'`, with
-/// optional whitespace around the dots — and across both link forms,
-/// the dotted `parent.` and the inline-table `parent = {`, so legal
-/// spellings like `"loc" . lloc = 500` or `loc = { lloc = 500 }`
-/// attribute to `[thresholds]` rather than to a `[thresholds.loc]`
-/// header that was never written. Partially dotted forms (`b.c = 1`
-/// under `[thresholds.a]`) attribute to the deepest written header
-/// (`thresholds.a`) with the dotted remainder (`b.c`) as the reported
-/// key.
-fn written_spelling(
-    text: &str,
-    key_span: std::ops::Range<usize>,
-    prefix: &str,
-    leaf: &str,
-    context: &str,
-) -> (String, String) {
-    if prefix.is_empty() {
-        return (context.to_string(), leaf.to_string());
-    }
-    let line_start = text[..key_span.start]
-        .rfind('\n')
-        .map_or(0, |newline| newline + 1);
-    let mut rest = text[line_start..key_span.start].trim_end();
-    // A quoted leaf's span may exclude its quotes; drop the opening
-    // quote so the link search below sees the delimiter.
-    rest = rest.strip_suffix(['"', '\'']).unwrap_or(rest).trim_end();
-    let segments: Vec<&str> = prefix.split('.').collect();
-    // Consume `<segment> .` (dotted) or `<segment> = {` (inline
-    // table) links backwards, per TOML key syntax.
-    let mut matched = 0;
-    while matched < segments.len() {
-        let after_link = if let Some(after) = rest.strip_suffix('.') {
-            Some(after)
-        } else if let Some(after) = rest.strip_suffix('{') {
-            after.trim_end().strip_suffix('=')
-        } else {
-            None
-        };
-        let Some(candidate) = after_link else {
-            break;
-        };
-        let candidate = candidate.trim_end();
-        let segment = segments[segments.len() - 1 - matched];
-        let remaining = if let Some(remaining) = candidate
-            .strip_suffix(&format!("\"{segment}\""))
-            .or_else(|| candidate.strip_suffix(&format!("'{segment}'")))
-        {
-            remaining
-        } else if let Some(remaining) = candidate.strip_suffix(segment) {
-            // A bare match must not butt up against more identifier
-            // characters (`xloc.` is not the segment `loc`).
-            let boundary = remaining
-                .chars()
-                .next_back()
-                .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-'));
-            if !boundary {
-                break;
-            }
-            remaining
-        } else {
-            break;
-        };
-        rest = remaining.trim_end();
-        matched += 1;
-    }
-    if matched > 0 {
-        let split = segments.len() - matched;
-        let spelled = segments[split..].join(".");
-        let table = if split == 0 {
-            context.to_string()
-        } else {
-            format!("{context}.{}", segments[..split].join("."))
-        };
-        return (table, format!("{spelled}.{leaf}"));
-    }
-    (format!("{context}.{prefix}"), leaf.to_string())
-}
-
 fn insert_threshold(
     metric: &str,
     key: &toml::Spanned<toml::de::DeString<'_>>,
-    prefix: &str,
     limit: f64,
     context: &str,
     out: &mut BTreeMap<String, ThresholdEntry>,
@@ -972,18 +917,11 @@ fn insert_threshold(
                  disable the stricter gate",
             ));
     }
-    let (table, spelling) = written_spelling(
-        ctx.text,
-        key.span(),
-        prefix,
-        key.get_ref().as_ref(),
-        context,
-    );
     out.insert(
         canonical,
         ThresholdEntry {
-            spelling,
-            table,
+            spelling: metric.to_string(),
+            table: context.to_string(),
             limit,
         },
     );
@@ -1012,6 +950,23 @@ fn validate_metric_name(
                 "the fixed `history.*` family is: {}",
                 keys::HISTORY_ALL.join(", ")
             ))),
+        Err(ResolveError::UnknownNamespaced) => {
+            let candidates = namespaced_candidates(name);
+            let help = match closest_candidate(name, candidates) {
+                Some(candidate) => format!("did you mean `{candidate}`?"),
+                None => format!(
+                    "the analyzer that owns this namespace never publishes `{name}`; see \
+                     the metric reference for the published keys"
+                ),
+            };
+            Err(ctx
+                .error_at(
+                    span,
+                    "not a published metric",
+                    format!("unknown metric `{name}` in [{context}]"),
+                )
+                .with_help(help))
+        }
         Err(ResolveError::Unknown) => {
             let mut candidates: Vec<&str> = PUBLISHED_METRIC_KEYS.to_vec();
             candidates.extend_from_slice(keys::HISTORY_ALL);
@@ -1042,6 +997,21 @@ fn validate_metric_name(
                 .with_help(help))
         }
     }
+}
+
+/// The published-key candidates for a namespaced (`sql.*` /
+/// `markdown.*`) suggestion, from the owning analyzer's catalogue.
+fn namespaced_candidates(name: &str) -> &'static [&'static str] {
+    if name.starts_with("sql.") {
+        #[cfg(feature = "lang-sql")]
+        {
+            return mehen_sql::PUBLISHED_METRIC_KEYS;
+        }
+    }
+    if name.starts_with("markdown.") {
+        return mehen_markdown::PUBLISHED_METRIC_KEYS;
+    }
+    &[]
 }
 
 /// Published keys sharing the name's family (`mi` → `mi.visual_studio`,
@@ -1145,7 +1115,7 @@ pub fn render_threshold_report(breaches: &mut [ThresholdBreach], config_path: &P
             Polarity::HigherIsBetter => format!("below min {}", format_number(breach.limit)),
         };
         message.push_str(&format!(
-            "\n  {} = {} — {comparison}  [{}]",
+            "\n  {} = {} — {comparison}  (set by {})",
             breach.metric,
             format_number(breach.value),
             breach.source_table
@@ -1154,8 +1124,8 @@ pub fn render_threshold_report(breaches: &mut [ThresholdBreach], config_path: &P
     let report = ThresholdReport {
         message,
         help: Some(
-            "adjust or remove the limit in the config table shown, or bring the file back \
-             within it."
+            "adjust or remove the limit at the configuration path shown, or bring the file \
+             back within it."
                 .to_string(),
         ),
     };
@@ -1518,36 +1488,41 @@ mod tests {
     }
 
     #[test]
-    fn nested_table_headers_are_attributed_to_their_leaf_table() {
-        // `[thresholds.loc]` + `lloc = 500` and `[thresholds]` +
-        // `loc.lloc = 500` are the same TOML structure; the report
-        // must point at the spelling the user actually wrote.
+    fn every_toml_spelling_normalizes_to_the_same_semantic_path() {
+        // Dotted keys (with legal whitespace, quoting, and escapes),
+        // nested headers, and inline tables are all the same TOML
+        // entry; the breach reports the parse-tree path (`loc.lloc`
+        // set by `thresholds`) for every one of them — no spelling
+        // recovery from source text is involved.
         let space = space_with(&[("loc.lloc", 640.0)]);
-
-        let nested = parse("[thresholds.loc]\nlloc = 500\n").expect("valid config");
-        let breaches = nested
-            .thresholds
-            .evaluate("a.py", Language::Python, &space, None);
-        assert_eq!(breaches.len(), 1);
-        assert_eq!(breaches[0].metric, "lloc");
-        assert_eq!(breaches[0].source_table, "thresholds.loc");
-
-        let dotted = parse("[thresholds]\nloc.lloc = 500\n").expect("valid config");
-        let breaches = dotted
-            .thresholds
-            .evaluate("a.py", Language::Python, &space, None);
-        assert_eq!(breaches.len(), 1);
-        assert_eq!(breaches[0].metric, "loc.lloc");
-        assert_eq!(breaches[0].source_table, "thresholds");
+        for config_text in [
+            "[thresholds]\nloc.lloc = 500\n",
+            "[thresholds]\n\"loc.lloc\" = 500\n",
+            "[thresholds]\nloc . lloc = 500\n",
+            "[thresholds]\n\"loc\" . lloc = 500\n",
+            "[thresholds]\nloc.\"lloc\" = 500\n",
+            // Basic-string escapes normalize in the parse tree
+            // (`"lo\u0063"` is the key `loc`).
+            "[thresholds]\n\"lo\\u0063\".lloc = 500\n",
+            "[thresholds.loc]\nlloc = 500\n",
+            "thresholds = { loc = { lloc = 500 } }\n",
+            "[thresholds]\nloc = { lloc = 500 }\n",
+        ] {
+            let config = parse(config_text).expect("valid config");
+            let breaches = config
+                .thresholds
+                .evaluate("a.py", Language::Python, &space, None);
+            assert_eq!(breaches.len(), 1, "{config_text}");
+            assert_eq!(breaches[0].metric, "loc.lloc", "{config_text}");
+            assert_eq!(breaches[0].source_table, "thresholds", "{config_text}");
+        }
     }
 
     #[test]
     fn override_attribution_is_not_fooled_by_spellings_elsewhere() {
         // The dotted `loc.lloc` occurrence in the *global* table must
-        // not make the nested-header override report a dotted spelling
-        // under a `[languages.py.thresholds]` header that was never
-        // written: each entry's attribution derives from its own
-        // source span, not from a file-wide text search.
+        // not affect the override's attribution: paths come from the
+        // parse tree, never from searching the source text.
         let config = parse(
             "[thresholds]\n\"loc.lloc\" = 1000\n\n[languages.py.thresholds.loc]\nlloc = 10\n",
         )
@@ -1557,31 +1532,9 @@ mod tests {
             .thresholds
             .evaluate("a.py", Language::Python, &space, None);
         assert_eq!(breaches.len(), 1);
-        assert_eq!(breaches[0].metric, "lloc");
-        assert_eq!(breaches[0].source_table, "languages.py.thresholds.loc");
+        assert_eq!(breaches[0].metric, "loc.lloc");
+        assert_eq!(breaches[0].source_table, "languages.py.thresholds");
         assert_eq!(breaches[0].limit, 10.0);
-    }
-
-    #[test]
-    fn dotted_spellings_with_quotes_or_whitespace_attribute_to_their_table() {
-        // TOML permits whitespace around dots and quoted segments in
-        // dotted keys; all of these live in [thresholds] and must not
-        // be attributed to a [thresholds.loc] header that was never
-        // written.
-        let space = space_with(&[("loc.lloc", 640.0)]);
-        for config_text in [
-            "[thresholds]\nloc . lloc = 500\n",
-            "[thresholds]\n\"loc\" . lloc = 500\n",
-            "[thresholds]\nloc.\"lloc\" = 500\n",
-        ] {
-            let config = parse(config_text).expect("valid config");
-            let breaches = config
-                .thresholds
-                .evaluate("a.py", Language::Python, &space, None);
-            assert_eq!(breaches.len(), 1, "{config_text}");
-            assert_eq!(breaches[0].source_table, "thresholds", "{config_text}");
-            assert_eq!(breaches[0].metric, "loc.lloc", "{config_text}");
-        }
     }
 
     #[test]
@@ -1636,31 +1589,43 @@ mod tests {
     }
 
     #[test]
-    fn inline_tables_attribute_to_their_assignment_line() {
-        // Inline tables put the whole path on the assignment's line;
-        // the report must not point at a bracketed header that was
-        // never written.
-        let space = space_with(&[("loc.lloc", 640.0)]);
-        for config_text in [
-            "thresholds = { loc = { lloc = 500 } }\n",
-            "[thresholds]\nloc = { lloc = 500 }\n",
-        ] {
-            let config = parse(config_text).expect("valid config");
-            let breaches = config
-                .thresholds
-                .evaluate("a.py", Language::Python, &space, None);
-            assert_eq!(breaches.len(), 1, "{config_text}");
-            assert_eq!(breaches[0].source_table, "thresholds", "{config_text}");
-            assert_eq!(breaches[0].metric, "loc.lloc", "{config_text}");
-        }
-    }
-
-    #[test]
     fn integer_and_float_digit_separators_parse() {
         let config = parse("[thresholds]\ncognitive = 1_000\n\"loc.lloc\" = 1_500.5\n")
             .expect("digit separators are legal TOML");
         assert_eq!(global_limit(&config, "cognitive.sum"), Some(1000.0));
         assert_eq!(global_limit(&config, "loc.lloc"), Some(1500.5));
+    }
+
+    #[test]
+    fn rejects_unpublished_namespaced_metrics_with_suggestion() {
+        // The owning analyzers' catalogues validate `sql.*` and
+        // `markdown.*` names, so a typo cannot become a gate that
+        // never fires.
+        let err = parse("[thresholds]\n\"sql.modularit_health\" = 50\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown metric `sql.modularit_health`")
+        );
+        assert!(
+            rendered(&err).contains("did you mean `sql.modularity_health`?"),
+            "{}",
+            rendered(&err)
+        );
+
+        let err = parse("[thresholds]\n\"markdown.links.borken\" = 1\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown metric `markdown.links.borken`")
+        );
+    }
+
+    #[test]
+    fn accepts_namespaced_dynamic_family_members() {
+        let config = parse(
+            "[thresholds]\n\"sql.statement.kind_count.select\" = 20\n\"sql.dialect.is_postgres\" = 1\n\"markdown.loc.tloc\" = 400\n",
+        )
+        .expect("published dynamic-family keys are valid");
+        assert_eq!(config.thresholds.global.len(), 3);
     }
 
     #[test]
@@ -1772,11 +1737,11 @@ mod tests {
             report.contains("3 metric threshold violations (config: /repo/mehen.toml)"),
             "{report}"
         );
-        // The alias spelling and the full table path survive into the
-        // report, so the pointer names a table that exists.
-        let cognitive = "cognitive = 23 — exceeds max 15  [languages.py.thresholds]";
-        let lloc = "loc.lloc = 640 — exceeds max 500  [thresholds]";
-        let mi = "mi.visual_studio = 12.4 — below min 40  [thresholds]";
+        // The language alias is preserved (it is a real parsed key)
+        // and the pointer is a semantic key path, not a spelling claim.
+        let cognitive = "cognitive = 23 — exceeds max 15  (set by languages.py.thresholds)";
+        let lloc = "loc.lloc = 640 — exceeds max 500  (set by thresholds)";
+        let mi = "mi.visual_studio = 12.4 — below min 40  (set by thresholds)";
         for line in [cognitive, lloc, mi, "src/app/core.py", "src/util.rs"] {
             assert!(report.contains(line), "missing `{line}` in:\n{report}");
         }

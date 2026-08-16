@@ -1569,7 +1569,17 @@ fn run_diff_inner(
             } else {
                 Some(&doc_files)
             };
-            if let Err(e) = print_json(&diffs, doc_ref, &threshold_breaches) {
+            // A failed analysis means the measurements behind the
+            // breaches are partial: withhold the machine-readable gate
+            // signal so consumers (the GitHub Action) fail fast on the
+            // analysis error instead of publishing an incomplete
+            // report as an ordinary gate failure.
+            let publishable_breaches: &[crate::config_file::ThresholdBreach] = if analysis_failed {
+                &[]
+            } else {
+                &threshold_breaches
+            };
+            if let Err(e) = print_json(&diffs, doc_ref, publishable_breaches) {
                 // Surface the error loudly — exit code 2 mirrors the
                 // --fail-on gate and is distinct from the generic exit 1
                 // that covers setup/IO errors in run_diff_inner.
@@ -1599,20 +1609,22 @@ fn run_diff_inner(
         std::process::exit(2);
     }
 
+    // Per the diagnostic contract (rewrite plan §9.3), recoverable
+    // parser errors must surface as a non-zero exit so CI cannot pass
+    // partial metrics computed from a known-broken parse. Checked
+    // before the threshold gate: a broken analysis outranks a quality
+    // gate evaluated on the parseable remainder. Exit 1 lines up with
+    // the generic setup/IO bucket and is distinct from exit 2 (doc
+    // gate). Diagnostics are already logged above; this gate only
+    // flips the exit code.
+    if analysis_failed {
+        std::process::exit(1);
+    }
+
     // Exit 1: configured quality gates fail with the generic failure
     // code (`mehen.toml` threshold contract); the report was printed
     // above.
     if !threshold_breaches.is_empty() {
-        std::process::exit(1);
-    }
-
-    // Per the diagnostic contract (rewrite plan §9.3), recoverable
-    // parser errors must surface as a non-zero exit so CI cannot pass
-    // partial metrics computed from a known-broken parse. Exit 1 lines
-    // up with the generic setup/IO bucket and is distinct from exit 2
-    // (threshold gate). Diagnostics are already logged above; this gate
-    // only flips the exit code.
-    if analysis_failed {
         std::process::exit(1);
     }
 

@@ -79,11 +79,11 @@ fn metrics_exits_one_on_threshold_violation_with_grouped_report() {
         "stderr must summarize the violation count: {stderr}"
     );
     assert!(
-        stderr.contains("cognitive = 3 — exceeds max 2  [thresholds]"),
-        "stderr must name value, limit, and config table: {stderr}"
+        stderr.contains("cognitive = 3 — exceeds max 2  (set by thresholds)"),
+        "stderr must name value, limit, and config path: {stderr}"
     );
     assert!(
-        stderr.contains("loc.lloc = 4 — exceeds max 3  [thresholds]"),
+        stderr.contains("loc.lloc = 4 — exceeds max 3  (set by thresholds)"),
         "stderr must report every crossed metric: {stderr}"
     );
     assert!(
@@ -139,8 +139,8 @@ fn metrics_language_override_wins_and_is_named_in_report() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains("cognitive = 3 — exceeds max 1  [languages.python.thresholds]"),
-        "the override limit and its exact config table must be reported: {stderr}"
+        stderr.contains("cognitive = 3 — exceeds max 1  (set by languages.python.thresholds)"),
+        "the override limit and its config path must be reported: {stderr}"
     );
 }
 
@@ -484,6 +484,50 @@ fn diff_passes_when_head_within_thresholds() {
         output.status.success(),
         "within-limit diff must pass: {}",
         stderr_of(&output)
+    );
+}
+
+#[test]
+fn diff_analysis_failure_outranks_the_threshold_gate() {
+    // One file crosses the threshold, another has a hard syntax error:
+    // the run must fail as an analysis failure — JSON without the
+    // machine-readable gate signal — so CI consumers do not publish a
+    // partial report as an ordinary gate failure.
+    let dir = tempfile::tempdir().expect("tempdir");
+    git_ok(dir.path(), &["init", "-q", "-b", "main"]);
+    git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
+    write_file(dir.path(), "sample.py", SIMPLE_PY);
+    write_file(dir.path(), "broken.py", "def ok():\n    return 1\n");
+    git_ok(dir.path(), &["add", "-A"]);
+    git_ok(dir.path(), &["commit", "-q", "-m", "base"]);
+    write_file(dir.path(), "sample.py", COMPLEX_PY);
+    write_file(dir.path(), "broken.py", "def broken(:\n    return 1\n");
+    git_ok(dir.path(), &["add", "-A"]);
+    git_ok(dir.path(), &["commit", "-q", "-m", "head"]);
+    write_file(dir.path(), "mehen.toml", "[thresholds]\ncognitive = 1\n");
+
+    let output = mehen()
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "HEAD~1",
+            "--to",
+            "HEAD",
+            "--metrics",
+            "cognitive",
+            "--output-format",
+            "json",
+        ])
+        .output()
+        .expect("failed to run mehen diff");
+
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("JSON still emitted");
+    assert!(
+        value.get("threshold_violations").is_none(),
+        "an analysis failure must withhold the gate signal: {value}"
     );
 }
 

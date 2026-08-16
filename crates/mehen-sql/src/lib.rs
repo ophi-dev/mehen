@@ -329,6 +329,163 @@ fn empty_sql_analysis(
     }
 }
 
+/// Every fixed scalar metric key the SQL analyzer can publish, for
+/// configuration validation and typo suggestions. Two dynamic,
+/// enum-backed families are validated separately by
+/// [`is_published_metric_key`]: `sql.statement.kind_count.<kind>` and
+/// `sql.dialect.is_<dialect>`.
+///
+/// Kept honest by `published_key_catalogue_is_in_sync` in the tests
+/// below, which analyzes feature-rich SQL and asserts every published
+/// key validates.
+pub const PUBLISHED_METRIC_KEYS: &[&str] = &[
+    "sql.aggregate.distinct_count",
+    "sql.aggregate.function_count",
+    "sql.alias.table_alias_count",
+    "sql.case.count",
+    "sql.case.max_depth",
+    "sql.case.max_when_count",
+    "sql.case.missing_else_count",
+    "sql.case.when_count",
+    "sql.cast.count",
+    "sql.change_risk_score",
+    "sql.cognitive_complexity",
+    "sql.cte.count",
+    "sql.cte.dependency_edges",
+    "sql.cte.max_dependency_depth",
+    "sql.cte.max_fan_out",
+    "sql.cte.recursive_count",
+    "sql.cte.trivial_count",
+    "sql.cte.unused_count",
+    "sql.dcl.grant_revoke_count",
+    "sql.ddl.alter_count",
+    "sql.ddl.create_count",
+    "sql.ddl.create_or_replace_count",
+    "sql.ddl.drop_count",
+    "sql.ddl.truncate_count",
+    "sql.derived_table.count",
+    "sql.dialect.confidence",
+    "sql.dialect.conflict_count",
+    "sql.dialect.directive_present",
+    "sql.dialect.requested",
+    "sql.dml.delete_count",
+    "sql.dml.delete_without_where_count",
+    "sql.dml.insert_count",
+    "sql.dml.merge_count",
+    "sql.dml.returning_count",
+    "sql.dml.update_count",
+    "sql.dml.update_without_where_count",
+    "sql.expression.max_depth",
+    "sql.function.call_count",
+    "sql.function.distinct_count",
+    "sql.function.nested_call_depth",
+    "sql.group_by.count",
+    "sql.group_by.cube_count",
+    "sql.group_by.grouping_sets_count",
+    "sql.group_by.rollup_count",
+    "sql.halstead.difficulty",
+    "sql.halstead.distinct_operands",
+    "sql.halstead.distinct_operators",
+    "sql.halstead.effort",
+    "sql.halstead.length",
+    "sql.halstead.total_operands",
+    "sql.halstead.total_operators",
+    "sql.halstead.vocabulary",
+    "sql.halstead.volume",
+    "sql.having.count",
+    "sql.identifier.quoted_count",
+    "sql.identifier.unqualified_column_ratio",
+    "sql.join.count",
+    "sql.join.cross_count",
+    "sql.join.kind_count.cross",
+    "sql.join.kind_count.full",
+    "sql.join.kind_count.inner",
+    "sql.join.kind_count.lateral",
+    "sql.join.kind_count.left",
+    "sql.join.kind_count.natural",
+    "sql.join.kind_count.right",
+    "sql.join.missing_condition_count",
+    "sql.join.natural_count",
+    "sql.join.non_equi_count",
+    "sql.join.outer_count",
+    "sql.loc.avg_statement_lines",
+    "sql.loc.blank",
+    "sql.loc.code",
+    "sql.loc.comment",
+    "sql.loc.comment_density",
+    "sql.loc.logical",
+    "sql.loc.max_statement_lines",
+    "sql.loc.physical",
+    "sql.maintainability_index",
+    "sql.modularity_health",
+    "sql.object.read_count",
+    "sql.object.touch_count",
+    "sql.object.write_count",
+    "sql.parser.diagnostic_count",
+    "sql.parser.unparsable_line_count",
+    "sql.parser.unparsable_ratio",
+    "sql.parser.unparsable_segment_count",
+    "sql.predicate.boolean_operator_count",
+    "sql.predicate.comparison_count",
+    "sql.predicate.max_boolean_depth",
+    "sql.predicate.not_count",
+    "sql.predicate.null_semantics_risk_count",
+    "sql.query_block.avg_select_items",
+    "sql.query_block.count",
+    "sql.query_block.max_depth",
+    "sql.query_block.max_select_items",
+    "sql.relation.ref_count",
+    "sql.review_burden_index",
+    "sql.select.expression_without_alias_count",
+    "sql.select.outer_star_count",
+    "sql.select.output_alias_coverage",
+    "sql.select.star_count",
+    "sql.set_op.count",
+    "sql.set_op.kind_count.except",
+    "sql.set_op.kind_count.intersect",
+    "sql.set_op.kind_count.union",
+    "sql.set_op.kind_count.union_all",
+    "sql.set_op.union_all_ratio",
+    "sql.statement.count",
+    "sql.statement.kind_distinct",
+    "sql.statement.kind_entropy",
+    "sql.statement.lines",
+    "sql.statement.unparsed_count",
+    "sql.structural_complexity",
+    "sql.subquery.correlated_count",
+    "sql.subquery.count",
+    "sql.subquery.exists_count",
+    "sql.subquery.in_count",
+    "sql.subquery.max_depth",
+    "sql.subquery.scalar_count",
+    "sql.transaction.control_count",
+    "sql.window.frame_count",
+    "sql.window.function_count",
+    "sql.window.order_expression_count",
+    "sql.window.partition_expression_count",
+];
+
+/// Whether the SQL analyzer can publish `name` onto a `MetricSpace` —
+/// the fixed catalogue plus the enum-backed dynamic families. Used by
+/// `mehen.toml` threshold validation so a typo like
+/// `sql.modularit_health` is rejected at load time instead of
+/// becoming a gate that can never fire.
+pub fn is_published_metric_key(name: &str) -> bool {
+    use core::str::FromStr;
+    if PUBLISHED_METRIC_KEYS.contains(&name) {
+        return true;
+    }
+    if let Some(label) = name.strip_prefix("sql.statement.kind_count.") {
+        return facts::StatementKind::ALL
+            .iter()
+            .any(|kind| kind.label() == label);
+    }
+    if let Some(dialect) = name.strip_prefix("sql.dialect.is_") {
+        return DialectKind::from_str(dialect).is_ok();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +506,68 @@ mod tests {
             .get(&MetricKey::new(key))
             .map(|v| v.as_f64())
             .unwrap_or(0.0)
+    }
+
+    /// Every key the analyzer publishes — root and statement spaces
+    /// alike — must validate through `is_published_metric_key`, or
+    /// `mehen.toml` threshold validation would reject a real metric.
+    #[test]
+    fn published_key_catalogue_is_in_sync() {
+        let sql = "WITH history AS (SELECT 1 AS x),\n\
+                   unused AS (SELECT 2 AS y)\n\
+                   SELECT a.x,\n\
+                          COUNT(DISTINCT b.y) OVER (PARTITION BY a.x ORDER BY a.x \
+                          ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS w,\n\
+                          CASE WHEN a.x > 0 THEN 1 ELSE 0 END AS c,\n\
+                          CAST(a.x AS INT) AS casted,\n\
+                          (SELECT MAX(z) FROM v WHERE v.id = a.x) AS scalar\n\
+                   FROM history a\n\
+                   LEFT JOIN t b ON a.x = b.x\n\
+                   CROSS JOIN u\n\
+                   JOIN (SELECT 1 AS d) derived ON derived.d = a.x\n\
+                   WHERE EXISTS (SELECT 1 FROM v WHERE v.id = a.x)\n\
+                     AND a.x IN (SELECT z FROM w2)\n\
+                     AND NOT (a.x = 1 OR b.y IS NULL)\n\
+                   GROUP BY ROLLUP(a.x)\n\
+                   HAVING COUNT(*) > 1\n\
+                   UNION ALL SELECT 9;\n\
+                   INSERT INTO t VALUES (1);\n\
+                   UPDATE t SET c = 1;\n\
+                   DELETE FROM t;\n\
+                   MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET c = 2;\n\
+                   CREATE TABLE fresh (id INT);\n\
+                   ALTER TABLE fresh ADD COLUMN c INT;\n\
+                   DROP TABLE old_table;\n\
+                   TRUNCATE TABLE t;\n\
+                   GRANT SELECT ON t TO PUBLIC;\n\
+                   COMMIT;\n";
+        let a = analyze(sql);
+        let mut stack = vec![&a.root];
+        let mut seen = 0usize;
+        while let Some(space) = stack.pop() {
+            for (key, _) in space.metrics.iter() {
+                seen += 1;
+                assert!(
+                    is_published_metric_key(key.as_str()),
+                    "published key `{key}` is missing from the catalogue"
+                );
+            }
+            stack.extend(space.spaces.iter());
+        }
+        assert!(
+            seen > 80,
+            "fixture must exercise a rich key set, saw {seen}"
+        );
+        // The dynamic families validate by their enums, including
+        // members the fixture may not exercise…
+        assert!(is_published_metric_key(
+            "sql.statement.kind_count.create_view"
+        ));
+        assert!(is_published_metric_key("sql.dialect.is_snowflake"));
+        // …and near-misses stay invalid.
+        assert!(!is_published_metric_key("sql.modularit_health"));
+        assert!(!is_published_metric_key("sql.statement.kind_count.selec"));
+        assert!(!is_published_metric_key("sql.dialect.is_klingon"));
     }
 
     #[test]
