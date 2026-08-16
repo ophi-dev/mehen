@@ -77,9 +77,17 @@ async function main() {
   fs.writeFileSync(reportJson, `${diff.stdout.trim()}\n`, "utf8");
 
   const diffs = parseDiffJson(diff.stdout);
+  const gateViolations = parseGateViolations(diff.stdout);
   const context = readGithubContext();
   const violations = collectThresholdViolations(diffs, thresholds);
-  let markdown = renderMarkdown(diffs, context, thresholds, violations, version);
+  let markdown = renderMarkdown(
+    diffs,
+    context,
+    thresholds,
+    violations,
+    version,
+    gateViolations,
+  );
 
   // Phase F (§39): `mehen diff --output-format markdown` emits a
   // `<!-- mehen-docs -->` block whenever a changed Markdown file is in
@@ -479,7 +487,31 @@ function readGithubContext() {
   };
 }
 
-function renderMarkdown(diffs, context, thresholds, violations, version = "") {
+/**
+ * The `threshold_violations` array a gate-failing `mehen diff` embeds
+ * in its JSON report (absolute `mehen.toml` breaches at head — see the
+ * Configuration docs). Empty for passing runs, older CLIs, and
+ * non-JSON output.
+ */
+function parseGateViolations(stdout) {
+  try {
+    const parsed = JSON.parse(typeof stdout === "string" ? stdout : "");
+    return parsed && Array.isArray(parsed.threshold_violations)
+      ? parsed.threshold_violations
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function renderMarkdown(
+  diffs,
+  context,
+  thresholds,
+  violations,
+  version = "",
+  gateViolations = [],
+) {
   const title = input("COMMENT_TITLE", DEFAULT_TITLE).trim() || DEFAULT_TITLE;
   const scope =
     context.eventName === "pull_request"
@@ -526,6 +558,21 @@ function renderMarkdown(diffs, context, thresholds, violations, version = "") {
       for (const violation of violations) {
         body += `| ${renderFile(violation.path, context)} | ${escapeCell(violation.label)} | ${formatSigned(violation.delta)} | ${formatNumber(violation.limit)} |\n`;
       }
+    }
+  }
+
+  // Absolute `mehen.toml` breaches at head: the diff table above may
+  // not name these files at all (an unchanged-but-over-limit metric
+  // is dropped as an unchanged row), so the failing gate must be
+  // spelled out here or the comment would say "no changes" while the
+  // workflow step fails.
+  if (gateViolations.length > 0) {
+    body += "\n### Repository thresholds (mehen.toml)\n\n";
+    body += "| File | Metric | Value | Limit | Set by |\n";
+    body += "|---|---|---:|---:|---|\n";
+    for (const violation of gateViolations) {
+      const bound = violation.polarity === "higher_is_better" ? "min" : "max";
+      body += `| ${renderFile(violation.path, context)} | ${escapeCell(violation.metric)} | ${formatNumber(violation.value)} | ${bound} ${formatNumber(violation.limit)} | ${escapeCell(violation.source_table)} |\n`;
     }
   }
 
@@ -873,6 +920,7 @@ export {
   inferPolarity,
   isGateFailureReport,
   isNotApplicable,
+  parseGateViolations,
   parseList,
   parseThresholds,
   parseVersionOutput,

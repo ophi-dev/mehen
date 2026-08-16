@@ -11,12 +11,29 @@ import {
   inferPolarity,
   isGateFailureReport,
   isNotApplicable,
+  parseGateViolations,
   parseList,
   parseThresholds,
   parseVersionOutput,
   renderFooter,
   unionMetricColumns,
 } from "./github-action.mjs";
+
+test("parseGateViolations extracts the embedded gate breaches", () => {
+  const payload =
+    '{"source_code": [], "threshold_violations": [{"path": "a.py", "metric": "cognitive", "value": 23, "limit": 15, "polarity": "higher_is_worse", "source_table": "languages.py.thresholds"}]}';
+  const violations = parseGateViolations(payload);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].metric, "cognitive");
+  assert.equal(violations[0].source_table, "languages.py.thresholds");
+});
+
+test("parseGateViolations is empty for passing runs and older CLIs", () => {
+  assert.deepEqual(parseGateViolations('{"source_code": []}'), []);
+  assert.deepEqual(parseGateViolations("[]"), []);
+  assert.deepEqual(parseGateViolations("not json"), []);
+  assert.deepEqual(parseGateViolations(undefined), []);
+});
 
 test("isGateFailureReport requires the explicit threshold_violations signal", () => {
   assert.equal(

@@ -953,6 +953,14 @@ fn run_diff_inner(
     // unchanged (Codex P2). `explicit_metrics` selects between the two modes.
     let explicit_metrics = !opts.metrics.is_empty();
     let selectors = parse_metric_selectors(&opts.metrics);
+    // An explicit `--metrics` list where nothing parsed would silently
+    // produce an empty diff — and bypass every configured threshold
+    // whose column the typo'd list was meant to select. Fail loudly
+    // instead (matching `top-offenders`' required-metric guard).
+    if explicit_metrics && selectors.is_empty() {
+        log::error!("No valid metrics in --metrics. See `mehen diff --help`.");
+        std::process::exit(1);
+    }
 
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let analysis_config = AnalysisConfig::default();

@@ -158,30 +158,20 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
                 label,
                 polarity: polarity_override.unwrap_or(default_polarity),
             });
-        } else if is_namespaced_metric(name) {
-            // Language-owned families (`sql.*`, `markdown.*`) and the
-            // engine-owned `history.*` family publish flat keys that aren't
-            // in the source-code `KNOWN_METRICS` catalogue. Accept any such
-            // key verbatim so e.g. `--metric sql.change_risk_score` or
-            // `--metric history.churn.abs` works. `read_metric` reads the
-            // bare key from the `MetricSpace`.
-            // The name/label must be `'static`; leak the (short-lived, CLI-run)
-            // string, matching `metric_set_key_for`'s fallback.
-            let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-            selectors.push(MetricSelector {
-                name: leaked,
-                label: leaked,
-                polarity: polarity_override.unwrap_or_else(|| default_namespaced_polarity(name)),
-            });
         } else if let Ok(canonical) = crate::config_file::canonical_metric_key(name) {
-            // Any other key the shared source-code publishers emit — the
-            // same catalogue `mehen.toml` threshold validation resolves
-            // against: `cognitive.max`, `loc.sloc`, `nom.functions.max`
-            // (aggregate aliases resolve to their published spelling), …
-            // The selector reads the canonical key; the user's spelling
-            // stays as the column label. Without this branch a documented,
-            // configurable metric could not be selected as a column, so
-            // its configured gate could never fire in diff/top-offenders.
+            // Any other key the analyzers publish — the same catalogue
+            // `mehen.toml` threshold validation resolves against: the
+            // source-code families (`cognitive.max`, `loc.sloc`,
+            // `nom.functions.max` — aggregate aliases resolve to their
+            // published spelling), the fixed `history.*` family, and
+            // the analyzer-owned `sql.*` / `markdown.*` catalogues.
+            // Routing the namespaced families through the catalogue —
+            // instead of accepting any prefixed name verbatim —
+            // rejects typos like `sql.modularit_health` here, so a
+            // mistyped CI column cannot silently defeat the correctly
+            // configured threshold on the real key. The selector reads
+            // the canonical key; the user's spelling stays as the
+            // column label.
             let canonical: &'static str = Box::leak(canonical.into_boxed_str());
             let label: &'static str = Box::leak(name.to_string().into_boxed_str());
             let default_polarity = if is_higher_is_better_metric(canonical) {
@@ -200,21 +190,6 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
     }
 
     selectors
-}
-
-/// Whether `name` is a namespaced metric key that the CLI should accept even
-/// though it is not in the source-code `KNOWN_METRICS` catalogue: the
-/// language-owned families (`sql.*`, `markdown.*`) and the engine-owned git
-/// history family (`history.*`). The language namespaces are extensible and
-/// accepted by prefix; the `history.*` family is fixed and enumerated
-/// (`mehen_core::keys::HISTORY_ALL`), so a typo like
-/// `history.commit_frequncy` is rejected here — accepting it would trigger
-/// the expensive repository walk and then silently read `0.0` through the
-/// missing-key fallback (an all-zero ranking, or a diff with no rows).
-fn is_namespaced_metric(name: &str) -> bool {
-    name.starts_with("sql.")
-        || name.starts_with("markdown.")
-        || mehen_core::keys::HISTORY_ALL.contains(&name)
 }
 
 /// Namespaced (`sql.*` / `markdown.*` / `history.*`) metric keys where a
@@ -411,8 +386,12 @@ mod tests {
         for selector in &selectors {
             assert_eq!(selector.polarity, Polarity::LowerIsBetter);
         }
-        // Unpublished near-misses stay rejected.
+        // Unpublished near-misses stay rejected — including namespaced
+        // typos, which previously slipped through by prefix and could
+        // silently defeat the configured gate on the real key.
         assert!(parse_metric_selectors(&["cognitive.maximum".to_string()]).is_empty());
+        assert!(parse_metric_selectors(&["sql.modularit_health".to_string()]).is_empty());
+        assert!(parse_metric_selectors(&["markdown.links.borken".to_string()]).is_empty());
     }
 
     #[test]
