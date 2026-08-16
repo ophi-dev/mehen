@@ -520,4 +520,14 @@ fn diff_json_output_still_emitted_before_threshold_failure() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout)
         .expect("machine output must stay parseable when the gate fails");
     assert!(value["source_code"].is_array());
+    // The explicit gate signal machine consumers (e.g. the GitHub
+    // Action) use to distinguish a quality-gate exit from an analysis
+    // failure, which also exits 1 but without this key.
+    let violations = value["threshold_violations"]
+        .as_array()
+        .expect("gate failures must carry threshold_violations");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0]["metric"].as_str(), Some("cognitive"));
+    assert_eq!(violations[0]["path"].as_str(), Some("sample.py"));
+    assert_eq!(violations[0]["limit"].as_f64(), Some(1.0));
 }

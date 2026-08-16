@@ -18,11 +18,29 @@ import {
   unionMetricColumns,
 } from "./github-action.mjs";
 
-test("isGateFailureReport accepts a complete diff JSON payload", () => {
-  assert.equal(isGateFailureReport('{"source_code": [], "markdown": []}'), true);
+test("isGateFailureReport requires the explicit threshold_violations signal", () => {
   assert.equal(
-    isGateFailureReport('{"source_code": [{"path": "a.py"}]}'),
+    isGateFailureReport(
+      '{"source_code": [], "threshold_violations": [{"path": "a.py", "metric": "cognitive"}]}',
+    ),
     true,
+  );
+  assert.equal(
+    isGateFailureReport(
+      '{"source_code": [{"path": "a.py"}], "markdown": [], "threshold_violations": [{}]}',
+    ),
+    true,
+  );
+});
+
+test("isGateFailureReport rejects reports without a fired gate", () => {
+  // An analysis failure also exits 1 with well-formed JSON — without
+  // the threshold_violations key it must keep failing fast.
+  assert.equal(isGateFailureReport('{"source_code": [], "markdown": []}'), false);
+  assert.equal(isGateFailureReport('{"source_code": [{"path": "a.py"}]}'), false);
+  assert.equal(
+    isGateFailureReport('{"source_code": [], "threshold_violations": []}'),
+    false,
   );
 });
 

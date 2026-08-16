@@ -1541,6 +1541,9 @@ fn run_diff_inner(
     };
 
     // 7. Output
+    // Deterministic order for both the JSON payload and the stderr
+    // report (render_threshold_report re-sorts harmlessly).
+    crate::config_file::sort_breaches(&mut threshold_breaches);
     let format = opts.output_format.unwrap_or(DiffFormat::Markdown);
     match format {
         DiffFormat::Markdown => {
@@ -1566,7 +1569,7 @@ fn run_diff_inner(
             } else {
                 Some(&doc_files)
             };
-            if let Err(e) = print_json(&diffs, doc_ref) {
+            if let Err(e) = print_json(&diffs, doc_ref, &threshold_breaches) {
                 // Surface the error loudly — exit code 2 mirrors the
                 // --fail-on gate and is distinct from the generic exit 1
                 // that covers setup/IO errors in run_diff_inner.
@@ -2021,6 +2024,7 @@ fn format_f64(v: f64) -> String {
 fn print_json(
     diffs: &[FileDiff],
     docs: Option<&[DocDiffFile]>,
+    threshold_breaches: &[crate::config_file::ThresholdBreach],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut payload = serde_json::Map::new();
     payload.insert("source_code".to_string(), serde_json::to_value(diffs)?);
@@ -2028,6 +2032,16 @@ fn print_json(
         payload.insert(
             "markdown".to_string(),
             serde_json::Value::Array(doc_json_payload(docs)),
+        );
+    }
+    // Present only when a configured `mehen.toml` gate fired — the
+    // explicit signal machine consumers (e.g. the GitHub Action) use
+    // to distinguish a quality-gate exit (1, with this key) from an
+    // analysis failure (also exit 1, but without it).
+    if !threshold_breaches.is_empty() {
+        payload.insert(
+            "threshold_violations".to_string(),
+            serde_json::to_value(threshold_breaches)?,
         );
     }
     let json = serde_json::to_string_pretty(&serde_json::Value::Object(payload))?;
@@ -3746,7 +3760,7 @@ src/archive.txt binary
             is_deleted: false,
             functions: 0,
         }];
-        let res = print_json(&diffs, None);
+        let res = print_json(&diffs, None, &[]);
         assert!(res.is_ok(), "valid input must serialize cleanly");
     }
 
@@ -3757,7 +3771,7 @@ src/archive.txt binary
         // emitter used `unwrap_or_default` and silently wrote an empty
         // JSON document to stdout when serde_json failed.
         let diffs: Vec<FileDiff> = vec![];
-        let res: Result<(), Box<dyn std::error::Error>> = print_json(&diffs, None);
+        let res: Result<(), Box<dyn std::error::Error>> = print_json(&diffs, None, &[]);
         assert!(res.is_ok());
     }
 

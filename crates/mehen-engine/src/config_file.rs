@@ -377,8 +377,12 @@ impl ErrorContext<'_> {
 }
 
 /// One crossed threshold: the measured value, the configured limit,
-/// and enough context to render an actionable report line.
-#[derive(Debug, Clone)]
+/// and enough context to render an actionable report line. Serialized
+/// verbatim into `mehen diff --output-format json` under
+/// `threshold_violations` so machine consumers (e.g. the GitHub
+/// Action) can distinguish a quality-gate exit from an analysis
+/// failure.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ThresholdBreach {
     /// Display path of the offending file.
     pub path: String,
@@ -801,13 +805,20 @@ fn collect_thresholds(
             };
             match value.get_ref() {
                 toml::de::DeValue::Integer(i) => {
-                    let limit = i64::from_str_radix(i.as_str(), i.radix())
+                    // `as_str` keeps the lexical spelling, including
+                    // legal digit separators (`1_000`); strip them
+                    // before conversion.
+                    let limit = i64::from_str_radix(&i.as_str().replace('_', ""), i.radix())
                         .map(|v| v as f64)
                         .unwrap_or(f64::NAN);
                     insert_threshold(&metric, key, prefix, limit, context, out, ctx)?;
                 }
                 toml::de::DeValue::Float(f) => {
-                    let limit = f.as_str().parse::<f64>().unwrap_or(f64::NAN);
+                    let limit = f
+                        .as_str()
+                        .replace('_', "")
+                        .parse::<f64>()
+                        .unwrap_or(f64::NAN);
                     insert_threshold(&metric, key, prefix, limit, context, out, ctx)?;
                 }
                 toml::de::DeValue::Table(nested) => {
@@ -845,12 +856,14 @@ fn collect_thresholds(
 /// dotted assignment puts the parent segments there, a nested header
 /// leaves the line to start at the leaf. Parent segments are matched
 /// per TOML key syntax — bare, `"quoted"`, or `'quoted'`, with
-/// optional whitespace around the dots — so legal spellings like
-/// `"loc" . lloc = 500` attribute to `[thresholds]` rather than to a
-/// `[thresholds.loc]` header that was never written. Partially dotted
-/// forms (`b.c = 1` under `[thresholds.a]`) attribute to the deepest
-/// written header (`thresholds.a`) with the dotted remainder (`b.c`)
-/// as the reported key.
+/// optional whitespace around the dots — and across both link forms,
+/// the dotted `parent.` and the inline-table `parent = {`, so legal
+/// spellings like `"loc" . lloc = 500` or `loc = { lloc = 500 }`
+/// attribute to `[thresholds]` rather than to a `[thresholds.loc]`
+/// header that was never written. Partially dotted forms (`b.c = 1`
+/// under `[thresholds.a]`) attribute to the deepest written header
+/// (`thresholds.a`) with the dotted remainder (`b.c`) as the reported
+/// key.
 fn written_spelling(
     text: &str,
     key_span: std::ops::Range<usize>,
@@ -866,16 +879,24 @@ fn written_spelling(
         .map_or(0, |newline| newline + 1);
     let mut rest = text[line_start..key_span.start].trim_end();
     // A quoted leaf's span may exclude its quotes; drop the opening
-    // quote so the dot search below sees the delimiter.
+    // quote so the link search below sees the delimiter.
     rest = rest.strip_suffix(['"', '\'']).unwrap_or(rest).trim_end();
     let segments: Vec<&str> = prefix.split('.').collect();
-    // Consume `<segment> .` pairs backwards, per TOML key syntax.
+    // Consume `<segment> .` (dotted) or `<segment> = {` (inline
+    // table) links backwards, per TOML key syntax.
     let mut matched = 0;
     while matched < segments.len() {
-        let Some(after_dot) = rest.strip_suffix('.') else {
+        let after_link = if let Some(after) = rest.strip_suffix('.') {
+            Some(after)
+        } else if let Some(after) = rest.strip_suffix('{') {
+            after.trim_end().strip_suffix('=')
+        } else {
+            None
+        };
+        let Some(candidate) = after_link else {
             break;
         };
-        let candidate = after_dot.trim_end();
+        let candidate = candidate.trim_end();
         let segment = segments[segments.len() - 1 - matched];
         let remaining = if let Some(remaining) = candidate
             .strip_suffix(&format!("\"{segment}\""))
@@ -1090,6 +1111,14 @@ impl fmt::Display for ThresholdReport {
 
 impl core::error::Error for ThresholdReport {}
 
+/// Sort breaches by path then metric — the deterministic order shared
+/// by the stderr report and the JSON `threshold_violations` payload.
+pub(crate) fn sort_breaches(breaches: &mut [ThresholdBreach]) {
+    breaches.sort_by(|a, b| {
+        (a.path.as_str(), a.metric.as_str()).cmp(&(b.path.as_str(), b.metric.as_str()))
+    });
+}
+
 /// Render the violation report printed to stderr before exiting 1.
 ///
 /// Sorted by path then metric for determinism, grouped per file; each
@@ -1097,9 +1126,7 @@ impl core::error::Error for ThresholdReport {}
 /// config table that set it (`[thresholds]` or
 /// `[languages.<lang>.thresholds]`, alias spelling preserved).
 pub fn render_threshold_report(breaches: &mut [ThresholdBreach], config_path: &Path) -> String {
-    breaches.sort_by(|a, b| {
-        (a.path.as_str(), a.metric.as_str()).cmp(&(b.path.as_str(), b.metric.as_str()))
-    });
+    sort_breaches(breaches);
 
     let plural = if breaches.len() == 1 { "" } else { "s" };
     let mut message = format!(
@@ -1606,6 +1633,34 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn inline_tables_attribute_to_their_assignment_line() {
+        // Inline tables put the whole path on the assignment's line;
+        // the report must not point at a bracketed header that was
+        // never written.
+        let space = space_with(&[("loc.lloc", 640.0)]);
+        for config_text in [
+            "thresholds = { loc = { lloc = 500 } }\n",
+            "[thresholds]\nloc = { lloc = 500 }\n",
+        ] {
+            let config = parse(config_text).expect("valid config");
+            let breaches = config
+                .thresholds
+                .evaluate("a.py", Language::Python, &space, None);
+            assert_eq!(breaches.len(), 1, "{config_text}");
+            assert_eq!(breaches[0].source_table, "thresholds", "{config_text}");
+            assert_eq!(breaches[0].metric, "loc.lloc", "{config_text}");
+        }
+    }
+
+    #[test]
+    fn integer_and_float_digit_separators_parse() {
+        let config = parse("[thresholds]\ncognitive = 1_000\n\"loc.lloc\" = 1_500.5\n")
+            .expect("digit separators are legal TOML");
+        assert_eq!(global_limit(&config, "cognitive.sum"), Some(1000.0));
+        assert_eq!(global_limit(&config, "loc.lloc"), Some(1500.5));
     }
 
     #[test]

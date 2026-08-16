@@ -122,7 +122,10 @@ mehen::thresholds
 
 Each line names the measured value, the crossed limit, and the config table that set it, so the
 fix — either direction — is one jump away. Violations are sorted by path, then metric, for
-deterministic CI logs. Colors engage only on a terminal with `NO_COLOR` unset.
+deterministic CI logs. Colors engage only on a terminal with `NO_COLOR` unset. With
+`--output-format json`, `mehen diff` additionally embeds the violations as a top-level
+`threshold_violations` array (present only when the gate fired), so machine consumers can tell a
+quality-gate exit from an analysis failure.
 
 ## Validation
 

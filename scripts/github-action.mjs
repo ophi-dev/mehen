@@ -310,15 +310,22 @@ function runMehen(cli, args, options = {}) {
 }
 
 /**
- * Whether a failing `mehen diff --output-format json` invocation still
- * emitted its complete report — the marker that the nonzero exit is a
- * quality gate (configured `mehen.toml` thresholds), not a setup/IO
- * error whose stdout would be empty or partial.
+ * Whether a failing `mehen diff --output-format json` invocation is a
+ * configured quality-gate exit: the payload must be complete AND carry
+ * the explicit `threshold_violations` signal the CLI emits only when a
+ * `mehen.toml` gate fired. An analysis failure also exits 1 with
+ * well-formed JSON but without that key — it must keep failing fast
+ * instead of publishing a partial report under the wrong reason.
  */
 function isGateFailureReport(stdout) {
   try {
     const parsed = JSON.parse(typeof stdout === "string" ? stdout : "");
-    return Boolean(parsed && Array.isArray(parsed.source_code));
+    return Boolean(
+      parsed &&
+        Array.isArray(parsed.source_code) &&
+        Array.isArray(parsed.threshold_violations) &&
+        parsed.threshold_violations.length > 0,
+    );
   } catch {
     return false;
   }
