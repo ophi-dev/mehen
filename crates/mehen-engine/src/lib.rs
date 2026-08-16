@@ -35,8 +35,8 @@ mod registry;
 mod top_offenders;
 
 pub use config_file::{
-    ConfigError, ConfigFile, LimitSource, ThresholdBreach, ThresholdPolicy, load_config,
-    render_config_error, render_threshold_report,
+    ConfigError, ConfigFile, ThresholdBreach, ThresholdPolicy, load_config, render_config_error,
+    render_threshold_report,
 };
 pub use diff::{DiffOpts, run_diff};
 pub use top_offenders::{TopOffendersOpts, run_top_offenders};

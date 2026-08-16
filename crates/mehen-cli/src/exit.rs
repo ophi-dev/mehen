@@ -14,7 +14,9 @@ pub enum ExitCode {
     SetupError = 1,
     /// Documentation policy failure (`mehen diff --fail-on`) and JSON
     /// emission failures inside `mehen diff` keep this historical code.
-    ThresholdFailure = 2,
+    /// Named for the doc gate: configured `mehen.toml` metric thresholds
+    /// exit 1 (see `SetupError`), not 2.
+    DocPolicyFailure = 2,
     /// Invalid machine-output serialization state.
     SerializationError = 3,
 }

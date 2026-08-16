@@ -21,9 +21,11 @@ cognitive = 10         # overrides the global limit for Python files only
 ## File discovery
 
 mehen looks for `mehen.toml` (preferred) or `.mehen.toml`, starting in the current working
-directory and walking up to the filesystem root. The first file found wins, so a config at the
-repository root applies from any subdirectory. When both names exist in the same directory,
-`mehen.toml` is used and a warning is logged.
+directory and walking up to the enclosing git repository root — the repository is the boundary,
+so a config above it (for example a stray `~/mehen.toml`) can never leak into a project. Outside
+a git repository, only the current directory is checked. The first file found wins, so a config
+at the repository root applies from any subdirectory. When both names exist in the same
+directory, `mehen.toml` is used and a warning is logged.
 
 The global `--config <PATH>` flag bypasses discovery and pins an explicit file for any command:
 
@@ -111,7 +113,7 @@ mehen::thresholds
   × 2 metric threshold violations (config: /repo/mehen.toml)
   │
   │ src/app/core.py
-  │   cognitive = 23 — exceeds max 10  [languages.python]
+  │   cognitive = 23 — exceeds max 10  [languages.python.thresholds]
   │   loc.lloc = 640 — exceeds max 500  [thresholds]
   help: raise or remove the limit in the config table shown, or refactor the file below it.
 ```
@@ -122,8 +124,12 @@ deterministic CI logs. Colors engage only on a terminal with `NO_COLOR` unset.
 
 ## Validation
 
-The configuration is validated when it loads. Unknown metrics, unknown languages, misspelled
-`history.*` keys, and non-numeric limits fail immediately with a pointer into the file:
+The configuration is validated when it loads. A metric name no analyzer publishes — a typo, a
+bare family root like `mi` (the analyzers publish `mi.visual_studio`, `mi.original`, `mi.sei`),
+an invented aggregate like `cognitive.maximum`, or a misspelled `history.*` key — fails
+immediately with a pointer into the file, as do unknown languages, non-numeric limits, and two
+spellings of the same metric in one table (`cognitive` and `cognitive.sum` are one logical
+threshold; contradictory duplicates would silently disable the stricter gate):
 
 ```text
 mehen::config
@@ -133,15 +139,15 @@ mehen::config
  1 │ [thresholds]
  2 │ cognitve = 5
    · ────┬───
-   ·     ╰── not a known metric
+   ·     ╰── not a published metric
    ╰────
-  help: did you mean `cognitive`? known families: abc, cognitive, cyclomatic, halstead,
-        loc, mi, nargs, nexit, nom, npa, npm, wmc, plus `sql.*`, `markdown.*`, and the
-        fixed `history.*` keys
+  help: did you mean `cognitive`?
 ```
 
-A typo can never silently disable a gate: the command fails with exit `1` before any analysis
-runs.
+The command fails with exit `1` before any analysis runs. One exception to load-time strictness:
+the `sql.*` and `markdown.*` namespaces are extensible and accepted verbatim, so verify those
+spellings against the [SQL](/metrics/sql/overview) and [Markdown](/metrics/markdown/overview)
+metric references.
 
 ## Relationship to other gates
 

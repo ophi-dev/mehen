@@ -139,8 +139,31 @@ fn metrics_language_override_wins_and_is_named_in_report() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains("cognitive = 3 — exceeds max 1  [languages.python]"),
-        "the override limit and its config table must be reported: {stderr}"
+        stderr.contains("cognitive = 3 — exceeds max 1  [languages.python.thresholds]"),
+        "the override limit and its exact config table must be reported: {stderr}"
+    );
+}
+
+#[test]
+fn missing_explicit_config_fails_with_path_in_message() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = write_file(dir.path(), "sample.py", SIMPLE_PY);
+
+    let output = mehen()
+        .current_dir(dir.path())
+        .args(["--config", "absent.toml", "metrics", file.to_str().unwrap()])
+        .output()
+        .expect("failed to run mehen metrics");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("config file not found") && stderr.contains("absent.toml"),
+        "an explicit --config must fail loudly: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a missing requested config must fail before any analysis output"
     );
 }
 
@@ -219,6 +242,8 @@ fn explicit_config_flag_bypasses_discovery() {
 #[test]
 fn config_is_discovered_from_parent_directory() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // Discovery walks upward within the enclosing git repository.
+    git_ok(dir.path(), &["init", "-q", "-b", "main"]);
     write_file(dir.path(), "mehen.toml", "[thresholds]\ncognitive = 1\n");
     let nested = dir.path().join("src/deep");
     std::fs::create_dir_all(&nested).expect("mkdirs");
@@ -233,7 +258,31 @@ fn config_is_discovered_from_parent_directory() {
     assert_eq!(
         output.status.code(),
         Some(1),
-        "an ancestor mehen.toml must apply: {}",
+        "a repo-root mehen.toml must apply: {}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn config_above_the_repository_root_is_ignored() {
+    // outer/mehen.toml sits above the repository at outer/repo — it
+    // cannot belong to the project, so the run stays ungated.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_file(dir.path(), "mehen.toml", "[thresholds]\ncognitive = 1\n");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdirs");
+    git_ok(&repo, &["init", "-q", "-b", "main"]);
+    let file = write_file(&repo, "sample.py", COMPLEX_PY);
+
+    let output = mehen()
+        .current_dir(&repo)
+        .args(["metrics", file.to_str().unwrap()])
+        .output()
+        .expect("failed to run mehen metrics");
+
+    assert!(
+        output.status.success(),
+        "a config outside the repository must not gate the run: {}",
         stderr_of(&output)
     );
 }

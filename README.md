@@ -60,8 +60,9 @@ Quickstart: <https://mehen.ophi.dev/quickstart>.
 
 ## Configuration
 
-Drop a `mehen.toml` (or `.mehen.toml`) anywhere at or above the directory you run `mehen` from —
-discovery walks upward, and `--config <PATH>` pins an explicit file:
+Drop a `mehen.toml` (or `.mehen.toml`) anywhere between the directory you run `mehen` from and
+the git repository root — discovery walks upward and stops at the repository boundary — or pin an
+explicit file with `--config <PATH>`:
 
 ```toml
 [thresholds]
@@ -82,14 +83,16 @@ crossed limit prints a grouped report on stderr and fails the command with exit 
   × 2 metric threshold violations (config: /repo/mehen.toml)
   │
   │ src/app/core.py
-  │   cognitive = 23 — exceeds max 10  [languages.python]
+  │   cognitive = 23 — exceeds max 10  [languages.python.thresholds]
   │   loc.lloc = 640 — exceeds max 500  [thresholds]
   help: raise or remove the limit in the config table shown, or refactor the file below it.
 ```
 
 Configuration mistakes fail fast with a caret into the TOML source and a suggestion ("unknown
-metric `cognitve` … did you mean `cognitive`?"), so a typo can never silently disable a gate.
-Full reference: <https://mehen.ophi.dev/configuration>.
+metric `cognitve` … did you mean `cognitive`?"): names that no analyzer publishes are rejected at
+load time. The extensible `sql.*` and `markdown.*` namespaces are the one exception — they are
+accepted verbatim, so verify those spellings against the metric reference. Full reference:
+<https://mehen.ophi.dev/configuration>.
 
 ## GitHub Action
 
