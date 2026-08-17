@@ -555,19 +555,28 @@ impl ThresholdPolicy {
 
 /// Whether a present metric value is a real measurement for this
 /// space, as opposed to a published N/A sentinel.
-/// `sql.modularity_health` emits `0.0` when the file has no CTEs (the
-/// score is only meaningful for CTE-bearing files, per
-/// `mehen-sql::composite`): gating the sentinel would fail every
-/// ordinary non-CTE SQL file under a higher-is-better minimum, while a
-/// genuine zero on a CTE-bearing file must keep gating — so
-/// applicability is read from the co-published `sql.cte.count`.
+///
+/// - `sql.modularity_health` emits `0.0` when the file has no CTEs
+///   (the score is only meaningful for CTE-bearing files, per
+///   `mehen-sql::composite`); applicability is read from the
+///   co-published `sql.cte.count`.
+/// - `halstead.level` (`L = 1/D`) emits `0.0` when the difficulty is
+///   zero — an empty or token-free file where the ratio is undefined;
+///   applicability is read from the co-published
+///   `halstead.difficulty`.
+///
+/// Gating a sentinel under a higher-is-better minimum would fail
+/// every inapplicable file, while a genuine low score must keep
+/// gating.
 fn value_is_measurable(root: &MetricSpace, canonical: &str) -> bool {
-    if canonical != "sql.modularity_health" {
-        return true;
-    }
+    let applicability_key = match canonical {
+        "sql.modularity_health" => "sql.cte.count",
+        "halstead.level" => "halstead.difficulty",
+        _ => return true,
+    };
     root.metrics
-        .get(&MetricKey::new("sql.cte.count"))
-        .is_none_or(|count| count.as_f64() > 0.0)
+        .get(&MetricKey::new(applicability_key))
+        .is_none_or(|gate| gate.as_f64() > 0.0)
 }
 
 /// Whether a configured limit is a minimum (higher-is-better metric)
@@ -711,6 +720,9 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                 let table = expect_table(value, "languages", &ctx)?;
                 for (lang_key, lang_value) in table {
                     let lang_str: &str = lang_key.get_ref().as_ref();
+                    // Path segments render TOML-quoted when needed:
+                    // the accepted `c#` alias is not a valid bare key.
+                    let lang_segment = toml_key_segment(lang_str);
                     let language = lang_str.parse::<Language>().map_err(|_| {
                         ctx.error_at(
                             lang_key.span(),
@@ -728,7 +740,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                                 lang_key.span(),
                                 "same language configured twice",
                                 format!(
-                                    "duplicate [languages.{lang_str}] section — another key \
+                                    "duplicate [languages.{lang_segment}] section — another key \
                                      already configures `{}`",
                                     language.canonical()
                                 ),
@@ -738,7 +750,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                                  per language",
                             ));
                     }
-                    let lang_ctx = format!("languages.{lang_str}");
+                    let lang_ctx = format!("languages.{lang_segment}");
                     let lang_table = expect_table(lang_value, &lang_ctx, &ctx)?;
                     let mut thresholds: BTreeMap<String, ThresholdEntry> = BTreeMap::new();
                     for (sub_key, sub_value) in lang_table {
@@ -906,6 +918,45 @@ fn collect_thresholds(
     walk(table, "", context, language, out, ctx)
 }
 
+/// A key segment as it must be written in a TOML path: bare when the
+/// characters allow it, quoted-and-escaped otherwise. The accepted
+/// language alias `c#` cannot be a bare key (`#` starts a comment), so
+/// a path like `languages."c#".thresholds` must quote it or the
+/// reported configuration path could not identify the table.
+fn toml_key_segment(segment: &str) -> String {
+    let bare = !segment.is_empty()
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if bare {
+        segment.to_string()
+    } else {
+        format!("\"{}\"", segment.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// Every language mehen can identify, for the "can any enabled
+/// analyzer publish this key?" reachability check on global
+/// thresholds.
+const ALL_LANGUAGES: &[Language] = &[
+    Language::Python,
+    Language::TypeScript,
+    Language::Tsx,
+    Language::JavaScript,
+    Language::Jsx,
+    Language::Php,
+    Language::Ruby,
+    Language::Rust,
+    Language::Go,
+    Language::Kotlin,
+    Language::Java,
+    Language::CSharp,
+    Language::PowerShell,
+    Language::C,
+    Language::Markdown,
+    Language::Sql,
+];
+
 /// Whether files of `language` can ever publish `canonical` onto their
 /// root metric set. The engine-injected `history.*` family applies to
 /// every language (it needs no analyzer); `sql.*` and `markdown.*`
@@ -954,6 +1005,29 @@ fn insert_threshold(
     ctx: &ErrorContext<'_>,
 ) -> Result<(), ConfigError> {
     let canonical = validate_metric_name(metric, key.span(), context, ctx)?;
+    // A global threshold no enabled analyzer can ever publish — e.g.
+    // `wmc` in a build whose only compiled grammars have no class-like
+    // constructs — would be a gate that can never fire. (`history.*`
+    // passes: it needs no analyzer.)
+    if language.is_none()
+        && !ALL_LANGUAGES
+            .iter()
+            .any(|candidate| language_can_publish(*candidate, &canonical))
+    {
+        return Err(ctx
+            .error_at(
+                key.span(),
+                "unreachable in this build",
+                format!(
+                    "`{metric}` in [{context}] can never fire: no analyzer compiled into \
+                     this build publishes it"
+                ),
+            )
+            .with_help(
+                "enable the owning language feature (or use a metric one of the compiled \
+                 analyzers publishes)",
+            ));
+    }
     // A language override naming a metric its files can never publish
     // (`sql.*` under [languages.python], `cognitive` under
     // [languages.sql]) would be a gate that can never fire.
@@ -1337,6 +1411,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lang-python")]
     fn parses_language_override_with_alias() {
         let config = parse("[languages.py.thresholds]\ncognitive = 10\n").expect("valid config");
         assert_eq!(config.thresholds.per_language.len(), 1);
@@ -1483,6 +1558,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lang-python")]
     fn rejects_duplicate_language_via_alias() {
         let err = parse(
             "[languages.py.thresholds]\ncognitive = 5\n[languages.python.thresholds]\ncognitive = 6\n",
@@ -1514,6 +1590,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "lang-python", feature = "lang-rust"))]
     fn language_override_wins_over_global() {
         let config =
             parse("[thresholds]\ncognitive = 15\n[languages.python.thresholds]\ncognitive = 10\n")
@@ -1643,6 +1720,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lang-python")]
     fn override_attribution_is_not_fooled_by_spellings_elsewhere() {
         // The dotted `loc.lloc` occurrence in the *global* table must
         // not affect the override's attribution: paths come from the
@@ -1768,7 +1846,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "lang-sql")]
+    #[cfg(all(
+        feature = "lang-sql",
+        feature = "lang-python",
+        feature = "lang-c",
+        feature = "lang-go"
+    ))]
     fn rejects_language_incompatible_thresholds() {
         // A language override naming a metric its files can never
         // publish would be a permanently dead gate.
@@ -1846,6 +1929,45 @@ mod tests {
             "{}",
             rendered(&err)
         );
+    }
+
+    #[test]
+    fn halstead_level_zero_difficulty_sentinel_is_not_gated() {
+        // `level = 1/D` is undefined at D == 0 and published as 0.0;
+        // a configured minimum must not fail empty/token-free files.
+        let config = parse("[thresholds]\n\"halstead.level\" = 0.2\n").expect("valid config");
+        let sentinel = space_with(&[("halstead.level", 0.0), ("halstead.difficulty", 0.0)]);
+        assert!(
+            config
+                .thresholds
+                .evaluate("a.py", Language::Python, &sentinel, None)
+                .is_empty()
+        );
+        // A measured low level on a real file still gates.
+        let low = space_with(&[("halstead.level", 0.05), ("halstead.difficulty", 20.0)]);
+        assert_eq!(
+            config
+                .thresholds
+                .evaluate("a.py", Language::Python, &low, None)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "lang-csharp")]
+    fn csharp_alias_paths_render_toml_quoted() {
+        // `c#` cannot be a bare TOML key (`#` starts a comment): the
+        // reported path must quote it or it could not identify the
+        // table.
+        let config = parse("[languages.\"c#\".thresholds]\ncognitive = 1\n")
+            .expect("quoted alias section is valid");
+        let space = space_with(&[("cognitive.sum", 5.0)]);
+        let breaches = config
+            .thresholds
+            .evaluate("a.cs", Language::CSharp, &space, None);
+        assert_eq!(breaches.len(), 1);
+        assert_eq!(breaches[0].source_table, "languages.\"c#\".thresholds");
     }
 
     #[test]
