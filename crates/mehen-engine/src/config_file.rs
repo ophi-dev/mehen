@@ -839,10 +839,18 @@ fn collect_thresholds(
             // point at anything that does not exist semantically.
             match value.get_ref() {
                 toml::de::DeValue::Integer(i) => {
-                    // `as_str` keeps the lexical spelling, including
-                    // legal digit separators (`1_000`); strip them
-                    // before conversion.
-                    let limit = i64::from_str_radix(&i.as_str().replace('_', ""), i.radix())
+                    // `as_str` keeps the lexical spelling: strip legal
+                    // digit separators (`1_000`) and the radix prefix
+                    // of hexadecimal/octal/binary spellings (`0x10`)
+                    // before conversion — `from_str_radix` accepts
+                    // bare digits only.
+                    let raw = i.as_str().replace('_', "");
+                    let digits = raw
+                        .strip_prefix("0x")
+                        .or_else(|| raw.strip_prefix("0o"))
+                        .or_else(|| raw.strip_prefix("0b"))
+                        .unwrap_or(&raw);
+                    let limit = i64::from_str_radix(digits, i.radix())
                         .map(|v| v as f64)
                         .unwrap_or(f64::NAN);
                     insert_threshold(&metric, key, limit, context, out, ctx)?;
@@ -1594,6 +1602,18 @@ mod tests {
             .expect("digit separators are legal TOML");
         assert_eq!(global_limit(&config, "cognitive.sum"), Some(1000.0));
         assert_eq!(global_limit(&config, "loc.lloc"), Some(1500.5));
+    }
+
+    #[test]
+    fn non_decimal_integer_spellings_parse() {
+        let config = parse(
+            "[thresholds]\ncognitive = 0x10\n\"loc.lloc\" = 0o20\n\"loc.sloc\" = 0b1000\nnargs = 0xdead_beef\n",
+        )
+        .expect("hex/octal/binary integers are legal TOML");
+        assert_eq!(global_limit(&config, "cognitive.sum"), Some(16.0));
+        assert_eq!(global_limit(&config, "loc.lloc"), Some(16.0));
+        assert_eq!(global_limit(&config, "loc.sloc"), Some(8.0));
+        assert_eq!(global_limit(&config, "nargs"), Some(3735928559.0));
     }
 
     #[test]

@@ -101,8 +101,11 @@ Two consequences worth knowing:
   [documentation pipeline](/guides/pr-comment-design) with its own
   [`--fail-on` gates](/commands/diff#fail-on-thresholds).
 
-Files whose parse produced a blocking diagnostic keep their existing exit-`1` failure path and are
-never threshold-gated on partial metrics.
+Files whose parse produces a blocking diagnostic are never threshold-gated on partial metrics:
+`mehen metrics` and `mehen diff` fail with exit `1` through their existing analysis-error
+contract, while `mehen top-offenders` keeps its contract of skipping unparsable files from the
+ranking (so a broken file cannot fabricate a passing measurement — but it does not fail the run
+by itself either).
 
 ## The violation report
 

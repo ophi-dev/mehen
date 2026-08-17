@@ -329,15 +329,19 @@ fn empty_sql_analysis(
     }
 }
 
-/// Every fixed scalar metric key the SQL analyzer can publish, for
-/// configuration validation and typo suggestions. Two dynamic,
-/// enum-backed families are validated separately by
-/// [`is_published_metric_key`]: `sql.statement.kind_count.<kind>` and
-/// `sql.dialect.is_<dialect>`.
+/// Every fixed scalar metric key the SQL analyzer can publish onto the
+/// *root* `MetricSpace` — the space `mehen.toml` thresholds and CLI
+/// selectors read — for configuration validation and typo suggestions.
+/// Child-only keys (`sql.statement.lines` on per-statement spaces) are
+/// deliberately excluded: validating them would accept a gate that can
+/// never fire. Two dynamic, enum-backed families are validated
+/// separately by [`is_published_metric_key`]:
+/// `sql.statement.kind_count.<kind>` and `sql.dialect.is_<dialect>`
+/// (compiled dialects only).
 ///
 /// Kept honest by `published_key_catalogue_is_in_sync` in the tests
 /// below, which analyzes feature-rich SQL and asserts every published
-/// key validates.
+/// root key validates.
 pub const PUBLISHED_METRIC_KEYS: &[&str] = &[
     "sql.aggregate.distinct_count",
     "sql.aggregate.function_count",
@@ -449,7 +453,6 @@ pub const PUBLISHED_METRIC_KEYS: &[&str] = &[
     "sql.statement.count",
     "sql.statement.kind_distinct",
     "sql.statement.kind_entropy",
-    "sql.statement.lines",
     "sql.statement.unparsed_count",
     "sql.structural_complexity",
     "sql.subquery.correlated_count",
@@ -480,8 +483,12 @@ pub fn is_published_metric_key(name: &str) -> bool {
             .iter()
             .any(|kind| kind.label() == label);
     }
-    if let Some(dialect) = name.strip_prefix("sql.dialect.is_") {
-        return DialectKind::from_str(dialect).is_ok();
+    if let Some(name) = name.strip_prefix("sql.dialect.is_") {
+        // Only *compiled* dialects can become the effective dialect
+        // and publish their one-hot key; a recognized-but-uncompiled
+        // name (e.g. `duckdb`) would be a gate that can never fire.
+        return DialectKind::from_str(name)
+            .is_ok_and(|kind| dialect::dialect_for_kind(kind).is_some());
     }
     false
 }
@@ -508,9 +515,11 @@ mod tests {
             .unwrap_or(0.0)
     }
 
-    /// Every key the analyzer publishes — root and statement spaces
-    /// alike — must validate through `is_published_metric_key`, or
-    /// `mehen.toml` threshold validation would reject a real metric.
+    /// Every key the analyzer publishes onto the *root* space — the
+    /// space thresholds and selectors read — must validate through
+    /// `is_published_metric_key`, or `mehen.toml` threshold validation
+    /// would reject a real metric. Child-only keys must NOT validate:
+    /// a threshold on them could never fire.
     #[test]
     fn published_key_catalogue_is_in_sync() {
         let sql = "WITH history AS (SELECT 1 AS x),\n\
@@ -542,17 +551,13 @@ mod tests {
                    GRANT SELECT ON t TO PUBLIC;\n\
                    COMMIT;\n";
         let a = analyze(sql);
-        let mut stack = vec![&a.root];
         let mut seen = 0usize;
-        while let Some(space) = stack.pop() {
-            for (key, _) in space.metrics.iter() {
-                seen += 1;
-                assert!(
-                    is_published_metric_key(key.as_str()),
-                    "published key `{key}` is missing from the catalogue"
-                );
-            }
-            stack.extend(space.spaces.iter());
+        for (key, _) in a.root.metrics.iter() {
+            seen += 1;
+            assert!(
+                is_published_metric_key(key.as_str()),
+                "published root key `{key}` is missing from the catalogue"
+            );
         }
         assert!(
             seen > 80,
@@ -568,6 +573,11 @@ mod tests {
         assert!(!is_published_metric_key("sql.modularit_health"));
         assert!(!is_published_metric_key("sql.statement.kind_count.selec"));
         assert!(!is_published_metric_key("sql.dialect.is_klingon"));
+        // Recognized-but-uncompiled dialects can never publish their
+        // one-hot key; accepting them would create a dead gate.
+        assert!(!is_published_metric_key("sql.dialect.is_duckdb"));
+        // Child-only keys (statement spaces) are not root-configurable.
+        assert!(!is_published_metric_key("sql.statement.lines"));
     }
 
     #[test]
