@@ -58,14 +58,14 @@
 mod walker;
 
 use mehen_antlr::DiagnosticCollector;
-use mehen_antlr::runtime::{CommonTokenStream, InputStream, ParsedFile};
+use mehen_antlr::runtime::ParsedFile;
 use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
     ParseDiagnostic, Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
 
 use mehen_csharp_parser::c_sharp_lexer::CSharpLexer;
-use mehen_csharp_parser::c_sharp_parser::CSharpParser;
+use mehen_csharp_parser::c_sharp_parser;
 
 pub struct CSharpAnalyzer;
 
@@ -95,19 +95,28 @@ impl CSharpAnalyzer {
     /// predicate lowers to pure SemIR through the derived `patterns.toml`, so
     /// there is no hand-written Rust to install.
     ///
-    /// Replaces the runtime's default lexer console listener with a structured
-    /// diagnostic collector and removes the parser console listener.
+    /// Setup goes through the generated [`c_sharp_parser::parse_with_parser`]
+    /// driver (runtime 0.33): its lexer closure swaps the runtime's default
+    /// console listener for a structured diagnostic collector, and its entry
+    /// closure removes the parser console listener before running the rule.
     fn parse(&self, source: &str, line_index: &LineIndex) -> Option<ParsedCSharp> {
         // No hooks: the derived grammar keeps its interpolated-string state in
         // `@lexer::members`, lowered to pure SemIR via `patterns.toml`.
-        let mut lexer = CSharpLexer::new(InputStream::new(source));
-        lexer.remove_error_listeners();
         let lexer_diagnostics = DiagnosticCollector::default();
-        lexer.add_error_listener(lexer_diagnostics.clone());
-        let tokens = CommonTokenStream::new(lexer);
-        let mut parser = CSharpParser::new(tokens);
-        parser.remove_error_listeners();
-        let result = parser.compilation_unit().ok()?;
+        let out = c_sharp_parser::parse_with_parser(
+            source,
+            |input| {
+                let mut lexer = CSharpLexer::new(input);
+                lexer.remove_error_listeners();
+                lexer.add_error_listener(lexer_diagnostics.clone());
+                lexer
+            },
+            |parser| {
+                parser.remove_error_listeners();
+                parser.compilation_unit()
+            },
+        )
+        .ok()?;
         let lexer_diagnostics =
             lexer_diagnostics.diagnostics("csharp.syntax_error", 16, line_index);
 
@@ -115,7 +124,7 @@ impl CSharpAnalyzer {
         // token store into the `ParsedFile`; the LOC token list is then read
         // straight from that store (all channels, so hidden-channel comments
         // are present — no `fill()` step needed).
-        let parsed = parser.into_parsed_file(result);
+        let parsed = out.parser.into_parsed_file(out.result);
         let loc_tokens = collect_loc_tokens(&parsed, line_index);
         Some(ParsedCSharp {
             parsed,

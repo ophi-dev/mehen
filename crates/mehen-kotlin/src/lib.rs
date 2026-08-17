@@ -30,14 +30,14 @@
 mod walker;
 
 use mehen_antlr::DiagnosticCollector;
-use mehen_antlr::runtime::{CommonTokenStream, InputStream, ParsedFile, Parser};
+use mehen_antlr::runtime::{ParsedFile, Parser};
 use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
     ParseDiagnostic, Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
 
 use mehen_kotlin_parser::kotlin_lexer::KotlinLexer;
-use mehen_kotlin_parser::kotlin_parser::KotlinParser;
+use mehen_kotlin_parser::kotlin_parser::{self, KotlinParser};
 
 pub struct KotlinAnalyzer;
 
@@ -97,9 +97,12 @@ impl KotlinAnalyzer {
     /// `kotlinFile`) and return the recovered [`ParsedFile`], syntax-error
     /// count, and LOC token list, or `None` if the rule call hard-failed.
     ///
-    /// Replaces the runtime's default lexer console listener with a structured
-    /// diagnostic collector, removes the parser console listener, and folds the
-    /// recovered tree into a [`ParsedFile`] that owns the token store and CST.
+    /// Setup goes through the generated [`kotlin_parser::parse_with_parser`]
+    /// driver (runtime 0.33): its lexer closure swaps the runtime's default
+    /// console listener for a structured diagnostic collector, its entry
+    /// closure removes the parser console listener before running the rule,
+    /// and the returned output keeps the parser so the recovered tree can be
+    /// folded into a [`ParsedFile`] that owns the token store and CST.
     fn parse_entry(
         &self,
         source: &str,
@@ -111,15 +114,22 @@ impl KotlinAnalyzer {
         } else {
             KotlinParser::kotlin_file
         };
-        let mut lexer = KotlinLexer::new(InputStream::new(source));
-        lexer.remove_error_listeners();
         let lexer_diagnostics = DiagnosticCollector::default();
-        lexer.add_error_listener(lexer_diagnostics.clone());
-        let tokens = CommonTokenStream::new(lexer);
-        let mut parser = KotlinParser::new(tokens);
-        parser.remove_error_listeners();
-        let result = entry(&mut parser).ok()?;
-        let syntax_errors = parser.number_of_syntax_errors();
+        let out = kotlin_parser::parse_with_parser(
+            source,
+            |input| {
+                let mut lexer = KotlinLexer::new(input);
+                lexer.remove_error_listeners();
+                lexer.add_error_listener(lexer_diagnostics.clone());
+                lexer
+            },
+            |parser| {
+                parser.remove_error_listeners();
+                entry(parser)
+            },
+        )
+        .ok()?;
+        let syntax_errors = out.parser.number_of_syntax_errors();
         let lexer_diagnostics =
             lexer_diagnostics.diagnostics("kotlin.syntax_error", 16, line_index);
 
@@ -127,7 +137,7 @@ impl KotlinAnalyzer {
         // token store into the `ParsedFile`; the LOC token list is then read
         // straight from that store (all channels, so hidden-channel comments
         // are present — no `fill()` step needed).
-        let parsed = parser.into_parsed_file(result);
+        let parsed = out.parser.into_parsed_file(out.result);
         let loc_tokens = collect_loc_tokens(&parsed, line_index);
         Some(ParsedKotlin {
             parsed,

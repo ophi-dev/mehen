@@ -64,6 +64,14 @@ impl JavaAnalyzer {
     ///
     /// Replaces the runtime's default lexer console listener with a structured
     /// diagnostic collector and removes the parser console listener.
+    ///
+    /// Unlike the Kotlin and C# analyzers, this driver is hand-rolled instead
+    /// of going through the generated `parse_with_parser` (runtime 0.33): the
+    /// generated entry points always construct the parser hook-less via
+    /// `JavaParser::new`, so a `superClass` grammar cannot install its typed
+    /// hooks through them. Tracked upstream as
+    /// <https://github.com/ophi-dev/antlr-rust-runtime/issues/349>; fold this
+    /// onto the generated driver once the entry points accept hooks.
     fn parse(&self, source: &str, line_index: &LineIndex) -> Option<ParsedJava> {
         let mut lexer = JavaLexer::new(InputStream::new(source));
         lexer.remove_error_listeners();

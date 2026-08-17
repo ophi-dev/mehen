@@ -37,6 +37,12 @@
 //!
 //! ## Quickstart
 //!
+//! The hand-rolled lexer/stream/parser setup below is deliberate: the
+//! generated one-call drivers (`java_parser::parse_with_parser`, …) always
+//! construct the parser hook-less via `JavaParser::new`, so this grammar
+//! cannot use them until the entry points accept hooks
+//! (<https://github.com/ophi-dev/antlr-rust-runtime/issues/349>).
+//!
 //! ```no_run
 //! use mehen_java_parser::hooks::JavaParserBase;
 //! use mehen_java_parser::java_parser::{self, JavaParser};
