@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
+  canonicalMetricName,
   collectThresholdViolations,
   diffJsonHasDocs,
   extractMarkdownDocsSection,
@@ -18,6 +19,20 @@ import {
   renderFooter,
   unionMetricColumns,
 } from "./github-action.mjs";
+
+test("canonicalMetricName preserves case-distinct halstead count keys", () => {
+  // `n1`/`N1` (and `n2`/`N2`) are distinct published measurements —
+  // distinct vs total operator/operand counts; lowercasing would
+  // gate the wrong one.
+  assert.equal(canonicalMetricName("halstead.N1"), "halstead.N1");
+  assert.equal(canonicalMetricName("halstead.n1"), "halstead.n1");
+  assert.equal(canonicalMetricName("halstead.N2"), "halstead.N2");
+  assert.equal(canonicalMetricName("halstead.n2"), "halstead.n2");
+  // Everything else keeps the legacy case-insensitive aliasing.
+  assert.equal(canonicalMetricName("Cognitive"), "cognitive");
+  assert.equal(canonicalMetricName("loc"), "loc.lloc");
+  assert.equal(canonicalMetricName("nom"), "nom.functions");
+});
 
 test("parseGateViolations extracts the embedded gate breaches", () => {
   const payload =

@@ -774,10 +774,17 @@ function parseThresholds(value) {
 }
 
 function canonicalMetricName(name) {
-  const normalized = String(name)
-    .toLowerCase()
+  const raw = String(name)
     .replace(/[\s_-]+/g, "")
     .replace(/\.+/g, ".");
+  // `halstead.n1`/`halstead.N1` and `halstead.n2`/`halstead.N2` are
+  // case-distinct published keys (distinct vs total operator/operand
+  // counts): lowercasing would collapse a threshold onto the wrong
+  // measurement, so their case is preserved verbatim.
+  if (/^halstead\.[nN][12]$/.test(raw)) {
+    return raw;
+  }
+  const normalized = raw.toLowerCase();
   return METRIC_ALIASES.get(normalized) || normalized;
 }
 
@@ -927,6 +934,7 @@ function setOutput(name, value) {
 export {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
+  canonicalMetricName,
   collectThresholdViolations,
   diffJsonHasDocs,
   extractMarkdownDocsSection,
