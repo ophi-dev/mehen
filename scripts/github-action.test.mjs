@@ -4,18 +4,87 @@ import test from "node:test";
 import {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
+  canonicalMetricName,
   collectThresholdViolations,
   diffJsonHasDocs,
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,
+  isGateFailureReport,
   isNotApplicable,
+  parseGateViolations,
   parseList,
   parseThresholds,
   parseVersionOutput,
   renderFooter,
   unionMetricColumns,
 } from "./github-action.mjs";
+
+test("canonicalMetricName preserves case-distinct halstead count keys", () => {
+  // `n1`/`N1` (and `n2`/`N2`) are distinct published measurements —
+  // distinct vs total operator/operand counts; lowercasing would
+  // gate the wrong one.
+  assert.equal(canonicalMetricName("halstead.N1"), "halstead.N1");
+  assert.equal(canonicalMetricName("halstead.n1"), "halstead.n1");
+  assert.equal(canonicalMetricName("halstead.N2"), "halstead.N2");
+  assert.equal(canonicalMetricName("halstead.n2"), "halstead.n2");
+  // Everything else keeps the legacy case-insensitive aliasing.
+  assert.equal(canonicalMetricName("Cognitive"), "cognitive");
+  assert.equal(canonicalMetricName("loc"), "loc.lloc");
+  assert.equal(canonicalMetricName("nom"), "nom.functions");
+});
+
+test("parseGateViolations extracts the embedded gate breaches", () => {
+  const payload =
+    '{"source_code": [], "threshold_violations": [{"path": "a.py", "metric": "cognitive", "value": 23, "limit": 15, "polarity": "higher_is_worse", "source_table": "languages.py.thresholds"}]}';
+  const violations = parseGateViolations(payload);
+  assert.equal(violations.length, 1);
+  assert.equal(violations[0].metric, "cognitive");
+  assert.equal(violations[0].source_table, "languages.py.thresholds");
+});
+
+test("parseGateViolations is empty for passing runs and older CLIs", () => {
+  assert.deepEqual(parseGateViolations('{"source_code": []}'), []);
+  assert.deepEqual(parseGateViolations("[]"), []);
+  assert.deepEqual(parseGateViolations("not json"), []);
+  assert.deepEqual(parseGateViolations(undefined), []);
+});
+
+test("isGateFailureReport requires the explicit threshold_violations signal", () => {
+  assert.equal(
+    isGateFailureReport(
+      '{"source_code": [], "threshold_violations": [{"path": "a.py", "metric": "cognitive"}]}',
+    ),
+    true,
+  );
+  assert.equal(
+    isGateFailureReport(
+      '{"source_code": [{"path": "a.py"}], "markdown": [], "threshold_violations": [{}]}',
+    ),
+    true,
+  );
+});
+
+test("isGateFailureReport rejects reports without a fired gate", () => {
+  // An analysis failure also exits 1 with well-formed JSON — without
+  // the threshold_violations key it must keep failing fast.
+  assert.equal(isGateFailureReport('{"source_code": [], "markdown": []}'), false);
+  assert.equal(isGateFailureReport('{"source_code": [{"path": "a.py"}]}'), false);
+  assert.equal(
+    isGateFailureReport('{"source_code": [], "threshold_violations": []}'),
+    false,
+  );
+});
+
+test("isGateFailureReport rejects partial or non-JSON output", () => {
+  // A setup/IO failure leaves stdout empty or truncated — that must
+  // keep failing fast instead of being treated as a quality gate.
+  assert.equal(isGateFailureReport(""), false);
+  assert.equal(isGateFailureReport("error: not json"), false);
+  assert.equal(isGateFailureReport('{"source_code": '), false);
+  assert.equal(isGateFailureReport('{"markdown": []}'), false);
+  assert.equal(isGateFailureReport(undefined), false);
+});
 
 test("parseList uses explicit separators only", () => {
   assert.deepEqual(parseList("src"), ["src"]);

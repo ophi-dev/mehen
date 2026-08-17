@@ -713,3 +713,39 @@ fn markdown_analyzer_handles_empty_input() {
             .is_some()
     );
 }
+
+/// Every key the analyzer publishes must validate through
+/// `is_published_metric_key`, or `mehen.toml` threshold validation
+/// would reject a real metric.
+#[test]
+fn published_key_catalogue_is_in_sync() {
+    use mehen_core::{AnalysisConfig, Language, LanguageAnalyzer, SourceFile};
+
+    let body = "# Title\n\nIntro paragraph with a [link](https://example.com) and \
+                ![image](img.png).\n\n## Section\n\n- item one\n- item two\n\n\
+                | a | b |\n|---|---|\n| 1 | 2 |\n\n```python\nprint(1)\n```\n\n\
+                > quote\n\nAnother paragraph mentioning `code` and a bare URL \
+                https://example.org for grounding.\n";
+    let analysis = mehen_markdown::MarkdownAnalyzer::new()
+        .analyze(
+            &SourceFile::new("doc.md".into(), Language::Markdown, body.to_string()),
+            &AnalysisConfig::production(),
+        )
+        .expect("analysis ok");
+    let mut seen = 0usize;
+    for (key, _) in analysis.root.metrics.iter() {
+        seen += 1;
+        assert!(
+            mehen_markdown::is_published_metric_key(key.as_str()),
+            "published key `{key}` is missing from the catalogue"
+        );
+    }
+    assert!(
+        seen > 30,
+        "fixture must exercise a rich key set, saw {seen}"
+    );
+    // Near-misses stay invalid.
+    assert!(!mehen_markdown::is_published_metric_key(
+        "markdown.links.borken"
+    ));
+}

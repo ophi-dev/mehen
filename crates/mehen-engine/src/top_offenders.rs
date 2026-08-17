@@ -322,11 +322,7 @@ fn cmp_entries(
 /// nexit, npa, npm, wmc) is higher-is-worse. This mirrors the legacy
 /// `KNOWN_METRICS` catalog and the rewrite plan §5.1 metric contract.
 fn default_polarity_for(selector: &MetricSelector) -> Polarity {
-    let key = selector.key.as_str();
-    if key.starts_with("mi.")
-        || key == "mi"
-        || crate::metric_selector::is_namespaced_higher_is_better(key)
-    {
+    if crate::metric_selector::is_higher_is_better_metric(selector.key.as_str()) {
         Polarity::HigherIsBetter
     } else {
         Polarity::HigherIsWorse
@@ -490,6 +486,11 @@ struct TopOffendersCfg {
     /// recorded lazy-discovery failures after the run.
     history: Option<Arc<RepoHistories>>,
     results: Arc<Mutex<Vec<FileOffender>>>,
+    /// Configured metric thresholds (`mehen.toml`), present only when
+    /// the loaded config carries any. Evaluated per file against the
+    /// selected ranking metrics; crossings fail the run with exit 1.
+    thresholds: Option<crate::config_file::ThresholdPolicy>,
+    breaches: Arc<Mutex<Vec<crate::config_file::ThresholdBreach>>>,
 }
 
 /// Lazily discovered `HEAD` histories, one per repository work dir.
@@ -789,6 +790,23 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         })
         .collect();
 
+    // Configured thresholds (`mehen.toml`) gate the metrics this
+    // ranking reports. Evaluation reads the root metric set directly:
+    // a key the space does not publish is *skipped*, never compared
+    // as the `0.0` the ranking column falls back to — a fabricated
+    // zero under a higher-is-better limit would fire a false
+    // violation on every cross-language file.
+    if let Some(policy) = &cfg.thresholds {
+        let names: Vec<&str> = cfg.selectors.iter().map(|s| s.name).collect();
+        let breaches = policy.evaluate(&path.display().to_string(), language, &root, Some(&names));
+        if !breaches.is_empty() {
+            cfg.breaches
+                .lock()
+                .expect("top-offenders breaches mutex poisoned")
+                .extend(breaches);
+        }
+    }
+
     cfg.results
         .lock()
         .expect("top-offenders results mutex poisoned")
@@ -895,7 +913,7 @@ fn parse_language_override(raw: &str) -> Option<Language> {
     raw.parse::<Language>().ok()
 }
 
-pub fn run_top_offenders(opts: TopOffendersOpts) {
+pub fn run_top_offenders(opts: TopOffendersOpts, config: Option<&crate::config_file::ConfigFile>) {
     let selectors = parse_metric_selectors(&opts.metrics);
     if selectors.is_empty() {
         log::error!("No valid metrics selected. See `mehen top-offenders --help`.");
@@ -938,6 +956,8 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
     };
 
     let results: Arc<Mutex<Vec<FileOffender>>> = Arc::new(Mutex::new(Vec::new()));
+    let breaches: Arc<Mutex<Vec<crate::config_file::ThresholdBreach>>> =
+        Arc::new(Mutex::new(Vec::new()));
     let registry = Arc::new(AnalyzerRegistry::default_set());
 
     let cfg = TopOffendersCfg {
@@ -946,6 +966,10 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
         registry,
         history: history.clone(),
         results: results.clone(),
+        thresholds: config
+            .map(|c| c.thresholds.clone())
+            .filter(|policy| !policy.is_empty()),
+        breaches: breaches.clone(),
     };
 
     let files_data = FilesData {
@@ -989,6 +1013,26 @@ pub fn run_top_offenders(opts: TopOffendersOpts) {
     match opts.output_format {
         TopOffendersFormat::Json => print_json_offenders(&offenders),
         TopOffendersFormat::Markdown => print_markdown_offenders(&offenders, &selectors),
+    }
+
+    // Configured metric thresholds (`mehen.toml`): evaluated against
+    // *every* analyzed file — not just the displayed top N, so a
+    // violation cannot hide below the `--max-results` cut. The
+    // ranking above still prints in full before the run fails.
+    let mut breaches = Arc::try_unwrap(breaches)
+        .expect("breaches Arc still has outstanding references")
+        .into_inner()
+        .expect("top-offenders breaches mutex poisoned");
+    if !breaches.is_empty()
+        && let Some(config) = config
+    {
+        eprint!(
+            "{}",
+            crate::config_file::render_threshold_report(&mut breaches, &config.path)
+        );
+        // Exit 1: configured quality gates fail with the generic
+        // failure code (`mehen.toml` threshold contract).
+        process::exit(1);
     }
 }
 

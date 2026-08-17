@@ -49,6 +49,10 @@ hihg = "hihg"
 # Intentional typo in the negative-path test for `history.*` selector
 # validation (`metric_selector.rs` rejects unknown history keys).
 frequncy = "frequncy"
+# Intentional typo in the negative-path test for the SQL published-key
+# catalogue (`mehen-sql` rejects unknown `sql.statement.kind_count.*`
+# members).
+selec = "selec"
 # Intentional name of a removed language parser
 Ccomment = "Ccomment"
 "Winn" = "Winn"

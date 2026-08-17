@@ -32,6 +32,12 @@ pub(crate) struct Cli {
     #[arg(long, global = true, requires = "version")]
     pub(crate) json: bool,
 
+    /// Path to a configuration file. When omitted, `mehen.toml` (or
+    /// `.mehen.toml`) is discovered from the current directory upward,
+    /// stopping at the enclosing git repository root.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub(crate) config: Option<PathBuf>,
+
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }

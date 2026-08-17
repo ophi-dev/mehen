@@ -71,15 +71,23 @@ async function main() {
   const cli = prepareMehen();
   const version = detectMehenVersion(cli);
   const diffArgs = buildDiffArgs();
-  const diff = runMehen(cli, diffArgs);
+  const diff = runMehen(cli, diffArgs, { acceptGateOutput: isGateFailureReport });
   const reportsDir = process.env.RUNNER_TEMP || os.tmpdir();
   const reportJson = path.join(reportsDir, `mehen-diff-${Date.now()}.json`);
   fs.writeFileSync(reportJson, `${diff.stdout.trim()}\n`, "utf8");
 
   const diffs = parseDiffJson(diff.stdout);
+  const gateViolations = parseGateViolations(diff.stdout);
   const context = readGithubContext();
   const violations = collectThresholdViolations(diffs, thresholds);
-  let markdown = renderMarkdown(diffs, context, thresholds, violations, version);
+  let markdown = renderMarkdown(
+    diffs,
+    context,
+    thresholds,
+    violations,
+    version,
+    gateViolations,
+  );
 
   // Phase F (§39): `mehen diff --output-format markdown` emits a
   // `<!-- mehen-docs -->` block whenever a changed Markdown file is in
@@ -104,13 +112,26 @@ async function main() {
     console.warn(`Unable to publish mehen PR comment: ${error.message}`);
   }
 
-  setOutput("violations", String(violations.length));
+  // The advertised violation count covers both gates: Action-input
+  // delta thresholds and repository `mehen.toml` breaches parsed from
+  // the diff report.
+  setOutput("violations", String(violations.length + gateViolations.length));
   setOutput("report_json", reportJson);
   setOutput("report_markdown", reportMarkdown);
 
   if (violations.length > 0 && boolInput("FAIL_ON_THRESHOLD", true)) {
     console.error(
       `Mehen threshold check failed with ${violations.length} violation(s).`,
+    );
+    process.exit(1);
+  }
+
+  // A deferred quality-gate failure from the diff itself (configured
+  // `mehen.toml` thresholds): the comment and report outputs above
+  // landed with the complete report; now the workflow step fails.
+  if (diff.gateStatus) {
+    console.error(
+      `mehen diff exited with status ${diff.gateStatus}: a configured quality gate failed (see the report above).`,
     );
     process.exit(1);
   }
@@ -259,7 +280,7 @@ function parseVersionOutput(stdout) {
   return "";
 }
 
-function runMehen(cli, args) {
+function runMehen(cli, args, options = {}) {
   console.log(`Running: ${[cli.command, ...cli.args, ...args].join(" ")}`);
   const result = spawnSync(cli.command, [...cli.args, ...args], {
     encoding: "utf8",
@@ -270,6 +291,21 @@ function runMehen(cli, args) {
     throw result.error;
   }
   if (result.status !== 0) {
+    // A nonzero exit that still produced the requested report is a
+    // quality-gate failure (`mehen.toml` thresholds exit 1, `--fail-on`
+    // documentation gates exit 2), not a broken run: surface the
+    // stderr report in the log, keep the stdout report so the PR
+    // comment and outputs still land, and let the caller defer the
+    // failure. Everything else keeps failing fast.
+    if (
+      typeof options.acceptGateOutput === "function" &&
+      options.acceptGateOutput(result.stdout)
+    ) {
+      if (result.stderr) {
+        process.stderr.write(result.stderr);
+      }
+      return { ...result, gateStatus: result.status };
+    }
     if (result.stdout) {
       console.error(result.stdout);
     }
@@ -282,6 +318,28 @@ function runMehen(cli, args) {
     process.stderr.write(result.stderr);
   }
   return result;
+}
+
+/**
+ * Whether a failing `mehen diff --output-format json` invocation is a
+ * configured quality-gate exit: the payload must be complete AND carry
+ * the explicit `threshold_violations` signal the CLI emits only when a
+ * `mehen.toml` gate fired. An analysis failure also exits 1 with
+ * well-formed JSON but without that key — it must keep failing fast
+ * instead of publishing a partial report under the wrong reason.
+ */
+function isGateFailureReport(stdout) {
+  try {
+    const parsed = JSON.parse(typeof stdout === "string" ? stdout : "");
+    return Boolean(
+      parsed &&
+        Array.isArray(parsed.source_code) &&
+        Array.isArray(parsed.threshold_violations) &&
+        parsed.threshold_violations.length > 0,
+    );
+  } catch {
+    return false;
+  }
 }
 
 function runCommand(command, args, options = {}) {
@@ -343,7 +401,13 @@ function fetchMarkdownDocsSection(cli, baseArgs) {
   }
   let mdResult;
   try {
-    mdResult = runMehen(cli, mdArgs);
+    // The rerun trips the same configured quality gates as the main
+    // diff (exit 1 with the markdown report on stdout); accept any
+    // non-empty output so the docs section still reaches the comment.
+    mdResult = runMehen(cli, mdArgs, {
+      acceptGateOutput: (stdout) =>
+        typeof stdout === "string" && stdout.trim().length > 0,
+    });
   } catch (error) {
     console.warn(
       `mehen diff --output-format markdown failed (docs section will be omitted): ${error.message}`,
@@ -426,7 +490,31 @@ function readGithubContext() {
   };
 }
 
-function renderMarkdown(diffs, context, thresholds, violations, version = "") {
+/**
+ * The `threshold_violations` array a gate-failing `mehen diff` embeds
+ * in its JSON report (absolute `mehen.toml` breaches at head — see the
+ * Configuration docs). Empty for passing runs, older CLIs, and
+ * non-JSON output.
+ */
+function parseGateViolations(stdout) {
+  try {
+    const parsed = JSON.parse(typeof stdout === "string" ? stdout : "");
+    return parsed && Array.isArray(parsed.threshold_violations)
+      ? parsed.threshold_violations
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function renderMarkdown(
+  diffs,
+  context,
+  thresholds,
+  violations,
+  version = "",
+  gateViolations = [],
+) {
   const title = input("COMMENT_TITLE", DEFAULT_TITLE).trim() || DEFAULT_TITLE;
   const scope =
     context.eventName === "pull_request"
@@ -473,6 +561,21 @@ function renderMarkdown(diffs, context, thresholds, violations, version = "") {
       for (const violation of violations) {
         body += `| ${renderFile(violation.path, context)} | ${escapeCell(violation.label)} | ${formatSigned(violation.delta)} | ${formatNumber(violation.limit)} |\n`;
       }
+    }
+  }
+
+  // Absolute `mehen.toml` breaches at head: the diff table above may
+  // not name these files at all (an unchanged-but-over-limit metric
+  // is dropped as an unchanged row), so the failing gate must be
+  // spelled out here or the comment would say "no changes" while the
+  // workflow step fails.
+  if (gateViolations.length > 0) {
+    body += "\n### Repository thresholds (mehen.toml)\n\n";
+    body += "| File | Metric | Value | Limit | Set by |\n";
+    body += "|---|---|---:|---:|---|\n";
+    for (const violation of gateViolations) {
+      const bound = violation.polarity === "higher_is_better" ? "min" : "max";
+      body += `| ${renderFile(violation.path, context)} | ${escapeCell(violation.metric)} | ${formatExactNumber(violation.value)} | ${bound} ${formatExactNumber(violation.limit)} | ${escapeCell(violation.source_table)} |\n`;
     }
   }
 
@@ -671,10 +774,17 @@ function parseThresholds(value) {
 }
 
 function canonicalMetricName(name) {
-  const normalized = String(name)
-    .toLowerCase()
+  const raw = String(name)
     .replace(/[\s_-]+/g, "")
     .replace(/\.+/g, ".");
+  // `halstead.n1`/`halstead.N1` and `halstead.n2`/`halstead.N2` are
+  // case-distinct published keys (distinct vs total operator/operand
+  // counts): lowercasing would collapse a threshold onto the wrong
+  // measurement, so their case is preserved verbatim.
+  if (/^halstead\.[nN][12]$/.test(raw)) {
+    return raw;
+  }
+  const normalized = raw.toLowerCase();
   return METRIC_ALIASES.get(normalized) || normalized;
 }
 
@@ -691,6 +801,17 @@ function formatNumber(value) {
     return String(value);
   }
   return Number.isInteger(number) ? String(number) : number.toFixed(2);
+}
+
+/**
+ * Shortest exact representation for repository-gate values: rounding
+ * both sides of a close crossing to two decimals would render an
+ * apparently impossible failure (`0.50` versus `max 0.50` for a
+ * `0.504` value over a `0.503` limit).
+ */
+function formatExactNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number) : String(value);
 }
 
 function formatSigned(value) {
@@ -813,12 +934,15 @@ function setOutput(name, value) {
 export {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
+  canonicalMetricName,
   collectThresholdViolations,
   diffJsonHasDocs,
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,
+  isGateFailureReport,
   isNotApplicable,
+  parseGateViolations,
   parseList,
   parseThresholds,
   parseVersionOutput,

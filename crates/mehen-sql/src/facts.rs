@@ -50,6 +50,31 @@ pub(crate) enum StatementKind {
 }
 
 impl StatementKind {
+    /// Every variant, for catalogue validation of the
+    /// `sql.statement.kind_count.<label>` dynamic metric family.
+    pub(crate) const ALL: &[StatementKind] = &[
+        StatementKind::Select,
+        StatementKind::WithSelect,
+        StatementKind::Insert,
+        StatementKind::Update,
+        StatementKind::Delete,
+        StatementKind::Merge,
+        StatementKind::CreateView,
+        StatementKind::CreateTable,
+        StatementKind::CreateTableAsSelect,
+        StatementKind::CreateOther,
+        StatementKind::AlterTable,
+        StatementKind::Drop,
+        StatementKind::Truncate,
+        StatementKind::Grant,
+        StatementKind::Revoke,
+        StatementKind::TransactionControl,
+        StatementKind::Explain,
+        StatementKind::Procedural,
+        StatementKind::SetOperation,
+        StatementKind::Unknown,
+    ];
+
     /// Stable label used in `sql.statement.kind_count.<label>` keys.
     pub(crate) fn label(self) -> &'static str {
         match self {

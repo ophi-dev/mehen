@@ -58,6 +58,41 @@ mehen diff --from main --to HEAD --paths src --output-format markdown
 
 Quickstart: <https://mehen.ophi.dev/quickstart>.
 
+## Configuration
+
+Drop a `mehen.toml` (or `.mehen.toml`) anywhere between the directory you run `mehen` from and
+the git repository root — discovery walks upward and stops at the repository boundary — or pin an
+explicit file with `--config <PATH>`:
+
+```toml
+[thresholds]
+cognitive = 15         # higher-is-worse metrics: the limit is a maximum
+"loc.lloc" = 500
+mi.visual_studio = 40  # higher-is-better metrics (mi.*): the limit is a minimum
+
+[languages.python.thresholds]
+cognitive = 10         # overrides the global limit for Python files only
+```
+
+Every command that reports a configured metric enforces it: `mehen metrics` checks the full
+metric set of the analyzed file, while `mehen diff` (head side) and `mehen top-offenders` check
+the metrics selected for output — across *all* analyzed files, not just the displayed rows. Any
+crossed limit prints a grouped report on stderr and fails the command with exit code 1:
+
+```text
+  × 2 metric threshold violations (config: /repo/mehen.toml)
+  │
+  │ src/app/core.py
+  │   cognitive = 23 — exceeds max 10  (set by languages.python.thresholds)
+  │   loc.lloc = 640 — exceeds max 500  (set by thresholds)
+  help: adjust or remove the limit at the configuration path shown, or bring the file back within it.
+```
+
+Configuration mistakes fail fast with a caret into the TOML source and a suggestion ("unknown
+metric `cognitve` … did you mean `cognitive`?"): every metric name is validated against the keys
+the analyzers actually publish — including the `sql.*` and `markdown.*` namespaces — so a typo
+can never silently disable a gate. Full reference: <https://mehen.ophi.dev/configuration>.
+
 ## GitHub Action
 
 Drop the action into a workflow to publish per-PR metric trends:
@@ -91,6 +126,8 @@ Everything else lives in the docs site:
   object-touch risk, SQL Halstead, and composite scores via `mehen-sql` (sqruff-backed).
 - [Commands](https://mehen.ophi.dev/commands/overview) — `mehen metrics`, `mehen diff`,
   `mehen top-offenders`.
+- [Configuration](https://mehen.ophi.dev/configuration) — `mehen.toml` thresholds and
+  per-language overrides.
 - [Developers guide](https://mehen.ophi.dev/developers/overview) — build, test, contribute, add a
   language.
 

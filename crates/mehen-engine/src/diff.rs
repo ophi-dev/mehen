@@ -819,14 +819,17 @@ fn parse_fail_on_flag(raw: &str) -> Result<FailOn, clap::Error> {
     }
 }
 
-pub fn run_diff(opts: DiffOpts) {
-    if let Err(e) = run_diff_inner(opts) {
+pub fn run_diff(opts: DiffOpts, config: Option<&crate::config_file::ConfigFile>) {
+    if let Err(e) = run_diff_inner(opts, config) {
         log::error!("{e}");
         std::process::exit(1);
     }
 }
 
-fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
+fn run_diff_inner(
+    opts: DiffOpts,
+    config: Option<&crate::config_file::ConfigFile>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Resolve refs
     let ci_ctx = ci::detect();
     let (from_ref, to_ref) = resolve_refs(&opts, &ci_ctx);
@@ -950,6 +953,14 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     // unchanged (Codex P2). `explicit_metrics` selects between the two modes.
     let explicit_metrics = !opts.metrics.is_empty();
     let selectors = parse_metric_selectors(&opts.metrics);
+    // An explicit `--metrics` list where nothing parsed would silently
+    // produce an empty diff — and bypass every configured threshold
+    // whose column the typo'd list was meant to select. Fail loudly
+    // instead (matching `top-offenders`' required-metric guard).
+    if explicit_metrics && selectors.is_empty() {
+        log::error!("No valid metrics in --metrics. See `mehen diff --help`.");
+        std::process::exit(1);
+    }
 
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let analysis_config = AnalysisConfig::default();
@@ -1068,6 +1079,12 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     //    metrics from a broken parse must not pass CI silently.
     let mut diffs = Vec::new();
     let mut analysis_failed = false;
+    // Configured metric thresholds (`mehen.toml`): evaluated per file
+    // against the *head* side of the metrics this diff reports.
+    let threshold_policy = config
+        .map(|c| &c.thresholds)
+        .filter(|policy| !policy.is_empty());
+    let mut threshold_breaches: Vec<crate::config_file::ThresholdBreach> = Vec::new();
     // The union of selectors actually displayed, in first-seen order. With
     // explicit `--metric` this is just `selectors`; with per-language defaults
     // it accumulates each language's default columns as files are seen, so a
@@ -1431,6 +1448,27 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             })
             .collect();
 
+        // Configured thresholds gate the head side of the metrics
+        // this file reports; a deleted file has no head side to gate.
+        // Keys the head space does not publish — statics behind a
+        // blocked parse or an unavailable analyzer, history on an
+        // untracked path — are skipped by `evaluate`, never read as a
+        // fabricated `0.0`. Evaluation happens *before* the
+        // unchanged-row filter below: an unchanged-but-over-limit
+        // metric still fails the gate even when its row is hidden.
+        if let Some(policy) = threshold_policy
+            && !is_deleted
+            && let Some(space) = current_space.as_ref()
+        {
+            let names: Vec<&str> = file_selectors.iter().map(|s| s.name).collect();
+            threshold_breaches.extend(policy.evaluate(
+                &cf.path.display().to_string(),
+                *language,
+                space,
+                Some(&names),
+            ));
+        }
+
         diffs.push(FileDiff {
             path: cf.path.clone(),
             metrics: metric_diffs,
@@ -1511,6 +1549,9 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 7. Output
+    // Deterministic order for both the JSON payload and the stderr
+    // report (render_threshold_report re-sorts harmlessly).
+    crate::config_file::sort_breaches(&mut threshold_breaches);
     let format = opts.output_format.unwrap_or(DiffFormat::Markdown);
     match format {
         DiffFormat::Markdown => {
@@ -1536,7 +1577,17 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 Some(&doc_files)
             };
-            if let Err(e) = print_json(&diffs, doc_ref) {
+            // A failed analysis means the measurements behind the
+            // breaches are partial: withhold the machine-readable gate
+            // signal so consumers (the GitHub Action) fail fast on the
+            // analysis error instead of publishing an incomplete
+            // report as an ordinary gate failure.
+            let publishable_breaches: &[crate::config_file::ThresholdBreach] = if analysis_failed {
+                &[]
+            } else {
+                &threshold_breaches
+            };
+            if let Err(e) = print_json(&diffs, doc_ref, publishable_breaches) {
                 // Surface the error loudly — exit code 2 mirrors the
                 // --fail-on gate and is distinct from the generic exit 1
                 // that covers setup/IO errors in run_diff_inner.
@@ -1544,6 +1595,19 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(2);
             }
         }
+    }
+
+    // Configured metric thresholds (`mehen.toml`): print the report
+    // before the doc gate below so a combined failure still surfaces
+    // both; the exit itself happens after the doc gate to keep its
+    // historical exit code (2) stable.
+    if !threshold_breaches.is_empty()
+        && let Some(config) = config
+    {
+        eprint!(
+            "{}",
+            crate::config_file::render_threshold_report(&mut threshold_breaches, &config.path)
+        );
     }
 
     // --fail-on check.
@@ -1555,11 +1619,20 @@ fn run_diff_inner(opts: DiffOpts) -> Result<(), Box<dyn std::error::Error>> {
 
     // Per the diagnostic contract (rewrite plan §9.3), recoverable
     // parser errors must surface as a non-zero exit so CI cannot pass
-    // partial metrics computed from a known-broken parse. Exit 1 lines
-    // up with the generic setup/IO bucket and is distinct from exit 2
-    // (threshold gate). Diagnostics are already logged above; this gate
-    // only flips the exit code.
+    // partial metrics computed from a known-broken parse. Checked
+    // before the threshold gate: a broken analysis outranks a quality
+    // gate evaluated on the parseable remainder. Exit 1 lines up with
+    // the generic setup/IO bucket and is distinct from exit 2 (doc
+    // gate). Diagnostics are already logged above; this gate only
+    // flips the exit code.
     if analysis_failed {
+        std::process::exit(1);
+    }
+
+    // Exit 1: configured quality gates fail with the generic failure
+    // code (`mehen.toml` threshold contract); the report was printed
+    // above.
+    if !threshold_breaches.is_empty() {
         std::process::exit(1);
     }
 
@@ -1971,6 +2044,7 @@ fn format_f64(v: f64) -> String {
 fn print_json(
     diffs: &[FileDiff],
     docs: Option<&[DocDiffFile]>,
+    threshold_breaches: &[crate::config_file::ThresholdBreach],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut payload = serde_json::Map::new();
     payload.insert("source_code".to_string(), serde_json::to_value(diffs)?);
@@ -1978,6 +2052,16 @@ fn print_json(
         payload.insert(
             "markdown".to_string(),
             serde_json::Value::Array(doc_json_payload(docs)),
+        );
+    }
+    // Present only when a configured `mehen.toml` gate fired — the
+    // explicit signal machine consumers (e.g. the GitHub Action) use
+    // to distinguish a quality-gate exit (1, with this key) from an
+    // analysis failure (also exit 1, but without it).
+    if !threshold_breaches.is_empty() {
+        payload.insert(
+            "threshold_violations".to_string(),
+            serde_json::to_value(threshold_breaches)?,
         );
     }
     let json = serde_json::to_string_pretty(&serde_json::Value::Object(payload))?;
@@ -3696,7 +3780,7 @@ src/archive.txt binary
             is_deleted: false,
             functions: 0,
         }];
-        let res = print_json(&diffs, None);
+        let res = print_json(&diffs, None, &[]);
         assert!(res.is_ok(), "valid input must serialize cleanly");
     }
 
@@ -3707,7 +3791,7 @@ src/archive.txt binary
         // emitter used `unwrap_or_default` and silently wrote an empty
         // JSON document to stdout when serde_json failed.
         let diffs: Vec<FileDiff> = vec![];
-        let res: Result<(), Box<dyn std::error::Error>> = print_json(&diffs, None);
+        let res: Result<(), Box<dyn std::error::Error>> = print_json(&diffs, None, &[]);
         assert!(res.is_ok());
     }
 

@@ -24,6 +24,7 @@ mehen diff [OPTIONS]
 | `--show-unchanged` | Show files where every metric is unchanged. |
 | `--ignore-git-attributes[=<BOOL>]` | Skip files marked `linguist-generated`, `linguist-vendored`, or `binary` (default `true`; `--ignore-generated` remains an alias). |
 | `--fail-on <FAIL_ON>` | Exit non-zero when named thresholds are crossed. Comma-separated: `dmi-drop`, `new-broken-link`, `filler-high`, `all`. |
+| `--config <PATH>` | Pin a [configuration file](/configuration) instead of discovering `mehen.toml` upward from the working directory. |
 
 ## Examples
 
@@ -109,16 +110,26 @@ verdicts: a rising number flags *where to look*, not *that the code is bad*.
 The rules align with the severity-1 / severity-2 indicators on the
 [PR comment design](/guides/pr-comment-design) page.
 
-For per-metric numeric gating (e.g. "fail if cyclomatic delta > 5"), use the
+## Configured thresholds
+
+When a [`mehen.toml`](/configuration) is present, the **head side** of every changed source-code
+file is checked against the configured limits for the metrics this diff reports (the explicit
+`--metrics` list, or the per-language defaults). Evaluation happens before the unchanged-row
+filter, so an unchanged-but-over-limit metric still fails the gate even when its row is hidden.
+Deleted files have no head side to gate; Markdown files stay on the `--fail-on` documentation
+gates above. Crossed limits print a grouped report on stderr — after the Markdown or JSON output,
+which stays complete for machine consumers — and the command exits `1`.
+
+For delta gating (e.g. "fail if the cyclomatic delta exceeds 5"), use the
 [GitHub Action's `thresholds` input](/guides/github-action), which post-processes the JSON report.
-See [Concepts → Thresholds and diffs](/concepts/thresholds-and-diffs).
+See [Concepts → Thresholds and diffs](/concepts/thresholds-and-diffs) for how the gates compose.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | Success — the comment is advisory. |
-| 1 | IO, git, parser-fatal, or unsupported-language error. |
+| 1 | IO, git, parser-fatal, or unsupported-language error. Also: a [configured metric threshold](/configuration) crossed, after the report is emitted. |
 | 2 | One or more `--fail-on` rules crossed (gating exit). |
 
 ## See also

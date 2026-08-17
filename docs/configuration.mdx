@@ -1,0 +1,179 @@
+---
+title: "Configuration"
+description: "Repository-local mehen.toml: per-metric thresholds with per-language overrides that gate mehen metrics, diff, and top-offenders."
+keywords: ["mehen.toml", "configuration", "thresholds", "quality gate", "ci", "exit code"]
+---
+
+mehen reads an optional repository-local configuration file. Without one, every command behaves
+exactly as documented on its own page. With one, the configured metric thresholds become quality
+gates: any command that reports a configured metric exits `1` when a limit is crossed.
+
+```toml mehen.toml
+[thresholds]
+cognitive = 15         # higher-is-worse metrics: the limit is a maximum
+"loc.lloc" = 500
+mi.visual_studio = 40  # higher-is-better metrics (mi.*): the limit is a minimum
+
+[languages.python.thresholds]
+cognitive = 10         # overrides the global limit for Python files only
+```
+
+## File discovery
+
+mehen looks for `mehen.toml` (preferred) or `.mehen.toml`, starting in the current working
+directory and walking up to the enclosing git repository root — the repository is the boundary,
+so a config above it (for example a stray `~/mehen.toml`) can never leak into a project. Outside
+a git repository, only the current directory is checked. The first file found wins, so a config
+at the repository root applies from any subdirectory. When both names exist in the same
+directory, `mehen.toml` is used and a warning is logged.
+
+The global `--config <PATH>` flag bypasses discovery and pins an explicit file for any command:
+
+```bash
+mehen --config ci/strict.toml metrics src/main.py
+```
+
+A missing or malformed `--config` file is an error (exit `1`) — a requested gate is never silently
+skipped.
+
+## Threshold limits
+
+Each entry under `[thresholds]` maps a metric name to a numeric limit. The dotted spelling
+(`loc.lloc = 500`) and the quoted spelling (`"loc.lloc" = 500`) are equivalent.
+
+The limit's meaning follows the metric's polarity:
+
+| Polarity | Metrics | Limit means | Violation |
+|---|---|---|---|
+| Higher is worse | `cognitive`, `cyclomatic`, `loc.*`, `abc`, `halstead.*`, most others | Maximum | measured value > limit |
+| Higher is better | `mi.*`, `halstead.level`, and quality scores such as `sql.maintainability_index` | Minimum | measured value < limit |
+
+A value exactly at the limit passes. mehen knows the direction for every metric it publishes — the
+same polarity rules that drive [`mehen top-offenders`](/commands/top-offenders#polarity) ranking
+and diff trend arrows.
+
+Metric names are the same ones `--metric` accepts — the relationship goes both ways, so any
+configurable key is also selectable as a diff/top-offenders column: the source-code families
+(`cognitive`, `cyclomatic`, `loc.*`, `halstead.*`, `mi.*`, `abc`, `nargs`, `nexit`, `nom.*`,
+`npa.*`, `npm.*`, `wmc`, including aggregate spellings such as `cognitive.max` or
+`nom.functions.max`), the fixed [history family](/metrics/history/overview) (`history.hotspot`,
+`history.churn.relative`, …), and the namespaced [SQL](/metrics/sql/overview) and
+[Markdown](/metrics/markdown/overview) families (`sql.*`, `markdown.*`). Names that no analyzer
+publishes — a bare `mi`, an invented `cognitive.maximum` — are rejected when the config loads.
+
+## Per-language overrides
+
+A `[languages.<lang>.thresholds]` table overrides the global limit for files of that language,
+metric by metric. Language identifiers accept the usual aliases (`python`/`py`,
+`typescript`/`ts`, `ruby`/`rb`, …); two sections that name the same language through different
+aliases are rejected at load time.
+
+```toml mehen.toml
+[thresholds]
+cognitive = 15
+
+[languages.python.thresholds]
+cognitive = 10      # Python files use 10; every other language keeps 15
+
+[languages.sql.thresholds]
+"sql.change_risk_score" = 3
+```
+
+An override does not need a global counterpart — a threshold that exists only under a language
+gates only that language's files.
+
+## What gets gated
+
+Thresholds apply to the metrics a command actually reports:
+
+| Command | Evaluated against | Thresholds considered |
+|---|---|---|
+| [`mehen metrics`](/commands/metrics) | The analyzed file's full root metric set | Every configured threshold |
+| [`mehen diff`](/commands/diff) | The **head side** of each changed file, before the unchanged-row filter | Thresholds matching the selected (or default) metric columns |
+| [`mehen top-offenders`](/commands/top-offenders) | **Every analyzed file**, not just the displayed top N | Thresholds matching the `--metric` selection |
+
+Two consequences worth knowing:
+
+- A metric the analyzed file does not publish is skipped, never read as `0`. A
+  `sql.change_risk_score` threshold does not fire on Python files, and an `mi.visual_studio`
+  minimum does not produce false violations on files where MI is unavailable.
+- In `mehen diff`, deleted files have no head side to gate, and Markdown files route through the
+  [documentation pipeline](/guides/pr-comment-design) with its own
+  [`--fail-on` gates](/commands/diff#fail-on-thresholds).
+
+Files whose parse produces a blocking diagnostic are never threshold-gated on partial metrics:
+`mehen metrics` and `mehen diff` fail with exit `1` through their existing analysis-error
+contract, while `mehen top-offenders` keeps its contract of skipping unparsable files from the
+ranking (so a broken file cannot fabricate a passing measurement — but it does not fail the run
+by itself either).
+
+## The violation report
+
+Crossed limits print a grouped report on stderr — after the command's normal stdout output, so
+JSON and Markdown reports stay complete for machine consumers — and the command exits `1`:
+
+```text
+mehen::thresholds
+
+  × 2 metric threshold violations (config: /repo/mehen.toml)
+  │
+  │ src/app/core.py
+  │   cognitive = 23 — exceeds max 10  (set by languages.python.thresholds)
+  │   loc.lloc = 640 — exceeds max 500  (set by thresholds)
+  help: adjust or remove the limit at the configuration path shown, or bring the file back within it.
+```
+
+Each line names the measured value, the crossed limit, and the configuration path that set it
+(language aliases preserved as written), so the fix — either direction — is one jump away.
+Violations are sorted by path, then metric, for deterministic CI logs. Colors engage only on a
+terminal with `NO_COLOR` unset. With
+`--output-format json`, `mehen diff` additionally embeds the violations as a top-level
+`threshold_violations` array (present only when the gate fired), so machine consumers can tell a
+quality-gate exit from an analysis failure.
+
+## Validation
+
+The configuration is validated when it loads. A metric name no analyzer publishes — a typo, a
+bare family root like `mi` (the analyzers publish `mi.visual_studio`, `mi.original`, `mi.sei`),
+an invented aggregate like `cognitive.maximum`, or a misspelled `history.*` key — fails
+immediately with a pointer into the file, as do unknown languages, non-numeric limits, and two
+spellings of the same metric in one table (`cognitive` and `cognitive.sum` are one logical
+threshold; contradictory duplicates would silently disable the stricter gate):
+
+```text
+mehen::config
+
+  × unknown metric `cognitve` in [thresholds]
+   ╭─[/repo/mehen.toml:2:1]
+ 1 │ [thresholds]
+ 2 │ cognitve = 5
+   · ────┬───
+   ·     ╰── not a published metric
+   ╰────
+  help: did you mean `cognitive`?
+```
+
+The command fails with exit `1` before any analysis runs. Namespaced `sql.*` and `markdown.*`
+names validate against the owning analyzer's published catalogue too (including the dynamic
+`sql.statement.kind_count.<kind>` and `sql.dialect.is_<dialect>` families), so
+`sql.modularit_health` is caught just like `cognitve`.
+
+## Relationship to other gates
+
+| Gate | Where it runs | What it checks | Exit code |
+|---|---|---|---|
+| `mehen.toml` thresholds | Inside the binary, every command | Absolute values at head | 1 |
+| [`mehen diff --fail-on`](/commands/diff#fail-on-thresholds) | Inside the binary, diff only | Markdown documentation band crossings | 2 |
+| [GitHub Action `thresholds`](/guides/github-action) | Action post-processing | Adverse per-file **deltas** | Action failure |
+
+The gates are complementary: the Action input limits how much a PR may *move* a metric, while
+`mehen.toml` limits where the metric may *be*. A repository that adopts a `mehen.toml` gets the
+same gating locally, in pre-commit hooks, and in any CI system — not only in the GitHub Action.
+When the gate fires inside the Action, the PR comment and the `report_json` / `report_markdown`
+outputs still publish with the complete report before the workflow step fails.
+
+## See also
+
+- [Commands overview](/commands/overview) — the three commands that enforce thresholds.
+- [Concepts → Thresholds and diffs](/concepts/thresholds-and-diffs) — gating strategies in CI.
+- [Code metrics](/metrics/code/overview) — the metric names you can threshold.

@@ -302,3 +302,71 @@ fn publish_markdown_metrics(m: &MarkdownMetrics, target: &mut MetricSet) {
         m.review.review_criticality_index,
     );
 }
+
+/// Every metric key the Markdown analyzer can publish, for
+/// configuration validation and typo suggestions.
+///
+/// Kept honest by `published_key_catalogue_is_in_sync` in the tests
+/// below, which analyzes a feature-rich document and asserts every
+/// published key validates.
+pub const PUBLISHED_METRIC_KEYS: &[&str] = &[
+    "markdown.ai_era.filler_lazy_structure_risk",
+    "markdown.complexity.cognitive_complexity",
+    "markdown.complexity.reading_path_complexity",
+    "markdown.complexity.reading_path_complexity_raw",
+    "markdown.grounding.evidence_coverage_score",
+    "markdown.grounding.repository_grounding_score",
+    "markdown.halstead.difficulty",
+    "markdown.halstead.effort",
+    "markdown.halstead.embedded_volume",
+    "markdown.halstead.length",
+    "markdown.halstead.operands_distinct",
+    "markdown.halstead.operands_total",
+    "markdown.halstead.operators_distinct",
+    "markdown.halstead.operators_total",
+    "markdown.halstead.total_volume",
+    "markdown.halstead.vocabulary",
+    "markdown.halstead.volume",
+    "markdown.links.broken",
+    "markdown.links.information_scent_score",
+    "markdown.links.link_debt_score",
+    "markdown.links.review_burden",
+    "markdown.links.total",
+    "markdown.loc.aloc",
+    "markdown.loc.bloc",
+    "markdown.loc.cloc",
+    "markdown.loc.dloc",
+    "markdown.loc.mloc",
+    "markdown.loc.ploc",
+    "markdown.loc.tloc",
+    "markdown.loc_ratios.artifact_line_ratio",
+    "markdown.loc_ratios.blank_line_ratio",
+    "markdown.loc_ratios.code_line_ratio",
+    "markdown.loc_ratios.math_line_ratio",
+    "markdown.loc_ratios.table_line_ratio",
+    "markdown.maintainability.artifact_debt_score",
+    "markdown.maintainability.documentation_maintainability_index",
+    "markdown.maintainability.good_scaffold_score",
+    "markdown.maintainability.section_balance_score",
+    "markdown.review.review_criticality_index",
+    "markdown.size.effective_content_units",
+    "markdown.size.headings",
+    "markdown.size.sections",
+    "markdown.size.words",
+    "markdown.tables.count",
+    "markdown.tables.hard_warnings",
+    "markdown.tables.max_cells",
+    "markdown.tables.table_burden_score",
+    "markdown.visuals.diagram_parse_error_count",
+    "markdown.visuals.diagrams",
+    "markdown.visuals.images",
+    "markdown.visuals.visual_net_effect",
+];
+
+/// Whether the Markdown analyzer can publish `name` onto a
+/// `MetricSpace`. Used by `mehen.toml` threshold validation so a typo
+/// like `markdown.links.borken` is rejected at load time instead of
+/// becoming a gate that can never fire.
+pub fn is_published_metric_key(name: &str) -> bool {
+    PUBLISHED_METRIC_KEYS.contains(&name)
+}
