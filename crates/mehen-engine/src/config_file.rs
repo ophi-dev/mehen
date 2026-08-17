@@ -967,7 +967,12 @@ const ALL_LANGUAGES: &[Language] = &[
 /// compiled into this build.
 fn language_can_publish(language: Language, canonical: &str) -> bool {
     if canonical.starts_with("history.") {
-        return true;
+        // Git-only history keys need no analyzer; the static-dependent
+        // composites (`history.hotspot`, `history.churn.relative`)
+        // read analyzer inputs and are omitted when static analysis is
+        // unavailable — exactly what `selector_available` encodes.
+        return crate::history_metrics::selector_available(canonical, false, true)
+            || crate::AnalyzerRegistry::default_set().has_analyzer_for(language);
     }
     if !crate::AnalyzerRegistry::default_set().has_analyzer_for(language) {
         return false;
@@ -1037,8 +1042,8 @@ fn insert_threshold(
         let help = if !crate::AnalyzerRegistry::default_set().has_analyzer_for(language) {
             format!(
                 "this build was compiled without the {} analyzer; its files cannot be \
-                 analyzed, so a static threshold can never fire (`history.*` thresholds \
-                 remain valid)",
+                 analyzed, so this threshold can never fire (git-only `history.*` \
+                 thresholds remain valid)",
                 language.canonical()
             )
         } else if canonical.starts_with("sql.") {
@@ -1898,8 +1903,10 @@ mod tests {
     #[cfg(not(feature = "lang-rust"))]
     fn rejects_static_overrides_for_uncompiled_analyzers() {
         // Feature-reduced builds cannot analyze the language at all,
-        // so any static override for it is a permanently dead gate.
-        // (`history.*` needs no analyzer and stays valid.)
+        // so any static override for it is a permanently dead gate —
+        // including the static-dependent history composites (hotspot
+        // reads the analyzer's cognitive sum). Git-only history keys
+        // need no analyzer and stay valid.
         let err = parse("[languages.rust.thresholds]\ncognitive = 1\n").unwrap_err();
         assert!(err.to_string().contains("can never fire"), "{err}");
         assert!(
@@ -1907,7 +1914,9 @@ mod tests {
             "{}",
             rendered(&err)
         );
-        assert!(parse("[languages.rust.thresholds]\n\"history.hotspot\" = 9\n").is_ok());
+        let err = parse("[languages.rust.thresholds]\n\"history.hotspot\" = 9\n").unwrap_err();
+        assert!(err.to_string().contains("can never fire"), "{err}");
+        assert!(parse("[languages.rust.thresholds]\n\"history.churn.abs\" = 40\n").is_ok());
     }
 
     #[test]
