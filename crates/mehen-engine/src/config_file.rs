@@ -530,6 +530,13 @@ impl ThresholdPolicy {
             else {
                 continue;
             };
+            // Undefined measurements publish as NaN (e.g. interface
+            // averages over a zero interface count): NaN compares
+            // false under every polarity, which would silently pass
+            // the gate — skip them as unmeasurable instead.
+            if !value.is_finite() {
+                continue;
+            }
             if !value_is_measurable(root, canonical) {
                 continue;
             }
@@ -987,6 +994,18 @@ fn language_can_publish(language: Language, canonical: &str) -> bool {
             if is_class_family_key(canonical) && matches!(language, Language::C | Language::Go) {
                 return false;
             }
+            // The interface-scoped members of the class families
+            // measure interface-like spaces (interfaces, traits);
+            // Python, Ruby, and PowerShell walkers never open one, so
+            // those overrides could never fire.
+            if is_interface_scoped_key(canonical)
+                && matches!(
+                    language,
+                    Language::Python | Language::Ruby | Language::PowerShell
+                )
+            {
+                return false;
+            }
             true
         }
     }
@@ -998,6 +1017,17 @@ fn is_class_family_key(canonical: &str) -> bool {
     ["npa", "npm", "wmc"]
         .iter()
         .any(|family| canonical == *family || canonical.starts_with(&format!("{family}.")))
+}
+
+/// The interface-scoped members of the class families
+/// (`npa.interfaces`, `npm.interface_methods`, `wmc.interfaces`, …),
+/// which measure `SpaceKind::Interface` / `SpaceKind::Trait` spaces
+/// exclusively.
+fn is_interface_scoped_key(canonical: &str) -> bool {
+    let Some((_, member)) = canonical.split_once('.') else {
+        return false;
+    };
+    is_class_family_key(canonical) && member.starts_with("interface")
 }
 
 fn insert_threshold(
@@ -1055,6 +1085,12 @@ fn insert_threshold(
             "`markdown.*` metrics are published by the Markdown analyzer; move the threshold \
              to [languages.markdown.thresholds] or the global [thresholds] table"
                 .to_string()
+        } else if is_interface_scoped_key(&canonical) {
+            format!(
+                "the interface-scoped members measure interface-like spaces (interfaces, \
+                 traits); the {} grammar never opens one",
+                language.canonical()
+            )
         } else if is_class_family_key(&canonical) {
             format!(
                 "the class-shape families (npa, npm, wmc) publish only for languages with \
@@ -1888,6 +1924,17 @@ mod tests {
         assert!(err.to_string().contains("can never fire"), "{err}");
         // Class-capable languages keep the whole catalogue.
         assert!(parse("[languages.python.thresholds]\nwmc = 5\n").is_ok());
+        // …except the interface-scoped members: Python classes exist,
+        // interface-like spaces do not.
+        let err =
+            parse("[languages.python.thresholds]\n\"npa.interfaces_average\" = 2\n").unwrap_err();
+        assert!(err.to_string().contains("can never fire"), "{err}");
+        assert!(
+            rendered(&err).contains("never opens one"),
+            "{}",
+            rendered(&err)
+        );
+        assert!(parse("[languages.python.thresholds]\n\"npa.classes_average\" = 2\n").is_ok());
 
         // The owning language and the engine-injected history family
         // stay valid, and global cross-language thresholds are
@@ -1977,6 +2024,23 @@ mod tests {
             .evaluate("a.cs", Language::CSharp, &space, None);
         assert_eq!(breaches.len(), 1);
         assert_eq!(breaches[0].source_table, "languages.\"c#\".thresholds");
+    }
+
+    #[test]
+    fn evaluate_skips_non_finite_measurements() {
+        // Undefined measurements publish as NaN (e.g. an interface
+        // average over a zero interface count); NaN compares false
+        // under both polarities and must be skipped as unmeasurable,
+        // not silently passed.
+        let config = parse("[thresholds]\ncognitive = 2\n\"mi.visual_studio\" = 40\n")
+            .expect("valid config");
+        let space = space_with(&[("cognitive.sum", f64::NAN), ("mi.visual_studio", f64::NAN)]);
+        assert!(
+            config
+                .thresholds
+                .evaluate("a.ts", Language::TypeScript, &space, None)
+                .is_empty()
+        );
     }
 
     #[test]
