@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.9.0](https://github.com/ophi-dev/mehen/compare/v1.8.1...v1.9.0) (2026-08-17)
+
+
+### Features
+
+* add mehen.toml per-metric threshold gates ([#243](https://github.com/ophi-dev/mehen/issues/243)) ([cf606c2](https://github.com/ophi-dev/mehen/commit/cf606c2087e3bb019a567526a4e06a5664541125))
+* git history metrics family + history-aware default PR-comment columns ([#236](https://github.com/ophi-dev/mehen/issues/236)) ([cf64502](https://github.com/ophi-dev/mehen/commit/cf645020abcc615914bc28abab59a9c6834e199f))
+* upgrade antlr-rust-runtime to 0.33.1, adopt generated drivers ([#245](https://github.com/ophi-dev/mehen/issues/245)) ([5ebcac3](https://github.com/ophi-dev/mehen/commit/5ebcac39beeb90eda861dfc40d07d78c11ca57d0))
+
+
+### Bug Fixes
+
+* address PR review comment ([885ec7e](https://github.com/ophi-dev/mehen/commit/885ec7edda10f055ce4931a57a583354d10f9c12))
+* address PR review comments ([2267dc3](https://github.com/ophi-dev/mehen/commit/2267dc3ec91f9080be9769fa11bda9f62372bfc5))
+* **csharp:** attribute a primary constructor's whole header to its space ([d2e91c3](https://github.com/ophi-dev/mehen/commit/d2e91c3cdc0a4e7641ce0c8e001dac292a96cc02)), closes [#219](https://github.com/ophi-dev/mehen/issues/219)
+* **csharp:** parse a local generic declaration as a declaration ([5a03880](https://github.com/ophi-dev/mehen/commit/5a038802753ae1cf1932c947119ff9b69ce7b9fa)), closes [#218](https://github.com/ophi-dev/mehen/issues/218)
+* **csharp:** stop constructor attribution at the base-constructor call ([0a3dd76](https://github.com/ophi-dev/mehen/commit/0a3dd761cc539bee8d37cf0573579b19ed227b33))
+* **kotlin:** stop prefix ! from breaking a cognitive boolean run ([5afc2ab](https://github.com/ophi-dev/mehen/commit/5afc2ab7e02a4a6526cdeea1e4a03391dd694613)), closes [#217](https://github.com/ophi-dev/mehen/issues/217)
+
+
+### Parser & Grammar Updates
+
+* bump mago-syntax-core from 1.45.0 to 1.46.0 in the mago group ([#240](https://github.com/ophi-dev/mehen/issues/240)) ([d81ab22](https://github.com/ophi-dev/mehen/commit/d81ab22a601fd681991d61f5d4b9a16e713be1a4))
+* bump ra_ap_syntax from 0.0.345 to 0.0.347 ([#242](https://github.com/ophi-dev/mehen/issues/242)) ([2019f23](https://github.com/ophi-dev/mehen/commit/2019f2328d6b034650f3d985cea67e2f20a1dd0a))
+* bump the mago group with 4 updates ([#231](https://github.com/ophi-dev/mehen/issues/231)) ([139a972](https://github.com/ophi-dev/mehen/commit/139a972a96c52109384832eef91cab020563ebe7))
+* bump the oxc group with 6 updates ([#239](https://github.com/ophi-dev/mehen/issues/239)) ([c8191b1](https://github.com/ophi-dev/mehen/commit/c8191b1637969190273c29ad45d7263788e371c8))
+* bump tree-sitter from 0.26.11 to 0.26.12 in the tree-sitter group ([#238](https://github.com/ophi-dev/mehen/issues/238)) ([78d12ed](https://github.com/ophi-dev/mehen/commit/78d12ed2efcdd793892bbf6587d0156056cee022))
+
 ## [1.8.1](https://github.com/ophi-dev/mehen/compare/v1.8.0...v1.8.1) (2026-08-05)
 
 
