@@ -908,14 +908,18 @@ fn collect_thresholds(
 
 /// Whether files of `language` can ever publish `canonical` onto their
 /// root metric set. The engine-injected `history.*` family applies to
-/// every language; `sql.*` and `markdown.*` belong to their owning
-/// analyzers (which publish nothing else); and the class-shape
-/// families (`npa`, `npm`, `wmc`) publish only when a class-like
-/// construct exists — the C and Go grammars have none, so their files
-/// can never publish those keys.
+/// every language (it needs no analyzer); `sql.*` and `markdown.*`
+/// belong to their owning analyzers (which publish nothing else); the
+/// class-shape families (`npa`, `npm`, `wmc`) publish only when a
+/// class-like construct exists — the C and Go grammars have none; and
+/// any static key additionally requires the language's analyzer to be
+/// compiled into this build.
 fn language_can_publish(language: Language, canonical: &str) -> bool {
     if canonical.starts_with("history.") {
         return true;
+    }
+    if !crate::AnalyzerRegistry::default_set().has_analyzer_for(language) {
+        return false;
     }
     match language {
         Language::Sql => canonical.starts_with("sql."),
@@ -956,7 +960,14 @@ fn insert_threshold(
     if let Some(language) = language
         && !language_can_publish(language, &canonical)
     {
-        let help = if canonical.starts_with("sql.") {
+        let help = if !crate::AnalyzerRegistry::default_set().has_analyzer_for(language) {
+            format!(
+                "this build was compiled without the {} analyzer; its files cannot be \
+                 analyzed, so a static threshold can never fire (`history.*` thresholds \
+                 remain valid)",
+                language.canonical()
+            )
+        } else if canonical.starts_with("sql.") {
             "`sql.*` metrics are published by the SQL analyzer; move the threshold to \
              [languages.sql.thresholds] or the global [thresholds] table (global limits apply \
              only to files that publish the metric)"
@@ -1491,6 +1502,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lang-sql")]
     fn accepts_namespaced_and_published_member_metrics() {
         let config = parse(
             "[thresholds]\n\"sql.change_risk_score\" = 3\n\"history.hotspot\" = 100\nnargs = 6\n\"cognitive.max\" = 20\n\"nom.functions.max\" = 9\n",
@@ -1670,6 +1682,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lang-sql")]
     fn sql_modularity_na_sentinel_is_not_gated() {
         let config = parse("[thresholds]\n\"sql.modularity_health\" = 50\n").expect("valid config");
         // No CTEs: the published 0.0 is an N/A sentinel, not a score —
@@ -1721,6 +1734,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lang-sql")]
     fn rejects_unpublished_namespaced_metrics_with_suggestion() {
         // The owning analyzers' catalogues validate `sql.*` and
         // `markdown.*` names, so a typo cannot become a gate that
@@ -1744,6 +1758,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lang-sql")]
     fn accepts_namespaced_dynamic_family_members() {
         let config = parse(
             "[thresholds]\n\"sql.statement.kind_count.select\" = 20\n\"sql.dialect.is_postgres\" = 1\n\"markdown.loc.tloc\" = 400\n",
@@ -1753,6 +1768,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "lang-sql")]
     fn rejects_language_incompatible_thresholds() {
         // A language override naming a metric its files can never
         // publish would be a permanently dead gate.
@@ -1793,6 +1809,22 @@ mod tests {
         )
         .expect("compatible thresholds are valid");
         assert!(!config.thresholds.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(feature = "lang-rust"))]
+    fn rejects_static_overrides_for_uncompiled_analyzers() {
+        // Feature-reduced builds cannot analyze the language at all,
+        // so any static override for it is a permanently dead gate.
+        // (`history.*` needs no analyzer and stays valid.)
+        let err = parse("[languages.rust.thresholds]\ncognitive = 1\n").unwrap_err();
+        assert!(err.to_string().contains("can never fire"), "{err}");
+        assert!(
+            rendered(&err).contains("compiled without the rust analyzer"),
+            "{}",
+            rendered(&err)
+        );
+        assert!(parse("[languages.rust.thresholds]\n\"history.hotspot\" = 9\n").is_ok());
     }
 
     #[test]
@@ -1858,9 +1890,10 @@ mod tests {
             ),
         ];
         for (name, language, body) in samples {
-            let analyzer = registry
-                .analyzer_for(*language)
-                .expect("analyzer available");
+            // Feature-reduced builds skip languages they don't compile.
+            let Some(analyzer) = registry.analyzer_for(*language) else {
+                continue;
+            };
             let source = SourceFile::new(
                 camino::Utf8PathBuf::from(*name),
                 *language,

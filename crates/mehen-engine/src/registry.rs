@@ -61,6 +61,14 @@ impl AnalyzerRegistry {
             .map(|e| (e.factory)())
     }
 
+    /// Whether an analyzer is registered for `language`, without
+    /// constructing one. Used by `mehen.toml` validation: a static
+    /// threshold for a language this build cannot analyze is a gate
+    /// that can never fire.
+    pub fn has_analyzer_for(&self, language: Language) -> bool {
+        self.entries.iter().any(|e| e.language == language)
+    }
+
     /// Default registry assembling every analyzer enabled by feature flags.
     ///
     /// Also registers the Markdown embedded-code dispatcher
