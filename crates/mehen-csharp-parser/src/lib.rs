@@ -49,21 +49,22 @@
 //! ## Quickstart
 //!
 //! ```no_run
-//! use mehen_csharp_parser::c_sharp_parser::CSharpParser;
+//! use mehen_csharp_parser::c_sharp_parser::{self, CSharpParser};
 //! use mehen_csharp_parser::c_sharp_lexer::CSharpLexer;
-//! use antlr4_runtime::{CommonTokenStream, InputStream};
 //! // `number_of_syntax_errors` is a `Parser`-trait method, so the trait
 //! // must be in scope to call it.
 //! use antlr4_runtime::Parser;
 //!
 //! # fn main() -> Result<(), antlr4_runtime::AntlrError> {
-//! let input = InputStream::new("class C {}\n");
-//! let lexer = CSharpLexer::new(input);
-//! let tokens = CommonTokenStream::new(lexer);
-//! let mut parser = CSharpParser::new(tokens);
-//! let result = parser.compilation_unit()?;
-//! let errors = parser.number_of_syntax_errors();
-//! let parsed = parser.into_parsed_file(result);
+//! // One-call setup: build lexer + token stream + parser and run an entry
+//! // rule. `parse_with_parser` keeps the parser so you can read diagnostics.
+//! let out = c_sharp_parser::parse_with_parser(
+//!     "class C {}\n",
+//!     CSharpLexer::new,
+//!     CSharpParser::compilation_unit,
+//! )?;
+//! let errors = out.parser.number_of_syntax_errors();
+//! let parsed = out.parser.into_parsed_file(out.result);
 //! let _ = (errors, parsed.tree());
 //! # Ok(())
 //! # }

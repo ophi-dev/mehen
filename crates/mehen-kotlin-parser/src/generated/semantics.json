@@ -3,7 +3,13 @@
   "policy": "error",
   "note": "unknown coordinates currently default to assume-true; a future minor release changes the default to error",
   "options": [
-    {"name": "tokenVocab", "value": "KotlinLexer", "line": 7, "column": 10, "disposition": "metadata"}
+    {
+      "name": "tokenVocab",
+      "value": "KotlinLexer",
+      "line": 7,
+      "column": 10,
+      "disposition": "metadata"
+    }
   ],
   "grammars": [
     {
