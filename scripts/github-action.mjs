@@ -112,7 +112,10 @@ async function main() {
     console.warn(`Unable to publish mehen PR comment: ${error.message}`);
   }
 
-  setOutput("violations", String(violations.length));
+  // The advertised violation count covers both gates: Action-input
+  // delta thresholds and repository `mehen.toml` breaches parsed from
+  // the diff report.
+  setOutput("violations", String(violations.length + gateViolations.length));
   setOutput("report_json", reportJson);
   setOutput("report_markdown", reportMarkdown);
 

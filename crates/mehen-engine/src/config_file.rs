@@ -77,8 +77,11 @@ const PUBLISHED_METRIC_KEYS: &[&str] = &[
     "cognitive.average",
     "cognitive.min",
     "cognitive.max",
-    // loc family (bare `loc` mirrors `loc.sloc`)
-    "loc",
+    // loc family — the bare `loc` key (a mirror of `loc.sloc`) is
+    // published but deliberately NOT configurable: the GitHub Action
+    // ecosystem treats bare `loc` as a legacy alias for `loc.lloc`,
+    // so accepting it would gate a different measurement than the
+    // name suggests. Use the precise `loc.*` members instead.
     "loc.lloc",
     "loc.sloc",
     "loc.ploc",
@@ -143,8 +146,11 @@ const PUBLISHED_METRIC_KEYS: &[&str] = &[
     "nargs.functions_max",
     "nargs.closures_min",
     "nargs.closures_max",
-    // nom
-    "nom",
+    // nom — the bare `nom` key (functions + closures total) is
+    // published but deliberately NOT configurable: the GitHub Action
+    // ecosystem treats bare `nom` as a legacy alias for
+    // `nom.functions`, so accepting it would gate a different
+    // measurement than the name suggests. Use the precise members.
     "nom.functions",
     "nom.closures",
     "nom.functions_average",
@@ -193,6 +199,10 @@ pub(crate) enum ResolveError {
     /// A `sql.*` / `markdown.*` name the owning analyzer never
     /// publishes.
     UnknownNamespaced,
+    /// A namespace this build cannot analyze (`sql.*` without the
+    /// `lang-sql` feature) — the gate could never fire.
+    #[cfg(not(feature = "lang-sql"))]
+    UnavailableNamespace,
     /// Everything else the resolver cannot map to a published key.
     Unknown,
 }
@@ -230,8 +240,9 @@ pub(crate) fn canonical_metric_key(name: &str) -> Result<String, ResolveError> {
         // The SQL analyzer owns its namespace: validate against its
         // published catalogue (fixed keys + enum-backed dynamic
         // families) so a typo can never become a gate that cannot
-        // fire. Builds without the SQL analyzer cannot know the
-        // catalogue and accept the name verbatim.
+        // fire. A build without the SQL analyzer cannot analyze SQL
+        // files at all, so any `sql.*` threshold would be a dead gate
+        // there — rejected rather than accepted verbatim.
         #[cfg(feature = "lang-sql")]
         {
             return if mehen_sql::is_published_metric_key(name) {
@@ -242,7 +253,7 @@ pub(crate) fn canonical_metric_key(name: &str) -> Result<String, ResolveError> {
         }
         #[cfg(not(feature = "lang-sql"))]
         {
-            return Ok(name.to_string());
+            return Err(ResolveError::UnavailableNamespace);
         }
     }
     if name.starts_with("markdown.") {
@@ -694,7 +705,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
         match key_str {
             "thresholds" => {
                 let table = expect_table(value, "thresholds", &ctx)?;
-                collect_thresholds(table, "thresholds", &mut global, &ctx)?;
+                collect_thresholds(table, "thresholds", None, &mut global, &ctx)?;
             }
             "languages" => {
                 let table = expect_table(value, "languages", &ctx)?;
@@ -735,7 +746,13 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                             "thresholds" => {
                                 let threshold_ctx = format!("{lang_ctx}.thresholds");
                                 let table = expect_table(sub_value, &threshold_ctx, &ctx)?;
-                                collect_thresholds(table, &threshold_ctx, &mut thresholds, &ctx)?;
+                                collect_thresholds(
+                                    table,
+                                    &threshold_ctx,
+                                    Some(language),
+                                    &mut thresholds,
+                                    &ctx,
+                                )?;
                             }
                             other => {
                                 return Err(ctx
@@ -813,6 +830,7 @@ fn expect_table<'v, 'i>(
 fn collect_thresholds(
     table: &toml::de::DeTable<'_>,
     context: &str,
+    language: Option<Language>,
     out: &mut BTreeMap<String, ThresholdEntry>,
     ctx: &ErrorContext<'_>,
 ) -> Result<(), ConfigError> {
@@ -820,6 +838,7 @@ fn collect_thresholds(
         table: &toml::de::DeTable<'_>,
         prefix: &str,
         context: &str,
+        language: Option<Language>,
         out: &mut BTreeMap<String, ThresholdEntry>,
         ctx: &ErrorContext<'_>,
     ) -> Result<(), ConfigError> {
@@ -853,7 +872,7 @@ fn collect_thresholds(
                     let limit = i64::from_str_radix(digits, i.radix())
                         .map(|v| v as f64)
                         .unwrap_or(f64::NAN);
-                    insert_threshold(&metric, key, limit, context, out, ctx)?;
+                    insert_threshold(&metric, key, limit, context, language, out, ctx)?;
                 }
                 toml::de::DeValue::Float(f) => {
                     let limit = f
@@ -861,10 +880,10 @@ fn collect_thresholds(
                         .replace('_', "")
                         .parse::<f64>()
                         .unwrap_or(f64::NAN);
-                    insert_threshold(&metric, key, limit, context, out, ctx)?;
+                    insert_threshold(&metric, key, limit, context, language, out, ctx)?;
                 }
                 toml::de::DeValue::Table(nested) => {
-                    walk(nested, &metric, context, out, ctx)?;
+                    walk(nested, &metric, context, language, out, ctx)?;
                 }
                 other => {
                     return Err(ctx
@@ -884,7 +903,22 @@ fn collect_thresholds(
         Ok(())
     }
 
-    walk(table, "", context, out, ctx)
+    walk(table, "", context, language, out, ctx)
+}
+
+/// Whether files of `language` can ever publish `canonical` onto their
+/// root metric set. The engine-injected `history.*` family applies to
+/// every language; `sql.*` and `markdown.*` belong to their owning
+/// analyzers, and those analyzers publish nothing else.
+fn language_can_publish(language: Language, canonical: &str) -> bool {
+    if canonical.starts_with("history.") {
+        return true;
+    }
+    match language {
+        Language::Sql => canonical.starts_with("sql."),
+        Language::Markdown => canonical.starts_with("markdown."),
+        _ => !canonical.starts_with("sql.") && !canonical.starts_with("markdown."),
+    }
 }
 
 fn insert_threshold(
@@ -892,10 +926,39 @@ fn insert_threshold(
     key: &toml::Spanned<toml::de::DeString<'_>>,
     limit: f64,
     context: &str,
+    language: Option<Language>,
     out: &mut BTreeMap<String, ThresholdEntry>,
     ctx: &ErrorContext<'_>,
 ) -> Result<(), ConfigError> {
     let canonical = validate_metric_name(metric, key.span(), context, ctx)?;
+    // A language override naming a metric its files can never publish
+    // (`sql.*` under [languages.python], `cognitive` under
+    // [languages.sql]) would be a gate that can never fire.
+    if let Some(language) = language
+        && !language_can_publish(language, &canonical)
+    {
+        let owner = if canonical.starts_with("sql.") {
+            "the SQL analyzer"
+        } else if canonical.starts_with("markdown.") {
+            "the Markdown analyzer"
+        } else {
+            "the source-code analyzers"
+        };
+        return Err(ctx
+            .error_at(
+                key.span(),
+                "never published for this language",
+                format!(
+                    "`{metric}` in [{context}] can never fire: {} files do not publish it",
+                    language.canonical()
+                ),
+            )
+            .with_help(format!(
+                "`{canonical}` is published by {owner}; move the threshold to the owning \
+                 language's table or the global [thresholds] table (global limits apply only \
+                 to files that publish the metric)"
+            )));
+    }
     if !limit.is_finite() {
         return Err(ctx
             .error_at(
@@ -958,6 +1021,17 @@ fn validate_metric_name(
                 "the fixed `history.*` family is: {}",
                 keys::HISTORY_ALL.join(", ")
             ))),
+        #[cfg(not(feature = "lang-sql"))]
+        Err(ResolveError::UnavailableNamespace) => Err(ctx
+            .error_at(
+                span,
+                "unavailable in this build",
+                format!("unavailable metric `{name}` in [{context}]"),
+            )
+            .with_help(
+                "this build was compiled without the SQL analyzer (`lang-sql` feature); a \
+                 `sql.*` threshold could never fire",
+            )),
         Err(ResolveError::UnknownNamespaced) => {
             let candidates = namespaced_candidates(name);
             let help = match closest_candidate(name, candidates) {
@@ -1649,6 +1723,56 @@ mod tests {
     }
 
     #[test]
+    fn rejects_language_incompatible_thresholds() {
+        // A language override naming a metric its files can never
+        // publish would be a permanently dead gate.
+        let err =
+            parse("[languages.python.thresholds]\n\"sql.change_risk_score\" = 3\n").unwrap_err();
+        assert!(err.to_string().contains("can never fire"), "{err}");
+        assert!(
+            rendered(&err).contains("published by the SQL analyzer"),
+            "{}",
+            rendered(&err)
+        );
+
+        let err = parse("[languages.sql.thresholds]\ncognitive = 5\n").unwrap_err();
+        assert!(err.to_string().contains("can never fire"), "{err}");
+
+        let err = parse("[languages.markdown.thresholds]\n\"loc.lloc\" = 100\n").unwrap_err();
+        assert!(err.to_string().contains("can never fire"), "{err}");
+
+        // The owning language and the engine-injected history family
+        // stay valid, and global cross-language thresholds are
+        // untouched (they apply only to files that publish the key).
+        let config = parse(
+            "[thresholds]\n\"sql.change_risk_score\" = 3\n\n[languages.sql.thresholds]\n\"sql.cognitive_complexity\" = 40\n\n[languages.python.thresholds]\n\"history.hotspot\" = 100\n",
+        )
+        .expect("compatible thresholds are valid");
+        assert!(!config.thresholds.is_empty());
+    }
+
+    #[test]
+    fn rejects_ambiguous_bare_aliases_with_family_help() {
+        // Bare `loc` / `nom` are published root keys, but the Action
+        // ecosystem treats them as aliases for `loc.lloc` /
+        // `nom.functions` — configuring them would gate a different
+        // measurement than the name suggests.
+        let err = parse("[thresholds]\nloc = 100\n").unwrap_err();
+        assert!(err.to_string().contains("unknown metric `loc`"));
+        assert!(
+            rendered(&err).contains("loc.sloc"),
+            "help must list the precise family members: {}",
+            rendered(&err)
+        );
+        let err = parse("[thresholds]\nnom = 10\n").unwrap_err();
+        assert!(
+            rendered(&err).contains("nom.functions"),
+            "{}",
+            rendered(&err)
+        );
+    }
+
+    #[test]
     fn report_preserves_precision_on_close_crossings() {
         // Rounding both sides to two decimals would render an
         // impossible-looking `0.5 — exceeds max 0.5`.
@@ -1703,6 +1827,18 @@ mod tests {
                 .expect("analysis succeeds");
             for (key, _) in analysis.root.metrics.iter() {
                 let key = key.as_str();
+                // Published on the root but deliberately not
+                // configurable: the GitHub Action ecosystem treats
+                // these bare names as legacy aliases for `loc.lloc` /
+                // `nom.functions`, so accepting them would gate a
+                // different measurement than the name suggests.
+                if matches!(key, "loc" | "nom") {
+                    assert!(
+                        canonical_metric_key(key).is_err(),
+                        "ambiguous alias `{key}` must stay non-configurable"
+                    );
+                    continue;
+                }
                 let canonical = canonical_metric_key(key)
                     .unwrap_or_else(|_| panic!("published key `{key}` must validate"));
                 // The canonical form must be readable from the same
