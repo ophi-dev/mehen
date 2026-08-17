@@ -909,7 +909,10 @@ fn collect_thresholds(
 /// Whether files of `language` can ever publish `canonical` onto their
 /// root metric set. The engine-injected `history.*` family applies to
 /// every language; `sql.*` and `markdown.*` belong to their owning
-/// analyzers, and those analyzers publish nothing else.
+/// analyzers (which publish nothing else); and the class-shape
+/// families (`npa`, `npm`, `wmc`) publish only when a class-like
+/// construct exists — the C and Go grammars have none, so their files
+/// can never publish those keys.
 fn language_can_publish(language: Language, canonical: &str) -> bool {
     if canonical.starts_with("history.") {
         return true;
@@ -917,8 +920,24 @@ fn language_can_publish(language: Language, canonical: &str) -> bool {
     match language {
         Language::Sql => canonical.starts_with("sql."),
         Language::Markdown => canonical.starts_with("markdown."),
-        _ => !canonical.starts_with("sql.") && !canonical.starts_with("markdown."),
+        _ => {
+            if canonical.starts_with("sql.") || canonical.starts_with("markdown.") {
+                return false;
+            }
+            if is_class_family_key(canonical) && matches!(language, Language::C | Language::Go) {
+                return false;
+            }
+            true
+        }
     }
+}
+
+/// The class-shape metric families, published only for files with
+/// class-like constructs (classes, interfaces, traits, impls).
+fn is_class_family_key(canonical: &str) -> bool {
+    ["npa", "npm", "wmc"]
+        .iter()
+        .any(|family| canonical == *family || canonical.starts_with(&format!("{family}.")))
 }
 
 fn insert_threshold(
@@ -937,12 +956,27 @@ fn insert_threshold(
     if let Some(language) = language
         && !language_can_publish(language, &canonical)
     {
-        let owner = if canonical.starts_with("sql.") {
-            "the SQL analyzer"
+        let help = if canonical.starts_with("sql.") {
+            "`sql.*` metrics are published by the SQL analyzer; move the threshold to \
+             [languages.sql.thresholds] or the global [thresholds] table (global limits apply \
+             only to files that publish the metric)"
+                .to_string()
         } else if canonical.starts_with("markdown.") {
-            "the Markdown analyzer"
+            "`markdown.*` metrics are published by the Markdown analyzer; move the threshold \
+             to [languages.markdown.thresholds] or the global [thresholds] table"
+                .to_string()
+        } else if is_class_family_key(&canonical) {
+            format!(
+                "the class-shape families (npa, npm, wmc) publish only for languages with \
+                 class-like constructs; the {} grammar has none",
+                language.canonical()
+            )
         } else {
-            "the source-code analyzers"
+            format!(
+                "`{canonical}` is published by the source-code analyzers; {} files publish a \
+                 different metric family",
+                language.canonical()
+            )
         };
         return Err(ctx
             .error_at(
@@ -953,11 +987,7 @@ fn insert_threshold(
                     language.canonical()
                 ),
             )
-            .with_help(format!(
-                "`{canonical}` is published by {owner}; move the threshold to the owning \
-                 language's table or the global [thresholds] table (global limits apply only \
-                 to files that publish the metric)"
-            )));
+            .with_help(help));
     }
     if !limit.is_finite() {
         return Err(ctx
@@ -1740,6 +1770,20 @@ mod tests {
 
         let err = parse("[languages.markdown.thresholds]\n\"loc.lloc\" = 100\n").unwrap_err();
         assert!(err.to_string().contains("can never fire"), "{err}");
+
+        // Class-shape families need class-like constructs; the C and
+        // Go grammars have none, so those overrides are dead gates.
+        let err = parse("[languages.c.thresholds]\nwmc = 1\n").unwrap_err();
+        assert!(err.to_string().contains("can never fire"), "{err}");
+        assert!(
+            rendered(&err).contains("class-like constructs"),
+            "{}",
+            rendered(&err)
+        );
+        let err = parse("[languages.go.thresholds]\n\"npm.classes\" = 1\n").unwrap_err();
+        assert!(err.to_string().contains("can never fire"), "{err}");
+        // Class-capable languages keep the whole catalogue.
+        assert!(parse("[languages.python.thresholds]\nwmc = 5\n").is_ok());
 
         // The owning language and the engine-injected history family
         // stay valid, and global cross-language thresholds are

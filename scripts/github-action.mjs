@@ -575,7 +575,7 @@ function renderMarkdown(
     body += "|---|---|---:|---:|---|\n";
     for (const violation of gateViolations) {
       const bound = violation.polarity === "higher_is_better" ? "min" : "max";
-      body += `| ${renderFile(violation.path, context)} | ${escapeCell(violation.metric)} | ${formatNumber(violation.value)} | ${bound} ${formatNumber(violation.limit)} | ${escapeCell(violation.source_table)} |\n`;
+      body += `| ${renderFile(violation.path, context)} | ${escapeCell(violation.metric)} | ${formatExactNumber(violation.value)} | ${bound} ${formatExactNumber(violation.limit)} | ${escapeCell(violation.source_table)} |\n`;
     }
   }
 
@@ -794,6 +794,17 @@ function formatNumber(value) {
     return String(value);
   }
   return Number.isInteger(number) ? String(number) : number.toFixed(2);
+}
+
+/**
+ * Shortest exact representation for repository-gate values: rounding
+ * both sides of a close crossing to two decimals would render an
+ * apparently impossible failure (`0.50` versus `max 0.50` for a
+ * `0.504` value over a `0.503` limit).
+ */
+function formatExactNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number) : String(value);
 }
 
 function formatSigned(value) {
