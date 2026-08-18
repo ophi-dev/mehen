@@ -34,7 +34,7 @@ file, in a fixed priority order chosen so no format can false-positive on anothe
 5. **Clover** — `<coverage` carrying a `clover="…"` version attribute.
 6. **Cobertura** — `<coverage` without the Clover marker.
 
-An explicit `--coverage <path>` argument goes through the same detection; a file no parser
+An explicit `--coverage=<path>` argument goes through the same detection; a file no parser
 recognizes is a hard error, while an auto-discovered candidate that fails sniffing is silently
 recorded as rejected (that is business as usual for e.g. `coverage.txt` text summaries).
 

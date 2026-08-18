@@ -48,7 +48,7 @@ they exist even for formats without function records.
 | Signal | Interpretation |
 |---|---|
 | `coverage.function` far below `coverage.line` | Coverage is concentrated: a few well-tested functions carry the percentage while others never run. The file-level line number is hiding dead zones. |
-| Function at 0% with public visibility | Either missing tests or dead API — both worth knowing. Cross-reference [NPM](/metrics/code/npm)/[NOM](/metrics/code/nom) for how much surface the file exposes. |
+| A function space whose `coverage.line` reads 0% on a public function | Either missing tests or dead API — both worth knowing. Cross-reference [NPM](/metrics/code/npm)/[NOM](/metrics/code/nom) for how much surface the file exposes. |
 | A hit function with low span line-coverage | Tests enter it but bail early — typically only the happy path's first branch. The per-function `coverage.line` on the space pinpoints these. |
 | Language-specific footnote | Import-time execution counts: a Python `def` line executes when the module loads, so an otherwise-untested function can show a hit declaration line while its body sits at zero. The body lines tell the truth. |
 

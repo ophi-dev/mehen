@@ -24,7 +24,7 @@ untested — which is exactly the intersection the CRAP index formalizes (see
 cargo llvm-cov --lcov --output-path lcov.info
 
 # 2. Analyze a file with coverage enrichment:
-mehen metrics src/parser.rs --coverage lcov.info --pretty
+mehen metrics src/parser.rs --coverage=lcov.info --pretty
 
 # 3. Or let mehen find the report by itself:
 mehen metrics src/parser.rs --coverage
@@ -68,9 +68,11 @@ Every `coverage.*` metric is **higher-is-better**: a configured threshold is a *
   from the ingested reports. It works for any of mehen's source languages, because the report
   formats are language-agnostic.
 - **Unmeasured is never 0%.** A file absent from every report publishes *no* coverage keys: it
-  renders as `n/a`, ranks as least concerning, and never fires a threshold. A file present in a
-  report with zero executed lines publishes an honest `0`. The distinction is load-bearing — a
-  fabricated 0% would fail every gate on every file the moment path matching hiccuped.
+  ranks as least concerning and never fires a threshold. `top-offenders` renders the missing
+  score as `n/a`, while `mehen metrics` omits the coverage family from its output entirely. A
+  file present in a report with zero executed lines publishes an honest `0`. The distinction is
+  load-bearing — a fabricated 0% would fail every gate on every file the moment path matching
+  hiccuped.
 - **Dimensions are independent.** A format that cannot measure a dimension leaves it absent: a Go
   coverprofile has no branch or function records, so only `coverage.line` appears.
 - **Per-function attribution.** Beyond the file totals, every function and closure space in the

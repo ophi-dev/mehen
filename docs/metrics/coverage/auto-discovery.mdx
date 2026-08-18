@@ -6,7 +6,7 @@ keywords: ["coverage discovery", "lcov.info", "coverage directory", "TestResults
 
 Coverage reports live exactly where mehen's source walk refuses to look: `coverage/`, `target/`,
 `build/`, and `TestResults/` are gitignored in any healthy repository, and `.nyc_output/` is
-hidden. Bare `--coverage` (or `--coverage auto`) therefore runs a *dedicated* discovery pass with
+hidden. Bare `--coverage` (or `--coverage=auto`) therefore runs a *dedicated* discovery pass with
 the inverse policy — every ignore rule off, hidden entries visible — while staying strictly
 bounded and deterministic.
 
@@ -16,12 +16,12 @@ mehen top-offenders src --metric coverage.line --coverage
 
 Discovery also runs without the flag when something asks for coverage: a `coverage.*` metric
 selector, a configured `coverage.*` threshold, or an opting-in `[coverage]` section in
-`mehen.toml`. `--coverage off` disables it unconditionally; explicit paths
-(`--coverage lcov.info`) skip discovery entirely.
+`mehen.toml`. `--coverage=off` disables it unconditionally; explicit paths
+(`--coverage=lcov.info`) skip discovery entirely.
 
 ## Three input tiers
 
-1. **Explicit reports** — `--coverage <path>` (repeatable) or `reports = […]` under
+1. **Explicit reports** — `--coverage=<path>` (repeatable) or `reports = […]` under
    `[coverage]`. These are *your* statement of intent: a missing or unparsable explicit report
    is a hard error, because an explicit gate input that silently disappears is a broken CI gate.
 2. **Tool-config introspection** — mehen reads *declarative* tool configs that say where reports
@@ -111,7 +111,7 @@ extra-patterns = ["qa/**/*.lcov"]      # additive scan globs, root-relative
 stale-warning = true                   # the mtime-vs-HEAD warning above
 ```
 
-The CLI always wins over the file: `--coverage off` disables coverage regardless of
+The CLI always wins over the file: `--coverage=off` disables coverage regardless of
 configuration. Unknown keys and wrong types are rejected at load time with a caret into the TOML
 source, like every other `mehen.toml` mistake.
 

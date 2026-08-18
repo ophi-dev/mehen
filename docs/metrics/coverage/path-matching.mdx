@@ -66,7 +66,7 @@ violations; it surfaces instead as:
 - a warning on ambiguous matches naming the candidate count.
 
 If a report that should match reads as unmeasured, check the three usual suspects: the report was
-generated in a different checkout layout (regenerate, or use explicit `--coverage <path>` from
+generated in a different checkout layout (regenerate, or use explicit `--coverage=<path>` from
 the matching root), the workspace file is spelled through a symlinked directory (canonicalization
 handles most of this), or two same-named files genuinely tie (make the report paths more specific
 — e.g. configure the tool to emit paths relative to the repo root).
