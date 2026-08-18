@@ -139,6 +139,13 @@ fn monorepo_discovery_snapshot() {
         ..Default::default()
     });
 
+    // The observability counter must reflect the walk (regression: it
+    // used to stay 0 while dirents_left was decremented).
+    assert!(
+        outcome.diagnostics.dirents_visited > 0,
+        "dirents_visited must count visited entries"
+    );
+
     insta::assert_yaml_snapshot!("monorepo_discovery", projection(root, &outcome));
 }
 
@@ -197,6 +204,7 @@ fn extra_patterns_lift_prune_dirs() {
 }
 
 #[test]
+#[cfg(unix)]
 fn symlink_escape_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8Path::from_path(dir.path()).unwrap();

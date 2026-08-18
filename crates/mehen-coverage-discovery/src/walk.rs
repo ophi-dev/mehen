@@ -112,7 +112,14 @@ const PRUNE_DIRS: &[&str] = &[
 /// * `build/` (Gradle/CMake/Jenkins conventions): only `reports/`,
 ///   `logs/`, and `coverage/`.
 /// * `coverage/tmp/` holds c8/nyc raw V8 output (never final reports).
-fn should_descend(name: &str, parent_name: Option<&str>, prune: &BTreeSet<&str>) -> bool {
+fn should_descend<S>(
+    name: &str,
+    parent_name: Option<&str>,
+    prune: &std::collections::BTreeSet<S>,
+) -> bool
+where
+    S: std::borrow::Borrow<str> + Ord,
+{
     if prune.contains(name) {
         return false;
     }
@@ -253,8 +260,7 @@ fn scan_one_root(
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str());
-        let prune_ref: BTreeSet<&str> = prune_for_filter.iter().map(String::as_str).collect();
-        should_descend(name, parent_name, &prune_ref)
+        should_descend(name, parent_name, &prune_for_filter)
     });
 
     for result in builder.build() {
@@ -263,6 +269,7 @@ fn scan_one_root(
             return;
         }
         budget.dirents_left -= 1;
+        diagnostics.dirents_visited += 1;
 
         let entry = match result {
             Ok(entry) => entry,

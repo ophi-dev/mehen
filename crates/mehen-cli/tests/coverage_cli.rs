@@ -44,10 +44,7 @@ fn metrics_with_explicit_coverage_report_publishes_the_family() {
     write(dir.path(), "app.py", PYTHON_BODY);
     write(dir.path(), "lcov.info", LCOV);
 
-    let output = mehen(
-        dir.path(),
-        &["metrics", "app.py", "--coverage", "lcov.info"],
-    );
+    let output = mehen(dir.path(), &["metrics", "app.py", "--coverage=lcov.info"]);
     let json = json_stdout(&output);
 
     let coverage = &json["metrics"]["coverage"];
@@ -101,7 +98,7 @@ fn metrics_without_coverage_omits_the_family() {
 
     // `--coverage off` beats an opting-in config section.
     write(dir.path(), "mehen.toml", "[coverage]\ndiscover = true\n");
-    let output = mehen(dir.path(), &["metrics", "app.py", "--coverage", "off"]);
+    let output = mehen(dir.path(), &["metrics", "app.py", "--coverage=off"]);
     let json = json_stdout(&output);
     assert!(json["metrics"].get("coverage").is_none());
 }
@@ -199,7 +196,7 @@ fn metrics_with_missing_explicit_report_is_a_setup_error() {
 
     let output = mehen(
         dir.path(),
-        &["metrics", "app.py", "--coverage", "nonexistent.info"],
+        &["metrics", "app.py", "--coverage=nonexistent.info"],
     );
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -211,16 +208,62 @@ fn metrics_with_missing_explicit_report_is_a_setup_error() {
     // Conflicting flag values are a usage error too.
     let output = mehen(
         dir.path(),
-        &[
-            "metrics",
-            "app.py",
-            "--coverage",
-            "auto",
-            "--coverage",
-            "off",
-        ],
+        &["metrics", "app.py", "--coverage=auto", "--coverage=off"],
     );
     assert_eq!(output.status.code(), Some(1));
+
+    // Explicit report paths require the `=` spelling: a space-separated
+    // value would otherwise swallow a positional path
+    // (`top-offenders --coverage src/`), so clap rejects it outright.
+    let output = mehen(
+        dir.path(),
+        &["metrics", "app.py", "--coverage", "lcov.info"],
+    );
+    assert!(
+        !output.status.success(),
+        "space-separated --coverage value must be rejected"
+    );
+}
+
+#[test]
+fn bare_coverage_flag_does_not_swallow_positional_paths() {
+    // Regression: with `require_equals`, bare `--coverage` never
+    // consumes the following positional argument as its value.
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "covered.py", PYTHON_BODY);
+    write(dir.path(), "lcov.info", LCOV);
+
+    let output = mehen(
+        dir.path(),
+        &[
+            "top-offenders",
+            "--metric",
+            "coverage.line",
+            "--coverage",
+            ".",
+        ],
+    );
+    let json = json_stdout(&mehen(
+        dir.path(),
+        &[
+            "top-offenders",
+            "--metric",
+            "coverage.line",
+            "--coverage",
+            "-O",
+            "json",
+            ".",
+        ],
+    ));
+    assert!(
+        output.status.success(),
+        "paths after bare --coverage must survive: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        json.as_array().is_some_and(|rows| !rows.is_empty()),
+        "the positional path must be walked: {json}"
+    );
 }
 
 #[test]
@@ -240,8 +283,7 @@ fn top_offenders_ranks_by_coverage_ascending_risk() {
             "top-offenders",
             "--metric",
             "coverage.line",
-            "--coverage",
-            "lcov.info",
+            "--coverage=lcov.info",
             "-O",
             "json",
             ".",

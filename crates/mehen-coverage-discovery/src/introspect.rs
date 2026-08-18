@@ -103,8 +103,15 @@ fn resolve_inside_root(root: &Utf8Path, configured: &str) -> Option<Utf8PathBuf>
         return None;
     }
     let mut components: Vec<&str> = Vec::new();
-    if trimmed.starts_with('/') || trimmed.starts_with('\\') || trimmed.contains(':') {
-        return None; // absolute or drive-qualified: outside our contract
+    // Absolute, UNC, or drive-qualified (`C:…`) spellings are outside
+    // our contract. A bare ':' elsewhere is a legal POSIX filename byte
+    // — `out/run:1` must resolve.
+    let drive_qualified = {
+        let bytes = trimmed.as_bytes();
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+    };
+    if trimmed.starts_with('/') || trimmed.starts_with('\\') || drive_qualified {
+        return None;
     }
     for part in trimmed.split(['/', '\\']) {
         match part {
@@ -297,5 +304,11 @@ mod tests {
         assert_eq!(resolve_inside_root(root, "C:\\windows\\system32"), None);
         assert_eq!(resolve_inside_root(root, ""), None);
         assert_eq!(resolve_inside_root(root, "."), None);
+        // A ':' inside a segment is a legal POSIX filename byte, not a
+        // drive qualifier.
+        assert_eq!(
+            resolve_inside_root(root, "out/run:1/lcov.info"),
+            Some(Utf8PathBuf::from("/repo/out/run:1/lcov.info"))
+        );
     }
 }

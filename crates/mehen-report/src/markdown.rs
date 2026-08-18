@@ -111,6 +111,15 @@ fn write_unit_metrics(out: &mut String, metrics: &MetricSet, language: Language)
     let _ = writeln!(out);
     let _ = writeln!(out, "## Metrics");
 
+    // Coverage first when present — before the language-specific early
+    // returns, because a measured Markdown or SQL file carries coverage
+    // too. Unlike the always-rendered source-code tables it is omitted
+    // entirely when unmeasured ("no data" must stay distinguishable
+    // from 0%).
+    if let Some(coverage) = crate::metrics_json::coverage(metrics) {
+        write_coverage(out, &coverage);
+    }
+
     if language == Language::Markdown {
         // The Markdown analyzer publishes a different metric family
         // (`markdown.*` keys covering documentation-specific
@@ -811,6 +820,31 @@ mod tests {
             root,
             contributions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn coverage_renders_before_language_specific_early_returns() {
+        // Regression: the coverage table used to be emitted after the
+        // Markdown/SQL early returns, so a measured documentation or
+        // SQL file silently dropped its coverage from `--format
+        // markdown` output.
+        let coverage_keys: &[(&str, f64)] = &[
+            ("coverage.line", 50.0),
+            ("coverage.line.covered", 2.0),
+            ("coverage.line.total", 4.0),
+        ];
+        for language in [Language::Markdown, Language::Sql, Language::Python] {
+            let mut report = report_with_metrics(coverage_keys);
+            report.language = language;
+            let md = render_metrics_markdown(&report);
+            assert!(
+                md.contains("### Coverage") && md.contains("| line | 50.0% | 2 | 4 |"),
+                "{language:?} output must carry the coverage table:\n{md}"
+            );
+        }
+        // Unmeasured files omit the section entirely (absent ≠ 0%).
+        let md = render_metrics_markdown(&report_with_metrics(&[("loc.sloc", 3.0)]));
+        assert!(!md.contains("### Coverage"));
     }
 
     #[test]

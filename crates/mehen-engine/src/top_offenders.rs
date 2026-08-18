@@ -97,32 +97,17 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         if wants_coverage && !input.coverage_reports.is_empty() {
             let mut parsed = Vec::new();
             for path in &input.coverage_reports {
-                match std::fs::read(path.as_std_path()) {
-                    Ok(bytes) => {
-                        let head_len = bytes.len().min(4096);
-                        match mehen_coverage::detect_format(path, &bytes[..head_len])
-                            .ok_or_else(|| "unrecognized coverage report format".to_string())
-                            .and_then(|format| {
-                                mehen_coverage::parse_report(format, &bytes)
-                                    .map_err(|e| e.to_string())
-                            }) {
-                            Ok(data) => parsed.push(data),
-                            Err(message) => analysis_errors.push(AnalysisErrorRecord {
-                                path: path.clone(),
-                                side: DiffSide::Head,
-                                diagnostics: vec![ParseDiagnostic::warning(
-                                    "engine.coverage_unavailable",
-                                    format!("coverage report unusable: {message}"),
-                                )],
-                            }),
-                        }
-                    }
-                    Err(e) => analysis_errors.push(AnalysisErrorRecord {
+                // The same ingest path (read + sniff + parse) the CLI
+                // uses, with a diagnostic-record sink instead of the
+                // CLI's hard error.
+                match crate::coverage_metrics::ingest_report(path) {
+                    Ok((_, data)) => parsed.push(data),
+                    Err(message) => analysis_errors.push(AnalysisErrorRecord {
                         path: path.clone(),
                         side: DiffSide::Head,
                         diagnostics: vec![ParseDiagnostic::warning(
                             "engine.coverage_unavailable",
-                            format!("cannot read coverage report: {e}"),
+                            format!("coverage report unusable: {message}"),
                         )],
                     }),
                 }
@@ -234,7 +219,7 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         // Fold the `coverage.*` family in: whole-file dimensions on
         // the root, span-scoped line/branch coverage on each function
         // space.
-        if let Some(file_coverage) = coverage_entry {
+        if let Some(file_coverage) = &coverage_entry {
             crate::coverage_metrics::inject_coverage_metrics(&mut root, file_coverage);
         }
 
@@ -873,7 +858,7 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
 
     // Fold the `coverage.*` family in: whole-file dimensions on the
     // root, span-scoped line/branch coverage on each function space.
-    if let Some(file_coverage) = coverage_entry {
+    if let Some(file_coverage) = &coverage_entry {
         crate::coverage_metrics::inject_coverage_metrics(&mut root, file_coverage);
     }
 
@@ -2347,12 +2332,24 @@ binary.py binary
             max_results: 10,
             config: AnalysisConfig::default(),
             coverage_reports: vec![
+                // Read failure: exercises the diagnostic-record sink.
+                Utf8PathBuf::from_path_buf(dir.path().join("missing.info")).unwrap(),
+                // `.info` extension sniffs as LCOV, but the content has
+                // no SF record — an empty report.
                 Utf8PathBuf::from_path_buf(dir.path().join("bogus.info")).unwrap(),
             ],
         };
         let report = rank_top_offenders(input);
-        // `.info` extension sniffs as LCOV, but the content carries no
-        // SF record — an empty report; every file reads unavailable.
+        assert!(
+            report.analysis_errors.iter().any(|e| {
+                e.path.as_str().ends_with("missing.info")
+                    && e.diagnostics[0].code == "engine.coverage_unavailable"
+            }),
+            "expected an engine.coverage_unavailable record, got {:?}",
+            report.analysis_errors
+        );
+        // The empty report yields no measurements: every file reads
+        // unavailable, never fabricated 0%.
         for entry in &report.entries {
             assert_eq!(entry.scores[0], None, "{}", entry.path);
         }

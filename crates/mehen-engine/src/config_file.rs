@@ -335,7 +335,7 @@ pub struct ConfigFile {
 /// The section's mere presence opts the run into coverage ingestion
 /// when it carries `reports` or an explicit `discover = true`; the
 /// `--coverage` CLI flag always wins over the file.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CoverageConfig {
     /// Explicit report paths (relative paths resolve against the
     /// invocation's working directory, like every other CLI path).
@@ -349,6 +349,20 @@ pub struct CoverageConfig {
     /// Whether to warn when a discovered report's mtime predates the
     /// newest analyzed commit. Default: true.
     pub stale_warning: bool,
+}
+
+/// Hand-written so the type carries its documented defaults — the
+/// derived impl would silently disable the staleness warning for any
+/// caller constructing the (public, re-exported) type directly.
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        Self {
+            reports: Vec::new(),
+            discover_key: None,
+            extra_patterns: Vec::new(),
+            stale_warning: true,
+        }
+    }
 }
 
 impl CoverageConfig {
@@ -903,10 +917,7 @@ fn collect_coverage(
     table: &toml::de::DeTable<'_>,
     ctx: &ErrorContext<'_>,
 ) -> Result<CoverageConfig, ConfigError> {
-    let mut config = CoverageConfig {
-        stale_warning: true,
-        ..CoverageConfig::default()
-    };
+    let mut config = CoverageConfig::default();
     for (key, value) in table {
         let key_str: &str = key.get_ref().as_ref();
         match key_str {
@@ -1161,6 +1172,13 @@ fn language_can_publish(language: Language, canonical: &str) -> bool {
         // unavailable — exactly what `selector_available` encodes.
         return crate::history_metrics::selector_available(canonical, false, true)
             || crate::AnalyzerRegistry::default_set().has_analyzer_for(language);
+    }
+    if canonical.starts_with("coverage.") {
+        // Coverage keys come from ingested reports, never from an
+        // analyzer: they are injected even into an empty metric space
+        // when static analysis is unavailable, so a build without the
+        // language's analyzer can still fire this gate.
+        return true;
     }
     if !crate::AnalyzerRegistry::default_set().has_analyzer_for(language) {
         return false;
@@ -2493,6 +2511,16 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{key} must validate: {e}"));
             assert!(!config.thresholds.is_empty());
         }
+        // …including inside a per-language table: coverage comes from
+        // ingested reports, never from an analyzer, so the gate stays
+        // valid even in builds compiled without that language (the
+        // `history.*` reachability property).
+        let per_language = parse_config(
+            "[languages.rust.thresholds]\n\"coverage.line\" = 80\n",
+            Path::new("mehen.toml"),
+        )
+        .expect("per-language coverage threshold must validate");
+        assert!(!per_language.thresholds.is_empty());
         // …and a typo is rejected with the family listing, so the gate
         // can never silently fail to fire.
         let err = parse_config(

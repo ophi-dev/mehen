@@ -44,23 +44,25 @@ pub(crate) fn names_want_coverage<'a>(mut names: impl Iterator<Item = &'a str>) 
     names.any(|name| name.starts_with("coverage.") && !is_unknown_coverage_key(name))
 }
 
-/// A `coverage.`-prefixed name outside the fixed family
-/// (`mehen_core::keys::COVERAGE_ALL`). The CLI selector parser
-/// rejects these up front; the public engine boundaries accept
-/// arbitrary strings, so they must be checked again there.
+/// A `coverage`-rooted name outside the fixed family
+/// (`mehen_core::keys::COVERAGE_ALL`) — including the bare family root
+/// `coverage`, which is not a leaf. The CLI selector parser rejects
+/// these up front; the public engine boundaries accept arbitrary
+/// strings, so they must be checked again there.
 pub(crate) fn is_unknown_coverage_key(name: &str) -> bool {
-    name.starts_with("coverage.") && !mehen_core::keys::COVERAGE_ALL.contains(&name)
+    (name == "coverage" || name.starts_with("coverage."))
+        && !mehen_core::keys::COVERAGE_ALL.contains(&name)
 }
 
 /// Whether an engine-boundary selector cannot read a published
-/// coverage value at all: a `coverage.*` key outside the fixed
+/// coverage value at all: a `coverage`-rooted key outside the fixed
 /// family, **or** a valid key with a non-root aggregator — like
 /// history, top-offenders/diff read root keys only, so
 /// `coverage.line.max` parses (key `coverage.line`, aggregator `Max`)
 /// yet can never resolve.
 pub(crate) fn is_invalid_coverage_selector(selector: &mehen_core::MetricSelector) -> bool {
     let key = selector.key.as_str();
-    if !key.starts_with("coverage.") {
+    if key != "coverage" && !key.starts_with("coverage.") {
         return false;
     }
     is_unknown_coverage_key(key)
@@ -145,16 +147,16 @@ fn inject_into_children(spaces: &mut [MetricSpace], file: &FileCoverage) {
 }
 
 /// Whether a selector can be honestly valued given what backs the
-/// metric space, coverage included: `coverage.*` selectors need a
-/// matched coverage entry; everything else defers to
-/// [`crate::history_metrics::selector_available`].
+/// metric space, coverage included: `coverage`-rooted selectors need a
+/// matched coverage entry (and must be a known family key); everything
+/// else defers to [`crate::history_metrics::selector_available`].
 pub(crate) fn selector_available_with_coverage(
     name: &str,
     statics: bool,
     history: bool,
     coverage: bool,
 ) -> bool {
-    if name.starts_with("coverage.") {
+    if name == "coverage" || name.starts_with("coverage.") {
         return coverage && !is_unknown_coverage_key(name);
     }
     crate::history_metrics::selector_available(name, statics, history)
@@ -198,7 +200,7 @@ pub fn enrich_metrics_with_coverage(
         );
         return Ok(false);
     };
-    inject_coverage_metrics(&mut report.root, file_coverage);
+    inject_coverage_metrics(&mut report.root, &file_coverage);
     Ok(true)
 }
 
@@ -210,14 +212,19 @@ pub fn enrich_metrics_with_coverage(
 pub struct CoverageOpts {
     /// Coverage input: 'auto' discovers report files (LCOV, Cobertura,
     /// JaCoCo, Clover, Istanbul, Go coverprofile); 'off' disables
-    /// coverage; one or more report paths use exactly those files.
-    /// Bare `--coverage` means 'auto'. When omitted, coverage loads
-    /// lazily — only if a coverage.* metric or threshold asks for it.
+    /// coverage; one or more report paths (--coverage=lcov.info) use
+    /// exactly those files. Bare `--coverage` means 'auto'. When
+    /// omitted, coverage loads lazily — only if a coverage.* metric or
+    /// threshold asks for it.
     #[arg(
         long = "coverage",
         value_name = "PATH|auto|off",
         num_args = 0..=1,
         default_missing_value = "auto",
+        // The house negatable-flag style (`--ignore-git-attributes`),
+        // and load-bearing here: without it, `--coverage src/` would
+        // swallow a positional path as the flag value.
+        require_equals = true,
         action = clap::ArgAction::Append
     )]
     coverage: Vec<String>,
@@ -304,6 +311,28 @@ impl std::fmt::Display for CoverageSetupError {
 
 impl std::error::Error for CoverageSetupError {}
 
+/// Read, sniff, and parse one report file. The single implementation
+/// behind every ingestion path — the CLI's hard-error explicit reports,
+/// discovered reports that degrade to warnings, and the library
+/// boundary's diagnostic records — so the sniff window, format
+/// detection, and parse behavior can never drift apart between them.
+pub(crate) fn ingest_report(
+    path: &Utf8Path,
+) -> Result<(mehen_coverage::CoverageFormat, mehen_coverage::CoverageData), String> {
+    let bytes = std::fs::read(path.as_std_path())
+        .map_err(|e| format!("cannot read coverage report `{path}`: {e}"))?;
+    let head_len = bytes.len().min(4096);
+    let Some(format) = mehen_coverage::detect_format(path, &bytes[..head_len]) else {
+        return Err(format!(
+            "unrecognized coverage report format: `{path}` (supported: LCOV, Go coverprofile, \
+             Istanbul JSON, JaCoCo/Clover/Cobertura XML)"
+        ));
+    };
+    let data = mehen_coverage::parse_report(format, &bytes)
+        .map_err(|e| format!("failed to parse coverage report `{path}`: {e}"))?;
+    Ok((format, data))
+}
+
 /// Resolve the coverage request into a queryable index.
 ///
 /// * `mode` — the CLI flag ([`CoverageOpts::mode`]).
@@ -345,19 +374,7 @@ pub(crate) fn resolve_coverage(
     // is a hard, user-attributable error — an explicit gate input that
     // silently disappears is a broken CI gate.
     for path in &explicit {
-        let bytes = std::fs::read(path.as_std_path()).map_err(|e| {
-            CoverageSetupError(format!("cannot read coverage report `{path}`: {e}"))
-        })?;
-        let head_len = bytes.len().min(4096);
-        let Some(format) = mehen_coverage::detect_format(path, &bytes[..head_len]) else {
-            return Err(CoverageSetupError(format!(
-                "unrecognized coverage report format: `{path}` (supported: LCOV, Go \
-                 coverprofile, Istanbul JSON, JaCoCo/Clover/Cobertura XML)"
-            )));
-        };
-        let data = mehen_coverage::parse_report(format, &bytes).map_err(|e| {
-            CoverageSetupError(format!("failed to parse coverage report `{path}`: {e}"))
-        })?;
+        let (format, data) = ingest_report(path).map_err(CoverageSetupError)?;
         reports.push((path.clone(), format));
         parsed.push(data);
     }
@@ -377,18 +394,17 @@ pub(crate) fn resolve_coverage(
             if explicit.iter().any(|p| p == &report.path) {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(report.path.as_std_path()) else {
-                log::warn!("discovered coverage report vanished: {}", report.path);
-                continue;
-            };
-            match mehen_coverage::parse_report(report.format, &bytes) {
-                Ok(data) => {
+            // Discovered-report failures degrade to warnings; the shared
+            // ingest path keeps sniffing/parsing identical to the
+            // hard-error explicit branch above.
+            match ingest_report(&report.path) {
+                Ok((format, data)) => {
                     warn_if_stale(report, head_time, config);
-                    reports.push((report.path.clone(), report.format));
+                    reports.push((report.path.clone(), format));
                     parsed.push(data);
                 }
-                Err(e) => {
-                    log::warn!("skipping discovered coverage report `{}`: {e}", report.path);
+                Err(message) => {
+                    log::warn!("skipping discovered coverage report: {message}");
                 }
             }
         }
@@ -493,15 +509,15 @@ pub(crate) fn coverage_root_for(path: &Utf8Path) -> Option<Utf8PathBuf> {
 pub(crate) fn coverage_for_file<'a>(
     context: &'a CoverageContext,
     path: &Utf8Path,
-) -> Option<&'a FileCoverage> {
+) -> Option<std::borrow::Cow<'a, FileCoverage>> {
     enum Resolution<'a> {
-        Found(&'a FileCoverage),
+        Found(std::borrow::Cow<'a, FileCoverage>),
         Ambiguous(usize),
         NotFound,
     }
     fn resolve<'a>(index: &'a CoverageIndex, query: &Utf8Path) -> Resolution<'a> {
         match index.file(query) {
-            FileMatch::Found { coverage, .. } => Resolution::Found(coverage),
+            FileMatch::Found { coverage } => Resolution::Found(coverage),
             FileMatch::Ambiguous { candidates } => Resolution::Ambiguous(candidates),
             FileMatch::NotFound => Resolution::NotFound,
         }
@@ -724,7 +740,30 @@ mod tests {
         }
         assert!(is_unknown_coverage_key("coverage.lines"));
         assert!(is_unknown_coverage_key("coverage.statement"));
+        // The bare family root is not a leaf and must not read the
+        // missing-key 0.0 fallback as an available metric.
+        assert!(is_unknown_coverage_key("coverage"));
         assert!(!is_unknown_coverage_key("cognitive"));
+    }
+
+    #[test]
+    fn bare_family_roots_are_rejected_at_the_engine_boundary() {
+        // `coverage` / `history` parse as bare keys with the Root
+        // aggregator; without explicit handling they would slip past
+        // the prefix guards and rank on fabricated zeros.
+        let coverage: mehen_core::MetricSelector = "coverage".parse().unwrap();
+        assert!(is_invalid_coverage_selector(&coverage));
+        assert!(!selector_available_with_coverage(
+            "coverage", true, true, true
+        ));
+
+        let history: mehen_core::MetricSelector = "history".parse().unwrap();
+        assert!(crate::history_metrics::is_invalid_history_selector(
+            &history
+        ));
+        assert!(!crate::history_metrics::selector_available(
+            "history", true, true
+        ));
     }
 
     #[test]

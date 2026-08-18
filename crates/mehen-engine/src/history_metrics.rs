@@ -36,8 +36,9 @@ pub(crate) fn names_want_history<'a>(mut names: impl Iterator<Item = &'a str>) -
     names.any(|name| name.starts_with("history.") && !is_unknown_history_key(name))
 }
 
-/// A `history.`-prefixed name that is not one of the fixed keys
-/// (`mehen_core::keys::HISTORY_ALL`). The CLI selector parser rejects
+/// A `history`-rooted name that is not one of the fixed keys
+/// (`mehen_core::keys::HISTORY_ALL`) — including the bare family root
+/// `history`, which is not a leaf. The CLI selector parser rejects
 /// these up front; the public engine boundaries (`rank_top_offenders`
 /// selectors, `DiffInput` thresholds) accept arbitrary strings, so
 /// they must be checked again there — an unvalidated typo would
@@ -45,7 +46,8 @@ pub(crate) fn names_want_history<'a>(mut names: impl Iterator<Item = &'a str>) -
 /// the missing-key fallback (an all-zero ranking, or a policy
 /// silently evaluated against zero).
 pub(crate) fn is_unknown_history_key(name: &str) -> bool {
-    name.starts_with("history.") && !mehen_core::keys::HISTORY_ALL.contains(&name)
+    (name == "history" || name.starts_with("history."))
+        && !mehen_core::keys::HISTORY_ALL.contains(&name)
 }
 
 /// Whether an engine-boundary selector cannot read a published
@@ -57,7 +59,7 @@ pub(crate) fn is_unknown_history_key(name: &str) -> bool {
 /// fallback.
 pub(crate) fn is_invalid_history_selector(selector: &mehen_core::MetricSelector) -> bool {
     let key = selector.key.as_str();
-    if !key.starts_with("history.") {
+    if key != "history" && !key.starts_with("history.") {
         return false;
     }
     is_unknown_history_key(key)
