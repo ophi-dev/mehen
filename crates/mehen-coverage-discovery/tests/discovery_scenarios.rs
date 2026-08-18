@@ -34,11 +34,13 @@ fn set_mtime(root: &Utf8Path, relative: &str, seconds: u64) {
 }
 
 /// Flatten an outcome into stable, root-relative one-line records so
-/// insta snapshots stay platform- and tempdir-independent.
+/// insta snapshots stay platform- and tempdir-independent (Windows
+/// walk output spells `\` separators; snapshots pin the `/` form).
 fn projection(root: &Utf8Path, outcome: &DiscoveryOutcome) -> Vec<String> {
     let rel = |path: &Utf8PathBuf| -> String {
         path.strip_prefix(root)
             .map_or_else(|_| path.to_string(), ToString::to_string)
+            .replace('\\', "/")
     };
     let mut lines: Vec<String> = outcome
         .reports

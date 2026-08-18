@@ -291,15 +291,14 @@ fn top_offenders_ranks_by_coverage_ascending_risk() {
     );
     let json = json_stdout(&output);
     let rows = json.as_array().expect("offender array");
-    // Suffix-match on the full component (`/covered.py`), not the raw
-    // string — `./uncovered.py` also ends with the bytes `covered.py`.
+    // Suffix-match on the full component — `./uncovered.py` also ends
+    // with the bytes `covered.py`, and Windows walk output spells the
+    // separator as `\`.
     let value_for = |name: &str| {
         rows.iter()
             .find(|r| {
-                r["path"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .ends_with(&format!("/{name}"))
+                let path = r["path"].as_str().unwrap_or_default();
+                path.ends_with(&format!("/{name}")) || path.ends_with(&format!("\\{name}"))
             })
             .map(|r| r["metrics"][0]["value"].clone())
     };
