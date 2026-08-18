@@ -33,21 +33,16 @@ mehen-sql = { workspace = true, optional = true }
 
 camino = { workspace = true }
 clap = { workspace = true }
-# `globset` and `ignore` are pinned here (not in
-# `[workspace.dependencies]`) because `mehen-engine` is the only consumer
-# — CLI filtering and ignore-aware recursive directory walks are
-# engine-only concerns.
-globset = "^0.4"
-ignore = "^0.4"
+globset = { workspace = true }
+ignore = { workspace = true }
 gix = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# `toml` and `miette` are pinned here (not in `[workspace.dependencies]`)
-# because `mehen-engine` is the only consumer — repository-local
-# `mehen.toml` loading and its fancy diagnostic rendering are engine-only
-# concerns (`config_file` module).
-toml = "^1.1"
+toml = { workspace = true }
+# `miette` is pinned here (not in `[workspace.dependencies]`) because
+# `mehen-engine` is the only consumer — the fancy diagnostic rendering
+# for `mehen.toml` is an engine-only concern (`config_file` module).
 miette = { version = "^7.6", features = ["fancy"] }
 
 [dev-dependencies]

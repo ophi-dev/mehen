@@ -2768,6 +2768,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mehen-coverage-discovery"
+version = "1.9.0"
+dependencies = [
+ "camino",
+ "globset",
+ "ignore",
+ "insta",
+ "log",
+ "mehen-coverage",
+ "pretty_assertions",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "mehen-csharp"
 version = "1.9.0"
 dependencies = [
