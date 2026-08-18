@@ -305,7 +305,7 @@ mod tests {
         }
     }
 
-    fn found_path<'a>(index: &'a CoverageIndex, query: &str) -> Option<String> {
+    fn found_path(index: &CoverageIndex, query: &str) -> Option<String> {
         found(index, query).map(|c| c.path.clone())
     }
 
