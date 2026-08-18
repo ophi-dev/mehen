@@ -2760,7 +2760,6 @@ version = "1.9.0"
 dependencies = [
  "camino",
  "insta",
- "log",
  "pretty_assertions",
  "quick-xml",
  "serde",
