@@ -93,7 +93,7 @@ pub fn merge_reports(reports: Vec<CoverageData>) -> CoverageData {
                     slot.insert(file);
                 }
                 std::collections::btree_map::Entry::Occupied(mut slot) => {
-                    merge_file_into(slot.get_mut(), file);
+                    merge_file_into(slot.get_mut(), &file);
                 }
             }
         }
@@ -105,15 +105,16 @@ pub fn merge_reports(reports: Vec<CoverageData>) -> CoverageData {
 }
 
 /// Fold `incoming` into `kept` with saturating-max semantics. Both sides
-/// must be normalized.
-fn merge_file_into(kept: &mut FileCoverage, incoming: FileCoverage) {
+/// must be normalized. Also used by the query index to combine
+/// equivalence-proven spellings of one file at lookup time.
+pub(crate) fn merge_file_into(kept: &mut FileCoverage, incoming: &FileCoverage) {
     // Lines: keyed by line number.
     let mut lines: BTreeMap<u32, u64> = kept
         .lines
         .drain(..)
         .map(|l| (l.line_number, l.hit_count))
         .collect();
-    for l in incoming.lines {
+    for l in &incoming.lines {
         let slot = lines.entry(l.line_number).or_insert(0);
         *slot = (*slot).max(l.hit_count);
     }
@@ -131,7 +132,7 @@ fn merge_file_into(kept: &mut FileCoverage, incoming: FileCoverage) {
         .drain(..)
         .map(|b| ((b.line_number, b.branch_index), b.hit_count))
         .collect();
-    for b in incoming.branches {
+    for b in &incoming.branches {
         let slot = branches.entry((b.line_number, b.branch_index)).or_insert(0);
         *slot = (*slot).max(b.hit_count);
     }
@@ -150,9 +151,9 @@ fn merge_file_into(kept: &mut FileCoverage, incoming: FileCoverage) {
         .drain(..)
         .map(|f| ((f.start_line, f.name), (f.end_line, f.hit_count)))
         .collect();
-    for f in incoming.functions {
+    for f in &incoming.functions {
         let slot = functions
-            .entry((f.start_line, f.name))
+            .entry((f.start_line, f.name.clone()))
             .or_insert((f.end_line, 0));
         slot.0 = slot.0.max(f.end_line);
         slot.1 = slot.1.max(f.hit_count);
@@ -263,5 +264,60 @@ mod tests {
             vec!["src", "lib.rs"]
         );
         assert_eq!(normalize_components("../lib.rs"), vec!["..", "lib.rs"]);
+    }
+
+    #[test]
+    fn merge_keys_branch_arms_by_line_and_index() {
+        let mut a_file = FileCoverage::new("src/lib.rs".to_string());
+        a_file.branches = vec![
+            BranchCoverage {
+                line_number: 7,
+                branch_index: 0,
+                hit_count: 1,
+            },
+            BranchCoverage {
+                line_number: 7,
+                branch_index: 1,
+                hit_count: 0,
+            },
+        ];
+        let mut b_file = FileCoverage::new("src/lib.rs".to_string());
+        b_file.branches = vec![BranchCoverage {
+            line_number: 7,
+            branch_index: 1,
+            hit_count: 2,
+        }];
+
+        let merged = merge_reports(vec![data(vec![a_file]), data(vec![b_file])]);
+        let branches = &merged.files[0].branches;
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].hit_count, 1);
+        assert_eq!(branches[1].hit_count, 2);
+    }
+
+    #[test]
+    fn merge_takes_max_hits_and_widest_span_for_functions() {
+        // Functions merge by (start_line, name); Option ordering makes
+        // None.max(Some(n)) resolve to Some(n) — the widest known span
+        // wins, which is deliberate but not obvious.
+        let mut a_file = FileCoverage::new("src/lib.rs".to_string());
+        a_file.functions = vec![FunctionCoverage {
+            name: "f".into(),
+            start_line: Some(10),
+            end_line: None,
+            hit_count: 0,
+        }];
+        let mut b_file = FileCoverage::new("src/lib.rs".to_string());
+        b_file.functions = vec![FunctionCoverage {
+            name: "f".into(),
+            start_line: Some(10),
+            end_line: Some(20),
+            hit_count: 4,
+        }];
+
+        let merged = merge_reports(vec![data(vec![a_file]), data(vec![b_file])]);
+        assert_eq!(merged.files[0].functions.len(), 1);
+        assert_eq!(merged.files[0].functions[0].end_line, Some(20));
+        assert_eq!(merged.files[0].functions[0].hit_count, 4);
     }
 }

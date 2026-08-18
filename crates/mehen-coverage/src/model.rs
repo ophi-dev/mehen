@@ -224,6 +224,44 @@ mod tests {
         assert_eq!(file.lines, vec![line(1, 2), line(2, 0), line(3, 5)]);
     }
 
+    fn branch(line_number: u32, branch_index: u32, hit_count: u64) -> BranchCoverage {
+        BranchCoverage {
+            line_number,
+            branch_index,
+            hit_count,
+        }
+    }
+
+    #[test]
+    fn normalize_dedupes_branch_arms_keeping_max_hits() {
+        // Branch identity is (line, arm index) — not just the line.
+        let mut file = FileCoverage::new("a.rs".into());
+        file.branches = vec![branch(7, 1, 0), branch(7, 0, 2), branch(7, 1, 4)];
+        file.normalize();
+        assert_eq!(file.branches, vec![branch(7, 0, 2), branch(7, 1, 4)]);
+    }
+
+    #[test]
+    fn span_branch_totals_are_inclusive_and_bounded() {
+        let mut file = FileCoverage::new("a.rs".into());
+        file.branches = vec![
+            branch(2, 0, 1),
+            branch(5, 0, 0),
+            branch(5, 1, 3),
+            branch(30, 0, 1),
+        ];
+        file.normalize();
+        assert_eq!(
+            file.span_branch_totals(5, 9),
+            SpanTotals {
+                covered: 1,
+                total: 2
+            }
+        );
+        // No branch arms in the span is "no data", not 0%.
+        assert_eq!(file.span_branch_totals(10, 29).rate(), None);
+    }
+
     #[test]
     fn rate_distinguishes_no_data_from_zero() {
         assert_eq!(rate(0, 0), None);

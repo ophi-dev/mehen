@@ -48,7 +48,7 @@ use crate::Result;
 use crate::model::{BranchCoverage, FileCoverage, FunctionCoverage, LineCoverage};
 
 /// JaCoCo XML format parser.
-pub struct JacocoParser;
+pub(crate) struct JacocoParser;
 
 impl CoverageParser for JacocoParser {
     fn format(&self) -> CoverageFormat {
@@ -74,7 +74,8 @@ impl CoverageParser for JacocoParser {
 }
 
 /// Parse JaCoCo XML coverage data from raw bytes.
-pub fn parse(input: &[u8]) -> Result<crate::CoverageData> {
+#[cfg(test)]
+pub(crate) fn parse(input: &[u8]) -> Result<crate::CoverageData> {
     let mut data = crate::CoverageData::new();
     parse_streaming(&mut &*input, &mut |file| {
         data.files.push(file);
@@ -119,13 +120,22 @@ fn parse_streaming(
             Ok(Event::Eof) => break,
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 match e.name().as_ref() {
-                    b"package" => {
+                    // Container elements set state that only a matching
+                    // `Event::End` clears; a self-closing spelling
+                    // (`Event::Empty`) produces no `End`, so it must
+                    // never enter that state — an empty `<method/>`
+                    // would otherwise capture unrelated `<counter>`
+                    // elements, an empty `<package/>` would prefix the
+                    // next default-package sourcefile, and an empty
+                    // `<sourcefile/>` would leak into (and drop the
+                    // methods of) the next one.
+                    b"package" if is_start_event => {
                         current_package = get_attr(e, b"name");
                     }
                     b"class" if is_start_event => {
                         current_class_source = get_attr(e, b"sourcefilename");
                     }
-                    b"method" => {
+                    b"method" if is_start_event => {
                         in_method = true;
                         current_method_name = get_attr(e, b"name");
                         current_method_line =
@@ -146,7 +156,7 @@ fn parse_streaming(
                             }
                         }
                     }
-                    b"sourcefile" => {
+                    b"sourcefile" if is_start_event => {
                         if let Some(name) = get_attr(e, b"name") {
                             let path = match &current_package {
                                 Some(pkg) => format!("{pkg}/{name}"),
@@ -352,6 +362,33 @@ mod tests {
         let input = include_bytes!("../../tests/fixtures/empty_jacoco.xml");
         let data = parse(input).unwrap();
         assert_eq!(data.files.len(), 0);
+    }
+
+    #[test]
+    fn test_self_closing_elements_do_not_corrupt_state() {
+        // Empty-element spellings produce no `End` event, so they must
+        // never enter container state: an empty `<sourcefile/>` used to
+        // linger as the "current" sourcefile and get emitted as a
+        // phantom record at EOF (carrying methods it never owned), and
+        // an empty `<method/>` used to capture class-level METHOD
+        // counters that follow it.
+        let input = br#"<?xml version="1.0"?>
+<report name="t">
+  <package name="p">
+    <class name="p/A" sourcefilename="A.java">
+      <method name="dead" desc="()V" line="3"/>
+      <counter type="METHOD" missed="0" covered="1"/>
+      <method name="m" desc="()V" line="9">
+        <counter type="METHOD" missed="0" covered="1"/>
+      </method>
+    </class>
+    <sourcefile name="A.java"/>
+  </package>
+</report>"#;
+        let data = parse(input).unwrap();
+        // The self-closed sourcefile carries no line data and must not
+        // be emitted as a phantom record at EOF.
+        assert_eq!(data.files.len(), 0, "phantom record: {:?}", data.files);
     }
 
     #[test]

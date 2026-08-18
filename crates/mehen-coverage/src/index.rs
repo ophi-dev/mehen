@@ -18,43 +18,47 @@
 //!
 //! A naive map lookup returns nothing for 100% of files when the two
 //! sides disagree, and every function reads as 0% covered. The index
-//! resolves queries in two levels:
+//! resolves a query in two moves:
 //!
-//! * **Canonical lookup** — report paths spelled absolute that exist on
-//!   this machine are canonicalized at build time; a query that
-//!   canonicalizes to the same real file matches exactly.
-//! * **Component suffix match** — otherwise the query and entry match
-//!   when one's component list is a trailing subsequence of the other's
-//!   (components, never bytes: `/foo/bar.rs` must not match
-//!   `oofoo/bar.rs`). The longest suffix wins; exact component equality
-//!   outranks partial consumption; a genuine tie is reported as
-//!   [`FileMatch::Ambiguous`] rather than resolved by map order.
+//! * **Candidate collection** — report paths spelled absolute that
+//!   exist on this machine carry a canonicalized on-disk identity; a
+//!   query resolving to the same real file matches outright, and an
+//!   entry whose identity *provably differs* from the query's is
+//!   excluded. Everything else matches by component suffix (components,
+//!   never bytes: `/foo/bar.rs` must not match `oofoo/bar.rs`).
+//! * **Alias merging** — several report entries can be
+//!   equivalence-proven spellings of one workspace file: the exact
+//!   relative spelling, the same path behind a CI-absolute prefix, an
+//!   `lcov -a` leg. All proven aliases *merge* (saturating-max, the
+//!   cross-report rule) instead of the best-ranked one shadowing the
+//!   rest. Distinct relative entries that merely share a suffix
+//!   (`src/lib.rs` vs `vendor/dep/src/lib.rs`) are **not** aliases:
+//!   the exact spelling wins when present, and a genuine tie is
+//!   reported as [`FileMatch::Ambiguous`] rather than resolved by map
+//!   order.
 //!
 //! Relative report paths are **never** canonicalized against the
 //! process CWD — that would silently bind them to whatever happens to
 //! exist under the tool's working directory.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use camino::Utf8Path;
 
-use crate::merge::{is_absolute_spelling, normalize_components};
+use crate::merge::{is_absolute_spelling, merge_file_into, normalize_components};
 use crate::model::{CoverageData, FileCoverage};
 
 /// Result of asking the index for a workspace file's coverage.
 #[derive(Debug)]
 pub enum FileMatch<'a> {
-    /// Exactly one report entry matched. `entry_id` is stable for the
-    /// index lifetime — callers aggregate matched ids to report
-    /// report-only files afterwards.
-    Found {
-        coverage: &'a FileCoverage,
-        entry_id: usize,
-    },
-    /// Several report entries matched with equal specificity; matching
-    /// any one of them would be a coin flip, so the file reads as
-    /// unmeasured and the caller diagnoses it.
+    /// One or more equivalence-proven report entries matched; several
+    /// aliases arrive pre-merged.
+    Found { coverage: Cow<'a, FileCoverage> },
+    /// Several *distinct* report entries matched with equal
+    /// specificity; matching any one of them would be a coin flip, so
+    /// the file reads as unmeasured and the caller diagnoses it.
     Ambiguous { candidates: usize },
     /// No report entry matched.
     NotFound,
@@ -63,6 +67,10 @@ pub enum FileMatch<'a> {
 struct Entry {
     coverage: FileCoverage,
     components: Vec<String>,
+    /// Whether the report spelled this path absolutely.
+    absolute: bool,
+    /// On-disk identity, when the absolute spelling exists here.
+    canonical: Option<PathBuf>,
 }
 
 /// Calculate-once query structure over merged coverage data.
@@ -70,9 +78,6 @@ pub struct CoverageIndex {
     entries: Vec<Entry>,
     /// Last path component → entry ids, deterministic order.
     by_basename: BTreeMap<String, Vec<usize>>,
-    /// Canonicalized on-disk identity → entry id, for report paths
-    /// spelled absolute that exist on this machine.
-    by_canonical: BTreeMap<PathBuf, usize>,
 }
 
 impl CoverageIndex {
@@ -82,7 +87,6 @@ impl CoverageIndex {
     pub fn build(data: CoverageData) -> Self {
         let mut entries = Vec::with_capacity(data.files.len());
         let mut by_basename: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        let mut by_canonical: BTreeMap<PathBuf, usize> = BTreeMap::new();
 
         for file in data.files {
             let absolute = is_absolute_spelling(&file.path);
@@ -93,28 +97,28 @@ impl CoverageIndex {
             let id = entries.len();
             by_basename.entry(basename.clone()).or_default().push(id);
 
-            if absolute {
-                // Canonicalize only paths the report spelled absolute —
-                // and only when they exist here. Missing paths (reports
-                // produced on another machine) fall back to suffix
-                // matching. Relative paths are never resolved against
-                // the CWD.
+            // Canonicalize only paths the report spelled absolute — and
+            // only when they exist here. Missing paths (reports produced
+            // on another machine) participate through suffix matching.
+            // Relative paths are never resolved against the CWD.
+            let canonical = if absolute {
                 let spelled = PathBuf::from(format!("/{}", components.join("/")));
-                if let Ok(canonical) = std::fs::canonicalize(&spelled) {
-                    by_canonical.entry(canonical).or_insert(id);
-                }
-            }
+                std::fs::canonicalize(&spelled).ok()
+            } else {
+                None
+            };
 
             entries.push(Entry {
                 coverage: file,
                 components,
+                absolute,
+                canonical,
             });
         }
 
         Self {
             entries,
             by_basename,
-            by_canonical,
         }
     }
 
@@ -130,76 +134,130 @@ impl CoverageIndex {
         self.entries.is_empty()
     }
 
-    /// The normalized report path of an entry, for diagnostics.
-    #[must_use]
-    pub fn entry_path(&self, entry_id: usize) -> Option<&str> {
-        self.entries.get(entry_id).map(|e| e.coverage.path.as_str())
-    }
-
     /// Look up coverage for a workspace file, spelled however the caller
     /// spells paths (CWD-relative, repo-relative, or absolute).
     #[must_use]
     pub fn file(&self, path: &Utf8Path) -> FileMatch<'_> {
-        // Level 1: canonical identity for absolute-spelled report paths
-        // that exist on this machine.
-        if !self.by_canonical.is_empty()
-            && let Ok(canonical) = std::fs::canonicalize(path.as_std_path())
-            && let Some(&id) = self.by_canonical.get(&canonical)
-        {
-            return FileMatch::Found {
-                coverage: &self.entries[id].coverage,
-                entry_id: id,
-            };
-        }
-
-        // Level 2: component-wise suffix matching.
         let query = normalize_components(path.as_str());
         let Some(basename) = query.last() else {
             return FileMatch::NotFound;
         };
-        let Some(candidates) = self.by_basename.get(basename) else {
+        let Some(bucket) = self.by_basename.get(basename) else {
             return FileMatch::NotFound;
         };
+        let query_canonical = std::fs::canonicalize(path.as_std_path()).ok();
 
-        // Rank: (matched suffix length, exact component equality).
-        let mut best: (usize, bool) = (0, false);
-        let mut best_ids: Vec<usize> = Vec::new();
-        for &id in candidates {
+        // Candidate collection: suffix-valid entries, minus those whose
+        // on-disk identity provably differs from the query's.
+        struct Candidate {
+            id: usize,
+            suffix: usize,
+            entry_len: usize,
+            identity_match: bool,
+        }
+        let mut candidates: Vec<Candidate> = Vec::new();
+        for &id in bucket {
             let entry = &self.entries[id];
-            let s = common_suffix_len(&query, &entry.components);
+            let identity_match = match (&entry.canonical, &query_canonical) {
+                (Some(e), Some(q)) => {
+                    if e != q {
+                        continue; // provably different files
+                    }
+                    true
+                }
+                _ => false,
+            };
+            let suffix = common_suffix_len(&query, &entry.components);
             // Valid only when the shorter side is fully consumed: the
             // report path is a tail of the workspace path (JaCoCo
-            // package paths, basename-only entries) or the workspace
-            // path is a tail of the report path (CI prefixes, Go module
-            // prefixes).
-            if s == 0 || s < query.len().min(entry.components.len()) {
+            // package paths) or the workspace path is a tail of the
+            // report path (CI prefixes, Go module prefixes). An
+            // identity-proven entry is valid regardless of spelling.
+            if !identity_match && (suffix == 0 || suffix < query.len().min(entry.components.len()))
+            {
                 continue;
             }
-            // An entry spelled absolute that exists on this machine was
-            // already given its chance at level 1; if the canonical
-            // lookup didn't claim the query, a *full* absolute-path
-            // consumption is still fine (same spelling), but guard
-            // against a short relative query being swallowed whole by
-            // an unrelated absolute path is already covered by the
-            // suffix rule itself.
-            let exact = s == query.len() && s == entry.components.len();
-            let rank = (s, exact);
-            if rank > best {
-                best = rank;
-                best_ids.clear();
-                best_ids.push(id);
-            } else if rank == best {
-                best_ids.push(id);
-            }
+            candidates.push(Candidate {
+                id,
+                suffix,
+                entry_len: entry.components.len(),
+                identity_match,
+            });
+        }
+        if candidates.is_empty() {
+            return FileMatch::NotFound;
         }
 
-        match best_ids.len() {
-            0 => FileMatch::NotFound,
-            1 => FileMatch::Found {
-                coverage: &self.entries[best_ids[0]].coverage,
-                entry_id: best_ids[0],
+        // Alias pool. Proven members: on-disk identity matches, exact
+        // component equality, or a *longer absolute* spelling ending in
+        // the full query (a checkout prefix from another machine — a
+        // longer *relative* spelling is a more deeply nested, different
+        // workspace file and never an alias).
+        let full_query = |c: &Candidate| c.suffix == query.len();
+        let exact = |c: &Candidate| full_query(c) && c.suffix == c.entry_len;
+        let has_anchor = candidates.iter().any(|c| c.identity_match || exact(c));
+
+        let pool: Vec<usize> = if has_anchor {
+            candidates
+                .iter()
+                .filter(|c| {
+                    c.identity_match || exact(c) || (full_query(c) && self.entries[c.id].absolute)
+                })
+                .map(|c| c.id)
+                .collect()
+        } else {
+            let rel_longer: Vec<&Candidate> = candidates
+                .iter()
+                .filter(|c| full_query(c) && !self.entries[c.id].absolute && !exact(c))
+                .collect();
+            if rel_longer.len() > 1 {
+                return FileMatch::Ambiguous {
+                    candidates: rel_longer.len(),
+                };
+            }
+            let pool: Vec<usize> = candidates
+                .iter()
+                .filter(|c| full_query(c))
+                .map(|c| c.id)
+                .collect();
+            if pool.is_empty() {
+                // Entry-consumed direction (report path is a tail of
+                // the workspace path): the longest suffix wins; a tie
+                // between distinct entries is a coin flip we refuse.
+                let best = candidates.iter().map(|c| c.suffix).max().unwrap_or(0);
+                let tier: Vec<usize> = candidates
+                    .iter()
+                    .filter(|c| c.suffix == best)
+                    .map(|c| c.id)
+                    .collect();
+                if tier.len() > 1 {
+                    return FileMatch::Ambiguous {
+                        candidates: tier.len(),
+                    };
+                }
+                tier
+            } else {
+                pool
+            }
+        };
+
+        match pool.as_slice() {
+            [] => FileMatch::NotFound,
+            [single] => FileMatch::Found {
+                coverage: Cow::Borrowed(&self.entries[*single].coverage),
             },
-            n => FileMatch::Ambiguous { candidates: n },
+            [first, rest @ ..] => {
+                // Merge equivalence-proven aliases so no spelling's
+                // data is silently dropped (the cross-report
+                // saturating-max rule, applied at query time).
+                let mut merged = self.entries[*first].coverage.clone();
+                for &id in rest {
+                    merge_file_into(&mut merged, &self.entries[id].coverage);
+                }
+                FileMatch::Found {
+                    coverage: Cow::Owned(merged),
+                }
+            }
         }
     }
 }
@@ -219,11 +277,18 @@ mod tests {
     use crate::model::LineCoverage;
 
     fn entry(path: &str) -> FileCoverage {
+        entry_with_lines(path, &[(1, 1)])
+    }
+
+    fn entry_with_lines(path: &str, lines: &[(u32, u64)]) -> FileCoverage {
         let mut f = FileCoverage::new(path.to_string());
-        f.lines = vec![LineCoverage {
-            line_number: 1,
-            hit_count: 1,
-        }];
+        f.lines = lines
+            .iter()
+            .map(|&(line_number, hit_count)| LineCoverage {
+                line_number,
+                hit_count,
+            })
+            .collect();
         f
     }
 
@@ -233,17 +298,24 @@ mod tests {
         }]))
     }
 
-    fn found_path<'a>(index: &'a CoverageIndex, query: &str) -> Option<&'a str> {
+    fn found<'a>(index: &'a CoverageIndex, query: &str) -> Option<Cow<'a, FileCoverage>> {
         match index.file(Utf8Path::new(query)) {
-            FileMatch::Found { coverage, .. } => Some(coverage.path.as_str()),
+            FileMatch::Found { coverage } => Some(coverage),
             _ => None,
         }
+    }
+
+    fn found_path<'a>(index: &'a CoverageIndex, query: &str) -> Option<String> {
+        found(index, query).map(|c| c.path.clone())
     }
 
     #[test]
     fn exact_relative_path_matches() {
         let idx = index(&["src/lib.rs"]);
-        assert_eq!(found_path(&idx, "src/lib.rs"), Some("src/lib.rs"));
+        assert_eq!(
+            found_path(&idx, "src/lib.rs").as_deref(),
+            Some("src/lib.rs")
+        );
     }
 
     #[test]
@@ -252,7 +324,7 @@ mod tests {
         // exist here: the workspace-relative query suffix-matches.
         let idx = index(&["/home/runner/work/repo/repo/src/lib.rs"]);
         assert_eq!(
-            found_path(&idx, "src/lib.rs"),
+            found_path(&idx, "src/lib.rs").as_deref(),
             Some("/home/runner/work/repo/repo/src/lib.rs")
         );
     }
@@ -263,7 +335,7 @@ mod tests {
         // the `src/main/java/` prefix the report never saw.
         let idx = index(&["com/example/Foo.java"]);
         assert_eq!(
-            found_path(&idx, "src/main/java/com/example/Foo.java"),
+            found_path(&idx, "src/main/java/com/example/Foo.java").as_deref(),
             Some("com/example/Foo.java")
         );
     }
@@ -274,7 +346,7 @@ mod tests {
         // paths.
         let idx = index(&["github.com/org/repo/pkg/handler.go"]);
         assert_eq!(
-            found_path(&idx, "pkg/handler.go"),
+            found_path(&idx, "pkg/handler.go").as_deref(),
             Some("github.com/org/repo/pkg/handler.go")
         );
     }
@@ -286,21 +358,62 @@ mod tests {
         let idx = index(&["/foo/bar.rs"]);
         assert_eq!(found_path(&idx, "oofoo/bar.rs"), None);
         // Basename alone still matches (report consumed).
-        assert_eq!(found_path(&idx, "bar.rs"), Some("/foo/bar.rs"));
+        assert_eq!(found_path(&idx, "bar.rs").as_deref(), Some("/foo/bar.rs"));
     }
 
     #[test]
-    fn longest_suffix_wins_over_shorter() {
+    fn exact_spelling_wins_over_deeper_relative_suffix() {
         // cargo-crap spec 26: `src/lib.rs` vs `vendor/dep/src/lib.rs` —
-        // the most specific suffix wins for the specific query.
-        let idx = index(&["src/lib.rs", "vendor/dep/src/lib.rs"]);
+        // a deeper *relative* entry is a different workspace file, not
+        // an alias, so its data must not merge into the exact match.
+        let idx = CoverageIndex::build(crate::merge::merge_reports(vec![CoverageData {
+            files: vec![
+                entry_with_lines("src/lib.rs", &[(1, 1)]),
+                entry_with_lines("vendor/dep/src/lib.rs", &[(9, 9)]),
+            ],
+        }]));
         assert_eq!(
-            found_path(&idx, "vendor/dep/src/lib.rs"),
+            found_path(&idx, "vendor/dep/src/lib.rs").as_deref(),
             Some("vendor/dep/src/lib.rs")
         );
-        // Exact equality outranks partial consumption of the longer
-        // vendor entry.
-        assert_eq!(found_path(&idx, "src/lib.rs"), Some("src/lib.rs"));
+        let exact = found(&idx, "src/lib.rs").expect("exact match");
+        assert_eq!(exact.path, "src/lib.rs");
+        assert!(
+            exact.lines.iter().all(|l| l.line_number != 9),
+            "vendor data must not merge into the exact match"
+        );
+    }
+
+    #[test]
+    fn absolute_and_relative_aliases_merge_their_data() {
+        // The same file measured by two reports: one leg spelled
+        // repo-relative, one behind a CI-absolute prefix. Both are
+        // equivalence-proven spellings of the query and must merge —
+        // returning only the "best" one would silently drop the other
+        // leg's coverage.
+        let relative = CoverageData {
+            files: vec![entry_with_lines("src/lib.rs", &[(1, 1), (2, 0)])],
+        };
+        let absolute = CoverageData {
+            files: vec![entry_with_lines(
+                "/ci/work/repo/repo/src/lib.rs",
+                &[(2, 3), (7, 1)],
+            )],
+        };
+        let idx = CoverageIndex::build(crate::merge::merge_reports(vec![relative, absolute]));
+        assert_eq!(idx.len(), 2, "spellings stay distinct in the merge layer");
+
+        let merged = found(&idx, "src/lib.rs").expect("alias merge");
+        let line = |n: u32| {
+            merged
+                .lines
+                .iter()
+                .find(|l| l.line_number == n)
+                .map(|l| l.hit_count)
+        };
+        assert_eq!(line(1), Some(1));
+        assert_eq!(line(2), Some(3), "max of both legs");
+        assert_eq!(line(7), Some(1), "absolute-only line preserved");
     }
 
     #[test]
@@ -313,7 +426,10 @@ mod tests {
             other => panic!("expected ambiguous, got {other:?}"),
         }
         // A more specific query resolves it.
-        assert_eq!(found_path(&idx, "a/sub/mod.rs"), Some("a/sub/mod.rs"));
+        assert_eq!(
+            found_path(&idx, "a/sub/mod.rs").as_deref(),
+            Some("a/sub/mod.rs")
+        );
     }
 
     #[test]
@@ -326,7 +442,7 @@ mod tests {
         // that would shadow differently-rooted queries.
         let idx = index(&["nested/Cargo.toml"]);
         assert_eq!(
-            found_path(&idx, "elsewhere/nested/Cargo.toml"),
+            found_path(&idx, "elsewhere/nested/Cargo.toml").as_deref(),
             Some("nested/Cargo.toml")
         );
         assert_eq!(found_path(&idx, "unrelated.rs"), None);
@@ -335,7 +451,10 @@ mod tests {
     #[test]
     fn dot_spelled_variants_match() {
         let idx = index(&["./src/app.py"]);
-        assert_eq!(found_path(&idx, "src/app.py"), Some("src/app.py"));
+        assert_eq!(
+            found_path(&idx, "src/app.py").as_deref(),
+            Some("src/app.py")
+        );
     }
 
     #[test]
@@ -351,16 +470,29 @@ mod tests {
         let idx = index(&[&report_path]);
         // Query through a `..`-spelled variant of the same on-disk file.
         let query = format!("{}/sub/../sub/target_file.rs", dir.to_str().unwrap());
-        match idx.file(Utf8Path::new(&query)) {
-            FileMatch::Found { entry_id, .. } => {
-                assert!(
-                    idx.entry_path(entry_id)
-                        .unwrap()
-                        .ends_with("target_file.rs")
-                );
-            }
-            other => panic!("expected canonical match, got {other:?}"),
-        }
+        let hit = found_path(&idx, &query).expect("canonical identity match");
+        assert!(hit.ends_with("target_file.rs"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn known_different_identity_is_excluded() {
+        // An absolute entry that exists locally and resolves to a
+        // *different* file must not be offered as suffix evidence for
+        // this query.
+        let dir = std::env::temp_dir().join(format!("mehen-cov-idx2-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("a/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("b/sub")).unwrap();
+        std::fs::write(dir.join("a/sub/f.rs"), "a\n").unwrap();
+        std::fs::write(dir.join("b/sub/f.rs"), "b\n").unwrap();
+
+        let report = format!("{}/a/sub/f.rs", dir.to_str().unwrap());
+        let idx = index(&[&report]);
+        let other = format!("{}/b/sub/f.rs", dir.to_str().unwrap());
+        assert!(
+            found_path(&idx, &other).is_none(),
+            "provably different on-disk identity must not match"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

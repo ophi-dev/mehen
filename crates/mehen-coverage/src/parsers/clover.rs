@@ -45,7 +45,7 @@ use crate::Result;
 use crate::model::{BranchCoverage, FileCoverage, FunctionCoverage, LineCoverage};
 
 /// Clover XML format parser.
-pub struct CloverParser;
+pub(crate) struct CloverParser;
 
 impl CoverageParser for CloverParser {
     fn format(&self) -> CoverageFormat {
@@ -70,7 +70,8 @@ impl CoverageParser for CloverParser {
 }
 
 /// Parse Clover XML coverage data from raw bytes.
-pub fn parse(input: &[u8]) -> Result<crate::CoverageData> {
+#[cfg(test)]
+pub(crate) fn parse(input: &[u8]) -> Result<crate::CoverageData> {
     let mut data = crate::CoverageData::new();
     parse_streaming(&mut &*input, &mut |file| {
         data.files.push(file);
@@ -169,43 +170,27 @@ fn parse_streaming(
                                     });
                                 }
 
-                                // Branch coverage — type="cond" lines have
-                                // truecount/falsecount indicating how many
-                                // conditions had their true/false branches
-                                // evaluated.
-                                //
-                                // The total number of conditions on the
-                                // line is max(truecount, falsecount) —
-                                // e.g. a simple `if` has 1 condition;
-                                // truecount=1, falsecount=1 means both
-                                // branches taken. Two branch arms are
-                                // emitted per condition: one for the true
-                                // branch (hit if i < truecount) and one
-                                // for the false branch (hit if
-                                // i < falsecount).
+                                // Branch coverage — type="cond" lines
+                                // carry truecount/falsecount, the
+                                // *execution counts* of the condition's
+                                // true and false outcomes (OpenClover
+                                // semantics). Each condition is exactly
+                                // two arms: the true arm (hit iff
+                                // truecount > 0) and the false arm (hit
+                                // iff falsecount > 0). The counts must
+                                // not be expanded into arms — a hot
+                                // condition with truecount="10",
+                                // falsecount="5" is still one condition
+                                // with both outcomes exercised.
                                 if line_type.as_deref() == Some("cond") {
                                     let tc = truecount.unwrap_or(0);
                                     let fc = falsecount.unwrap_or(0);
-                                    let num_conditions =
-                                        tc.max(fc).min(super::MAX_BRANCHES_PER_LINE);
                                     let idx = branch_indices.entry(line_number).or_insert(0);
-
-                                    for i in 0..num_conditions {
-                                        // True arm for condition i
-                                        let true_hit: u64 = u64::from(i < tc);
+                                    for hit in [u64::from(tc > 0), u64::from(fc > 0)] {
                                         file.branches.push(BranchCoverage {
                                             line_number,
                                             branch_index: *idx,
-                                            hit_count: true_hit,
-                                        });
-                                        *idx += 1;
-
-                                        // False arm for condition i
-                                        let false_hit: u64 = u64::from(i < fc);
-                                        file.branches.push(BranchCoverage {
-                                            line_number,
-                                            branch_index: *idx,
-                                            hit_count: false_hit,
+                                            hit_count: hit,
                                         });
                                         *idx += 1;
                                     }
@@ -357,5 +342,34 @@ mod tests {
         assert_eq!(file.branches.len(), 2);
         assert_eq!(file.branches[0].hit_count, 1); // true arm
         assert_eq!(file.branches[1].hit_count, 0); // false arm
+    }
+
+    #[test]
+    fn test_parse_clover_counts_are_executions_not_conditions() {
+        // truecount/falsecount are *execution counts* of the two
+        // outcomes, not a number of conditions: a hot condition with
+        // truecount="10" falsecount="5" is exactly two arms, both
+        // covered — never 20 arms with 15 covered.
+        let input = br#"<?xml version="1.0"?>
+<coverage generated="123" clover="4.4.1">
+  <project name="test">
+    <package name="pkg">
+      <file name="hot.py" path="/src/hot.py">
+        <line num="3" count="15" type="cond" truecount="10" falsecount="5"/>
+      </file>
+    </package>
+  </project>
+</coverage>"#;
+        let data = parse(input).unwrap();
+        let file = &data.files[0];
+        assert_eq!(file.branches.len(), 2);
+        assert!(file.branches.iter().all(|b| b.hit_count == 1));
+        assert_eq!(
+            file.branch_totals(),
+            crate::SpanTotals {
+                covered: 2,
+                total: 2
+            }
+        );
     }
 }

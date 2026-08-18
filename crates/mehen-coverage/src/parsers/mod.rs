@@ -10,13 +10,17 @@
 //! machinery. Every parser is streaming (one [`FileCoverage`] emitted per
 //! source-file record) and every detector is cheap by contract: the
 //! extension/filename plus content markers within the first 4 KiB.
+//!
+//! The per-format modules are implementation detail: external consumers
+//! go through the format-neutral entry points ([`detect`],
+//! [`for_format`], [`crate::detect_format`], [`crate::parse_report`]).
 
-pub mod clover;
-pub mod cobertura;
-pub mod gocover;
-pub mod istanbul;
-pub mod jacoco;
-pub mod lcov;
+pub(crate) mod clover;
+pub(crate) mod cobertura;
+pub(crate) mod gocover;
+pub(crate) mod istanbul;
+pub(crate) mod jacoco;
+pub(crate) mod lcov;
 
 use std::io::BufRead;
 

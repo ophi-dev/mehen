@@ -47,7 +47,7 @@ use crate::Result;
 use crate::model::{BranchCoverage, FileCoverage, FunctionCoverage, LineCoverage};
 
 /// Cobertura XML format parser.
-pub struct CoberturaParser;
+pub(crate) struct CoberturaParser;
 
 impl CoverageParser for CoberturaParser {
     fn format(&self) -> CoverageFormat {
@@ -69,7 +69,8 @@ impl CoverageParser for CoberturaParser {
 }
 
 /// Parse Cobertura XML coverage data from raw bytes.
-pub fn parse(input: &[u8]) -> Result<crate::CoverageData> {
+#[cfg(test)]
+pub(crate) fn parse(input: &[u8]) -> Result<crate::CoverageData> {
     let mut data = crate::CoverageData::new();
     parse_streaming(&mut &*input, &mut |file| {
         data.files.push(file);
@@ -106,9 +107,13 @@ fn parse_streaming(
     let mut branch_indices: HashMap<u32, u32> = HashMap::new();
     let mut line_index_map: HashMap<u32, usize> = HashMap::new();
 
-    // Source prefix from <source> elements
+    // Source prefix from <source> elements. Text accumulates until the
+    // closing tag because quick-xml 0.41 splits entity references out
+    // of text: `<source>/srv/a&amp;b</source>` arrives as
+    // Text("/srv/a") + GeneralRef("amp") + Text("b").
     let mut sources: Vec<String> = Vec::new();
     let mut in_source = false;
+    let mut source_text = String::new();
 
     let mut emit_normalized = |mut file: FileCoverage| {
         file.normalize();
@@ -131,6 +136,7 @@ fn parse_streaming(
                         // captured.
                         if is_start_event {
                             in_source = true;
+                            source_text.clear();
                         }
                     }
                     b"class" => {
@@ -217,6 +223,11 @@ fn parse_streaming(
                                     && let Some((covered, total)) = parse_condition_fraction(cond)
                                 {
                                     let total = total.min(super::MAX_BRANCHES_PER_LINE);
+                                    // Clamp to the arms actually emitted:
+                                    // a malformed fraction like
+                                    // "100% (4/2)" (or a capped total)
+                                    // must not mark every arm covered.
+                                    let covered = covered.min(total);
                                     for i in 0..total {
                                         // Cobertura's condition-coverage
                                         // only says how many branches were
@@ -240,15 +251,34 @@ fn parse_streaming(
                 }
             }
             Ok(Event::Text(ref e)) => {
+                if in_source && let Ok(text) = e.decode() {
+                    source_text.push_str(&text);
+                }
+            }
+            Ok(Event::GeneralRef(ref e)) => {
+                // Entity/character references inside <source> content.
+                // Only numeric char refs and the five predefined XML
+                // entities resolve; custom entities are never expanded
+                // (no DTD processing) — an unresolvable ref makes the
+                // prefix unusable, so it is dropped with its record
+                // left to suffix matching.
                 if in_source {
-                    if let Ok(text) = e.decode() {
-                        sources.push(text.to_string());
+                    if let Ok(Some(ch)) = e.resolve_char_ref() {
+                        source_text.push(ch);
+                    } else if let Some(entity) = e
+                        .decode()
+                        .ok()
+                        .and_then(|name| quick_xml::escape::resolve_predefined_entity(&name))
+                    {
+                        source_text.push_str(entity);
                     }
-                    in_source = false;
                 }
             }
             Ok(Event::End(ref e)) => match e.name().as_ref() {
                 b"source" => {
+                    if in_source && !source_text.trim().is_empty() {
+                        sources.push(std::mem::take(&mut source_text));
+                    }
                     in_source = false;
                 }
                 b"class" => {
@@ -287,11 +317,13 @@ fn parse_streaming(
 
 /// Resolve a filename against the list of `<source>` prefixes.
 ///
-/// - If the filename is already absolute, return it as-is.
+/// - If the filename is already absolute — POSIX (`/…`), Windows
+///   drive-qualified (`C:\…`, `C:/…`), or UNC (`\\server\…`) — return
+///   it as-is; the path index normalizes separators later.
 /// - Otherwise, prepend the first non-empty source prefix.
 /// - If no non-empty sources exist, return the filename unchanged.
 fn resolve_source_path(filename: &str, sources: &[String]) -> String {
-    if filename.starts_with('/') {
+    if is_absolute_filename(filename) {
         return filename.to_string();
     }
     for source in sources {
@@ -301,6 +333,18 @@ fn resolve_source_path(filename: &str, sources: &[String]) -> String {
         }
     }
     filename.to_string()
+}
+
+/// POSIX-absolute, Windows drive-qualified, or UNC spelling.
+fn is_absolute_filename(filename: &str) -> bool {
+    if filename.starts_with('/') || filename.starts_with("\\\\") {
+        return true;
+    }
+    let bytes = filename.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 #[cfg(test)]
@@ -413,6 +457,64 @@ mod tests {
         assert_eq!(parse_condition_fraction("100%"), None);
         assert_eq!(parse_condition_fraction("(x/y)"), None);
         assert_eq!(parse_condition_fraction(""), None);
+    }
+
+    #[test]
+    fn test_malformed_condition_fraction_cannot_exceed_arm_count() {
+        // A generator writing covered > total ("100% (4/2)") must not
+        // report more covered arms than emitted arms — coverage.branch
+        // backs CI gates, so an uncapped count would mask a failure.
+        let input = br#"<?xml version="1.0"?>
+<coverage version="1.0">
+  <packages><package name="p"><classes>
+    <class name="C" filename="src/f.rs">
+      <lines><line number="3" hits="1" branch="true" condition-coverage="100% (4/2)"/></lines>
+    </class>
+  </classes></package></packages>
+</coverage>"#;
+        let data = parse(input).unwrap();
+        let file = &data.files[0];
+        assert_eq!(file.branches.len(), 2);
+        assert!(file.branches.iter().all(|b| b.hit_count == 1));
+    }
+
+    #[test]
+    fn test_source_with_entity_reference_is_complete() {
+        // quick-xml splits `&amp;` out of text content; the <source>
+        // accumulator must reassemble the full prefix.
+        let input = br#"<?xml version="1.0"?>
+<coverage version="1.0">
+  <sources><source>/srv/a&amp;b</source></sources>
+  <packages><package name="p"><classes>
+    <class name="C" filename="src/f.py">
+      <lines><line number="1" hits="1"/></lines>
+    </class>
+  </classes></package></packages>
+</coverage>"#;
+        let data = parse(input).unwrap();
+        assert_eq!(data.files[0].path, "/srv/a&b/src/f.py");
+    }
+
+    #[test]
+    fn test_windows_absolute_filenames_are_preserved() {
+        // Drive-qualified and UNC filenames must not receive a <source>
+        // prefix; the path index normalizes separators later.
+        for absolute in [
+            r"C:\proj\src\a.cs",
+            "C:/proj/src/a.cs",
+            r"\\server\share\a.cs",
+        ] {
+            assert_eq!(
+                resolve_source_path(absolute, &["/ignored".to_string()]),
+                absolute,
+                "{absolute} must stay as spelled"
+            );
+        }
+        // POSIX-relative still receives the prefix.
+        assert_eq!(
+            resolve_source_path("src/a.cs", &["/root".to_string()]),
+            "/root/src/a.cs"
+        );
     }
 
     #[test]

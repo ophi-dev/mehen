@@ -29,7 +29,7 @@ use crate::model::{BranchCoverage, FileCoverage, FunctionCoverage, LineCoverage}
 use crate::{CoverageError, Result};
 
 /// Istanbul / NYC JSON parser.
-pub struct IstanbulParser;
+pub(crate) struct IstanbulParser;
 
 impl CoverageParser for IstanbulParser {
     fn format(&self) -> CoverageFormat {
@@ -59,7 +59,8 @@ impl CoverageParser for IstanbulParser {
 }
 
 /// Parse Istanbul JSON from raw bytes.
-pub fn parse(input: &[u8]) -> Result<crate::CoverageData> {
+#[cfg(test)]
+pub(crate) fn parse(input: &[u8]) -> Result<crate::CoverageData> {
     let mut data = crate::CoverageData::new();
     parse_streaming_reader(&mut &*input, &mut |file| {
         data.files.push(file);
@@ -87,10 +88,20 @@ fn parse_streaming_reader(
     reader: &mut dyn BufRead,
     emit: &mut dyn FnMut(FileCoverage) -> Result<()>,
 ) -> Result<()> {
-    // Peek at the buffer to handle empty/whitespace-only input.
-    let buf = reader.fill_buf()?;
-    if buf.is_empty() || buf.iter().all(|b| b.is_ascii_whitespace()) {
-        return Ok(());
+    // Consume leading whitespace across buffer refills: `fill_buf`
+    // exposes only the current buffer, and a buffer that happens to be
+    // whitespace-only can still be followed by valid JSON.
+    loop {
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(()); // empty / whitespace-only input
+        }
+        let ws = buf.iter().take_while(|b| b.is_ascii_whitespace()).count();
+        let all_ws = ws == buf.len();
+        reader.consume(ws);
+        if !all_ws {
+            break;
+        }
     }
 
     let mut deser = serde_json::Deserializer::from_reader(reader);
@@ -109,10 +120,17 @@ fn parse_streaming_reader(
         },
     };
     match serde::Deserializer::deserialize_map(&mut deser, visitor) {
-        Ok(()) => match emit_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        },
+        Ok(()) => {
+            if let Some(e) = emit_err {
+                return Err(e);
+            }
+            // Reject trailing non-whitespace bytes: `deserialize_map`
+            // stops at the closing brace, and `{}garbage` must not
+            // parse as a clean empty report.
+            deser.end().map_err(|e| {
+                CoverageError::Malformed(format!("trailing data after Istanbul JSON object: {e}"))
+            })
+        }
         Err(e) => {
             // If the error originated from `emit`, return the original.
             if let Some(original) = emit_err {
@@ -248,9 +266,13 @@ fn parse_branches(entry: &Value, file: &mut FileCoverage) {
             continue;
         };
 
-        for count_val in counts.iter().take(super::MAX_BRANCHES_PER_LINE as usize) {
+        // The arm cap is per source *line*, and several branchMap
+        // entries can resolve to one line — budget from the arms
+        // already assigned to that line, not per entry.
+        let branch_index = line_branch_idx.entry(line).or_insert(0);
+        let remaining = super::MAX_BRANCHES_PER_LINE.saturating_sub(*branch_index) as usize;
+        for count_val in counts.iter().take(remaining) {
             let hit_count = count_val.as_u64().unwrap_or(0);
-            let branch_index = line_branch_idx.entry(line).or_insert(0);
             file.branches.push(BranchCoverage {
                 line_number: line,
                 branch_index: *branch_index,
@@ -389,6 +411,54 @@ mod tests {
         let result = parse(br#"{ "/src/app.js": { "statementMap": "#);
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Istanbul"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_trailing_garbage_is_rejected() {
+        let err = parse(b"{} not json").unwrap_err().to_string();
+        assert!(err.contains("trailing"), "unexpected error: {err}");
+        // Trailing whitespace stays fine.
+        assert!(parse(b"{}   \n").is_ok());
+    }
+
+    #[test]
+    fn test_leading_whitespace_larger_than_one_buffer() {
+        // A whitespace run longer than any single fill_buf window must
+        // not read as an empty report.
+        let mut input = vec![b' '; 64 * 1024];
+        input.extend_from_slice(
+            br#"{"/src/app.js": {"statementMap": {"0": {"start": {"line": 1}}}, "s": {"0": 1}, "fnMap": {}, "f": {}}}"#,
+        );
+        let data = parse(&input).unwrap();
+        assert_eq!(data.files.len(), 1);
+    }
+
+    #[test]
+    fn test_branch_cap_is_per_line_across_entries() {
+        // Several branchMap entries resolving to one line share that
+        // line's arm budget.
+        let mut entries = String::new();
+        let mut counts = String::new();
+        let per_entry = 300; // 4 entries × 300 arms = 1200 > 1024 cap
+        for i in 0..4 {
+            if i > 0 {
+                entries.push(',');
+                counts.push(',');
+            }
+            let arms = (0..per_entry).map(|_| "1").collect::<Vec<_>>().join(",");
+            entries.push_str(&format!(
+                r#""{i}": {{ "loc": {{ "start": {{ "line": 9 }} }} }}"#
+            ));
+            counts.push_str(&format!(r#""{i}": [{arms}]"#));
+        }
+        let input = format!(
+            r#"{{"/src/big.js": {{"statementMap": {{}}, "s": {{}}, "branchMap": {{{entries}}}, "b": {{{counts}}}, "fnMap": {{}}, "f": {{}}}}}}"#
+        );
+        let data = parse(input.as_bytes()).unwrap();
+        assert_eq!(
+            data.files[0].branches.len(),
+            super::super::MAX_BRANCHES_PER_LINE as usize
+        );
     }
 
     #[test]

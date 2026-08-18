@@ -33,7 +33,7 @@ use crate::Result;
 use crate::model::{FileCoverage, LineCoverage};
 
 /// Go coverage profile parser.
-pub struct GocoverParser;
+pub(crate) struct GocoverParser;
 
 impl CoverageParser for GocoverParser {
     fn format(&self) -> CoverageFormat {
@@ -73,7 +73,8 @@ impl CoverageParser for GocoverParser {
 }
 
 /// Parse a Go coverage profile from raw bytes.
-pub fn parse(input: &[u8]) -> Result<crate::CoverageData> {
+#[cfg(test)]
+pub(crate) fn parse(input: &[u8]) -> Result<crate::CoverageData> {
     let mut data = crate::CoverageData::new();
     parse_streaming_reader(&mut &*input, &mut |file| {
         data.files.push(file);
@@ -86,6 +87,10 @@ pub fn parse(input: &[u8]) -> Result<crate::CoverageData> {
 struct Block {
     start_line: u32,
     end_line: u32,
+    /// Column of the block's exclusive end position. When the end
+    /// position sits at column 1, the block ends *before* `end_line`'s
+    /// first character and that line is not part of the block.
+    end_col: u32,
     count: u64,
 }
 
@@ -120,7 +125,9 @@ fn parse_block_line(line: &str) -> Option<(&str, Block)> {
     let (start, end) = range.split_once(',')?;
 
     let start_line: u32 = start.split_once('.')?.0.parse().ok()?;
-    let end_line: u32 = end.split_once('.')?.0.parse().ok()?;
+    let (end_line_str, end_col_str) = end.split_once('.')?;
+    let end_line: u32 = end_line_str.parse().ok()?;
+    let end_col: u32 = end_col_str.parse().ok()?;
 
     // Reject blocks with an invalid range or an absurdly large span that
     // would cause excessive memory allocation when expanded per-line.
@@ -137,6 +144,7 @@ fn parse_block_line(line: &str) -> Option<(&str, Block)> {
         Block {
             start_line,
             end_line,
+            end_col,
             count,
         },
     ))
@@ -153,25 +161,34 @@ fn parse_streaming_reader(
     let mut file_blocks: HashMap<String, Vec<Block>> = HashMap::new();
 
     let mut raw_line = String::new();
+    let mut line_number: u64 = 0;
     loop {
         raw_line.clear();
         let n = reader.read_line(&mut raw_line)?;
         if n == 0 {
             break;
         }
+        line_number += 1;
 
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with("mode:") {
             continue;
         }
 
-        if let Some((file, block)) = parse_block_line(line) {
-            let file_str = file.to_string();
-            if !file_blocks.contains_key(&file_str) {
-                file_order.push(file_str.clone());
-            }
-            file_blocks.entry(file_str).or_default().push(block);
+        // A non-header line that is not a valid block record means the
+        // input is not (or is no longer) a Go coverage profile —
+        // silently dropping it would report misleadingly complete
+        // coverage from a corrupt report.
+        let Some((file, block)) = parse_block_line(line) else {
+            return Err(crate::CoverageError::Malformed(format!(
+                "malformed Go coverage block at line {line_number}: {line}"
+            )));
+        };
+        let file_str = file.to_string();
+        if !file_blocks.contains_key(&file_str) {
+            file_order.push(file_str.clone());
         }
+        file_blocks.entry(file_str).or_default().push(block);
     }
 
     // Emit one FileCoverage per source file.
@@ -194,12 +211,16 @@ fn blocks_to_file_coverage(path: String, blocks: &[Block]) -> FileCoverage {
     let mut line_hits: HashMap<u32, u64> = HashMap::new();
 
     for block in blocks {
-        // Go coverage ranges are inclusive on both ends, but the end
-        // line's end column might be at the very start of the line
-        // (col 1), which would mean the block doesn't really include that
-        // line. We include it anyway since we don't have column-level
-        // granularity and this matches how most tools interpret it.
-        for line_num in block.start_line..=block.end_line {
+        // Block positions are start-inclusive with an *exclusive* end
+        // offset. An end column of 1 means the block ends before the
+        // end line's first character — that line carries none of the
+        // block's statements and must not inherit its count.
+        let last_line = if block.end_col == 1 && block.end_line > block.start_line {
+            block.end_line - 1
+        } else {
+            block.end_line
+        };
+        for line_num in block.start_line..=last_line {
             let entry = line_hits.entry(line_num).or_insert(0);
             if block.count > *entry {
                 *entry = block.count;
@@ -288,6 +309,38 @@ mod tests {
         assert_eq!(data.files.len(), 1);
         assert_eq!(data.files[0].lines.len(), 5);
         assert_eq!(data.files[0].lines[0].hit_count, 3);
+    }
+
+    #[test]
+    fn test_end_column_one_excludes_the_end_line() {
+        // Block positions carry an exclusive end offset: `1.1,3.1` ends
+        // *before* line 3's first character, so only lines 1 and 2
+        // belong to the block.
+        let input = b"mode: set\nexample.com/pkg/f.go:1.1,3.1 1 1\n";
+        let data = parse(input).unwrap();
+        let lines: Vec<u32> = data.files[0].lines.iter().map(|l| l.line_number).collect();
+        assert_eq!(lines, vec![1, 2]);
+
+        // A degenerate single-line block at column 1 still keeps its
+        // one line rather than vanishing.
+        let input = b"mode: set\nexample.com/pkg/f.go:7.1,7.1 1 1\n";
+        let data = parse(input).unwrap();
+        let lines: Vec<u32> = data.files[0].lines.iter().map(|l| l.line_number).collect();
+        assert_eq!(lines, vec![7]);
+    }
+
+    #[test]
+    fn test_malformed_block_line_is_an_error() {
+        // A non-header line that is not a block record must fail the
+        // parse — silently dropping it would report misleadingly
+        // complete coverage from a corrupt report.
+        let input = b"mode: count\nnot a profile\n";
+        let err = parse(input).unwrap_err().to_string();
+        assert!(err.contains("line 2"), "unexpected error: {err}");
+
+        // A record with a corrupted range is equally fatal.
+        let input = b"mode: count\nexample.com/pkg/f.go:9.1,3.1 1 1\n";
+        assert!(parse(input).is_err());
     }
 
     #[test]

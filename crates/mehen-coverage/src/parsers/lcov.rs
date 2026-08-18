@@ -37,7 +37,7 @@ use crate::Result;
 use crate::model::{BranchCoverage, FileCoverage, FunctionCoverage, LineCoverage};
 
 /// LCOV format parser.
-pub struct LcovParser;
+pub(crate) struct LcovParser;
 
 impl CoverageParser for LcovParser {
     fn format(&self) -> CoverageFormat {
@@ -72,7 +72,8 @@ impl CoverageParser for LcovParser {
 }
 
 /// Parse LCOV format coverage data from raw bytes.
-pub fn parse(input: &[u8]) -> Result<crate::CoverageData> {
+#[cfg(test)]
+pub(crate) fn parse(input: &[u8]) -> Result<crate::CoverageData> {
     let mut data = crate::CoverageData::new();
     parse_streaming_reader(&mut &*input, &mut |file| {
         data.files.push(file);
