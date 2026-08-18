@@ -6,6 +6,25 @@ mehen Rust crate itself is released under MPL-2.0 (see `LICENSE`); the
 bundled data lives under `src/markdown/data/` and follows the licenses
 below.
 
+## covrs coverage-report parsers (adapted source code)
+
+- Files: `crates/mehen-coverage/src/model.rs`,
+  `crates/mehen-coverage/src/parsers/{mod,lcov,gocover,istanbul,jacoco,clover,cobertura}.rs`,
+  and the parser test fixtures under
+  `crates/mehen-coverage/tests/fixtures/`.
+- Origin: covrs 0.3.2 — code coverage ingestion and reporting, by
+  Scott Nelson. https://github.com/scttnlsn/covrs
+- License: MIT, as declared by the upstream `Cargo.toml` `license`
+  field (the upstream repository ships no standalone LICENSE file; the
+  crates.io metadata is the license statement of record).
+- Use: The six coverage-report format parsers (LCOV, Go coverprofile,
+  Istanbul JSON, JaCoCo XML, Clover XML, Cobertura XML), their shared
+  detection helpers, the uniform coverage model, and the parser test
+  fixtures were adapted into `mehen-coverage`. Local modifications
+  (house error type, camino paths, quick-xml 0.41 API, record
+  normalization, regex removal) are noted in each file's provenance
+  header and are licensed under the repository's AGPL-3.0-only terms.
+
 ## NGSL 1.2 (New General Service List)
 
 - File: `src/markdown/data/ngsl_1_2.txt`

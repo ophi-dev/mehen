@@ -1,0 +1,26 @@
+<?xml version="1.0" ?>
+<coverage version="1.0" timestamp="0" lines-valid="4" lines-covered="4" line-rate="1.0" branches-covered="1" branches-valid="2" branch-rate="0.5">
+    <packages>
+        <package name="pkg" line-rate="1.0" branch-rate="0.5" complexity="0">
+            <classes>
+                <class name="test.py" filename="src/test.py" complexity="0" line-rate="1.0" branch-rate="0.5">
+                    <methods>
+                        <method name="check" signature="()" line-rate="1.0" branch-rate="0.5">
+                            <lines>
+                                <line number="2" hits="5"/>
+                                <line number="3" hits="5" branch="true" condition-coverage="50% (1/2)"/>
+                                <line number="4" hits="3"/>
+                            </lines>
+                        </method>
+                    </methods>
+                    <lines>
+                        <line number="1" hits="1"/>
+                        <line number="2" hits="5"/>
+                        <line number="3" hits="5" branch="true" condition-coverage="50% (1/2)"/>
+                        <line number="4" hits="3"/>
+                    </lines>
+                </class>
+            </classes>
+        </package>
+    </packages>
+</coverage>

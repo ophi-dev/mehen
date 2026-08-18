@@ -1,0 +1,24 @@
+[package]
+name = "mehen-coverage"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Mehen 1.0 — coverage-report parsing (LCOV, Go coverprofile, Istanbul, JaCoCo, Clover, Cobertura), merging, and source-path matching (internal)."
+publish = false
+
+[dependencies]
+camino = { workspace = true }
+log = { workspace = true }
+quick-xml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+pretty_assertions = { workspace = true }
+
+[lints]
+workspace = true

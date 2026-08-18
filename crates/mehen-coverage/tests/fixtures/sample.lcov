@@ -1,0 +1,26 @@
+TN:test suite
+SF:/src/lib.rs
+FN:1,main
+FN:10,helper
+FNDA:5,main
+FNDA:0,helper
+DA:1,5
+DA:2,5
+DA:3,0
+DA:10,0
+DA:11,0
+BRDA:2,0,0,5
+BRDA:2,0,1,0
+LF:5
+LH:2
+FNF:2
+FNH:1
+BRF:2
+BRH:1
+end_of_record
+SF:/src/util.rs
+DA:1,1
+DA:2,1
+LF:2
+LH:2
+end_of_record

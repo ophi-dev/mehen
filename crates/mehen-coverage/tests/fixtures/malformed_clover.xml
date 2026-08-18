@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage generated="1695949238" clover="4.4.1">
+    <project timestamp="1695949238" name="broken">
+        <package name="pkg">
+            <file name="bad.py" path="/src/bad.py">
+                <line num="1" count="1" type="stmt"/>
+            </package>
+        </file>
+    </project>
+</coverage>

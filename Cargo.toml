@@ -23,6 +23,7 @@ members = [
     "crates/mehen-sql",
     "crates/mehen-engine",
     "crates/mehen-git",
+    "crates/mehen-coverage",
     "crates/mehen-report",
     "crates/mehen-cli",
     "xtask",
@@ -76,6 +77,7 @@ mehen-powershell = { path = "crates/mehen-powershell" }
 mehen-sql = { path = "crates/mehen-sql" }
 mehen-engine = { path = "crates/mehen-engine" }
 mehen-git = { path = "crates/mehen-git" }
+mehen-coverage = { path = "crates/mehen-coverage" }
 mehen-report = { path = "crates/mehen-report" }
 
 # Shared third-party deps with pinned versions. Single-consumer deps
@@ -92,6 +94,13 @@ serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 smol_str = { version = "^0.3", features = ["serde"] }
 gix = { version = "^0.86", default-features = false, features = ["attributes", "blob-diff", "max-performance-safe", "revision", "sha1"] }
+# Read-only XML pull parsing for coverage reports (JaCoCo/Clover/Cobertura)
+# and `phpunit.xml` introspection. Shared by `mehen-coverage` and
+# `mehen-coverage-discovery`. Both optional features (`serialize`,
+# `encoding`) stay off: parsing is hand-rolled streaming, and non-UTF-8
+# report encodings are rejected as diagnostics. Keep ≥0.41 — it carries the
+# fixes for RUSTSEC-2026-0194/-0195.
+quick-xml = "^0.41"
 
 # ANTLR v4 Rust runtime and code generator (`ophi-dev/antlr-rust-runtime`).
 # The runtime package's library is imported as `antlr4_runtime`, so alias it
