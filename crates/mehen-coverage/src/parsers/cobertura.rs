@@ -385,6 +385,60 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_utplsql_real_report() {
+        // Real utPLSQL 3.1.6 output (see the fixture's provenance comment).
+        // Pins how a genuine SQL coverage report maps: the line dimension is
+        // fully populated while branches and functions are absent — utPLSQL
+        // emits `branch="false"` on every line and no <method> elements, so
+        // downstream coverage.branch/coverage.function must stay unpublished
+        // (absent, not zero) for these files.
+        let input = include_bytes!("../../tests/fixtures/cobertura_utplsql.xml");
+        let data = parse(input).unwrap();
+
+        assert_eq!(data.files.len(), 5);
+
+        // utPLSQL abuses <sources> as a list of DB unit names rather than
+        // filesystem roots, and its filenames are `schema.unit` identifiers
+        // (not paths), so the first "source" is prepended to every record.
+        // The spellings never match repository files — real-world mapping
+        // requires utPLSQL-cli's -source_path file mapping. This documents
+        // (not endorses) the raw shape.
+        let expected: [(&str, usize, u64); 5] = [
+            ("s205031.betwnstr/s205031.betwnstr", 4, 4),
+            ("s205031.betwnstr/s205031.load_from_tab", 13, 0),
+            ("s205031.betwnstr/s205031.minimal_view", 13, 0),
+            ("s205031.betwnstr/s205031.pk_glb0_mail", 1174, 0),
+            ("s205031.betwnstr/s205031.pk_tst0_instrumentation", 29, 0),
+        ];
+        for (file, (path, lines, covered)) in data.files.iter().zip(expected) {
+            assert_eq!(file.path, path);
+            assert_eq!(file.lines.len(), lines, "{path}: listed lines");
+            assert_eq!(
+                file.lines.iter().filter(|l| l.hit_count > 0).count() as u64,
+                covered,
+                "{path}: covered lines",
+            );
+            assert!(file.branches.is_empty(), "{path}: no branch dimension");
+            assert!(file.functions.is_empty(), "{path}: no function dimension");
+        }
+
+        // Cross-check against the report's own totals
+        // (lines-valid="1233" lines-covered="4").
+        let total: usize = data.files.iter().map(|f| f.lines.len()).sum();
+        assert_eq!(total, 1233);
+
+        // DBMS_PLSQL_CODE_COVERAGE line numbers are unit-source-relative;
+        // BETWNSTR's executable lines and hit counts arrive verbatim.
+        let betwnstr = &data.files[0];
+        let got: Vec<(u32, u64)> = betwnstr
+            .lines
+            .iter()
+            .map(|l| (l.line_number, l.hit_count))
+            .collect();
+        assert_eq!(got, [(2, 5), (4, 5), (5, 3), (7, 5)]);
+    }
+
+    #[test]
     fn test_parse_cobertura_branch_dedup() {
         // Branch line appears in both <method><lines> and <class><lines>.
         // We must not double-count the branch arms.
