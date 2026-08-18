@@ -166,7 +166,7 @@ pub(crate) fn selector_available_with_coverage(
 /// Resolution: the `--coverage` flag, then the `[coverage]` config
 /// section, then the lazy trigger (a configured `coverage.*`
 /// threshold). Returns whether coverage data was injected. An
-/// explicit report path that is missing or unparseable is an error;
+/// explicit report path that is missing or unparsable is an error;
 /// everything else (no reports found, file not matched) degrades to
 /// logs and an untouched report.
 pub fn enrich_metrics_with_coverage(
@@ -291,7 +291,7 @@ impl CoverageContext {
 }
 
 /// A fatal coverage-setup problem (user-attributable: an explicit
-/// report path that is missing or unparseable). Discovered-report
+/// report path that is missing or unparsable). Discovered-report
 /// problems never take this path — they degrade to warnings.
 #[derive(Debug)]
 pub struct CoverageSetupError(pub String);

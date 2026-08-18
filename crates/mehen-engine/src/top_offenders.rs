@@ -2330,7 +2330,7 @@ binary.py binary
 
     #[test]
     fn rank_top_offenders_reports_unusable_coverage_report() {
-        // An unreadable/unparseable explicit report surfaces as an
+        // An unreadable/unparsable explicit report surfaces as an
         // `analysis_error` (this API has no fatal channel), and the
         // coverage column reads as unavailable for every file.
         use mehen_core::{AnalysisConfig, TopOffendersInput};

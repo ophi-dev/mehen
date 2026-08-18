@@ -22,7 +22,7 @@ selector, a configured `coverage.*` threshold, or an opting-in `[coverage]` sect
 ## Three input tiers
 
 1. **Explicit reports** — `--coverage <path>` (repeatable) or `reports = […]` under
-   `[coverage]`. These are *your* statement of intent: a missing or unparseable explicit report
+   `[coverage]`. These are *your* statement of intent: a missing or unparsable explicit report
    is a hard error, because an explicit gate input that silently disappears is a broken CI gate.
 2. **Tool-config introspection** — mehen reads *declarative* tool configs that say where reports
    get written:

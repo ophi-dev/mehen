@@ -199,8 +199,8 @@ mod tests {
         ]);
 
         let ab = merge_reports(vec![a.clone(), b.clone()]);
-        let ba = merge_reports(vec![b, a]);
-        assert_eq!(ab, ba);
+        let reversed = merge_reports(vec![b, a]);
+        assert_eq!(ab, reversed);
 
         assert_eq!(ab.files.len(), 2);
         let lib = &ab.files[0];

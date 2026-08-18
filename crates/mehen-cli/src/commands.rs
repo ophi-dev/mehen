@@ -68,7 +68,7 @@ pub(crate) fn metrics(args: MetricsArgs, config: Option<&mehen_engine::ConfigFil
     // Coverage enrichment (`--coverage`, `[coverage]` config, or a
     // configured coverage threshold): folds the `coverage.*` family
     // into the metric tree before rendering and threshold evaluation.
-    // An explicit report path that is missing or unparseable is a
+    // An explicit report path that is missing or unparsable is a
     // setup error; "no coverage found/matched" leaves the report
     // untouched.
     let mut report = report;
