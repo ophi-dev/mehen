@@ -136,6 +136,13 @@ fn write_unit_metrics(out: &mut String, metrics: &MetricSet, language: Language)
     }
 
     let families = MetricsFamilies::from_metrics(metrics);
+    // Coverage first when present: it is the family users gate CI on,
+    // and unlike the always-rendered source-code tables it is omitted
+    // entirely when unmeasured ("no data" must stay distinguishable
+    // from 0%).
+    if let Some(coverage) = &families.coverage {
+        write_coverage(out, coverage);
+    }
     write_cyclomatic(out, &families.cyclomatic);
     write_cognitive(out, &families.cognitive);
     write_loc(out, &families.loc);
@@ -537,6 +544,30 @@ fn space_kind_label(kind: &SpaceKind) -> &'static str {
 }
 
 // --- Per-family helpers --------------------------------------------
+
+/// Coverage table: one row per measured dimension. A dimension the
+/// ingested report never measured is skipped — "no data" must stay
+/// distinguishable from 0%.
+fn write_coverage(out: &mut String, m: &crate::metrics_json::Coverage) {
+    let _ = writeln!(out);
+    let _ = writeln!(out, "### Coverage");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "| dimension | coverage | covered | total |");
+    let _ = writeln!(out, "|---|---:|---:|---:|");
+    for (label, dimension) in [
+        ("line", &m.line),
+        ("branch", &m.branch),
+        ("function", &m.function),
+    ] {
+        if let Some(dimension) = dimension {
+            let _ = writeln!(
+                out,
+                "| {label} | {:.1}% | {} | {} |",
+                dimension.percent, dimension.covered, dimension.total,
+            );
+        }
+    }
+}
 
 fn write_cyclomatic(out: &mut String, m: &Cyclomatic) {
     let _ = writeln!(out);

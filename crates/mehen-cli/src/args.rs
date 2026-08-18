@@ -77,6 +77,9 @@ pub(crate) struct MetricsArgs {
     /// Built-in profile preset.
     #[arg(long, default_value = "default")]
     pub(crate) profile: Profile,
+
+    #[command(flatten)]
+    pub(crate) coverage: mehen_engine::CoverageOpts,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]

@@ -392,6 +392,71 @@ fn as_f64(metrics: &MetricSet, key: &str) -> f64 {
     }
 }
 
+fn maybe_f64(metrics: &MetricSet, key: &str) -> Option<f64> {
+    match metrics.get(&MetricKey::new(key)) {
+        Some(MetricValue::Int(i)) => Some(i as f64),
+        Some(MetricValue::Float(f)) => Some(f),
+        None => None,
+    }
+}
+
+/// One measured coverage dimension: the rate (percent, `0..=100`) plus
+/// the covered/total counters behind it.
+#[derive(Serialize)]
+pub struct CoverageDimension {
+    pub percent: f64,
+    pub covered: u64,
+    pub total: u64,
+}
+
+/// Render the `coverage` family object. Unlike the source-code
+/// families, coverage is **omitted entirely when unmeasured** — a file
+/// absent from every ingested report must read as "no data", never as
+/// a fabricated 0%. Each dimension (`line`, `branch`, `function`) is
+/// likewise present only when the report format measured it: a Go
+/// coverprofile carries no branch records, so `branch` stays absent.
+pub fn coverage(metrics: &MetricSet) -> Option<Coverage> {
+    let dimension = |rate: &str, covered: &str, total: &str| -> Option<CoverageDimension> {
+        Some(CoverageDimension {
+            percent: maybe_f64(metrics, rate)?,
+            covered: maybe_f64(metrics, covered)? as u64,
+            total: maybe_f64(metrics, total)? as u64,
+        })
+    };
+    let family = Coverage {
+        line: dimension(
+            "coverage.line",
+            "coverage.line.covered",
+            "coverage.line.total",
+        ),
+        branch: dimension(
+            "coverage.branch",
+            "coverage.branch.covered",
+            "coverage.branch.total",
+        ),
+        function: dimension(
+            "coverage.function",
+            "coverage.function.covered",
+            "coverage.function.total",
+        ),
+    };
+    if family.line.is_none() && family.branch.is_none() && family.function.is_none() {
+        None
+    } else {
+        Some(family)
+    }
+}
+
+#[derive(Serialize)]
+pub struct Coverage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<CoverageDimension>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<CoverageDimension>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<CoverageDimension>,
+}
+
 /// All metric families pivoted into the documented per-family shape.
 /// This is what the CLI emits as the `metrics` field of `mehen metrics
 /// --format json`, replacing the flat `metric_key → value` map of the
@@ -409,6 +474,9 @@ pub struct MetricsFamilies {
     pub abc: Abc,
     pub halstead: Halstead,
     pub loc: Loc,
+    /// Present only when coverage enrichment measured this file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Coverage>,
 }
 
 impl MetricsFamilies {
@@ -425,6 +493,7 @@ impl MetricsFamilies {
             abc: abc(metrics),
             halstead: halstead(metrics),
             loc: loc(metrics),
+            coverage: coverage(metrics),
         }
     }
 }

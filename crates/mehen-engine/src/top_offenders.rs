@@ -45,6 +45,18 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
                 )],
             });
         }
+        if crate::coverage_metrics::is_invalid_coverage_selector(selector) {
+            analysis_errors.push(AnalysisErrorRecord {
+                path: Utf8PathBuf::new(),
+                side: DiffSide::Head,
+                diagnostics: vec![ParseDiagnostic::warning(
+                    "engine.unknown_metric",
+                    format!(
+                        "unresolvable coverage selector `{selector}` (the fixed `coverage.*` keys publish root values only)",
+                    ),
+                )],
+            });
+        }
     }
     // `history.*` selectors need repository histories. Root-load
     // failures surface as `analysis_errors` (this API has no fatal
@@ -72,6 +84,67 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         Some(loaded)
     } else {
         None
+    };
+    // `coverage.*` selectors read explicitly supplied report files.
+    // Parse failures surface as `analysis_errors` (no fatal channel
+    // here); a resolvable coverage selector without any report reads
+    // as unavailable per file rather than as fabricated zeros.
+    let coverage_index = {
+        let wants_coverage = input.selectors.iter().any(|s| {
+            s.key.as_str().starts_with("coverage.")
+                && !crate::coverage_metrics::is_invalid_coverage_selector(s)
+        });
+        if wants_coverage && !input.coverage_reports.is_empty() {
+            let mut parsed = Vec::new();
+            for path in &input.coverage_reports {
+                match std::fs::read(path.as_std_path()) {
+                    Ok(bytes) => {
+                        let head_len = bytes.len().min(4096);
+                        match mehen_coverage::detect_format(path, &bytes[..head_len])
+                            .ok_or_else(|| "unrecognized coverage report format".to_string())
+                            .and_then(|format| {
+                                mehen_coverage::parse_report(format, &bytes)
+                                    .map_err(|e| e.to_string())
+                            }) {
+                            Ok(data) => parsed.push(data),
+                            Err(message) => analysis_errors.push(AnalysisErrorRecord {
+                                path: path.clone(),
+                                side: DiffSide::Head,
+                                diagnostics: vec![ParseDiagnostic::warning(
+                                    "engine.coverage_unavailable",
+                                    format!("coverage report unusable: {message}"),
+                                )],
+                            }),
+                        }
+                    }
+                    Err(e) => analysis_errors.push(AnalysisErrorRecord {
+                        path: path.clone(),
+                        side: DiffSide::Head,
+                        diagnostics: vec![ParseDiagnostic::warning(
+                            "engine.coverage_unavailable",
+                            format!("cannot read coverage report: {e}"),
+                        )],
+                    }),
+                }
+            }
+            if parsed.is_empty() {
+                None
+            } else {
+                let index = mehen_coverage::CoverageIndex::build(
+                    mehen_coverage::merge::merge_reports(parsed),
+                );
+                let mut roots: Vec<Utf8PathBuf> = input
+                    .paths
+                    .iter()
+                    .filter_map(|path| crate::coverage_metrics::coverage_root_for(path))
+                    .collect();
+                roots.sort_unstable();
+                roots.dedup();
+                Some(crate::coverage_metrics::CoverageContext::new(index, &roots))
+            }
+        } else {
+            None
+        }
     };
     // Dedup files across roots. Without this, callers passing
     // overlapping paths (`.` plus `src`, or a directory plus a file
@@ -112,6 +185,11 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         // metric space) instead of silently dropping it. Static-only
         // rankings keep skipping such files.
         let history_entry = histories.as_ref().and_then(|h| h.file(entry.as_std_path()));
+        // Coverage likewise comes from report files, not from the
+        // blob.
+        let coverage_entry = coverage_index
+            .as_ref()
+            .and_then(|context| crate::coverage_metrics::coverage_for_file(context, &entry));
         let analyzed_root = analyzer.and_then(|analyzer| {
             let text = std::fs::read_to_string(entry.as_std_path()).ok()?;
             let source = SourceFile::new(entry.clone(), language, text);
@@ -129,14 +207,15 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
         });
         let statics_available = analyzed_root.is_some();
         let history_available = history_entry.is_some();
-        let mut root = match (analyzed_root, history_available) {
-            (Some(root), _) => root,
-            (None, true) => mehen_core::MetricSpace::new(
+        let coverage_available = coverage_entry.is_some();
+        let mut root = match analyzed_root {
+            Some(root) => root,
+            None if history_available || coverage_available => mehen_core::MetricSpace::new(
                 mehen_core::SpaceId(0),
                 mehen_core::SpaceKind::Unit,
                 mehen_core::SourceSpan::empty(),
             ),
-            (None, false) => continue,
+            None => continue,
         };
 
         // Fold the `history.*` family into the metric set so history
@@ -152,24 +231,34 @@ pub fn rank_top_offenders(input: TopOffendersInput) -> TopOffendersReport {
             );
         }
 
+        // Fold the `coverage.*` family in: whole-file dimensions on
+        // the root, span-scoped line/branch coverage on each function
+        // space.
+        if let Some(file_coverage) = coverage_entry {
+            crate::coverage_metrics::inject_coverage_metrics(&mut root, file_coverage);
+        }
+
         let scores: Vec<Option<f64>> = input
             .selectors
             .iter()
             .map(|s| {
                 // A selector the space cannot back — any static
                 // metric on a history-only fallback, any `history.*`
-                // metric on a file without recorded Git history, or a
-                // history selector no enrichment can resolve (typo'd
+                // metric on a file without recorded Git history, any
+                // `coverage.*` metric on a file no report measured,
+                // or a selector no enrichment can resolve (typo'd
                 // key / non-root aggregator) — has no measurable
                 // value, and the missing-key `0.0` fallback must not
                 // rank the file on a fabricated one (worst-possible
                 // MI on an undecodable file; zero-age "worst
                 // offender" for an untracked file).
                 if crate::history_metrics::is_invalid_history_selector(s)
-                    || !crate::history_metrics::selector_available(
+                    || crate::coverage_metrics::is_invalid_coverage_selector(s)
+                    || !crate::coverage_metrics::selector_available_with_coverage(
                         s.key.as_str(),
                         statics_available,
                         history_available,
+                        coverage_available,
                     )
                 {
                     None
@@ -454,6 +543,9 @@ pub struct TopOffendersOpts {
     #[clap(long, short)]
     language_type: Option<String>,
 
+    #[clap(flatten)]
+    coverage: crate::coverage_metrics::CoverageOpts,
+
     /// One or more files or directories to analyze.
     #[clap(required = true, num_args = 1..)]
     paths: Vec<PathBuf>,
@@ -485,6 +577,9 @@ struct TopOffendersCfg {
     /// was requested. Shared with the orchestrator, which drains
     /// recorded lazy-discovery failures after the run.
     history: Option<Arc<RepoHistories>>,
+    /// Ingested coverage reports — present only when coverage was
+    /// requested (flag, config, or a `coverage.*` selector/threshold).
+    coverage: Option<Arc<crate::coverage_metrics::CoverageContext>>,
     results: Arc<Mutex<Vec<FileOffender>>>,
     /// Configured metric thresholds (`mehen.toml`), present only when
     /// the loaded config carries any. Evaluated per file against the
@@ -725,9 +820,17 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
     // skipping such files (an all-zero row would be noise).
     let history_entry = cfg.history.as_ref().and_then(|h| h.file(&path));
 
+    // Coverage likewise comes from report files, not from parsing the
+    // blob: a matched coverage entry ranks the file on real values
+    // even when static analysis is unavailable.
+    let coverage_entry = cfg
+        .coverage
+        .as_ref()
+        .and_then(|context| crate::coverage_metrics::coverage_for_file(context, &utf8_path));
+
     let analyzed_root = analyzer.and_then(|analyzer| {
         let text = std::fs::read_to_string(&path).ok()?;
-        let source = SourceFile::new(utf8_path, language, text);
+        let source = SourceFile::new(utf8_path.clone(), language, text);
         let analysis = analyzer
             .analyze(&source, &mehen_core::AnalysisConfig::default())
             .ok()?;
@@ -742,14 +845,15 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
     });
     let statics_available = analyzed_root.is_some();
     let history_available = history_entry.is_some();
-    let mut root = match (analyzed_root, history_available) {
-        (Some(root), _) => root,
-        (None, true) => mehen_core::MetricSpace::new(
+    let coverage_available = coverage_entry.is_some();
+    let mut root = match analyzed_root {
+        Some(root) => root,
+        None if history_available || coverage_available => mehen_core::MetricSpace::new(
             mehen_core::SpaceId(0),
             mehen_core::SpaceKind::Unit,
             mehen_core::SourceSpan::empty(),
         ),
-        (None, false) => return Ok(()),
+        None => return Ok(()),
     };
 
     // Fold the `history.*` family into the metric set so history
@@ -767,6 +871,12 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
         );
     }
 
+    // Fold the `coverage.*` family in: whole-file dimensions on the
+    // root, span-scoped line/branch coverage on each function space.
+    if let Some(file_coverage) = coverage_entry {
+        crate::coverage_metrics::inject_coverage_metrics(&mut root, file_coverage);
+    }
+
     let metrics: Vec<CliMetricValue> = cfg
         .selectors
         .iter()
@@ -774,14 +884,16 @@ fn act_on_file(path: PathBuf, cfg: &TopOffendersCfg) -> std::io::Result<()> {
             name: sel.name,
             label: sel.label,
             // A selector the space cannot back — any static metric on
-            // a history-only fallback, or any `history.*` metric on a
-            // file without recorded Git history — has no measurable
+            // a history-only fallback, any `history.*` metric on a
+            // file without recorded Git history, or any `coverage.*`
+            // metric on a file no report measured — has no measurable
             // value, and the missing-key `0.0` fallback must not rank
             // the file on a fabricated one.
-            value: if crate::history_metrics::selector_available(
+            value: if crate::coverage_metrics::selector_available_with_coverage(
                 sel.name,
                 statics_available,
                 history_available,
+                coverage_available,
             ) {
                 Some(read_selector_metric(&root, sel))
             } else {
@@ -955,6 +1067,47 @@ pub fn run_top_offenders(opts: TopOffendersOpts, config: Option<&crate::config_f
         None
     };
 
+    // Coverage: resolve the flag, the `[coverage]` config section, and
+    // the lazy trigger (a `coverage.*` ranking column or threshold)
+    // into an ingested report index. Explicit report problems are hard
+    // errors; discovery problems degrade to warnings.
+    let coverage_mode = match opts.coverage.mode() {
+        Ok(mode) => mode,
+        Err(e) => {
+            log::error!("{e}");
+            process::exit(1);
+        }
+    };
+    let coverage_wanted =
+        crate::coverage_metrics::names_want_coverage(selectors.iter().map(|s| s.name))
+            || config.is_some_and(|c| {
+                c.thresholds
+                    .any_metric(|name| name.starts_with("coverage."))
+            });
+    let coverage_roots: Vec<Utf8PathBuf> = {
+        let mut roots: Vec<Utf8PathBuf> = opts
+            .paths
+            .iter()
+            .filter_map(|path| Utf8PathBuf::from_path_buf(path.clone()).ok())
+            .filter_map(|path| crate::coverage_metrics::coverage_root_for(&path))
+            .collect();
+        roots.sort_unstable();
+        roots.dedup();
+        roots
+    };
+    let coverage = match crate::coverage_metrics::resolve_coverage(
+        &coverage_mode,
+        config.and_then(|c| c.coverage.as_ref()),
+        &coverage_roots,
+        coverage_wanted,
+    ) {
+        Ok(context) => context.map(Arc::new),
+        Err(e) => {
+            log::error!("{e}");
+            process::exit(1);
+        }
+    };
+
     let results: Arc<Mutex<Vec<FileOffender>>> = Arc::new(Mutex::new(Vec::new()));
     let breaches: Arc<Mutex<Vec<crate::config_file::ThresholdBreach>>> =
         Arc::new(Mutex::new(Vec::new()));
@@ -965,6 +1118,7 @@ pub fn run_top_offenders(opts: TopOffendersOpts, config: Option<&crate::config_f
         language_override,
         registry,
         history: history.clone(),
+        coverage,
         results: results.clone(),
         thresholds: config
             .map(|c| c.thresholds.clone())
@@ -1393,6 +1547,7 @@ mod tests {
             selectors: vec![sel("history.commit_frequency")],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
         assert!(report.analysis_errors.is_empty(), "no history-load errors");
@@ -1455,6 +1610,7 @@ mod tests {
             selectors: vec![sel("history.commit_frequency")],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
         let ranked: Vec<(&str, f64)> = report
@@ -1523,6 +1679,7 @@ mod tests {
             ],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
         let latin = report
@@ -1593,6 +1750,7 @@ mod tests {
             selectors: vec![sel("history.commit_frequency")],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
         let score = |name: &str| {
@@ -1639,6 +1797,7 @@ mod tests {
             ],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
         assert!(
@@ -1687,6 +1846,7 @@ mod tests {
             selectors: vec![sel("loc.lloc")],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
         let paths: Vec<&str> = report
@@ -1743,6 +1903,7 @@ binary.py binary
             selectors: vec![sel("loc.lloc")],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
         let names: Vec<&str> = report
@@ -1785,6 +1946,7 @@ binary.py binary
             selectors: vec![sel("loc.lloc")],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
         let names: Vec<&str> = report
@@ -1828,6 +1990,7 @@ binary.py binary
             selectors: vec![sel("loc.lloc")],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
 
@@ -2115,8 +2278,112 @@ binary.py binary
             selectors: vec!["loc.lloc".parse().unwrap()],
             max_results: 10,
             config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
         };
         let report = rank_top_offenders(input);
         assert!(report.analysis_errors.is_empty());
+    }
+
+    #[test]
+    fn rank_top_offenders_ranks_on_explicit_coverage_reports() {
+        // A `coverage.*` selector backed by an explicit LCOV report:
+        // matched files score real values; unmatched files read the
+        // selector as unavailable (`None`), never as fabricated 0%.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("covered.py"), "x = 1\ny = 2\n").unwrap();
+        std::fs::write(dir.path().join("unmeasured.py"), "z = 3\n").unwrap();
+        // Report spelled with a CI-style absolute prefix that does not
+        // exist here — the suffix matcher must absorb it.
+        std::fs::write(
+            dir.path().join("lcov.info"),
+            "TN:\nSF:/home/ci/work/repo/repo/covered.py\nDA:1,1\nDA:2,0\nend_of_record\n",
+        )
+        .unwrap();
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec!["coverage.line".parse().unwrap()],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+            coverage_reports: vec![
+                Utf8PathBuf::from_path_buf(dir.path().join("lcov.info")).unwrap(),
+            ],
+        };
+        let report = rank_top_offenders(input);
+        let score_for = |name: &str| {
+            report
+                .entries
+                .iter()
+                .find(|e| e.path.as_str().ends_with(name))
+                .map(|e| e.scores[0])
+        };
+        // 1 of 2 instrumented lines hit → 50%.
+        assert_eq!(score_for("covered.py"), Some(Some(50.0)));
+        // Unmeasured file: `None`, ranked as least concerning.
+        assert_eq!(score_for("unmeasured.py"), Some(None));
+        assert!(report.analysis_errors.is_empty());
+    }
+
+    #[test]
+    fn rank_top_offenders_reports_unusable_coverage_report() {
+        // An unreadable/unparseable explicit report surfaces as an
+        // `analysis_error` (this API has no fatal channel), and the
+        // coverage column reads as unavailable for every file.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("ok.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.path().join("bogus.info"), "not a coverage report").unwrap();
+
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec!["coverage.line".parse().unwrap()],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+            coverage_reports: vec![
+                Utf8PathBuf::from_path_buf(dir.path().join("bogus.info")).unwrap(),
+            ],
+        };
+        let report = rank_top_offenders(input);
+        // `.info` extension sniffs as LCOV, but the content carries no
+        // SF record — an empty report; every file reads unavailable.
+        for entry in &report.entries {
+            assert_eq!(entry.scores[0], None, "{}", entry.path);
+        }
+    }
+
+    #[test]
+    fn coverage_selector_with_aggregator_is_rejected() {
+        // `coverage.line.max` parses as key `coverage.line` +
+        // aggregator `Max`, which enrichment can never resolve (flat
+        // root keys only) — it must be flagged, mirroring history.
+        use mehen_core::{AnalysisConfig, TopOffendersInput};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("ok.py"), "x = 1\n").unwrap();
+        let input = TopOffendersInput {
+            paths: vec![Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            selectors: vec!["coverage.line.max".parse().unwrap()],
+            max_results: 10,
+            config: AnalysisConfig::default(),
+            coverage_reports: Vec::new(),
+        };
+        let report = rank_top_offenders(input);
+        assert!(
+            report
+                .analysis_errors
+                .iter()
+                .any(|e| e.diagnostics[0].message.contains("coverage")),
+            "expected an unresolvable-coverage-selector record, got {:?}",
+            report.analysis_errors
+        );
     }
 }

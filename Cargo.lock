@@ -2819,6 +2819,8 @@ dependencies = [
  "log",
  "mehen-c",
  "mehen-core",
+ "mehen-coverage",
+ "mehen-coverage-discovery",
  "mehen-csharp",
  "mehen-git",
  "mehen-go",

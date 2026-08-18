@@ -155,6 +155,12 @@ pub struct TopOffendersInput {
     pub selectors: Vec<MetricSelector>,
     pub max_results: usize,
     pub config: AnalysisConfig,
+    /// Explicit coverage report files (LCOV, Cobertura, JaCoCo,
+    /// Clover, Istanbul, Go coverprofile) backing `coverage.*`
+    /// selectors. The library boundary takes explicit paths only — no
+    /// filesystem discovery — so rankings stay a pure function of the
+    /// declared inputs; the CLI layers auto-discovery on top.
+    pub coverage_reports: Vec<Utf8PathBuf>,
 }
 
 /// `mehen top-offenders --format json` output shape.

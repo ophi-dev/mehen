@@ -232,11 +232,15 @@ pub(crate) fn is_namespaced_higher_is_better(name: &str) -> bool {
 /// the post-1.0 ranking polarity: `mi.*` variants, the Halstead
 /// program level (`L = 1/D` — inverse difficulty, so larger is the
 /// healthier direction, unlike the rest of the `halstead.*` family),
-/// and the enumerated namespaced quality scores.
+/// the entire `coverage.*` family (more covered code is always the
+/// healthier direction — configured thresholds become minimums, e.g.
+/// `coverage.line = 80`), and the enumerated namespaced quality
+/// scores.
 pub(crate) fn is_higher_is_better_metric(key: &str) -> bool {
     key == "mi"
         || key.starts_with("mi.")
         || key == "halstead.level"
+        || key.starts_with("coverage.")
         || is_namespaced_higher_is_better(key)
 }
 
