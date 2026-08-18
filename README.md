@@ -23,6 +23,9 @@ complexity.
   pulldown-cmark for Markdown, sqruff for SQL, tree-sitter for Go, C, PowerShell.
 - **Code, documentation, and SQL in one tool** — source-code complexity, Markdown documentation
   health, *and* a dedicated relational metric family for `.sql` files.
+- **Bring-your-own coverage** — ingests LCOV, Cobertura, JaCoCo, Clover, Istanbul, and Go
+  coverprofile reports, auto-discovers them in their idiomatic (usually gitignored) locations,
+  and publishes `coverage.*` as a rankable, gateable metric family down to per-function values.
 - **Deterministic, no network** — pure static analysis. Same input → same output. Safe for air-gapped
   CI.
 - **Pull-request native** — built-in `mehen diff` plus a sticky comment GitHub Action.
@@ -124,6 +127,9 @@ Everything else lives in the docs site:
   filler/lazy risk, English/Japanese prose layer.
 - [SQL metrics](https://mehen.ophi.dev/metrics/sql/overview) — CTE graphs, join/subquery structure,
   object-touch risk, SQL Halstead, and composite scores via `mehen-sql` (sqruff-backed).
+- [Coverage metrics](https://mehen.ophi.dev/metrics/coverage/overview) — ingest test-coverage
+  reports (six formats, auto-discovered), gate on line/branch/function coverage, rank the
+  least-tested files.
 - [Commands](https://mehen.ophi.dev/commands/overview) — `mehen metrics`, `mehen diff`,
   `mehen top-offenders`.
 - [Configuration](https://mehen.ophi.dev/configuration) — `mehen.toml` thresholds and

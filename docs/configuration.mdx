@@ -156,7 +156,44 @@ mehen::config
 The command fails with exit `1` before any analysis runs. Namespaced `sql.*` and `markdown.*`
 names validate against the owning analyzer's published catalogue too (including the dynamic
 `sql.statement.kind_count.<kind>` and `sql.dialect.is_<dialect>` families), so
-`sql.modularit_health` is caught just like `cognitve`.
+`sql.modularit_health` is caught just like `cognitve`. The fixed `history.*` and `coverage.*`
+families are enumerated exactly — a mistyped member is rejected with the family listing instead
+of silently becoming a gate that can never fire.
+
+## The `[coverage]` section
+
+Coverage ingestion (the [`coverage.*` metric family](/metrics/coverage/overview)) is configured
+by its own table:
+
+```toml
+[coverage]
+reports = ["ci-artifacts/lcov.info"]  # explicit report paths (hard error if unusable)
+discover = true                        # allow report auto-discovery; `true` also
+                                       # opts the run in without a --coverage flag
+extra-patterns = ["qa/**/*.lcov"]      # additive discovery globs, repo-root-relative
+stale-warning = true                   # warn when a report predates the newest commit
+```
+
+All keys are optional and validated like everything else — unknown keys, non-boolean toggles,
+and non-string-array lists are rejected with a caret into the source. The `--coverage` CLI flag
+always wins over the file (`--coverage off` disables ingestion regardless of configuration), and
+a configured `coverage.*` threshold triggers ingestion by itself. Full semantics:
+[coverage auto-discovery](/metrics/coverage/auto-discovery).
+
+Coverage thresholds are **minimums** (the family is higher-is-better):
+
+```toml
+[thresholds]
+"coverage.line" = 80     # fail any measured file below 80% line coverage
+"coverage.branch" = 60
+
+[languages.python.thresholds]
+"coverage.line" = 90
+```
+
+A file *unmeasured* by every ingested report skips coverage gates entirely — "no data" is never
+treated as 0%, so a path-matching hiccup cannot fail your build; only genuinely
+instrumented-but-uncovered code can.
 
 ## Relationship to other gates
 
@@ -177,3 +214,4 @@ outputs still publish with the complete report before the workflow step fails.
 - [Commands overview](/commands/overview) — the three commands that enforce thresholds.
 - [Concepts → Thresholds and diffs](/concepts/thresholds-and-diffs) — gating strategies in CI.
 - [Code metrics](/metrics/code/overview) — the metric names you can threshold.
+- [Coverage metrics](/metrics/coverage/overview) — the `[coverage]` section and coverage gates.

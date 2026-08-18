@@ -26,6 +26,7 @@ mehen top-offenders [OPTIONS] --metric <METRICS> <PATHS>...
 | `--no-ignore` | off | Disable ignore-file and Git-attribute filtering. Hidden children remain excluded. |
 | `-j, --num-jobs <N>` | platform default | Number of parser jobs. |
 | `-l, --language-type <LANG>` | auto | Language type override (skip auto-detection). |
+| `--coverage <PATH\|auto\|off>` | lazy | Coverage input for `coverage.*` rankings: bare `--coverage` (or `auto`) [discovers report files](/metrics/coverage/auto-discovery); paths use exactly those reports; `off` disables coverage. A `coverage.*` metric or threshold triggers discovery by itself. |
 | `--config <PATH>` | discovered | Pin a [configuration file](/configuration) instead of discovering `mehen.toml` upward from the working directory. |
 
 ## File discovery
@@ -60,7 +61,10 @@ family (`history.churn.abs`, `history.churn.relative`, `history.age_months`, `hi
 `history.minor_contributors`, `history.ownership`, `history.commit_frequency`, `history.hotspot`,
 `history.sum_of_coupling`, `history.twr`, `history.bugfix_commits` — these require a full,
 non-shallow git clone (e.g. a CI checkout with `fetch-depth: 0`) and walk the history of `HEAD`),
-plus the full Markdown family from [Markdown metrics](/metrics/markdown/overview). These are the
+the test-coverage family (`coverage.line`, `coverage.branch`, `coverage.function` and their
+`.covered`/`.total` counters — these ingest [coverage reports](/metrics/coverage/overview) and
+rank *unmeasured* files as `n/a`, never as 0%), plus the full Markdown family from
+[Markdown metrics](/metrics/markdown/overview). These are the
 same names a [`mehen.toml`](/configuration) threshold accepts.
 
 ## Polarity

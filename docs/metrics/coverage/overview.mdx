@@ -1,0 +1,117 @@
+---
+title: "Coverage metrics"
+description: "Ingest coverage reports from your test runner — LCOV, Cobertura, JaCoCo, Clover, Istanbul, Go coverprofile — and analyze coverage alongside complexity."
+keywords: ["code coverage", "test coverage", "lcov", "cobertura", "jacoco", "coverage gate", "CI"]
+---
+
+The `coverage.*` family folds **test coverage** into mehen's metric tree, next to the complexity
+and size metrics computed from source. mehen does not instrument or run your tests — your test
+runner already produces a coverage report; mehen ingests it, maps its file paths onto the files
+under analysis, and publishes coverage as a first-class metric category: selectable in
+[`mehen top-offenders`](/commands/top-offenders), gateable through
+[`mehen.toml` thresholds](/configuration), and rendered in the JSON and Markdown reports of
+[`mehen metrics`](/commands/metrics).
+
+Coverage answers a question no static metric can: *which of this code do the tests actually
+exercise?* Combined with complexity it locates the riskiest code in a repository — complex **and**
+untested — which is exactly the intersection the CRAP index formalizes (see
+[roadmap](#coverage-and-complexity-together) below).
+
+## Quick start
+
+```bash
+# 1. Produce a report with your usual tool, e.g. for Rust:
+cargo llvm-cov --lcov --output-path lcov.info
+
+# 2. Analyze a file with coverage enrichment:
+mehen metrics src/parser.rs --coverage lcov.info --pretty
+
+# 3. Or let mehen find the report by itself:
+mehen metrics src/parser.rs --coverage
+
+# 4. Rank the least-tested files:
+mehen top-offenders src --metric coverage.line --coverage
+
+# 5. Gate CI: fail when line coverage drops below 80%.
+printf '[thresholds]\n"coverage.line" = 80\n' >> mehen.toml
+mehen metrics src/parser.rs   # the threshold itself triggers ingestion
+```
+
+Bare `--coverage` means `auto`: mehen [discovers report files](/metrics/coverage/auto-discovery)
+in their idiomatic locations — including gitignored directories like `coverage/`, `target/`, and
+`TestResults/` where they conventionally live. Six report formats are recognized by content, not
+by filename (see [supported formats](/metrics/coverage/supported-formats)), and report paths are
+reconciled with workspace paths by a dedicated
+[path-matching layer](/metrics/coverage/path-matching).
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `coverage.line` | float | Percentage of instrumentable lines executed at least once, `0..=100`. |
+| `coverage.line.covered` | int | Instrumentable lines executed at least once. |
+| `coverage.line.total` | int | Instrumentable lines the report recorded for this file. |
+| `coverage.branch` | float | Percentage of branch arms taken at least once, `0..=100`. |
+| `coverage.branch.covered` | int | Branch arms taken at least once. |
+| `coverage.branch.total` | int | Branch arms the report recorded. |
+| `coverage.function` | float | Percentage of recorded functions executed at least once, `0..=100`. |
+| `coverage.function.covered` | int | Functions executed at least once. |
+| `coverage.function.total` | int | Functions the report recorded. |
+
+Every `coverage.*` metric is **higher-is-better**: a configured threshold is a *minimum*, and
+`top-offenders` ranks the *least* covered files as the worst offenders.
+
+## Semantics
+
+- **Report-scope, engine-published.** Like the [`history.*` family](/metrics/history/overview),
+  coverage is not computed by a language analyzer — the engine injects it after static analysis,
+  from the ingested reports. It works for any of mehen's source languages, because the report
+  formats are language-agnostic.
+- **Unmeasured is never 0%.** A file absent from every report publishes *no* coverage keys: it
+  renders as `n/a`, ranks as least concerning, and never fires a threshold. A file present in a
+  report with zero executed lines publishes an honest `0`. The distinction is load-bearing — a
+  fabricated 0% would fail every gate on every file the moment path matching hiccuped.
+- **Dimensions are independent.** A format that cannot measure a dimension leaves it absent: a Go
+  coverprofile has no branch or function records, so only `coverage.line` appears.
+- **Per-function attribution.** Beyond the file totals, every function and closure space in the
+  [metric tree](/concepts/spaces) receives `coverage.line` and `coverage.branch` scoped to its
+  line span — so you can see *which* function inside a 60%-covered file is the untested one.
+- **Merging.** Multiple reports (monorepo per-package runs, `.nyc_output` shards, re-run
+  artifacts) merge as a union of files with saturating-max hit counts: covered anywhere ⇒
+  covered. Max is order-independent, so the result is deterministic regardless of which report is
+  found first.
+
+## Coverage and complexity together
+
+Coverage percentages are a *risk denominator*, not a quality score: high coverage does not prove
+the tests assert anything (Inozemtseva & Holmes measured only weak-to-moderate correlation between
+coverage and suite effectiveness once suite size is controlled), and Google's large-scale
+experience report treats coverage as a heuristic adopted for insight, not as a target to chase.
+The productive use is *directional* and *combinatorial*:
+
+- rank by `coverage.line` ascending to find blind spots (`top-offenders`),
+- gate on a floor so blind spots stop growing (`[thresholds]`),
+- and cross it with complexity: a trivial getter at 0% is noise; a cognitive-complexity-30
+  function at 0% is where bugs hide. The per-function `coverage.line` mehen publishes is the
+  direct input to the CRAP index — `comp(m)² × (1 − cov(m)/100)³ + comp(m)` (Savoia & Evans) —
+  planned as a follow-up composite in this family.
+
+## See also
+
+- [Supported formats](/metrics/coverage/supported-formats) — the six report formats and how they
+  are detected and merged.
+- [Auto-discovery](/metrics/coverage/auto-discovery) — how `--coverage` finds reports with zero
+  configuration.
+- [Path matching](/metrics/coverage/path-matching) — how report paths map onto workspace files.
+- [Line](/metrics/coverage/line), [branch](/metrics/coverage/branch), and
+  [function](/metrics/coverage/function) coverage — the individual metrics.
+
+## References
+
+- Ivanković, M., Petrović, G., Just, R., & Fraser, G. (2019). [Code coverage at
+  Google](https://research.google/pubs/code-coverage-at-google/). *ESEC/FSE 2019.*
+- Inozemtseva, L., & Holmes, R. (2014). [Coverage is not strongly correlated with test suite
+  effectiveness](https://dl.acm.org/doi/10.1145/2568225.2568271). *ICSE 2014.*
+- Savoia, A., & Evans, B. (2007). [The CRAP metric](https://www.artima.com/weblogs/viewpost.jsp?thread=210575).
+- Marick, B. (1999). [How to misuse code coverage](http://www.exampler.com/testing-com/writings/coverage.pdf).
+- Fowler, M. (2012). [TestCoverage](https://martinfowler.com/bliki/TestCoverage.html). *martinfowler.com.*

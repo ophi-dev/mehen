@@ -1,0 +1,82 @@
+---
+title: "Path matching"
+description: "How report-spelled file paths — CI-absolute, Java-package, Go-module, ./-relative — are reconciled with the files mehen analyzes, and why naive lookups silently read 0%."
+keywords: ["path matching", "coverage paths", "monorepo coverage", "SF record", "prefix stripping"]
+---
+
+Path matching is where coverage integrations *silently* fail. mehen sees workspace paths
+(`src/app.py`); a report contains whatever the producing tool decided to write. When the two
+disagree, a naive map lookup returns nothing for 100% of files — and every function suddenly
+"reads" 0% covered. Both cargo-crap and grcov document this as the central hazard of coverage
+ingestion; mehen treats it as a first-class layer with pinned regression tests.
+
+## What reports actually contain
+
+| Producer | Report path | Workspace file |
+|---|---|---|
+| CI-generated LCOV | `/home/runner/work/repo/repo/src/lib.rs` | `src/lib.rs` |
+| JaCoCo (Java packages) | `com/example/Foo.java` | `src/main/java/com/example/Foo.java` |
+| Go coverprofile (module import paths) | `github.com/org/repo/pkg/handler.go` | `pkg/handler.go` |
+| Cobertura (`<sources>` roots) | `<source>/w</source>` + `src/app.py` | `src/app.py` |
+| Clover | absolute `path` attribute (fallback: basename) | anything |
+| Merged `lcov -a` legs | `./src/lib.rs` *and* `src/lib.rs` | one file |
+
+Note the direction flips: JaCoCo paths are a *suffix* of the workspace path, while Go and
+CI-absolute paths *contain* the workspace path as their suffix. Any fixed prefix-stripping rule
+handles one direction and breaks the other.
+
+## The matching algorithm
+
+Report paths are normalized once (forward slashes, `.`/`..` segments resolved lexically — so
+`./`-spelled variants of one file merge instead of racing), then each analyzed file resolves in
+two levels:
+
+1. **Canonical identity.** A report path spelled absolute that exists *on this machine*
+   canonicalizes to an on-disk identity; a query resolving to the same file matches exactly.
+   Same-machine runs — the common local case — always take this precise path.
+2. **Component-suffix match.** Otherwise the query and a report entry match when one's component
+   list is a trailing subsequence of the other's — components, never bytes, so `/foo/bar.rs` can
+   never match `oofoo/bar.rs`. The longest suffix wins; exact component equality outranks partial
+   consumption (`src/lib.rs` prefers the `src/lib.rs` entry over `vendor/dep/src/lib.rs`).
+3. **Root-relative retry.** When an absolute *query* matches nothing — a local checkout being
+   compared against a report written on a CI machine, where neither absolute spelling contains
+   the other — the query is re-spelled relative to its repository root and resolved again. This
+   is grcov's `--prefix-dir` idea, automated and scoped to the repository boundary rather than
+   applied as a blanket basename match (which would happily hand `tests/util.py` the coverage of
+   `src/util.py`).
+
+Two rules are deliberately conservative:
+
+- **Relative report paths are never resolved against the working directory.** Doing so would
+  silently bind them to whatever happens to exist under the directory mehen was launched from —
+  cargo-crap pins the same invariant with a dedicated regression test, and so does mehen.
+- **A genuine tie is unmeasured, not a coin flip.** When two distinct report entries match a
+  query with equal specificity (`a/sub/mod.rs` vs `b/sub/mod.rs` for the query `sub/mod.rs`),
+  mehen logs the ambiguity and treats the file as unmeasured rather than resolving by map order.
+  Deterministic *and* honest beats accidentally-right.
+
+## Failure visibility
+
+Because unmeasured files publish nothing (never 0% — see the
+[overview](/metrics/coverage/overview#semantics)), a path-matching failure cannot fabricate gate
+violations; it surfaces instead as:
+
+- `n/a` scores in `top-offenders` output and absent `coverage` families in `metrics` JSON,
+- an info log naming how many ingested report entries the file was checked against,
+- a warning on ambiguous matches naming the candidate count.
+
+If a report that should match reads as unmeasured, check the three usual suspects: the report was
+generated in a different checkout layout (regenerate, or use explicit `--coverage <path>` from
+the matching root), the workspace file is spelled through a symlinked directory (canonicalization
+handles most of this), or two same-named files genuinely tie (make the report paths more specific
+— e.g. configure the tool to emit paths relative to the repo root).
+
+## References
+
+- [cargo-crap — the path-matching problem](https://github.com/minikin/cargo-crap#the-path-matching-problem)
+  — the failure mode this design descends from, including the CWD-resolution regression.
+- [grcov path mapping options](https://github.com/mozilla/grcov#usage) — `--prefix-dir`,
+  `--path-mapping`, `--ignore-not-existing`: the same problem at Firefox scale.
+- [geninfo(1)](https://ltp.sourceforge.net/coverage/lcov/geninfo.1.php) — `SF:` record semantics.
+- [JaCoCo XML report documentation](https://www.jacoco.org/jacoco/trunk/doc/) — package-relative
+  `sourcefile` naming.
