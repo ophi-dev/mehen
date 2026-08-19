@@ -21,8 +21,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
 name: Code Quality Checks
 
@@ -70,34 +68,7 @@ jobs:
       - name: Cargo Machete
         uses: bnjbvr/cargo-machete@7959c845782fed02ee69303126d4a12d64f1db18 # v0.9.1
 
-      - name: Publish mehen metrics
-        uses: ./
-        with:
-          install-method: cargo
-          # `crates` carries the per-language analyzer + engine
-          # source after the 1.0 workspace split; `xtask` is the
-          # build-helper crate. `docs/` (Mintlify) and the top-level
-          # Markdown files feed the Phase-F `<!-- mehen-docs -->`
-          # documentation-metrics section. Any path that matches one
-          # of mehen's registered Markdown extensions
-          # (md/markdown/mdown/mkd/mkdn/mdx) is routed through the
-          # documentation pipeline. Keep this list in sync with every
-          # root Markdown file so doc-only PRs do not silently skip
-          # the self-check.
-          paths: |
-            crates
-            xtask
-            docs
-            README.md
-            AGENTS.md
-            CLAUDE.md
-            CHANGELOG.md
-          # `xtask/templates/grammar.rs` is an askama template — it
-          # has the `.rs` extension so language detection routes it
-          # through the Rust analyzer, but it carries `{{ c_name }}`
-          # and other template directives that don't parse as Rust.
-          # The analyzer reports `rust.syntax_error` diagnostics that
-          # flip `mehen diff`'s exit code to 1 (per plan §9.3), even
-          # when the JSON report is otherwise complete. Skip it.
-          exclude: |
-            xtask/templates/**
+      # The mehen action self-test (`uses: ./`) lives in
+      # .github/workflows/coverage.yml: it consumes the LCOV report the
+      # coverage job produces, dogfooding the head `--coverage` and
+      # base-retrieval (`coverage-files`) paths from issue #248.
