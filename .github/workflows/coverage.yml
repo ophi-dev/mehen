@@ -9,6 +9,8 @@ on:
 permissions:
   contents: read
   checks: write
+  # OIDC token for codecov uploads (use_oidc: true).
+  id-token: write
   # The mehen action posts/updates the sticky PR metrics comment.
   pull-requests: write
   issues: write
