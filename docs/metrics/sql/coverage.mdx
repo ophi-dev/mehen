@@ -1,0 +1,143 @@
+---
+title: "SQL coverage"
+description: "Ingesting test coverage for .sql files from utPLSQL (Oracle) and SQLCover (SQL Server): file-name mapping so report entries match repository paths, and the Cobertura transform for OpenCover output."
+keywords: ["sql coverage", "utPLSQL", "SQLCover", "tSQLt", "cobertura", "opencover", "reportgenerator", "file mapping"]
+---
+
+Coverage ingestion in mehen is language-agnostic: the [coverage metrics](/metrics/coverage/overview)
+attach to any analyzed file that a report measures, and `.sql` files are no exception. Two
+mainstream stacks produce real coverage for SQL sources:
+
+| Stack | Test framework | Coverage emitter | Format |
+|---|---|---|---|
+| Oracle PL/SQL | [utPLSQL](https://www.utplsql.org/) | `ut_coverage_cobertura_reporter` | Cobertura XML — ingested directly |
+| SQL Server T-SQL | [tSQLt](https://tsqlt.org/) | [SQLCover](https://github.com/GoEddie/SQLCover) | OpenCover XML — needs a transform |
+
+Both need one deliberate step in the pipeline before mehen sees usable data. This page covers
+those two steps; the metric semantics live on the
+[line](/metrics/coverage/line), [branch](/metrics/coverage/branch), and
+[function](/metrics/coverage/function) pages.
+
+## What to expect from SQL coverage
+
+Oracle's instrumentation (`DBMS_PLSQL_CODE_COVERAGE`, which utPLSQL drives) reports **lines
+only**: utPLSQL's Cobertura output marks every line `branch="false"` and emits no `<method>`
+elements. A measured `.sql` file therefore publishes `coverage.line`, `coverage.line.covered`,
+and `coverage.line.total` — and nothing else. `coverage.branch` and `coverage.function` stay
+*absent*, not zero: a gate on an unmeasured dimension skips rather than fails, per the
+[measured-or-absent rule](/metrics/coverage/overview). SQLCover reports statement coverage,
+which likewise lands on the line dimension after the Cobertura transform.
+
+Coverage for SQL files attaches at the file root. mehen's per-function coverage breakdown
+applies to function-shaped scopes, and a SQL file's child scopes are statements, not functions —
+so rank and gate SQL coverage at file granularity.
+
+## utPLSQL: map database objects to file names
+
+This is the step most pipelines miss. Run without file mapping, utPLSQL writes *database object
+identifiers* where Cobertura expects file paths:
+
+```xml
+<class name="BETWNSTR" filename="hr.betwnstr" line-rate="0.0" ...>
+```
+
+`hr.betwnstr` is `schema.unit` from the Oracle dictionary. No spelling of a repository path ends
+in it, so [path matching](/metrics/coverage/path-matching) correctly refuses to attribute the
+data — every `.sql` file reports "unmeasured", and `mehen metrics -v` logs that the report's
+entries matched nothing.
+
+utPLSQL's fix is [project-based coverage](https://www.utplsql.org/utPLSQL/latest/userguide/coverage.html):
+hand utPLSQL-cli your source tree with `-source_path`, and it maps database objects back to the
+files that created them, writing repository paths into the report:
+
+```bash
+utPLSQL-cli/bin/utplsql run test_runner/pass@db_url \
+  -p=hr \
+  -source_path=sources \
+  -f=ut_coverage_cobertura_reporter -o=cobertura.xml
+```
+
+```xml
+<class name="BETWNSTR" filename="sources/hr.betwnstr.fnc" line-rate="0.0" ...>
+```
+
+Run utPLSQL-cli from the repository root so the emitted paths are root-relative, then:
+
+```bash
+mehen metrics sources --coverage=cobertura.xml
+```
+
+Naming the output `cobertura.xml` (or `coverage.xml`) also makes it eligible for
+[auto-discovery](/metrics/coverage/auto-discovery), so bare `--coverage` works too.
+
+<Tip>
+utPLSQL's default mapping expects `owner.object_name.type` file names (`hr.betwnstr.fnc`). If
+your layout encodes owner or type in directories instead (`sources/hr/functions/betwnstr.sql`),
+pass the documented `-regex_expression`, `-owner_subexpression`, `-name_subexpression`, and
+`-type_mapping` options to describe it — see
+[file mapping using custom regular expressions](https://www.utplsql.org/utPLSQL/latest/userguide/coverage.html).
+</Tip>
+
+<Warning>
+Report line numbers come from the *stored unit source*, which begins at the unit header
+(`FUNCTION betwnstr(...)`) — Oracle strips the `CREATE OR REPLACE` prefix. utPLSQL's
+[object-file mapping rules](https://www.utplsql.org/utPLSQL/latest/userguide/coverage.html)
+require each file to hold exactly one object "as is", with no commands or blank lines before
+`CREATE`: that discipline is what keeps report line numbers aligned with file line numbers.
+A prologue of `SET` commands or license comments shifts every measured line.
+</Warning>
+
+## SQLCover: transform OpenCover output to Cobertura
+
+SQLCover (the coverage layer usually paired with tSQLt) emits **OpenCover-format XML**, which is
+not one of mehen's [ingested formats](/metrics/coverage/supported-formats). The standard .NET
+bridge closes the gap: [ReportGenerator](https://github.com/danielpalme/ReportGenerator)
+converts OpenCover to Cobertura. Add one step between test run and mehen:
+
+```bash
+# 1. Run tSQLt tests under SQLCover -> Coverage.opencover.xml
+# 2. Transform to Cobertura
+reportgenerator "-reports:Coverage.opencover.xml" \
+  "-targetdir:coverage" "-reporttypes:Cobertura"
+
+# 3. Ingest (ReportGenerator writes coverage/Cobertura.xml)
+mehen metrics . --coverage=coverage/Cobertura.xml
+```
+
+The same caveat applies as with utPLSQL: SQLCover only knows object names the database knows.
+Its reports name objects like `[dbo].[betwnstr]`, and the paths that reach the Cobertura output
+depend on how your deployment scripts fed SQLCover. Inspect one `filename` attribute from the
+transformed report and confirm a repository path can end with it before wiring a gate — the
+[path-matching page](/metrics/coverage/path-matching) explains exactly which spellings
+reconcile.
+
+## Gating
+
+Once report entries carry repository paths, SQL files participate in coverage thresholds and
+ranking like any other language:
+
+```toml
+[thresholds]
+"coverage.line" = 80
+```
+
+```bash
+mehen top-offenders sources -M coverage.line --coverage=cobertura.xml
+```
+
+Unmeasured files skip the gate entirely — so a mapping regression degrades to "no data", never
+to a spurious red build. If a previously measured directory suddenly reports nothing, that is
+the signal to re-check the file-name mapping, not the tests.
+
+## References
+
+- [utPLSQL user guide: Code coverage](https://www.utplsql.org/utPLSQL/latest/userguide/coverage.html) —
+  project-based coverage, file mapping parameters, and object-file mapping rules. *utPLSQL project.*
+- [utPLSQL-cli README](https://github.com/utPLSQL/utPLSQL-cli) — `-source_path`, `-regex_expression`,
+  and reporter options. *utPLSQL project.*
+- [DBMS_PLSQL_CODE_COVERAGE](https://docs.oracle.com/en/database/oracle/oracle-database/19/arpls/DBMS_PLSQL_CODE_COVERAGE.html) —
+  the Oracle-supplied instrumentation utPLSQL drives (basic-block granularity). *Oracle Database documentation.*
+- [SQLCover](https://github.com/GoEddie/SQLCover) — coverage collection for SQL Server, OpenCover output. *Ed Elliott.*
+- [tSQLt](https://tsqlt.org/) — the SQL Server unit-testing framework SQLCover pairs with.
+- [ReportGenerator](https://github.com/danielpalme/ReportGenerator) — OpenCover-to-Cobertura
+  conversion (`-reporttypes:Cobertura`). *Daniel Palme.*
