@@ -114,6 +114,11 @@ fn parse_streaming(
     let mut sources: Vec<String> = Vec::new();
     let mut in_source = false;
     let mut source_text = String::new();
+    // Set when a <source> contains an entity reference neither resolver
+    // can expand: the prefix is unusable and must be dropped whole —
+    // storing the partial text would silently rewrite `/repo/a&custom;b`
+    // into `/repo/ab` and map relative filenames to the wrong paths.
+    let mut source_invalid = false;
 
     let mut emit_normalized = |mut file: FileCoverage| {
         file.normalize();
@@ -137,6 +142,7 @@ fn parse_streaming(
                         if is_start_event {
                             in_source = true;
                             source_text.clear();
+                            source_invalid = false;
                         }
                     }
                     b"class" => {
@@ -260,8 +266,8 @@ fn parse_streaming(
                 // Only numeric char refs and the five predefined XML
                 // entities resolve; custom entities are never expanded
                 // (no DTD processing) — an unresolvable ref makes the
-                // prefix unusable, so it is dropped with its record
-                // left to suffix matching.
+                // prefix unusable, so the whole source is dropped with
+                // its records left to suffix matching.
                 if in_source {
                     if let Ok(Some(ch)) = e.resolve_char_ref() {
                         source_text.push(ch);
@@ -271,15 +277,18 @@ fn parse_streaming(
                         .and_then(|name| quick_xml::escape::resolve_predefined_entity(&name))
                     {
                         source_text.push_str(entity);
+                    } else {
+                        source_invalid = true;
                     }
                 }
             }
             Ok(Event::End(ref e)) => match e.name().as_ref() {
                 b"source" => {
-                    if in_source && !source_text.trim().is_empty() {
+                    if in_source && !source_invalid && !source_text.trim().is_empty() {
                         sources.push(std::mem::take(&mut source_text));
                     }
                     in_source = false;
+                    source_invalid = false;
                 }
                 b"class" => {
                     if let Some(file) = current_file.take() {
@@ -530,6 +539,27 @@ mod tests {
         let file = &data.files[0];
         assert_eq!(file.branches.len(), 2);
         assert!(file.branches.iter().all(|b| b.hit_count == 1));
+    }
+
+    #[test]
+    fn test_source_with_unresolvable_entity_is_dropped_whole() {
+        // A custom entity never expands (no DTD processing). Keeping
+        // the partial text would rewrite `/repo/a&custom;b` into
+        // `/repo/ab` and prefix filenames with a path that never
+        // existed — the whole <source> must be dropped instead, letting
+        // the next usable source (or none) apply.
+        let input = br#"<?xml version="1.0"?>
+<!DOCTYPE coverage [<!ENTITY custom "x">]>
+<coverage version="1.0">
+  <sources><source>/repo/a&custom;b</source><source>/srv/work</source></sources>
+  <packages><package name="p"><classes>
+    <class name="C" filename="src/f.py">
+      <lines><line number="1" hits="1"/></lines>
+    </class>
+  </classes></package></packages>
+</coverage>"#;
+        let data = parse(input).unwrap();
+        assert_eq!(data.files[0].path, "/srv/work/src/f.py");
     }
 
     #[test]

@@ -102,8 +102,7 @@ impl CoverageIndex {
             // on another machine) participate through suffix matching.
             // Relative paths are never resolved against the CWD.
             let canonical = if absolute {
-                let spelled = PathBuf::from(format!("/{}", components.join("/")));
-                std::fs::canonicalize(&spelled).ok()
+                std::fs::canonicalize(absolute_spelling(&components)).ok()
             } else {
                 None
             };
@@ -145,7 +144,17 @@ impl CoverageIndex {
         let Some(bucket) = self.by_basename.get(basename) else {
             return FileMatch::NotFound;
         };
-        let query_canonical = std::fs::canonicalize(path.as_std_path()).ok();
+        // The identity probe is one syscall per query; skip it when no
+        // entry in this bucket carries an on-disk identity to compare
+        // against (relative-spelled reports: LCOV, Go, JaCoCo).
+        let query_canonical = if bucket
+            .iter()
+            .any(|&id| self.entries[id].canonical.is_some())
+        {
+            std::fs::canonicalize(path.as_std_path()).ok()
+        } else {
+            None
+        };
 
         // Candidate collection: suffix-valid entries, minus those whose
         // on-disk identity provably differs from the query's.
@@ -262,6 +271,24 @@ impl CoverageIndex {
     }
 }
 
+/// Rebuild an absolute-spelled report path from its normalized
+/// components for the on-disk identity probe. Windows drive-qualified
+/// spellings (`C:\repo\src\lib.rs` → `["C:", "repo", …]`) keep the
+/// drive prefix bare — a leading `/` would produce `/C:/repo/…`, which
+/// `canonicalize` rejects on Windows, silently downgrading every
+/// drive-spelled entry from identity matching to suffix matching.
+fn absolute_spelling(components: &[String]) -> PathBuf {
+    let joined = components.join("/");
+    let drive_qualified = components.first().is_some_and(|first| {
+        first.len() == 2 && first.as_bytes()[0].is_ascii_alphabetic() && first.ends_with(':')
+    });
+    if drive_qualified {
+        PathBuf::from(joined)
+    } else {
+        PathBuf::from(format!("/{joined}"))
+    }
+}
+
 /// Number of trailing components shared by two component lists.
 fn common_suffix_len(a: &[String], b: &[String]) -> usize {
     a.iter()
@@ -307,6 +334,17 @@ mod tests {
 
     fn found_path(index: &CoverageIndex, query: &str) -> Option<String> {
         found(index, query).map(|c| c.path.clone())
+    }
+
+    #[test]
+    fn absolute_spelling_preserves_windows_drive_prefixes() {
+        let drive = ["C:".to_string(), "repo".into(), "lib.rs".into()];
+        assert_eq!(absolute_spelling(&drive), PathBuf::from("C:/repo/lib.rs"));
+        // POSIX spellings regain their root slash; a first component
+        // that merely contains a colon (`a:b`, valid on POSIX) is not
+        // a drive.
+        let posix = ["home".to_string(), "a:b".into(), "lib.rs".into()];
+        assert_eq!(absolute_spelling(&posix), PathBuf::from("/home/a:b/lib.rs"));
     }
 
     #[test]

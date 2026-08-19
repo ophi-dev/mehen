@@ -8,7 +8,8 @@ Coverage reports live exactly where mehen's source walk refuses to look: `covera
 `build/`, and `TestResults/` are gitignored in any healthy repository, and `.nyc_output/` is
 hidden. Bare `--coverage` (or `--coverage=auto`) therefore runs a *dedicated* discovery pass with
 the inverse policy — every ignore rule off, hidden entries visible — while staying strictly
-bounded and deterministic.
+bounded and deterministic. (A configured `[coverage] discover = false` opts the scan out even
+under the flag; configured `reports` still load.)
 
 ```bash
 mehen top-offenders src --metric coverage.line --coverage
@@ -111,9 +112,11 @@ extra-patterns = ["qa/**/*.lcov"]      # additive scan globs, root-relative
 stale-warning = true                   # the mtime-vs-HEAD warning above
 ```
 
-The CLI always wins over the file: `--coverage=off` disables coverage regardless of
-configuration. Unknown keys and wrong types are rejected at load time with a caret into the TOML
-source, like every other `mehen.toml` mistake.
+Flag/file precedence is per mode, not blanket: `--coverage=off` disables coverage regardless of
+configuration, and `--coverage=<path>` uses exactly the supplied reports — but bare
+`--coverage`/`=auto` honors a configured `discover = false` (it forces ingestion of configured
+reports, not the scan). Unknown keys and wrong types are rejected at load time with a caret
+into the TOML source, like every other `mehen.toml` mistake.
 
 ## See also
 

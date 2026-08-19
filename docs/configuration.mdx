@@ -175,9 +175,12 @@ stale-warning = true                   # warn when a report predates the newest 
 ```
 
 All keys are optional and validated like everything else — unknown keys, non-boolean toggles,
-and non-string-array lists are rejected with a caret into the source. The `--coverage` CLI flag
-always wins over the file (`--coverage=off` disables ingestion regardless of configuration), and
-a configured `coverage.*` threshold triggers ingestion by itself. Full semantics:
+and non-string-array lists are rejected with a caret into the source. Flag/file precedence, per
+mode: `--coverage=off` disables ingestion unconditionally; `--coverage=<path>` uses exactly the
+supplied reports (configured `reports` and discovery are skipped); bare `--coverage` (or
+`=auto`) ingests the configured `reports` and scans only when `discover` is not `false` — the
+flag forces ingestion *on*, it does not override a configured discovery opt-out. A configured
+`coverage.*` threshold triggers ingestion by itself. Full semantics:
 [coverage auto-discovery](/metrics/coverage/auto-discovery).
 
 Coverage thresholds are **minimums** (the family is higher-is-better):

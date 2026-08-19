@@ -111,12 +111,17 @@ fn write_unit_metrics(out: &mut String, metrics: &MetricSet, language: Language)
     let _ = writeln!(out);
     let _ = writeln!(out, "## Metrics");
 
-    // Coverage first when present — before the language-specific early
-    // returns, because a measured Markdown or SQL file carries coverage
-    // too. Unlike the always-rendered source-code tables it is omitted
-    // entirely when unmeasured ("no data" must stay distinguishable
-    // from 0%).
-    if let Some(coverage) = crate::metrics_json::coverage(metrics) {
+    // Coverage first when present, rendered on the flat-map path only
+    // for the flat-family languages (Markdown/SQL) whose early returns
+    // below never reach the `MetricsFamilies` pivot — a measured
+    // Markdown or SQL file carries coverage too. Source-code languages
+    // render coverage once, from `families.coverage` after the pivot;
+    // rendering here as well would emit the table twice. Unlike the
+    // always-rendered source-code tables it is omitted entirely when
+    // unmeasured ("no data" must stay distinguishable from 0%).
+    if matches!(language, Language::Markdown | Language::Sql)
+        && let Some(coverage) = crate::metrics_json::coverage(metrics)
+    {
         write_coverage(out, &coverage);
     }
 
@@ -849,6 +854,14 @@ mod tests {
             assert!(
                 md.contains("### Coverage") && md.contains("| line | 50.0% | 2 | 4 |"),
                 "{language:?} output must carry the coverage table:\n{md}"
+            );
+            // …and exactly once: source-code languages render it from
+            // the families pivot, the flat-family languages from the
+            // early path — never both.
+            assert_eq!(
+                md.matches("### Coverage").count(),
+                1,
+                "{language:?} output must carry exactly one coverage table:\n{md}"
             );
         }
         // Unmeasured files omit the section entirely (absent ≠ 0%).

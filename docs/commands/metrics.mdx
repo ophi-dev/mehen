@@ -21,7 +21,7 @@ mehen metrics [OPTIONS] <PATH>
 | `--format <FORMAT>` | `json` | One of `json`, `markdown`, `yaml`, `toml`. |
 | `--pretty` | off | Pretty-print JSON output. |
 | `--profile <PROFILE>` | `default` | One of `default`, `ci`, `strict`. |
-| `--coverage[=PATH\|auto\|off]` | lazy | Coverage input: bare `--coverage` (or `=auto`) [discovers report files](/metrics/coverage/auto-discovery); `--coverage=<path>` (repeatable, `=` required) uses exactly those reports; `=off` disables coverage. When omitted, coverage loads only if a `coverage.*` threshold or a `[coverage]` config section asks for it. |
+| `--coverage[=PATH\|auto\|off]` | lazy | Coverage input: bare `--coverage` (or `=auto`) ingests configured reports and [discovers report files](/metrics/coverage/auto-discovery) unless `[coverage] discover = false`; `--coverage=<path>` (repeatable, `=` required) uses exactly those reports; `=off` disables coverage. When omitted, coverage loads only if a `coverage.*` threshold or a `[coverage]` config section asks for it. |
 | `--config <PATH>` | discovered | Pin a [configuration file](/configuration) instead of discovering `mehen.toml` upward from the working directory. |
 
 ## Examples
