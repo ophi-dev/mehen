@@ -172,8 +172,8 @@ disclosed in the PR comment, never silently:
 3. **Nearest default-branch cache** — a prefix-key fallback that is recency-based, not
    ancestor-aware; the comment discloses that trends may compare against an older commit, and mehen
    itself warns when the restored report predates the base commit.
-4. **Absent** — coverage renders as new measurements (`85 (main: n/a)`), never fabricated
-   regressions.
+4. **Absent** — head values are shown without a base to compare against (`85 (main: n/a)` on
+   changed files, `85 🆕` on new ones), never fabricated regressions.
 
 `coverage-base-source` pins the ladder to one source: `cache` (rungs 1 → 3 → 4), `codecov`
 (2 → 4), or `off` (head-side coverage only).

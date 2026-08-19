@@ -77,11 +77,35 @@ function isEntrypoint() {
 async function main() {
   const thresholds = parseThresholds(input("THRESHOLDS"));
   const context = readGithubContext();
-  const baseCoverage = await resolveBaseCoverage(context);
+  let baseCoverage = await resolveBaseCoverage(context);
   const cli = prepareMehen();
   const version = detectMehenVersion(cli);
   const diffArgs = buildDiffArgs(baseCoverage.args);
-  const diff = runMehen(cli, diffArgs, { acceptGateOutput: isGateFailureReport });
+  let diff;
+  try {
+    diff = runMehen(cli, diffArgs, { acceptGateOutput: isGateFailureReport });
+  } catch (error) {
+    // mehen hard-errors on an explicit report it cannot read or parse
+    // — correct for a CLI gate input, but the retrieved base reports
+    // are not fully controlled (a prefix cache key can restore another
+    // configuration's files; an interrupted run can cache a truncated
+    // report). The ladder's contract is disclosure and degradation,
+    // never a failed action with no comment: retry once without the
+    // base side and disclose the downgrade.
+    if (!isBaseCoverageFailure(error, baseCoverage.args)) {
+      throw error;
+    }
+    console.warn(
+      "mehen rejected the retrieved base coverage report(s); continuing without base coverage.",
+    );
+    baseCoverage = {
+      args: [],
+      disclosure: `Base coverage: a retrieved report for \`${context.baseSha.slice(0, 7)}\` was unusable — coverage values are shown without a base to compare against, not as trends.`,
+    };
+    diff = runMehen(cli, buildDiffArgs(), {
+      acceptGateOutput: isGateFailureReport,
+    });
+  }
   const reportsDir = process.env.RUNNER_TEMP || os.tmpdir();
   const reportJson = path.join(reportsDir, `mehen-diff-${Date.now()}.json`);
   fs.writeFileSync(reportJson, `${diff.stdout.trim()}\n`, "utf8");
@@ -212,14 +236,25 @@ function buildDiffArgs(extraArgs = []) {
   // reports (an explicit gate input that silently disappears is a
   // broken gate), but the action is a reporter: the caller's test
   // step owns failing the build when coverage generation breaks.
-  for (const file of coverageFiles) {
+  const presentCoverageFiles = coverageFiles.filter((file) => {
     if (fs.existsSync(file)) {
-      args.push(`--coverage=${file}`);
-    } else {
-      console.warn(
-        `mehen: coverage file '${file}' not found; head-side coverage will be missing for it`,
-      );
+      return true;
     }
+    console.warn(
+      `mehen: coverage file '${file}' not found; head-side coverage will be missing for it`,
+    );
+    return false;
+  });
+  for (const file of presentCoverageFiles) {
+    args.push(`--coverage=${file}`);
+  }
+  // Every configured report is missing: pin coverage off. Without the
+  // pin, a `--base-coverage` argument would flip mehen's lazy trigger
+  // into head-side auto-discovery, silently substituting whatever
+  // stale artifact the working tree happens to hold for the reports
+  // the caller explicitly configured.
+  if (coverageFiles.length > 0 && presentCoverageFiles.length === 0) {
+    args.push("--coverage=off");
   }
   args.push(...extraArgs);
 
@@ -306,11 +341,12 @@ async function resolveBaseCoverage(context) {
     };
   }
 
-  // Rung 4 — absent. Coverage columns render head values as new
-  // measurements, never fabricated regressions.
+  // Rung 4 — absent. Coverage cells show head values without a base
+  // to compare against (`85 (main: n/a)` on changed files, `85 🆕` on
+  // new ones), never fabricated regressions.
   return {
     args: [],
-    disclosure: `Base coverage: unavailable for \`${shortBase}\` — coverage values are shown as new measurements, not trends.`,
+    disclosure: `Base coverage: unavailable for \`${shortBase}\` — coverage values are shown without a base to compare against, not as trends.`,
   };
 }
 
@@ -425,6 +461,27 @@ function codecovToLcov(report) {
     out += `SF:${name}\n${records}end_of_record\n`;
   }
   return out || null;
+}
+
+/**
+ * Whether a failed `mehen diff` invocation is attributable to one of
+ * the *base-side* coverage reports: mehen's coverage setup errors name
+ * the offending report path on stderr ("cannot read coverage report
+ * `PATH`", "failed to parse coverage report `PATH`", "unrecognized
+ * coverage report format: `PATH`"). Matching on the base paths keeps
+ * the degradation retry away from unrelated failures — including a
+ * corrupt *head* report, which is the caller's own fresh artifact and
+ * must keep failing loudly on its own step.
+ */
+function isBaseCoverageFailure(error, baseArgs) {
+  const stderr = typeof error?.stderr === "string" ? error.stderr : "";
+  if (!stderr || !Array.isArray(baseArgs) || baseArgs.length === 0) {
+    return false;
+  }
+  return baseArgs.some((arg) => {
+    const reportPath = String(arg).replace(/^--base-coverage=/, "");
+    return reportPath.length > 0 && stderr.includes(reportPath);
+  });
 }
 
 /** Every file under `dir`, recursively, sorted for determinism. */
@@ -567,7 +624,12 @@ function runMehen(cli, args, options = {}) {
     if (result.stderr) {
       console.error(result.stderr);
     }
-    throw new Error(`mehen exited with status ${result.status}`);
+    const error = new Error(`mehen exited with status ${result.status}`);
+    // Attach the streams so callers can classify the failure (e.g.
+    // the base-coverage degradation retry in `main`).
+    error.stdout = result.stdout;
+    error.stderr = result.stderr;
+    throw error;
   }
   if (result.stderr) {
     process.stderr.write(result.stderr);
@@ -1197,6 +1259,7 @@ function setOutput(name, value) {
 export {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
+  buildDiffArgs,
   canonicalMetricName,
   codecovToLcov,
   collectThresholdViolations,
@@ -1204,6 +1267,7 @@ export {
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,
+  isBaseCoverageFailure,
   isGateFailureReport,
   isNotApplicable,
   listFilesRecursively,

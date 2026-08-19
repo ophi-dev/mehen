@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
+  buildDiffArgs,
   canonicalMetricName,
   codecovToLcov,
   collectThresholdViolations,
@@ -12,6 +13,7 @@ import {
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,
+  isBaseCoverageFailure,
   isGateFailureReport,
   isNotApplicable,
   listFilesRecursively,
@@ -530,5 +532,68 @@ test("every top-level const is declared before the entrypoint block", () => {
     offender,
     null,
     `top-level const declared after the entrypoint block: '${offender?.[0]}'`,
+  );
+});
+
+
+test("buildDiffArgs pins coverage off when every configured report is missing", () => {
+  const saved = process.env.GHA_MEHEN_COVERAGE_FILES;
+  try {
+    // All configured files missing: without the pin, a --base-coverage
+    // argument would flip mehen's lazy trigger into head-side
+    // auto-discovery, substituting stale working-tree artifacts for
+    // the reports the caller explicitly configured.
+    process.env.GHA_MEHEN_COVERAGE_FILES =
+      "/nonexistent/mehen-a.info,/nonexistent/mehen-b.info";
+    const args = buildDiffArgs(["--base-coverage=/tmp/base.lcov"]);
+    assert.ok(args.includes("--coverage=off"), args.join(" "));
+    assert.ok(
+      !args.some((a) => a.startsWith("--coverage=/")),
+      "missing files must not be passed through",
+    );
+    assert.ok(args.includes("--base-coverage=/tmp/base.lcov"));
+
+    // No coverage configured at all: no pin — lazy semantics stay.
+    process.env.GHA_MEHEN_COVERAGE_FILES = "";
+    assert.ok(!buildDiffArgs().includes("--coverage=off"));
+  } finally {
+    if (saved === undefined) {
+      delete process.env.GHA_MEHEN_COVERAGE_FILES;
+    } else {
+      process.env.GHA_MEHEN_COVERAGE_FILES = saved;
+    }
+  }
+});
+
+test("isBaseCoverageFailure matches only stderr naming a base report path", () => {
+  const baseArgs = ["--base-coverage=/tmp/mehen-base-coverage/lcov.info"];
+  const failure = (stderr) => ({ stderr });
+  // mehen's setup error names the offending report.
+  assert.equal(
+    isBaseCoverageFailure(
+      failure(
+        "[ERROR] failed to parse coverage report `/tmp/mehen-base-coverage/lcov.info`: truncated record",
+      ),
+      baseArgs,
+    ),
+    true,
+  );
+  // A corrupt *head* report is the caller's own artifact — no retry.
+  assert.equal(
+    isBaseCoverageFailure(
+      failure("[ERROR] failed to parse coverage report `coverage/lcov.info`"),
+      baseArgs,
+    ),
+    false,
+  );
+  // Unrelated failures, missing stderr, or no base args: never retry.
+  assert.equal(
+    isBaseCoverageFailure(failure("[ERROR] git: object not found"), baseArgs),
+    false,
+  );
+  assert.equal(isBaseCoverageFailure(new Error("spawn failed"), baseArgs), false);
+  assert.equal(
+    isBaseCoverageFailure(failure("failed to parse coverage report"), []),
+    false,
   );
 });
