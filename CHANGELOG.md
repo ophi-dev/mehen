@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.0](https://github.com/ophi-dev/mehen/compare/v1.9.0...v1.10.0) (2026-08-19)
+
+
+### Features
+
+* base coverage for mehen diff via action retrieval (cache + codecov) ([#250](https://github.com/ophi-dev/mehen/issues/250)) ([b8d2d8a](https://github.com/ophi-dev/mehen/commit/b8d2d8a46686eb84c3603934c0de7d87cd8f27b0))
+* coverage metric category — ingestion, auto-discovery, gates ([#246](https://github.com/ophi-dev/mehen/issues/246)) ([a2ac86a](https://github.com/ophi-dev/mehen/commit/a2ac86abbe3f3b2201c4200684f101f1339448b0))
+
 ## [1.9.0](https://github.com/ophi-dev/mehen/compare/v1.8.1...v1.9.0) (2026-08-17)
 
 
