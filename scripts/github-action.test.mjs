@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import {
@@ -504,5 +505,30 @@ test("listFilesRecursively returns [] for absent or empty inputs", () => {
   assert.deepEqual(
     listFilesRecursively("/nonexistent/mehen-test-dir"),
     [],
+  );
+});
+
+
+test("every top-level const is declared before the entrypoint block", () => {
+  // `main()` is invoked from the `isEntrypoint()` block during module
+  // evaluation, so its synchronous call graph runs before any
+  // statement below that block has executed. Function declarations
+  // hoist; `const` bindings do not — a top-level const declared after
+  // the block is a temporal-dead-zone crash waiting for the first
+  // synchronous path that reads it. Seen live in CI as "Cannot access
+  // 'CODECOV_PENDING_RETRIES' before initialization"; importing the
+  // module (as these tests do) can never reproduce it, hence this
+  // source-order invariant.
+  const source = fs.readFileSync(
+    new URL("./github-action.mjs", import.meta.url),
+    "utf8",
+  );
+  const entry = source.indexOf("if (isEntrypoint())");
+  assert.ok(entry > 0, "entrypoint block must be present");
+  const offender = source.slice(entry).match(/^const\s+\S+/m);
+  assert.equal(
+    offender,
+    null,
+    `top-level const declared after the entrypoint block: '${offender?.[0]}'`,
   );
 });

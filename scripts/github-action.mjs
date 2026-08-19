@@ -51,6 +51,14 @@ const METRIC_ALIASES = new Map([
   ["halsteadvolume", "halstead.volume"],
 ]);
 
+// Declared above the entrypoint block below: `main()` starts running
+// during module evaluation, so any `const` it reaches synchronously
+// must already be initialized (a later declaration would be a
+// temporal-dead-zone crash — seen live as "Cannot access
+// 'CODECOV_PENDING_RETRIES' before initialization").
+const CODECOV_PENDING_RETRIES = 3;
+const CODECOV_RETRY_DELAY_MS = 5000;
+
 if (isEntrypoint()) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
@@ -226,9 +234,6 @@ function buildDiffArgs(extraArgs = []) {
 // cache (recency-based, so explicitly disclosed) → absent (columns
 // render as new measurements). Every level is stated in the sticky PR
 // comment — never silently.
-
-const CODECOV_PENDING_RETRIES = 3;
-const CODECOV_RETRY_DELAY_MS = 5000;
 
 /**
  * Resolve base-revision coverage into `--base-coverage=` CLI arguments
