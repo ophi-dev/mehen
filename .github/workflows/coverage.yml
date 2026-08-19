@@ -50,18 +50,20 @@ jobs:
           mkdir -p target/llvm-cov
           cargo llvm-cov nextest --workspace --locked --no-fail-fast --all-features --ignore-filename-regex 'src/languages/language_.*\.rs$' --lcov --output-path target/llvm-cov/lcov-branch.info
 
-      # Token-based uploads: OIDC/tokenless uploads have been failing
-      # with 404 "Repository not found" since the org rename
-      # (ophidiarium → ophi-dev) left codecov's ingest-side repo record
-      # stale. CODECOV_TOKEN is the repository *upload* token from the
-      # repo's codecov settings page.
+      # OIDC uploads have been failing with 404 "Repository not found"
+      # since the org rename (ophidiarium → ophi-dev) left codecov's
+      # ingest-side repo record on the old slug — verified locally: a
+      # token-based upload succeeds while codecov echoes the pre-rename
+      # slug in its response URL. Keep OIDC and fail loudly for now so
+      # the breakage is on CI record; the token switch (or a codecov
+      # support-side fix) follows.
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
         uses: codecov/test-results-action@v1
         with:
           files: target/nextest/ci/junit.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          use_oidc: true
+          fail_ci_if_error: true
           verbose: true
 
       - name: Upload coverage to Codecov
@@ -69,8 +71,8 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           files: target/llvm-cov/lcov-branch.info
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+          use_oidc: true
+          fail_ci_if_error: true
           verbose: true
 
       - name: Upload coverage artifacts
