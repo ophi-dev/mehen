@@ -87,6 +87,18 @@ fn build_monorepo(root: &Utf8Path) {
     write(root, "target/llvm-cov/lcov.info", LCOV);
     // Compiler output — must not be visited.
     write(root, "target/debug/deps/junk.lcov", LCOV);
+    // Rust: tarpaulin redirects reports into target/cov — pruned by the
+    // walk (target/ descent admits only llvm-cov|tarpaulin|site), so
+    // only introspection recovers them. `out` lives in the reserved
+    // [report] table while `output-dir` sits in a run profile; Html is
+    // not an ingestable format and must be skipped.
+    write(
+        root,
+        "tarpaulin.toml",
+        "[nightly_run]\noutput-dir = \"target/cov\"\n\n[report]\nout = [\"Xml\", \"Lcov\", \"Html\"]\n",
+    );
+    write(root, "target/cov/cobertura.xml", COBERTURA);
+    write(root, "target/cov/lcov.info", LCOV);
     // PHP: phpunit.xml.dist names the clover report (Jenkins layout).
     write(
         root,
@@ -178,6 +190,46 @@ fn discovery_is_deterministic_across_runs() {
         }),
     );
     assert_eq!(first, elsewhere);
+}
+
+#[test]
+fn tarpaulin_introspection_rejects_missing_and_escaping_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Utf8Path::from_path(dir.path()).unwrap();
+    // The Xml report was configured but never generated; the second
+    // profile tries to walk out of the root. Neither may produce a
+    // report; every probe must leave an auditable rejection. The
+    // introspector cross-products the union of `out` formats and
+    // `output-dir`s (the reserved [report] table splits them in real
+    // configs), so two dirs × two artifacts = four rejections.
+    write(
+        root,
+        ".tarpaulin.toml",
+        "[ci]\nout = [\"Xml\"]\noutput-dir = \"reports\"\n\n[evil]\nout = [\"Lcov\"]\noutput-dir = \"../outside\"\n",
+    );
+
+    let outcome = discover(&DiscoveryOptions {
+        roots: vec![root.to_path_buf()],
+        ..Default::default()
+    });
+    assert!(outcome.reports.is_empty());
+    let invalid = outcome
+        .diagnostics
+        .rejected
+        .iter()
+        .filter(|r| {
+            matches!(
+                &r.reason,
+                mehen_coverage_discovery::RejectReason::ToolConfigPathInvalid(config)
+                    if config.file_name() == Some(".tarpaulin.toml")
+            )
+        })
+        .count();
+    assert_eq!(
+        invalid, 4,
+        "absent reports and escaping output-dirs must all be rejected: {:?}",
+        outcome.diagnostics.rejected
+    );
 }
 
 #[test]

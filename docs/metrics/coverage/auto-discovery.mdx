@@ -33,7 +33,11 @@ selector, a configured `coverage.*` threshold, or an opting-in `[coverage]` sect
      (coverage.py);
    - `phpunit.xml` / `phpunit.xml.dist`: `<clover|cobertura outputFile="…">` and the legacy
      `<log type="coverage-clover" target="…">` — PHPUnit writes **no** coverage file unless
-     configured, so this is the only zero-config path for PHP.
+     configured, so this is the only zero-config path for PHP;
+   - `tarpaulin.toml` / `.tarpaulin.toml` (cargo-tarpaulin): the union of `out` formats and
+     `output-dir` values across run profiles and the reserved `[report]` table. Tarpaulin's file
+     names are fixed (`cobertura.xml`, `lcov.info`), so introspection matters exactly when
+     `output-dir` redirects them into territory the scan prunes (e.g. `target/cov/`).
 
    Executable configs — `jest.config.ts`, `vitest.config.ts`, `.simplecov`, Gradle DSLs, Pester
    scripts — are **never executed and never regex-scraped**. Their values are routinely computed
@@ -134,6 +138,8 @@ into the TOML source, like every other `mehen.toml` mistake.
   `[xml] output` / `[lcov] output` (the `[tool.coverage.*]` tables in `pyproject.toml`).
 - [PHPUnit XML configuration](https://docs.phpunit.de/en/main/configuration.html) — the
   `<coverage>`/`<report>` elements.
+- [cargo-tarpaulin config file](https://github.com/xd009642/tarpaulin#config-file) — run
+  profiles, the reserved `[report]` table, and the `out`/`output-dir` keys.
 - [coverlet VSTest integration](https://github.com/coverlet-coverage/coverlet/blob/master/Documentation/VSTestIntegration.md)
   — why `TestResults/<guid>/coverage.cobertura.xml` re-run clusters exist.
 - [Kover Gradle plugin](https://kotlin.github.io/kotlinx-kover/gradle-plugin/) — the

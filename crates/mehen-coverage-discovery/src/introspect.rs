@@ -4,7 +4,8 @@
 //! Declarative tool-config introspection — tier 1 of discovery.
 //!
 //! Only *data* formats are read: JSON (the c8/nyc rc family), TOML
-//! (`pyproject.toml`), and XML (`phpunit.xml`/`.dist`). Executable
+//! (`pyproject.toml`, `tarpaulin.toml`/`.tarpaulin.toml`), and XML
+//! (`phpunit.xml`/`.dist`). Executable
 //! configs — `jest.config.ts`, `vitest.config.ts`, `.simplecov`, Gradle
 //! DSLs, Pester scripts — are **never executed and never regex-scraped**:
 //! their values are routinely computed (template strings, env vars,
@@ -44,9 +45,10 @@ pub(crate) fn introspect_root(
     introspect_js_rc(root, &mut sink);
     introspect_pyproject(root, &mut sink);
     introspect_phpunit(root, &mut sink);
+    introspect_tarpaulin(root, &mut sink);
 }
 
-/// Shared candidate-submission plumbing for the three introspectors.
+/// Shared candidate-submission plumbing for the introspectors.
 struct Sink<'a> {
     root: &'a Utf8Path,
     caps: &'a DiscoveryCaps,
@@ -273,6 +275,84 @@ fn introspect_phpunit(root: &Utf8Path, sink: &mut Sink<'_>) {
 
     for output in outputs {
         sink.submit(&config, &output);
+    }
+}
+
+/// `tarpaulin.toml` / `.tarpaulin.toml` (cargo-tarpaulin). Every
+/// top-level table is a run profile — plus the reserved `[report]`
+/// table, which only affects reporting — and any of them may carry
+/// `out = ["Xml", "Lcov", …]` with an optional `output-dir`
+/// redirect. The output *file names* are fixed by tarpaulin
+/// (`cobertura.xml`, `lcov.info` inside `output-dir`), so only the
+/// directory is configuration. Defaults need no introspection: without
+/// `output-dir` the files land in the project root, which the artifact
+/// scan's `**/cobertura.xml` / `**/lcov.info` patterns already match —
+/// introspection recovers redirects into scan-pruned territory (e.g.
+/// `output-dir = "target/cov"`, where the walk's `target/` descent
+/// admits only `llvm-cov|tarpaulin|site`).
+fn introspect_tarpaulin(root: &Utf8Path, sink: &mut Sink<'_>) {
+    const CONFIG_NAMES: &[&str] = &["tarpaulin.toml", ".tarpaulin.toml"];
+    let Some(config) = CONFIG_NAMES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|p| p.is_file())
+    else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&config) else {
+        return;
+    };
+    let Ok(table) = text.parse::<toml::Table>() else {
+        log::warn!("malformed TOML in {config}; skipping introspection");
+        return;
+    };
+
+    // `out` and `output-dir` need not share a table: the reserved
+    // `[report]` table applies its reporting options to every run
+    // profile, so `out = ["Xml"]` under `[report]` combines with an
+    // `output-dir` set in a profile. Collect the union of both keys
+    // across all tables and emit the cross-product — every candidate
+    // is existence-checked and content-sniffed before anything
+    // believes it, so an over-approximate pair costs one stat call.
+    let mut dirs: Vec<&str> = Vec::new();
+    let mut artifacts: Vec<&str> = Vec::new();
+    for profile in table.values() {
+        let Some(profile) = profile.as_table() else {
+            continue;
+        };
+        if let Some(dir) = profile.get("output-dir").and_then(|v| v.as_str())
+            && !dirs.contains(&dir)
+        {
+            dirs.push(dir);
+        }
+        for format in profile
+            .get("out")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+        {
+            // Ingestable formats only: Html/Json/Markdown/Stdout are
+            // not report formats mehen parses. Values are PascalCase
+            // per tarpaulin's `OutputFile` enum; compare loosely so a
+            // hand-written lowercase spelling still resolves.
+            let artifact = match format.to_ascii_lowercase().as_str() {
+                "xml" => "cobertura.xml",
+                "lcov" => "lcov.info",
+                _ => continue,
+            };
+            if !artifacts.contains(&artifact) {
+                artifacts.push(artifact);
+            }
+        }
+    }
+    // Without `output-dir` the fixed-name files land in the project
+    // root — scan territory, no introspection needed.
+    for dir in dirs {
+        for artifact in &artifacts {
+            let configured = format!("{}/{artifact}", dir.trim_end_matches(['/', '\\']));
+            sink.submit(&config, &configured);
+        }
     }
 }
 

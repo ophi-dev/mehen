@@ -24,8 +24,9 @@
 //!
 //! 1. **Tool-config introspection** — *declarative* configs only:
 //!    the c8/nyc JSON rc family, `pyproject.toml`
-//!    (`[tool.coverage.xml|lcov] output`), and `phpunit.xml`/`.dist`
-//!    report elements. Executable configs (`jest.config.ts`,
+//!    (`[tool.coverage.xml|lcov] output`), `phpunit.xml`/`.dist`
+//!    report elements, and `tarpaulin.toml`/`.tarpaulin.toml`
+//!    (`out` + `output-dir`). Executable configs (`jest.config.ts`,
 //!    `.simplecov`, Gradle DSL, Pester scripts) are never executed and
 //!    never regex-scraped — their tools' default output locations are
 //!    already in the artifact-scan pattern table.

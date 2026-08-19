@@ -4,6 +4,7 @@ expression: "projection(root, &outcome)"
 ---
 - "report clover build/logs/clover.xml (tool-config:phpunit.xml.dist)"
 - "report cobertura qa/cov.xml (tool-config:pyproject.toml)"
+- "report lcov target/cov/lcov.info (tool-config:tarpaulin.toml)"
 - report istanbul .nyc_output/aaa.json (scan)
 - report cobertura TestResults/bbbb-2222/coverage.cobertura.xml (scan)
 - report lcov coverage/lcov.info (scan)
@@ -16,3 +17,4 @@ expression: "projection(root, &outcome)"
 - rejected coverage/coverage-final.json Superseded by coverage/lcov.info
 - rejected empty.lcov Empty
 - rejected notes/coverage.txt SniffMismatch
+- rejected target/cov/cobertura.xml Superseded by target/cov/lcov.info
