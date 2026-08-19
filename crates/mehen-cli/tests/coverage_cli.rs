@@ -407,3 +407,549 @@ fn sql_package_routines_receive_per_function_coverage() {
         )
     );
 }
+
+// ─── `mehen diff` coverage: head `--coverage` + base `--base-coverage` ───
+
+fn git(path: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .current_dir(path)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Mehen Test")
+        .env("GIT_AUTHOR_EMAIL", "test@mehen.invalid")
+        .env("GIT_COMMITTER_NAME", "Mehen Test")
+        .env("GIT_COMMITTER_EMAIL", "test@mehen.invalid")
+        .output()
+        .expect("failed to run git")
+}
+
+fn git_ok(path: &std::path::Path, args: &[&str]) {
+    let output = git(path, args);
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn init_git_repo(path: &std::path::Path) {
+    git_ok(path, &["init", "-q", "-b", "main"]);
+    git_ok(path, &["config", "commit.gpgsign", "false"]);
+}
+
+fn commit_all(path: &std::path::Path, message: &str) {
+    git_ok(path, &["add", "-A"]);
+    git_ok(path, &["commit", "-q", "-m", message]);
+}
+
+/// Run `mehen diff` with the CI env scrubbed so GitHub Actions
+/// detection never hijacks ref resolution on a developer machine or in
+/// this repo's own CI. `RUST_LOG=warn` surfaces `log::warn!` output
+/// (the staleness warning) on stderr — `env_logger`'s default filter
+/// is error-only.
+fn mehen_diff(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir)
+        .arg("diff")
+        .args(args)
+        .env("RUST_LOG", "warn")
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff")
+}
+
+/// The `coverage.line` entry of one file's metrics array, if present.
+/// Panics when the file has no diff row at all.
+fn coverage_line_metric(json: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let files = json["source_code"].as_array().expect("source_code array");
+    let file = files
+        .iter()
+        .find(|f| f["path"].as_str() == Some(path))
+        .unwrap_or_else(|| panic!("missing diff row for {path}: {json}"));
+    file["metrics"]
+        .as_array()
+        .expect("metrics array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some("coverage.line"))
+        .cloned()
+}
+
+/// Base body: cognitive 1 (one `if`).
+const PYTHON_V1: &str = "def hit(flag):\n    if flag:\n        return 1\n    return 2\n";
+/// Head body: cognitive 3 (nested `if`) — the statics delta keeps a
+/// row alive even when its coverage entry is omitted.
+const PYTHON_V2: &str = "def hit(flag):\n    if flag:\n        if flag > 1:\n            return 0\n        return 1\n    return 2\n\n\ndef extra():\n    return 3\n";
+
+/// Base report: `app.py` 1 of 2 instrumented lines hit → 50%.
+const BASE_LCOV: &str = "TN:\nSF:app.py\nDA:1,1\nDA:2,0\nend_of_record\n";
+/// Head report: `app.py` 3 of 3 instrumented lines hit → 100%.
+const HEAD_LCOV: &str = "TN:\nSF:app.py\nDA:1,1\nDA:2,1\nDA:5,1\nend_of_record\n";
+
+#[test]
+fn diff_carries_coverage_trend_when_both_sides_have_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    write(dir.path(), "app.py", PYTHON_V1);
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "cov-base"]);
+    write(dir.path(), "app.py", PYTHON_V2);
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "cov-head"]);
+    // Reports written *after* both commits: fresher than the base
+    // commit, so no staleness warning may fire.
+    write(dir.path(), "base.info", BASE_LCOV);
+    write(dir.path(), "head.info", HEAD_LCOV);
+
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--metrics",
+            "cognitive,coverage.line",
+            "--coverage=head.info",
+            "--base-coverage=base.info",
+            "--output-format",
+            "json",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let json = json_stdout(&output);
+
+    let m = coverage_line_metric(&json, "app.py").expect("coverage.line entry");
+    assert_eq!(m["current"], 100.0, "{m}");
+    assert_eq!(m["baseline"], 50.0);
+    assert_eq!(m["delta"], 50.0);
+    // Both sides measured: the unavailable flags are omitted from JSON.
+    assert!(m.get("baseline_unavailable").is_none(), "{m}");
+    assert!(m.get("current_unavailable").is_none());
+    assert!(
+        !stderr.contains("predates the base commit"),
+        "fresh report must not warn: {stderr}"
+    );
+}
+
+#[test]
+fn diff_defaults_surface_coverage_column_when_reports_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    write(dir.path(), "app.py", PYTHON_V1);
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "cov-base"]);
+    write(dir.path(), "app.py", PYTHON_V2);
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "cov-head"]);
+    // A name discovery never picks up (content-sniffed as LCOV on the
+    // explicit path): head-side discovery must find only the idiomatic
+    // `coverage/lcov.info`, not accidentally ingest the base report.
+    write(dir.path(), "base-report.data", BASE_LCOV);
+    // The idiomatic discoverable location for the head report.
+    write(dir.path(), "coverage/lcov.info", HEAD_LCOV);
+
+    // `--base-coverage` alone implies coverage for the head side: the
+    // lazy trigger runs discovery, which finds `coverage/lcov.info`.
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--base-coverage=base-report.data",
+            "--output-format",
+            "json",
+        ],
+    );
+    let json = json_stdout(&output);
+    let m = coverage_line_metric(&json, "app.py").expect("default coverage column");
+    assert_eq!(m["current"], 100.0, "{m}");
+    assert_eq!(m["baseline"], 50.0);
+    assert_eq!(m["label"], "Coverage");
+
+    // Markdown: the default column set gains a `Coverage` column with
+    // a real higher-is-better trend cell.
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--base-coverage=base-report.data",
+        ],
+    );
+    assert!(output.status.success());
+    let markdown = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(markdown.contains("| Coverage |"), "{markdown}");
+    assert!(markdown.contains(": 50) \u{1F7E2}"), "{markdown}"); // 🟢 +50pp
+    // Without any coverage request, the defaults stay coverage-free.
+    let output = mehen_diff(dir.path(), &["--from", "cov-base", "--to", "cov-head"]);
+    assert!(output.status.success());
+    let markdown = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(!markdown.contains("| Coverage |"), "{markdown}");
+}
+
+#[test]
+fn diff_renders_one_sided_coverage_as_measurement_change_and_omits_unmeasured() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    for file in ["app.py", "helper.py", "lone.py"] {
+        write(dir.path(), file, PYTHON_V1);
+    }
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "cov-base"]);
+    for file in ["app.py", "helper.py", "lone.py"] {
+        write(dir.path(), file, PYTHON_V2);
+    }
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "cov-head"]);
+    // Head report measures only `app.py`; base report only `helper.py`;
+    // `lone.py` is measured on neither side.
+    write(dir.path(), "head.info", HEAD_LCOV);
+    write(
+        dir.path(),
+        "base.info",
+        "TN:\nSF:helper.py\nDA:1,1\nDA:2,0\nend_of_record\n",
+    );
+
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--metrics",
+            "cognitive,coverage.line",
+            "--coverage=head.info",
+            "--base-coverage=base.info",
+            "--output-format",
+            "json",
+        ],
+    );
+    let json = json_stdout(&output);
+
+    // Newly measured: head value real, no fabricated regression — the
+    // base side reads *unavailable* (absent ≠ 0, extended to diff).
+    let app = coverage_line_metric(&json, "app.py").expect("app.py coverage");
+    assert_eq!(app["current"], 100.0, "{app}");
+    assert_eq!(app["baseline_unavailable"], true);
+    assert_eq!(app["delta"], 0.0, "no direction may be claimed: {app}");
+
+    // Lost measurement: base value real, head side unavailable.
+    let helper = coverage_line_metric(&json, "helper.py").expect("helper.py coverage");
+    assert_eq!(helper["baseline"], 50.0, "{helper}");
+    assert_eq!(helper["current_unavailable"], true);
+    assert_eq!(helper["delta"], 0.0);
+
+    // Measured on neither side: the entry is omitted entirely (the
+    // column renders `–`), never an `n/a`-forever row or a fabricated
+    // `0`.
+    assert!(
+        coverage_line_metric(&json, "lone.py").is_none(),
+        "unmeasured file must omit the coverage entry"
+    );
+
+    // The same scope in Markdown pins the `–` cell for the unmeasured
+    // file.
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--metrics",
+            "cognitive,coverage.line",
+            "--coverage=head.info",
+            "--base-coverage=base.info",
+        ],
+    );
+    assert!(output.status.success());
+    let markdown = String::from_utf8_lossy(&output.stdout).to_string();
+    let lone_row = markdown
+        .lines()
+        .find(|line| line.starts_with("| lone.py"))
+        .expect("lone.py row");
+    assert!(lone_row.contains('\u{2013}'), "expected – cell: {lone_row}");
+}
+
+#[test]
+fn diff_new_and_deleted_files_keep_honest_coverage_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    // Contents are deliberately unrelated: rename tracking must not
+    // pair the deletion with the addition.
+    write(
+        dir.path(),
+        "old.py",
+        "def legacy(a, b):\n    while a:\n        a -= b\n    return a\n",
+    );
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "cov-base"]);
+    std::fs::remove_file(dir.path().join("old.py")).unwrap();
+    write(
+        dir.path(),
+        "new.py",
+        "class Greeter:\n    def greet(self, name):\n        if name:\n            return f\"hi {name}\"\n        return \"hi\"\n",
+    );
+    write(
+        dir.path(),
+        "unmeasured_new.py",
+        "VALUES = [1, 2, 3]\n\n\ndef total():\n    return sum(VALUES)\n",
+    );
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "cov-head"]);
+    write(
+        dir.path(),
+        "head.info",
+        "TN:\nSF:new.py\nDA:1,1\nDA:2,1\nDA:5,1\nend_of_record\n",
+    );
+    write(
+        dir.path(),
+        "base.info",
+        "TN:\nSF:old.py\nDA:1,1\nDA:2,0\nend_of_record\n",
+    );
+
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--metrics",
+            "coverage.line",
+            "--coverage=head.info",
+            "--base-coverage=base.info",
+            "--output-format",
+            "json",
+        ],
+    );
+    let json = json_stdout(&output);
+
+    let new = coverage_line_metric(&json, "new.py").expect("new.py coverage");
+    assert_eq!(new["is_new"], true, "{new}");
+    assert_eq!(new["current"], 100.0);
+    let old = coverage_line_metric(&json, "old.py").expect("old.py coverage");
+    assert_eq!(old["is_deleted"], true, "{old}");
+    assert_eq!(old["baseline"], 50.0);
+
+    // A new file measured by no report has no coverage entry, and with
+    // coverage as the only selected column its row carries no signal
+    // at all — it must drop out rather than render an empty row.
+    assert!(
+        json["source_code"]
+            .as_array()
+            .expect("source_code array")
+            .iter()
+            .all(|f| f["path"].as_str() != Some("unmeasured_new.py")),
+        "unmeasured new file must not produce a row: {json}"
+    );
+}
+
+#[test]
+fn diff_base_report_predating_base_commit_warns_once_and_is_configurable() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    write(dir.path(), "app.py", PYTHON_V1);
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "cov-base"]);
+    write(dir.path(), "app.py", PYTHON_V2);
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "cov-head"]);
+    write(dir.path(), "base.info", BASE_LCOV);
+    // Backdate the report to 1970: it cannot describe the base commit.
+    let report = std::fs::File::options()
+        .write(true)
+        .open(dir.path().join("base.info"))
+        .unwrap();
+    report
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+        .unwrap();
+    drop(report);
+
+    let args = [
+        "--from",
+        "cov-base",
+        "--to",
+        "cov-head",
+        "--metrics",
+        "coverage.line",
+        "--base-coverage=base.info",
+        "--coverage=off",
+        "--output-format",
+        "json",
+    ];
+    let output = mehen_diff(dir.path(), &args);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        stderr.contains("predates the base commit"),
+        "backdated base report must warn: {stderr}"
+    );
+
+    // `stale-warning = false` under `[coverage]` silences it.
+    write(
+        dir.path(),
+        "mehen.toml",
+        "[coverage]\nstale-warning = false\n",
+    );
+    let output = mehen_diff(dir.path(), &args);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !stderr.contains("predates the base commit"),
+        "stale-warning = false must silence the warning: {stderr}"
+    );
+}
+
+#[test]
+fn diff_missing_base_coverage_report_is_a_setup_error() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    write(dir.path(), "app.py", PYTHON_V1);
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "cov-base"]);
+    write(dir.path(), "app.py", PYTHON_V2);
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "cov-head"]);
+
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--base-coverage=nonexistent.info",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        stderr.contains("nonexistent.info"),
+        "error must name the missing report: {stderr}"
+    );
+
+    // The `=` spelling is mandatory, mirroring `--coverage`.
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--base-coverage",
+            "base.info",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "space-separated --base-coverage value must be rejected"
+    );
+}
+
+#[test]
+fn diff_coverage_threshold_gates_head_side_via_lazy_trigger() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    write(dir.path(), "app.py", PYTHON_V1);
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "cov-base"]);
+    write(dir.path(), "app.py", PYTHON_V2);
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "cov-head"]);
+    // Head report at the idiomatic discoverable location: 1 of 3 → 33%.
+    write(
+        dir.path(),
+        "coverage/lcov.info",
+        "TN:\nSF:app.py\nDA:1,1\nDA:2,0\nDA:5,0\nend_of_record\n",
+    );
+    // The configured minimum is the lazy ingestion trigger — no flag.
+    write(
+        dir.path(),
+        "mehen.toml",
+        "[thresholds]\n\"coverage.line\" = 80\n",
+    );
+
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--output-format",
+            "json",
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "33% line coverage must fail a min-80 gate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("gate-failing diff still emits JSON");
+    let violations = json["threshold_violations"]
+        .as_array()
+        .expect("threshold_violations array");
+    assert!(
+        violations
+            .iter()
+            .any(|v| v["metric"].as_str() == Some("coverage.line")),
+        "violation must name coverage.line: {json}"
+    );
+}
+
+#[test]
+fn diff_renamed_file_reads_base_coverage_from_old_path() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    write(dir.path(), "app.py", PYTHON_V1);
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "cov-base"]);
+    // Rename with a one-line edit: similar enough for rename tracking
+    // (the diff row appears under the new path with the old path as
+    // its baseline), while the coverage trend keeps the row alive.
+    git_ok(dir.path(), &["mv", "app.py", "renamed.py"]);
+    let mut renamed = PYTHON_V1.to_string();
+    renamed.push_str("\n\nLIMIT = 3\n");
+    write(dir.path(), "renamed.py", &renamed);
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "cov-head"]);
+    // The base report measured the file under its *old* path.
+    write(dir.path(), "base.info", BASE_LCOV);
+    write(
+        dir.path(),
+        "head.info",
+        "TN:\nSF:renamed.py\nDA:1,1\nDA:2,1\nDA:5,1\nend_of_record\n",
+    );
+
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "cov-base",
+            "--to",
+            "cov-head",
+            "--metrics",
+            "cognitive,coverage.line",
+            "--coverage=head.info",
+            "--base-coverage=base.info",
+            "--output-format",
+            "json",
+        ],
+    );
+    let json = json_stdout(&output);
+    let m = coverage_line_metric(&json, "renamed.py").expect("renamed.py coverage");
+    assert_eq!(m["baseline"], 50.0, "old-path base lookup: {m}");
+    assert_eq!(m["current"], 100.0);
+    assert!(m.get("baseline_unavailable").is_none(), "{m}");
+}

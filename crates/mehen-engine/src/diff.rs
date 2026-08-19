@@ -27,12 +27,14 @@ use mehen_report::github_markdown_docs::{DocDiffFile, DocRenderCtx, render_doc_s
 
 use crate::ci;
 use crate::concurrent_files::mk_globset;
+use crate::coverage_metrics;
 use crate::detection::detect_language;
 use crate::git_attributes::GitAttributeFilter;
 use crate::history_metrics;
 use crate::metric_selector::{
-    MetricSelector, Polarity as SelectorPolarity, default_selectors_for_language,
-    parse_metric_selectors, read_metric as read_selector_metric,
+    MetricSelector, Polarity as SelectorPolarity, coverage_line_selector,
+    default_selectors_for_language, metric_set_key_for, parse_metric_selectors,
+    read_metric as read_selector_metric,
 };
 use crate::registry::AnalyzerRegistry;
 use crate::top_offenders::read_metric;
@@ -778,6 +780,27 @@ pub struct DiffOpts {
         value_parser = parse_fail_on_flag,
     )]
     fail_on: Vec<FailOn>,
+    /// Head-side coverage: the shared `--coverage` flag
+    /// (`PATH|auto|off`, repeatable, bare means `auto`). Also loads
+    /// lazily when a `coverage.*` column or configured threshold asks,
+    /// or when `--base-coverage` is given — a base-only report could
+    /// render at most half a trend.
+    #[clap(flatten)]
+    coverage: coverage_metrics::CoverageOpts,
+    /// Coverage report(s) for the *base* revision (repeatable),
+    /// enriching the baseline side so `coverage.*` columns carry real
+    /// trends. Explicit paths only — no discovery, since the working
+    /// tree holds *head* artifacts. Line numbers are read against the
+    /// re-analyzed base blobs, so the report must describe the base
+    /// revision; a file absent from it renders as a new measurement,
+    /// never a fabricated regression.
+    #[clap(
+        long = "base-coverage",
+        value_name = "PATH",
+        require_equals = true,
+        action = clap::ArgAction::Append
+    )]
+    base_coverage: Vec<String>,
 }
 
 /// Identifies one of the documented doc-metric CI gates. Any other value is
@@ -962,6 +985,51 @@ fn run_diff_inner(
         std::process::exit(1);
     }
 
+    // Coverage ingestion — resolved once per side, then folded into
+    // each file's spaces after static analysis (the same enrichment
+    // slot the `history.*` family occupies). The head side keeps the
+    // `--coverage` semantics of `metrics`/`top-offenders`: explicit
+    // report problems hard-error, discovery degrades to warnings, and
+    // the lazy trigger fires on a requested `coverage.*` column, a
+    // configured `coverage.*` threshold, or `--base-coverage`. The
+    // base side never discovers — the working tree holds *head*
+    // artifacts — and judges report staleness against the base
+    // commit's own time (see `resolve_base_coverage`).
+    let coverage_config = config.and_then(|c| c.coverage.as_ref());
+    let coverage_mode = opts.coverage.mode()?;
+    let base_coverage_paths: Vec<Utf8PathBuf> =
+        opts.base_coverage.iter().map(Utf8PathBuf::from).collect();
+    let coverage_wanted = coverage_metrics::names_want_coverage(selectors.iter().map(|s| s.name))
+        || config.is_some_and(|c| {
+            c.thresholds
+                .any_metric(|name| name.starts_with("coverage."))
+        })
+        || !base_coverage_paths.is_empty();
+    let coverage_roots: Vec<Utf8PathBuf> = repo
+        .workdir()
+        .and_then(|dir| Utf8PathBuf::from_path_buf(dir.to_path_buf()).ok())
+        .into_iter()
+        .collect();
+    let head_coverage = coverage_metrics::resolve_coverage(
+        &coverage_mode,
+        coverage_config,
+        &coverage_roots,
+        coverage_wanted,
+    )?;
+    let base_coverage = coverage_metrics::resolve_base_coverage(
+        &base_coverage_paths,
+        &coverage_roots,
+        commit_time(&repo, &from_ref),
+        coverage_config,
+    )?;
+    // With default (per-language) columns and coverage actually
+    // resolved for either side, surface the line-rate column — the one
+    // dimension every supported report format measures. An explicit
+    // `--metrics` list keeps full column control.
+    let coverage_default_selector: Option<MetricSelector> = (!explicit_metrics
+        && (head_coverage.is_some() || base_coverage.is_some()))
+    .then(coverage_line_selector);
+
     let registry = Arc::new(AnalyzerRegistry::default_set());
     let analysis_config = AnalysisConfig::default();
 
@@ -1122,7 +1190,14 @@ fn run_diff_inner(
         let file_selectors: Vec<MetricSelector> = if explicit_metrics {
             selectors.clone()
         } else {
-            let langs = default_selectors_for_language(*language);
+            let mut langs = default_selectors_for_language(*language);
+            // Coverage is language-orthogonal: the default coverage
+            // column joins every language's default set. Files no
+            // report measured render the column as `–` and stay
+            // droppable as unchanged (see the coverage arm below).
+            if let Some(coverage_column) = &coverage_default_selector {
+                langs.push(coverage_column.clone());
+            }
             for sel in &langs {
                 if !display_selectors.iter().any(|d| d.name == sel.name) {
                     display_selectors.push(sel.clone());
@@ -1385,9 +1460,57 @@ fn run_diff_inner(
             }
         }
 
+        // Coverage enrichment (`coverage.*`): fold each side's report
+        // data into that side's spaces — head from `--coverage` (or
+        // discovery), base from `--base-coverage`. Same-revision by
+        // construction: the base report describes the base blobs this
+        // diff just re-analyzed, so report line numbers and base
+        // spans line up without any mapping. A side whose blob could
+        // not be statically analyzed still carries its measured
+        // coverage via a synthetic space — statics stay honest there
+        // (`*_composites = false`, and the empty space publishes no
+        // static keys), mirroring the history-only fallback above.
+        // The baseline of a renamed file reads its old path: the base
+        // report was written when the file lived there.
+        if head_coverage.is_some() || base_coverage.is_some() {
+            let empty_space = || {
+                MetricSpace::new(
+                    mehen_core::SpaceId(0),
+                    mehen_core::SpaceKind::Unit,
+                    mehen_core::SourceSpan::empty(),
+                )
+            };
+            if let Some(context) = base_coverage.as_ref()
+                && !is_new
+                && let Ok(base_utf8) = Utf8PathBuf::try_from(base_path.to_path_buf())
+                && let Some(file_coverage) =
+                    coverage_metrics::coverage_for_file(context, &base_utf8)
+            {
+                if baseline_space.is_none() {
+                    baseline_space = Some(empty_space());
+                    baseline_composites = false;
+                }
+                if let Some(space) = baseline_space.as_mut() {
+                    coverage_metrics::inject_coverage_metrics(space, &file_coverage);
+                }
+            }
+            if let Some(context) = head_coverage.as_ref()
+                && !is_deleted
+                && let Some(file_coverage) = coverage_metrics::coverage_for_file(context, utf8_path)
+            {
+                if current_space.is_none() {
+                    current_space = Some(empty_space());
+                    current_composites = false;
+                }
+                if let Some(space) = current_space.as_mut() {
+                    coverage_metrics::inject_coverage_metrics(space, &file_coverage);
+                }
+            }
+        }
+
         let metric_diffs: Vec<MetricDiff> = file_selectors
             .iter()
-            .map(|sel| {
+            .filter_map(|sel| {
                 // A side whose static analysis is unavailable cannot
                 // value any analyzer-derived selector: the keys are
                 // absent from its synthetic history-only space, and
@@ -1404,22 +1527,58 @@ fn run_diff_inner(
                 // a numeric zero would render the entire history as a
                 // fresh regression and trip delta thresholds on
                 // fabricated values. New rows keep their 🆕 shape.
-                let baseline_history_missing = matches!(histories.as_ref(), Some((None, _)))
-                    && !is_new_row
-                    && sel.name.starts_with("history.");
-                let baseline_unavailable = baseline_history_missing
-                    || (baseline_space.is_some()
-                        && !history_metrics::selector_available(
-                            sel.name,
-                            baseline_composites,
-                            baseline_history_available,
-                        ));
-                let current_unavailable = current_space.is_some()
-                    && !history_metrics::selector_available(
-                        sel.name,
-                        current_composites,
-                        current_history_available,
-                    );
+                //
+                // Coverage selectors read per-side *key presence*
+                // instead: `inject_coverage_metrics` publishes a
+                // dimension only when the report measured it, so the
+                // key itself is the measured-or-absent signal — per
+                // dimension (a Go coverprofile measures lines but no
+                // branches) and per side (absent base coverage renders
+                // the head value as a new measurement, never a
+                // fabricated regression — absent ≠ 0, extended to
+                // diff). A file measured on *neither* side drops the
+                // entry entirely: the column reads `–` and the row
+                // stays droppable as unchanged — a permanent `n/a`
+                // cell on every uninstrumented file would be noise.
+                let (baseline_unavailable, current_unavailable) =
+                    if sel.name.starts_with("coverage.") {
+                        let measured = |space: &Option<MetricSpace>| {
+                            space.as_ref().is_some_and(|s| {
+                                s.metrics
+                                    .get(&mehen_core::MetricKey::new(metric_set_key_for(sel.name)))
+                                    .is_some()
+                            })
+                        };
+                        let base_measured = measured(&baseline_space);
+                        let head_measured = measured(&current_space);
+                        if !base_measured && !head_measured {
+                            return None;
+                        }
+                        (
+                            baseline_space.is_some() && !base_measured,
+                            current_space.is_some() && !head_measured,
+                        )
+                    } else {
+                        let baseline_history_missing =
+                            matches!(histories.as_ref(), Some((None, _)))
+                                && !is_new_row
+                                && sel.name.starts_with("history.");
+                        (
+                            baseline_history_missing
+                                || (baseline_space.is_some()
+                                    && !history_metrics::selector_available(
+                                        sel.name,
+                                        baseline_composites,
+                                        baseline_history_available,
+                                    )),
+                            current_space.is_some()
+                                && !history_metrics::selector_available(
+                                    sel.name,
+                                    current_composites,
+                                    current_history_available,
+                                ),
+                        )
+                    };
                 let baseline = baseline_space
                     .as_ref()
                     .map(|s| read_selector_metric(s, sel))
@@ -1433,7 +1592,7 @@ fn run_diff_inner(
                 } else {
                     current - baseline
                 };
-                MetricDiff {
+                Some(MetricDiff {
                     name: sel.name,
                     label: sel.label,
                     current,
@@ -1444,7 +1603,7 @@ fn run_diff_inner(
                     is_deleted,
                     current_unavailable,
                     baseline_unavailable,
-                }
+                })
             })
             .collect();
 
@@ -1742,6 +1901,27 @@ fn evaluate_fail_on(flags: &[FailOn], docs: &[DocDiffFile]) -> Vec<String> {
 }
 
 // ── Ref resolution ─────────────────────────────────────────────────────
+
+/// Committer timestamp of a revision, for base-report staleness
+/// checks. `None` when the revision or its commit metadata cannot be
+/// read (e.g. the force-push payload fallback keeps diffing while
+/// `from_ref` no longer resolves locally) — staleness is then simply
+/// not judged.
+fn commit_time(repo: &gix::Repository, rev: &str) -> Option<std::time::SystemTime> {
+    let seconds = repo
+        .rev_parse_single(rev)
+        .ok()?
+        .object()
+        .ok()?
+        .peel_to_commit()
+        .ok()?
+        .time()
+        .ok()?
+        .seconds;
+    u64::try_from(seconds)
+        .ok()
+        .map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s))
+}
 
 fn resolve_refs(opts: &DiffOpts, ci_ctx: &Option<ci::CiContext>) -> (String, String) {
     if let (Some(from), Some(to)) = (&opts.from, &opts.to) {
@@ -3450,6 +3630,8 @@ binary.md binary
             show_unchanged: false,
             ignore_git_attributes: true,
             fail_on: vec![],
+            coverage: Default::default(),
+            base_coverage: vec![],
         }
     }
 

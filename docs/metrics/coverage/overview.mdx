@@ -9,8 +9,10 @@ and size metrics computed from source. mehen does not instrument or run your tes
 runner already produces a coverage report; mehen ingests it, maps its file paths onto the files
 under analysis, and publishes coverage as a first-class metric category: selectable in
 [`mehen top-offenders`](/commands/top-offenders), gateable through
-[`mehen.toml` thresholds](/configuration), and rendered in the JSON and Markdown reports of
-[`mehen metrics`](/commands/metrics).
+[`mehen.toml` thresholds](/configuration), rendered in the JSON and Markdown reports of
+[`mehen metrics`](/commands/metrics), and carried as per-file **trend columns** in
+[`mehen diff`](/commands/diff#coverage-trend-columns) (base side supplied via `--base-coverage`,
+retrieved for you by the [GitHub Action](/guides/github-action#coverage-trends)).
 
 Coverage answers a question no static metric can: *which of this code do the tests actually
 exercise?* Combined with complexity it locates the riskiest code in a repository — complex **and**

@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
+  buildDiffArgs,
   canonicalMetricName,
+  codecovToLcov,
   collectThresholdViolations,
   diffJsonHasDocs,
   extractMarkdownDocsSection,
   formatMetricCell,
   inferPolarity,
+  isBaseCoverageFailure,
   isGateFailureReport,
   isNotApplicable,
+  listFilesRecursively,
   parseGateViolations,
   parseList,
   parseThresholds,
@@ -397,4 +402,198 @@ test("collectThresholdViolations skips non-applicable metrics", () => {
   ];
   const violations = collectThresholdViolations(diffs, thresholds);
   assert.deepEqual(violations, []);
+});
+
+
+// ── Base coverage retrieval (issue #248) ─────────────────────────────
+
+test("codecovToLcov maps hit, miss, and partial statuses to DA records", () => {
+  const lcov = codecovToLcov({
+    totals: { coverage: 66.67 },
+    files: [
+      {
+        name: "src/lib.rs",
+        totals: { lines: 3 },
+        // 0 = hit, 1 = miss, 2 = partial (partial executed → hit).
+        line_coverage: [
+          [1, 0],
+          [2, 1],
+          [3, 2],
+        ],
+      },
+    ],
+  });
+  assert.equal(lcov, "SF:src/lib.rs\nDA:1,1\nDA:2,0\nDA:3,1\nend_of_record\n");
+});
+
+test("codecovToLcov never fabricates branch records", () => {
+  const lcov = codecovToLcov({
+    files: [
+      {
+        name: "a.py",
+        line_coverage: [
+          [1, 2],
+          [2, 2],
+        ],
+      },
+    ],
+  });
+  // Partials come from branch data upstream, but codecov's merged view
+  // has no original arms — inventing BRDA records would poison
+  // coverage.branch gates.
+  assert.ok(!lcov.includes("BRDA"));
+  assert.equal(lcov, "SF:a.py\nDA:1,1\nDA:2,1\nend_of_record\n");
+});
+
+test("codecovToLcov skips malformed entries and unknown statuses", () => {
+  const lcov = codecovToLcov({
+    files: [
+      {
+        name: "b.go",
+        line_coverage: [
+          [1, 0],
+          [0, 0], // non-positive line
+          [-3, 1], // negative line
+          [2.5, 0], // fractional line
+          [4], // too short
+          "junk", // not an array
+          [5, "1/2"], // unknown status encoding → skipped, not guessed
+          [6, 3], // unknown numeric status
+          [7, 1],
+        ],
+      },
+    ],
+  });
+  assert.equal(lcov, "SF:b.go\nDA:1,1\nDA:7,0\nend_of_record\n");
+});
+
+test("codecovToLcov returns null when nothing usable remains", () => {
+  assert.equal(codecovToLcov(null), null);
+  assert.equal(codecovToLcov({}), null);
+  assert.equal(codecovToLcov({ files: [] }), null);
+  // A file without line data contributes nothing; an empty LCOV would
+  // fail mehen's format sniff, so the ladder must degrade to absent.
+  assert.equal(
+    codecovToLcov({ files: [{ name: "a.rs", line_coverage: [] }] }),
+    null,
+  );
+  assert.equal(
+    codecovToLcov({ files: [{ name: "", line_coverage: [[1, 0]] }] }),
+    null,
+  );
+  assert.equal(
+    codecovToLcov({ files: [{ name: "c.ts", line_coverage: [[1, 9]] }] }),
+    null,
+  );
+});
+
+test("codecovToLcov emits one record block per usable file", () => {
+  const lcov = codecovToLcov({
+    files: [
+      { name: "a.rs", line_coverage: [[1, 0]] },
+      { name: "skipped.rs", line_coverage: [] },
+      { name: "b.rs", line_coverage: [[9, 1]] },
+    ],
+  });
+  assert.equal(
+    lcov,
+    "SF:a.rs\nDA:1,1\nend_of_record\nSF:b.rs\nDA:9,0\nend_of_record\n",
+  );
+});
+
+test("listFilesRecursively returns [] for absent or empty inputs", () => {
+  assert.deepEqual(listFilesRecursively(""), []);
+  assert.deepEqual(listFilesRecursively(undefined), []);
+  assert.deepEqual(
+    listFilesRecursively("/nonexistent/mehen-test-dir"),
+    [],
+  );
+});
+
+
+test("every top-level const is declared before the entrypoint block", () => {
+  // `main()` is invoked from the `isEntrypoint()` block during module
+  // evaluation, so its synchronous call graph runs before any
+  // statement below that block has executed. Function declarations
+  // hoist; `const` bindings do not — a top-level const declared after
+  // the block is a temporal-dead-zone crash waiting for the first
+  // synchronous path that reads it. Seen live in CI as "Cannot access
+  // 'CODECOV_PENDING_RETRIES' before initialization"; importing the
+  // module (as these tests do) can never reproduce it, hence this
+  // source-order invariant.
+  const source = fs.readFileSync(
+    new URL("./github-action.mjs", import.meta.url),
+    "utf8",
+  );
+  const entry = source.indexOf("if (isEntrypoint())");
+  assert.ok(entry > 0, "entrypoint block must be present");
+  const offender = source.slice(entry).match(/^const\s+\S+/m);
+  assert.equal(
+    offender,
+    null,
+    `top-level const declared after the entrypoint block: '${offender?.[0]}'`,
+  );
+});
+
+
+test("buildDiffArgs pins coverage off when every configured report is missing", () => {
+  const saved = process.env.GHA_MEHEN_COVERAGE_FILES;
+  try {
+    // All configured files missing: without the pin, a --base-coverage
+    // argument would flip mehen's lazy trigger into head-side
+    // auto-discovery, substituting stale working-tree artifacts for
+    // the reports the caller explicitly configured.
+    process.env.GHA_MEHEN_COVERAGE_FILES =
+      "/nonexistent/mehen-a.info,/nonexistent/mehen-b.info";
+    const args = buildDiffArgs(["--base-coverage=/tmp/base.lcov"]);
+    assert.ok(args.includes("--coverage=off"), args.join(" "));
+    assert.ok(
+      !args.some((a) => a.startsWith("--coverage=/")),
+      "missing files must not be passed through",
+    );
+    assert.ok(args.includes("--base-coverage=/tmp/base.lcov"));
+
+    // No coverage configured at all: no pin — lazy semantics stay.
+    process.env.GHA_MEHEN_COVERAGE_FILES = "";
+    assert.ok(!buildDiffArgs().includes("--coverage=off"));
+  } finally {
+    if (saved === undefined) {
+      delete process.env.GHA_MEHEN_COVERAGE_FILES;
+    } else {
+      process.env.GHA_MEHEN_COVERAGE_FILES = saved;
+    }
+  }
+});
+
+test("isBaseCoverageFailure matches only stderr naming a base report path", () => {
+  const baseArgs = ["--base-coverage=/tmp/mehen-base-coverage/lcov.info"];
+  const failure = (stderr) => ({ stderr });
+  // mehen's setup error names the offending report.
+  assert.equal(
+    isBaseCoverageFailure(
+      failure(
+        "[ERROR] failed to parse coverage report `/tmp/mehen-base-coverage/lcov.info`: truncated record",
+      ),
+      baseArgs,
+    ),
+    true,
+  );
+  // A corrupt *head* report is the caller's own artifact — no retry.
+  assert.equal(
+    isBaseCoverageFailure(
+      failure("[ERROR] failed to parse coverage report `coverage/lcov.info`"),
+      baseArgs,
+    ),
+    false,
+  );
+  // Unrelated failures, missing stderr, or no base args: never retry.
+  assert.equal(
+    isBaseCoverageFailure(failure("[ERROR] git: object not found"), baseArgs),
+    false,
+  );
+  assert.equal(isBaseCoverageFailure(new Error("spawn failed"), baseArgs), false);
+  assert.equal(
+    isBaseCoverageFailure(failure("failed to parse coverage report"), []),
+    false,
+  );
 });

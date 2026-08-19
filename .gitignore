@@ -9,3 +9,4 @@ dist/
 .claude/worktrees/
 .claude/setting.local.json.DS_Store
 .DS_Store
+.env

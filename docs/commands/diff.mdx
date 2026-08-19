@@ -24,6 +24,8 @@ mehen diff [OPTIONS]
 | `--show-unchanged` | Show files where every metric is unchanged. |
 | `--ignore-git-attributes[=<BOOL>]` | Skip files marked `linguist-generated`, `linguist-vendored`, or `binary` (default `true`; `--ignore-generated` remains an alias). |
 | `--fail-on <FAIL_ON>` | Exit non-zero when named thresholds are crossed. Comma-separated: `dmi-drop`, `new-broken-link`, `filler-high`, `all`. |
+| `--coverage[=PATH\|auto\|off]` | Head-side coverage input, with the same semantics as on [`mehen metrics`](/commands/metrics): explicit report paths (repeatable), `auto` to [discover reports](/metrics/coverage/auto-discovery), `off` to disable. Bare `--coverage` means `auto`. When omitted, coverage loads lazily — when a `coverage.*` metric or configured threshold asks for it, or when `--base-coverage` is given. |
+| `--base-coverage=<PATH>` | Coverage report(s) for the **base** revision (repeatable). Enriches the baseline side of the diff so `coverage.*` columns carry real trend arrows instead of "new measurement". Explicit paths only — no discovery, since the working tree holds *head* artifacts. See [Coverage trend columns](#coverage-trend-columns). |
 | `--config <PATH>` | Pin a [configuration file](/configuration) instead of discovering `mehen.toml` upward from the working directory. |
 
 ## Examples
@@ -95,6 +97,40 @@ how much of the file's full repository history has moved, normalized by its
 size). The two history columns are computed by walking the git history of each
 compared revision — see the [history metric family](/metrics/history/overview). All columns are review-prioritization signals, not quality
 verdicts: a rising number flags *where to look*, not *that the code is bad*.
+
+## Coverage trend columns
+
+`mehen diff` folds [test coverage](/metrics/coverage/overview) into both sides of the comparison:
+
+- **Head side** — `--coverage` with the exact flag semantics of `mehen metrics` and
+  `mehen top-offenders` (explicit paths hard-error when missing; discovered reports degrade to
+  warnings).
+- **Base side** — `--base-coverage=<PATH>`, explicit paths only. The diff re-analyzes the base
+  revision's blobs, so a report generated *at the base revision* lines up with the recomputed base
+  spans without any line mapping. mehen never retrieves reports itself (it stays network-free); a CI
+  layer such as the [GitHub Action](/guides/github-action#coverage-trends) fetches the base report
+  and hands over plain paths.
+
+When coverage resolves for either side and no explicit `--metrics` list is given, a **Coverage**
+column (the `coverage.line` rate — the one dimension every supported format measures) joins the
+default columns. With explicit `--metrics`, select coverage columns yourself (`coverage.line`,
+`coverage.branch`, `coverage.function`, or their `.covered`/`.total` counters).
+
+The [measured-or-absent doctrine](/metrics/coverage/overview) extends to the diff:
+
+| Situation | Rendering |
+|---|---|
+| Both sides measured | Real delta with a trend arrow (higher coverage = 🟢). |
+| Head measured, base not | `85 (main: n/a)` — a **new measurement**, never a fabricated regression; the delta claims no direction. |
+| Base measured, head not | `n/a (main: 72)` — a lost measurement, equally direction-free. |
+| Neither side measured | The cell renders `–` and the entry is omitted from JSON; an otherwise-unchanged row stays droppable. |
+
+A base report whose file modification time predates the base commit itself cannot describe that
+commit's code (recency-based retrieval fallbacks land exactly here); mehen warns on stderr, and the
+warning honors the same `stale-warning` key under `[coverage]` in [`mehen.toml`](/configuration).
+
+Configured `coverage.*` thresholds gate the **head** side like every other metric this diff reports,
+and a configured coverage threshold is itself a lazy ingestion trigger — no flag needed.
 
 ## `--fail-on` thresholds
 

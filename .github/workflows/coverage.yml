@@ -7,9 +7,13 @@ on:
     branches: [main]
 
 permissions:
-  id-token: write
   contents: read
   checks: write
+  # OIDC token for codecov uploads (use_oidc: true).
+  id-token: write
+  # The mehen action posts/updates the sticky PR metrics comment.
+  pull-requests: write
+  issues: write
 
 jobs:
   coverage:
@@ -17,6 +21,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          # Full history: `mehen diff` resolves origin/<base> and walks
+          # both revisions for the history.* columns.
+          fetch-depth: 0
 
       - name: Set up Rust toolchain
         run: rustup show
@@ -44,24 +52,76 @@ jobs:
           mkdir -p target/llvm-cov
           cargo llvm-cov nextest --workspace --locked --no-fail-fast --all-features --ignore-filename-regex 'src/languages/language_.*\.rs$' --lcov --output-path target/llvm-cov/lcov-branch.info
 
+      # OIDC uploads have been failing with 404 "Repository not found"
+      # since the org rename (ophidiarium → ophi-dev) left codecov's
+      # ingest-side repo record on the old slug — verified locally: a
+      # token-based upload succeeds while codecov echoes the pre-rename
+      # slug in its response URL. Keep OIDC and fail loudly for now so
+      # the breakage is on CI record; the token switch (or a codecov
+      # support-side fix) follows.
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/test-results-action@v1
+        uses: codecov/codecov-action@v7
         with:
+          report_type: test_results
           files: target/nextest/ci/junit.xml
           use_oidc: true
+          fail_ci_if_error: true
           verbose: true
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
         with:
           files: target/llvm-cov/lcov-branch.info
-          fail_ci_if_error: false
           use_oidc: true
+          fail_ci_if_error: true
           verbose: true
 
       - name: Upload coverage artifacts
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: target/llvm-cov/lcov-branch.info
+
+      # Dogfooding issue #248: the action consumes the LCOV file just
+      # produced — head side directly, base side via the cache/codecov
+      # retrieval ladder — so PR comments carry coverage trend columns.
+      # Runs even when tests failed (`!cancelled()`): the metrics
+      # comment matters most on red PRs; a missing report file only
+      # degrades the coverage columns, never the comment.
+      - name: Publish mehen metrics
+        if: ${{ !cancelled() }}
+        uses: ./
+        with:
+          install-method: cargo
+          # `crates` carries the per-language analyzer + engine
+          # source after the 1.0 workspace split; `xtask` is the
+          # build-helper crate. `docs/` (Mintlify) and the top-level
+          # Markdown files feed the Phase-F `<!-- mehen-docs -->`
+          # documentation-metrics section. Any path that matches one
+          # of mehen's registered Markdown extensions
+          # (md/markdown/mdown/mkd/mkdn/mdx) is routed through the
+          # documentation pipeline. Keep this list in sync with every
+          # root Markdown file so doc-only PRs do not silently skip
+          # the self-check.
+          paths: |
+            crates
+            xtask
+            docs
+            README.md
+            AGENTS.md
+            CLAUDE.md
+            CHANGELOG.md
+          # `xtask/templates/grammar.rs` is an askama template — it
+          # has the `.rs` extension so language detection routes it
+          # through the Rust analyzer, but it carries `{{ c_name }}`
+          # and other template directives that don't parse as Rust.
+          # The analyzer reports `rust.syntax_error` diagnostics that
+          # flip `mehen diff`'s exit code to 1 (per plan §9.3), even
+          # when the JSON report is otherwise complete. Skip it.
+          exclude: |
+            xtask/templates/**
+          coverage-files: target/llvm-cov/lcov-branch.info
+          codecov-token: ${{ secrets.CODECOV_API_TOKEN }}
