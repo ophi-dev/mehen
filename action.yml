@@ -74,6 +74,30 @@ inputs:
     description: "Markdown heading used for the sticky pull request comment."
     required: false
     default: "## 📊 Source Code Metrics"
+  coverage-files:
+    description: >-
+      Coverage report paths produced by an earlier test step (newline, comma, or semicolon
+      separated; literal paths, no globs). Passed to mehen diff as head-side --coverage reports.
+      On pull requests the same logical reports are retrieved for the base revision and passed
+      as --base-coverage (see coverage-base-source); on pushes to the default branch they are
+      saved to the Actions cache as future pull-request baselines.
+    required: false
+    default: ""
+  coverage-base-source:
+    description: >-
+      Where base-revision coverage comes from on pull requests: auto (exact cache hit, then
+      codecov.io, then nearest default-branch cache, then absent), cache, codecov, or off.
+      Every fallback level is disclosed in the PR comment.
+    required: false
+    default: "auto"
+  codecov-token:
+    description: >-
+      Codecov API access token for coverage-base-source auto/codecov: a personal API access
+      token generated under Settings -> Access on app.codecov.io — NOT the repository upload
+      token (the API rejects upload tokens). Optional for public repositories; required for
+      private ones.
+    required: false
+    default: ""
 
 outputs:
   violations:
@@ -98,6 +122,60 @@ runs:
       if: ${{ inputs.install-method == 'cargo' }}
       uses: dtolnay/rust-toolchain@stable
 
+    # ── Base coverage retrieval (issue #248) ──────────────────────────
+    # Push to the default branch: copy the just-produced coverage
+    # reports into a staging directory and save them under the pushed
+    # SHA, so future pull requests can restore their base revision's
+    # reports by exact key. The staging directory lives under
+    # runner.temp — restoring it on a PR run can never overwrite the
+    # head reports the caller's test step just wrote into the
+    # workspace.
+    - name: Stage coverage reports for the base cache
+      id: coverage-stage
+      if: ${{ inputs.coverage-files != '' && (inputs.coverage-base-source == 'auto' || inputs.coverage-base-source == 'cache') && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      shell: bash
+      env:
+        GHA_MEHEN_COVERAGE_FILES: ${{ inputs.coverage-files }}
+        MEHEN_COVERAGE_DIR: ${{ runner.temp }}/mehen-base-coverage
+      run: |
+        staged=0
+        mkdir -p "$MEHEN_COVERAGE_DIR"
+        while IFS= read -r entry; do
+          f="$(printf '%s' "$entry" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          [ -z "$f" ] && continue
+          if [ -f "$f" ]; then
+            dest="$MEHEN_COVERAGE_DIR/${f#/}"
+            mkdir -p "$(dirname "$dest")"
+            cp "$f" "$dest"
+            staged=$((staged + 1))
+          else
+            echo "::warning::mehen: coverage file '$f' not found; it will be missing from the base-coverage cache"
+          fi
+        done < <(printf '%s\n' "$GHA_MEHEN_COVERAGE_FILES" | tr ',;' '\n\n')
+        echo "staged=$staged" >> "$GITHUB_OUTPUT"
+
+    - name: Save base coverage cache
+      if: ${{ steps.coverage-stage.outputs.staged != '' && steps.coverage-stage.outputs.staged != '0' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/mehen-base-coverage
+        key: mehen-coverage-${{ github.sha }}
+
+    # Pull request: restore the base revision's reports by exact key.
+    # On a miss, the prefix restore-key falls back to the most recent
+    # default-branch entry — recency-based, not ancestor-aware, so the
+    # runner script discloses that level explicitly (and prefers
+    # codecov by exact SHA over the fallback under 'auto').
+    - name: Restore base coverage cache
+      id: coverage-restore
+      if: ${{ inputs.coverage-files != '' && (inputs.coverage-base-source == 'auto' || inputs.coverage-base-source == 'cache') && github.event_name == 'pull_request' }}
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/mehen-base-coverage
+        key: mehen-coverage-${{ github.event.pull_request.base.sha }}
+        restore-keys: |
+          mehen-coverage-
+
     - name: Publish mehen metrics
       id: run
       shell: bash
@@ -119,3 +197,9 @@ runs:
         GHA_MEHEN_THRESHOLDS: ${{ inputs.thresholds }}
         GHA_MEHEN_FAIL_ON_THRESHOLD: ${{ inputs.fail-on-threshold }}
         GHA_MEHEN_COMMENT_TITLE: ${{ inputs.comment-title }}
+        GHA_MEHEN_COVERAGE_FILES: ${{ inputs.coverage-files }}
+        GHA_MEHEN_COVERAGE_BASE_SOURCE: ${{ inputs.coverage-base-source }}
+        GHA_MEHEN_CODECOV_TOKEN: ${{ inputs.codecov-token }}
+        GHA_MEHEN_COVERAGE_BASE_DIR: ${{ runner.temp }}/mehen-base-coverage
+        GHA_MEHEN_COVERAGE_CACHE_HIT: ${{ steps.coverage-restore.outputs.cache-hit }}
+        GHA_MEHEN_COVERAGE_CACHE_KEY: ${{ steps.coverage-restore.outputs.cache-matched-key }}

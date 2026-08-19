@@ -68,9 +68,11 @@ function isEntrypoint() {
 
 async function main() {
   const thresholds = parseThresholds(input("THRESHOLDS"));
+  const context = readGithubContext();
+  const baseCoverage = await resolveBaseCoverage(context);
   const cli = prepareMehen();
   const version = detectMehenVersion(cli);
-  const diffArgs = buildDiffArgs();
+  const diffArgs = buildDiffArgs(baseCoverage.args);
   const diff = runMehen(cli, diffArgs, { acceptGateOutput: isGateFailureReport });
   const reportsDir = process.env.RUNNER_TEMP || os.tmpdir();
   const reportJson = path.join(reportsDir, `mehen-diff-${Date.now()}.json`);
@@ -78,7 +80,6 @@ async function main() {
 
   const diffs = parseDiffJson(diff.stdout);
   const gateViolations = parseGateViolations(diff.stdout);
-  const context = readGithubContext();
   const violations = collectThresholdViolations(diffs, thresholds);
   let markdown = renderMarkdown(
     diffs,
@@ -87,6 +88,7 @@ async function main() {
     violations,
     version,
     gateViolations,
+    baseCoverage.disclosure,
   );
 
   // Phase F (§39): `mehen diff --output-format markdown` emits a
@@ -158,7 +160,7 @@ function parseList(value) {
   return parts.map((part) => part.trim()).filter(Boolean);
 }
 
-function buildDiffArgs() {
+function buildDiffArgs(extraArgs = []) {
   const args = ["diff", "--output-format", "json"];
   const from = input("FROM").trim();
   const to = input("TO").trim();
@@ -166,6 +168,7 @@ function buildDiffArgs() {
   const paths = parseList(input("PATHS"));
   const include = parseList(input("INCLUDE"));
   const exclude = parseList(input("EXCLUDE"));
+  const coverageFiles = parseList(input("COVERAGE_FILES"));
   if (boolInput("EXCLUDE_TESTS", true)) {
     for (const pattern of DEFAULT_TEST_EXCLUDES) {
       if (!exclude.includes(pattern)) {
@@ -195,8 +198,255 @@ function buildDiffArgs() {
   if (boolInput("SHOW_UNCHANGED", false)) {
     args.push("--show-unchanged");
   }
+  // Head-side coverage: the reports the caller's test step just wrote.
+  // A configured-but-missing file is warned about and skipped rather
+  // than passed through — mehen hard-errors on missing explicit
+  // reports (an explicit gate input that silently disappears is a
+  // broken gate), but the action is a reporter: the caller's test
+  // step owns failing the build when coverage generation breaks.
+  for (const file of coverageFiles) {
+    if (fs.existsSync(file)) {
+      args.push(`--coverage=${file}`);
+    } else {
+      console.warn(
+        `mehen: coverage file '${file}' not found; head-side coverage will be missing for it`,
+      );
+    }
+  }
+  args.push(...extraArgs);
 
   return args;
+}
+
+// ── Base coverage retrieval (issue #248) ─────────────────────────────
+//
+// The action, not the mehen binary, owns base-revision coverage: mehen
+// stays network-free and receives plain report paths. Degradation
+// ladder: exact cache hit → codecov by SHA → nearest default-branch
+// cache (recency-based, so explicitly disclosed) → absent (columns
+// render as new measurements). Every level is stated in the sticky PR
+// comment — never silently.
+
+const CODECOV_PENDING_RETRIES = 3;
+const CODECOV_RETRY_DELAY_MS = 5000;
+
+/**
+ * Resolve base-revision coverage into `--base-coverage=` CLI arguments
+ * plus a human-readable disclosure line for the PR comment. Returns
+ * `{ args: [], disclosure: null }` when base coverage does not apply
+ * (no coverage-files configured, source off, or not a pull request).
+ */
+async function resolveBaseCoverage(context) {
+  const none = { args: [], disclosure: null };
+  const files = parseList(input("COVERAGE_FILES"));
+  const source =
+    input("COVERAGE_BASE_SOURCE", "auto").trim().toLowerCase() || "auto";
+  if (files.length === 0 || source === "off") {
+    return none;
+  }
+  if (!["auto", "cache", "codecov"].includes(source)) {
+    throw new Error(
+      `Unsupported coverage-base-source '${source}'. Use auto, cache, codecov, or off.`,
+    );
+  }
+  // Base trends are a pull-request concept: pushes and manual runs
+  // compare event-defined ranges whose base has no retrievable report.
+  if (context.eventName !== "pull_request" || !context.baseSha) {
+    return none;
+  }
+  const shortBase = context.baseSha.slice(0, 7);
+
+  const cacheDir = input("COVERAGE_BASE_DIR").trim();
+  const exactHit = input("COVERAGE_CACHE_HIT").trim().toLowerCase() === "true";
+  const matchedKey = input("COVERAGE_CACHE_KEY").trim();
+  const cachedReports = listFilesRecursively(cacheDir);
+
+  // Rung 1 — exact cache hit: the base SHA's own reports.
+  if (source !== "codecov" && exactHit && cachedReports.length > 0) {
+    return {
+      args: cachedReports.map((file) => `--base-coverage=${file}`),
+      disclosure: `Base coverage: restored from the Actions cache for \`${shortBase}\`.`,
+    };
+  }
+
+  // Rung 2 — codecov by exact SHA. Line dimension only: codecov's
+  // merged view has no original branch arms, and fabricating BRDA
+  // records would poison branch-coverage gates.
+  if (source !== "cache") {
+    const lcov = await fetchCodecovBaseReport(context);
+    if (lcov) {
+      const dir = path.join(
+        process.env.RUNNER_TEMP || os.tmpdir(),
+        "mehen-codecov-base",
+      );
+      fs.mkdirSync(dir, { recursive: true });
+      const reportPath = path.join(dir, "codecov-base.lcov");
+      fs.writeFileSync(reportPath, lcov, "utf8");
+      return {
+        args: [`--base-coverage=${reportPath}`],
+        disclosure: `Base coverage: fetched from codecov.io for \`${shortBase}\` (line dimension only).`,
+      };
+    }
+  }
+
+  // Rung 3 — nearest default-branch cache via the prefix restore-key:
+  // recency-based, not ancestor-aware, so the staleness is disclosed
+  // (mehen itself also warns when the report predates the base
+  // commit).
+  if (source !== "codecov" && cachedReports.length > 0) {
+    const label = matchedKey ? ` (\`${matchedKey}\`)` : "";
+    return {
+      args: cachedReports.map((file) => `--base-coverage=${file}`),
+      disclosure: `Base coverage: nearest default-branch cache${label} — no saved report for \`${shortBase}\` itself, so coverage trends may compare against an older commit.`,
+    };
+  }
+
+  // Rung 4 — absent. Coverage columns render head values as new
+  // measurements, never fabricated regressions.
+  return {
+    args: [],
+    disclosure: `Base coverage: unavailable for \`${shortBase}\` — coverage values are shown as new measurements, not trends.`,
+  };
+}
+
+/**
+ * Fetch the codecov commit report for the PR base SHA and convert it
+ * to LCOV. Returns null (never throws) when codecov has no usable
+ * report — the ladder degrades instead. A `pending` report state is
+ * retried briefly; a 404 means no upload exists for that SHA and is
+ * final.
+ */
+async function fetchCodecovBaseReport(context) {
+  const [owner, repo] = context.repository.split("/");
+  if (!owner || !repo) {
+    return null;
+  }
+  const token = input("CODECOV_TOKEN").trim();
+  const url = `https://api.codecov.io/api/v2/github/${encodeURIComponent(owner)}/repos/${encodeURIComponent(repo)}/report/?sha=${encodeURIComponent(context.baseSha)}`;
+  for (let attempt = 1; attempt <= CODECOV_PENDING_RETRIES; attempt += 1) {
+    let payload;
+    try {
+      const headers = {
+        Accept: "application/json",
+        "User-Agent": "mehen-action",
+      };
+      if (token) {
+        headers.Authorization = `bearer ${token}`;
+      }
+      const response = await fetch(url, { headers });
+      if (response.status === 404) {
+        console.log(
+          `codecov has no report for base ${context.baseSha}; trying the next base-coverage source.`,
+        );
+        return null;
+      }
+      if (!response.ok) {
+        console.warn(
+          `codecov API responded ${response.status} for base ${context.baseSha}; trying the next base-coverage source.`,
+        );
+        return null;
+      }
+      payload = await response.json();
+    } catch (error) {
+      console.warn(
+        `codecov API request failed (${error.message}); trying the next base-coverage source.`,
+      );
+      return null;
+    }
+    if (payload && payload.state === "pending") {
+      console.log(
+        `codecov report for ${context.baseSha} is still processing (attempt ${attempt}/${CODECOV_PENDING_RETRIES}).`,
+      );
+      if (attempt < CODECOV_PENDING_RETRIES) {
+        await sleep(CODECOV_RETRY_DELAY_MS);
+      }
+      continue;
+    }
+    const lcov = codecovToLcov(payload);
+    if (!lcov) {
+      console.log(
+        `codecov report for ${context.baseSha} carries no per-file line data; trying the next base-coverage source.`,
+      );
+    }
+    return lcov;
+  }
+  console.warn(
+    `codecov report for ${context.baseSha} stayed pending; trying the next base-coverage source.`,
+  );
+  return null;
+}
+
+/**
+ * Convert a codecov API v2 commit report to LCOV `SF:`/`DA:` records.
+ *
+ * `line_coverage` entries are `[line, status]` pairs with
+ * 0 = hit, 1 = miss, 2 = partial (verified against this repository's
+ * own codecov data for 0/1; 2 follows codecov's documented session
+ * encoding). A partial line executed, so it maps to a hit — and no
+ * `BRDA` records are fabricated: codecov's merged view does not
+ * preserve original branch arms, and invented arms would poison
+ * `coverage.branch` gates. Unknown statuses and malformed entries are
+ * skipped (measured-or-absent). Returns null when no file yields any
+ * line record — an empty LCOV file would fail mehen's format sniff,
+ * and "absent with disclosure" is the honest degradation.
+ */
+function codecovToLcov(report) {
+  const files = Array.isArray(report?.files) ? report.files : [];
+  let out = "";
+  for (const file of files) {
+    const name = typeof file?.name === "string" ? file.name.trim() : "";
+    const lines = Array.isArray(file?.line_coverage) ? file.line_coverage : [];
+    if (!name || lines.length === 0) {
+      continue;
+    }
+    let records = "";
+    for (const entry of lines) {
+      if (!Array.isArray(entry) || entry.length < 2) {
+        continue;
+      }
+      const [line, status] = entry;
+      if (!Number.isInteger(line) || line <= 0) {
+        continue;
+      }
+      if (status === 0 || status === 2) {
+        records += `DA:${line},1\n`;
+      } else if (status === 1) {
+        records += `DA:${line},0\n`;
+      }
+    }
+    if (!records) {
+      continue;
+    }
+    out += `SF:${name}\n${records}end_of_record\n`;
+  }
+  return out || null;
+}
+
+/** Every file under `dir`, recursively, sorted for determinism. */
+function listFilesRecursively(dir) {
+  if (!dir || !fs.existsSync(dir)) {
+    return [];
+  }
+  const out = [];
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile()) {
+        out.push(full);
+      }
+    }
+  }
+  return out.sort();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function prepareMehen() {
@@ -484,6 +734,7 @@ function readGithubContext() {
     eventName: process.env.GITHUB_EVENT_NAME || "",
     repository: process.env.GITHUB_REPOSITORY || "",
     sha: pullRequest?.head?.sha || process.env.GITHUB_SHA || "",
+    baseSha: pullRequest?.base?.sha || "",
     baseLabel: pullRequest?.base?.ref || input("FROM").trim() || "base",
     prNumber: pullRequest?.number || payload.number || null,
     token: input("GITHUB_TOKEN").trim() || process.env.GITHUB_TOKEN || "",
@@ -514,6 +765,7 @@ function renderMarkdown(
   violations,
   version = "",
   gateViolations = [],
+  coverageNote = null,
 ) {
   const title = input("COMMENT_TITLE", DEFAULT_TITLE).trim() || DEFAULT_TITLE;
   const scope =
@@ -582,6 +834,12 @@ function renderMarkdown(
   if (sawNotApplicable) {
     body +=
       "\n> `—` indicates the metric does not apply to the file's language.\n";
+  }
+
+  // Base-coverage source disclosure (issue #248): every rung of the
+  // retrieval ladder is stated — never silently.
+  if (coverageNote) {
+    body += `\n> ${coverageNote}\n`;
   }
 
   body += `\n${renderFooter(version)}\n`;
@@ -935,6 +1193,7 @@ export {
   DEFAULT_TEST_EXCLUDES,
   alignFileMetrics,
   canonicalMetricName,
+  codecovToLcov,
   collectThresholdViolations,
   diffJsonHasDocs,
   extractMarkdownDocsSection,
@@ -942,6 +1201,7 @@ export {
   inferPolarity,
   isGateFailureReport,
   isNotApplicable,
+  listFilesRecursively,
   parseGateViolations,
   parseList,
   parseThresholds,

@@ -81,6 +81,9 @@ trees:
 | `thresholds` | `""` | Adverse per-file delta limits, e.g. `cyclomatic=5,cognitive=3,loc.lloc=100`. |
 | `fail-on-threshold` | `true` | Fail the action when any configured threshold is exceeded. |
 | `comment-title` | `## 📊 Source Code Metrics` | Markdown heading used for the sticky comment. |
+| `coverage-files` | `""` | Coverage report paths produced by an earlier test step (newline, comma, or semicolon separated; literal paths). Enables the [coverage trend columns](#coverage-trends). |
+| `coverage-base-source` | `auto` | Where base-revision coverage comes from on PRs: `auto`, `cache`, `codecov`, or `off`. |
+| `codecov-token` | `""` | Codecov **API access token** for the `codecov` source. Optional for public repositories. |
 
 ## Outputs
 
@@ -128,6 +131,62 @@ single table whose columns are the union of each language's defaults — every r
 columns its analyzer emits, and the rest render as `–`. This keeps SQL changes visible on the default
 action path instead of silently dropping out. See [`mehen diff`](/commands/diff) for how the default
 metric set is resolved per file language.
+
+## Coverage trends
+
+Point `coverage-files` at the report(s) your test step already writes and the sticky comment gains a
+**Coverage** column with real trend arrows — head value vs. the base revision's value:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - run: npm test -- --coverage   # writes coverage/lcov.info
+
+      - uses: ophi-dev/mehen@v1
+        with:
+          paths: src
+          coverage-files: coverage/lcov.info
+          codecov-token: ${{ secrets.CODECOV_API_TOKEN }}   # optional on public repos
+```
+
+The **head side** is simply passed to `mehen diff --coverage=<file>`. The **base side** is retrieved
+by the action — mehen itself stays network-free — walking a degradation ladder whose every rung is
+disclosed in the PR comment, never silently:
+
+1. **Exact cache hit** — on every push to the default branch the action saves your `coverage-files`
+   to the Actions cache under `mehen-coverage-<sha>`; a PR restores the entry for its exact base SHA.
+2. **codecov.io by base SHA** — the commit report is fetched from the codecov API and converted to
+   LCOV (line dimension only: codecov's merged view has no original branch arms, and fabricated ones
+   would poison `coverage.branch` gates). This is the durable source — Actions cache entries evict
+   after 7 days unused or under repository size pressure.
+3. **Nearest default-branch cache** — a prefix-key fallback that is recency-based, not
+   ancestor-aware; the comment discloses that trends may compare against an older commit, and mehen
+   itself warns when the restored report predates the base commit.
+4. **Absent** — coverage renders as new measurements (`85 (main: n/a)`), never fabricated
+   regressions.
+
+`coverage-base-source` pins the ladder to one source: `cache` (rungs 1 → 3 → 4), `codecov`
+(2 → 4), or `off` (head-side coverage only).
+
+<Warning>
+`codecov-token` must be a **personal API access token** — generate one under *Settings → Access* on
+[app.codecov.io](https://app.codecov.io). The `CODECOV_TOKEN` repository *upload* token most repos
+already have in secrets is a different credential and the API rejects it. On public repositories the
+token can be omitted entirely.
+</Warning>
+
+The cache-save rung requires the action to run on default-branch pushes too (after the same test
+step), so trigger the workflow with both `on: pull_request` and `on: push: branches: [main]`.
 
 ## Examples
 
