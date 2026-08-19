@@ -25,13 +25,14 @@ vocabulary across languages.
 | Kind | Examples |
 |---|---|
 | `File` | Always the root space. |
-| `Function` | Top-level functions, methods. |
+| `Function` | Top-level functions, methods, SQL routines (a `CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`, package-body routines, nested subprograms). |
 | `Closure` | Lambdas / closures / arrow functions. |
 | `Class` | `class`, `record`, `data class`. |
 | `Interface` | `interface`, `trait`, `protocol`. |
 | `Trait` | Rust traits, Kotlin traits where distinct. |
 | `Impl` | Rust `impl` blocks. |
 | `Module` | Files / Rust `mod` / Python `class`-as-namespace where applicable. |
+| `Custom` | Analyzer-defined scopes for declarative languages — e.g. `sql.statement` (one top-level SQL statement; routine definitions nest as `Function` spaces inside it). |
 
 ## Aggregation
 

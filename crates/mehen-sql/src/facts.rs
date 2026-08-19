@@ -323,6 +323,26 @@ pub(crate) struct StatementFacts {
     pub end_byte: u32,
 }
 
+/// One procedural unit — a routine definition with a body: standalone
+/// `CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`, a routine nested in a package
+/// or type body, or a subprogram declared inside another routine's DECLARE
+/// section. Collected in *pre-order* (an enclosing unit precedes the units
+/// it contains), so callers can rebuild the nesting from byte containment.
+///
+/// These become `SpaceKind::Function` spaces: the function-shaped scopes
+/// that per-function coverage enrichment (and, later, CRAP) attach to.
+#[derive(Clone, Debug)]
+pub(crate) struct ProceduralUnitFacts {
+    /// Declared name (`betwnstr`, `dbo.do_thing`), when the grammar exposes
+    /// one as a direct child of the definition node.
+    pub name: Option<String>,
+    /// 1-based inclusive line span of the whole definition.
+    pub start_line: u32,
+    pub end_line: u32,
+    pub start_byte: u32,
+    pub end_byte: u32,
+}
+
 /// Halstead operator/operand tallies (research foundation §7). Operators and
 /// operands are deduplicated by their normalized text so `η1`/`η2` are the
 /// distinct counts.
@@ -338,6 +358,8 @@ pub(crate) struct HalsteadFacts {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SqlFileFacts {
     pub statements: Vec<StatementFacts>,
+    /// Procedural units in pre-order (see [`ProceduralUnitFacts`]).
+    pub procedural_units: Vec<ProceduralUnitFacts>,
     pub query_block_count: u32,
     pub query_block_max_depth: u32,
     pub select_item_total: u32,
@@ -387,6 +409,9 @@ pub(crate) fn extract(
 
     // ── statements ──────────────────────────────────────────────────
     classify_statements(root, &line_at, &mut facts);
+
+    // ── procedural units (function-shaped scopes) ───────────────────
+    extract_procedural_units(root, &line_at, &mut facts);
 
     // ── unparsable / parser health ──────────────────────────────────
     let unparsables = root.recursive_crawl(
@@ -2277,11 +2302,82 @@ const WRITE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
 /// otherwise `CREATE PROCEDURE … INSERT INTO t …` would still add `t` to the
 /// object-touch sets and inflate `change_risk_score` (Codex P2). Phase 1 does
 /// not analyze routine bodies; Phase 3 will.
+///
+/// The Oracle dialect emits its own `OracleCreate*Statement` kinds (not the
+/// ANSI ones), so those are listed alongside — without them an Oracle
+/// routine classifies as `create_other` and its body DML leaks into the
+/// object-touch scans. Package and type bodies are containers of routines
+/// and count as procedural for the same reasons.
 const PROCEDURAL_DEFINITIONS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::CreateProcedureStatement,
     SyntaxKind::CreateFunctionStatement,
     SyntaxKind::CreateTriggerStatement,
+    SyntaxKind::CreateTrigger,
+    SyntaxKind::OracleCreateProcedureStatement,
+    SyntaxKind::OracleCreateFunctionStatement,
+    SyntaxKind::OracleCreateTriggerStatement,
+    SyntaxKind::OracleCreatePackageStatement,
+    SyntaxKind::OracleCreateTypeBodyStatement,
 ]);
+
+/// Definition kinds that are themselves one routine — the granularity of a
+/// `SpaceKind::Function` space. Deliberately *excludes* the package/type-body
+/// containers in [`PROCEDURAL_DEFINITIONS`]: a package body is a module, and
+/// its routines are the function-shaped units inside it.
+const PROCEDURAL_UNITS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::CreateProcedureStatement,
+    SyntaxKind::CreateFunctionStatement,
+    SyntaxKind::CreateTriggerStatement,
+    SyntaxKind::CreateTrigger,
+    SyntaxKind::OracleCreateProcedureStatement,
+    SyntaxKind::OracleCreateFunctionStatement,
+    SyntaxKind::OracleCreateTriggerStatement,
+]);
+
+/// Name-bearing nodes that appear as *direct* children of a routine
+/// definition. Direct children only: a body contains call sites whose
+/// `function_name`/`object_reference` nodes belong to the *called*
+/// routine, and Oracle's optional `END <name>` repeats the name inside
+/// the begin/end block — crawling would pick those up.
+const UNIT_NAME_KINDS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::OracleFunctionName,
+    SyntaxKind::FunctionName,
+    SyntaxKind::ObjectReference,
+    SyntaxKind::TriggerReference,
+]);
+
+/// Collect procedural units (routine definitions) in pre-order.
+///
+/// `recurse_into = true` descends into matched definitions, so routines
+/// nested in package bodies and subprograms declared inside another
+/// routine's DECLARE section are collected after their container —
+/// [`ProceduralUnitFacts`]'s ordering contract.
+fn extract_procedural_units(
+    root: &ErasedSegment,
+    line_at: &impl Fn(u32) -> u32,
+    facts: &mut SqlFileFacts,
+) {
+    let units = root.recursive_crawl(&PROCEDURAL_UNITS, true, &SyntaxSet::EMPTY, false);
+    for unit in &units {
+        let Some(pm) = unit.get_position_marker() else {
+            continue;
+        };
+        let (start_byte, end_byte) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+        let name = unit
+            .segments()
+            .iter()
+            .find(|child| UNIT_NAME_KINDS.contains(child.get_type()))
+            .map(|child| child.raw().trim().to_string())
+            .filter(|name| !name.is_empty());
+        facts.procedural_units.push(ProceduralUnitFacts {
+            name,
+            start_line: line_at(start_byte),
+            end_line: line_at(end_byte.saturating_sub(1)),
+            start_byte,
+            end_byte,
+        });
+    }
+}
 
 /// Collect the distinct read and write object names touched by the file.
 ///

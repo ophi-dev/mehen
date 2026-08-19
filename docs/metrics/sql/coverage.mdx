@@ -28,9 +28,16 @@ and `coverage.line.total` — and nothing else. `coverage.branch` and `coverage.
 [measured-or-absent rule](/metrics/coverage/overview). SQLCover reports statement coverage,
 which likewise lands on the line dimension after the Cobertura transform.
 
-Coverage for SQL files attaches at the file root. mehen's per-function coverage breakdown
-applies to function-shaped scopes, and a SQL file's child scopes are statements, not functions —
-so rank and gate SQL coverage at file granularity.
+Coverage attaches at two granularities for SQL. The file root carries the totals, and every
+*routine* — a standalone `CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`, a routine inside a package or
+type body, or a subprogram declared in another routine's DECLARE section — is a function space
+in the [metric tree](/concepts/spaces), nested under its statement's span. Each routine space
+receives `coverage.line` (and `coverage.branch`, when measured) scoped to its own line range,
+exactly like functions in any other language: a package body at 50% stops being one opaque
+number and becomes "``get_a`` 100%, ``set_b`` 0%". Statement spaces themselves carry no
+coverage keys — the routine is the meaningful unit, and it is the granularity the planned CRAP
+composite consumes. [`top-offenders`](/commands/top-offenders) ranks files, so gates stay
+file-level; the per-routine values live on the spaces in the JSON report.
 
 ## utPLSQL: map database objects to file names
 

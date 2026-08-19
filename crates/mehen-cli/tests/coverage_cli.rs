@@ -314,3 +314,96 @@ fn top_offenders_ranks_by_coverage_ascending_risk() {
         "least covered first: {json}"
     );
 }
+
+/// SQL routines are function-shaped scopes too: mehen-sql nests
+/// `SpaceKind::Function` spaces (one per routine) under their
+/// `sql.statement` space, and the engine's coverage recursion annotates
+/// them through the statement layer. An Oracle package body with one
+/// covered and one uncovered routine must publish per-routine
+/// `coverage.line` — the utPLSQL-style lines-only report also pins the
+/// absent-dimension rule at routine granularity (no branch/function
+/// keys on the spaces).
+#[test]
+fn sql_package_routines_receive_per_function_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "pkg_demo.sql",
+        "-- sqlfluff:dialect:oracle\ncreate or replace package body pkg_demo is\n  function get_a return number is\n  begin\n    return 1;\n  end get_a;\n\n  procedure set_b(p number) is\n  begin\n    null;\n  end set_b;\nend pkg_demo;\n/\n",
+    );
+    // Lines-only Cobertura, the shape utPLSQL emits with -source_path
+    // file mapping: get_a's body lines hit, set_b's never executed.
+    write(
+        dir.path(),
+        "cobertura.xml",
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<coverage version="1">
+<packages><package name="PKG_DEMO">
+<class name="PKG_DEMO" filename="pkg_demo.sql" line-rate="0.5">
+<lines>
+<line number="3" hits="4" branch="false"/>
+<line number="5" hits="4" branch="false"/>
+<line number="8" hits="0" branch="false"/>
+<line number="10" hits="0" branch="false"/>
+</lines>
+</class>
+</package></packages>
+</coverage>
+"#,
+    );
+
+    let output = mehen(
+        dir.path(),
+        &["metrics", "pkg_demo.sql", "--coverage=cobertura.xml"],
+    );
+    let json = json_stdout(&output);
+
+    // Root: 2 of 4 measured lines covered. SQL publishes its flat
+    // metric map verbatim (no families pivot), so the keys sit in
+    // root.metrics.
+    let root_metrics = &json["root"]["metrics"];
+    assert_eq!(root_metrics["coverage.line.covered"], 2, "{root_metrics}");
+    assert_eq!(root_metrics["coverage.line.total"], 4);
+
+    // The statement space carries the two routine spaces; each gets
+    // span-scoped line coverage (get_a: lines 3..=6 → 2/2 hit; set_b:
+    // lines 8..=11 → 0/2), and no branch/function keys — the report
+    // has no such dimensions (absent, not zero).
+    let statement = &json["root"]["spaces"][0];
+    assert_eq!(statement["kind"]["custom"], "sql.statement", "{statement}");
+    let routines = statement["spaces"].as_array().expect("routine spaces");
+    let coverage_of = |name: &str| {
+        let space = routines
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("missing routine space {name}: {routines:?}"));
+        assert_eq!(space["kind"], "function");
+        assert!(
+            space["metrics"].get("coverage.branch").is_none()
+                && space["metrics"].get("coverage.function").is_none(),
+            "unmeasured dimensions must stay absent: {}",
+            space["metrics"]
+        );
+        (
+            space["metrics"]["coverage.line"].clone(),
+            space["metrics"]["coverage.line.covered"].clone(),
+            space["metrics"]["coverage.line.total"].clone(),
+        )
+    };
+    assert_eq!(
+        coverage_of("get_a"),
+        (
+            serde_json::json!(100.0),
+            serde_json::json!(2),
+            serde_json::json!(2)
+        )
+    );
+    assert_eq!(
+        coverage_of("set_b"),
+        (
+            serde_json::json!(0.0),
+            serde_json::json!(0),
+            serde_json::json!(2)
+        )
+    );
+}

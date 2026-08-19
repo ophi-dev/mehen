@@ -518,13 +518,22 @@ fn write_nested_spaces(out: &mut String, spaces: &[MetricSpace], depth: usize, l
         // carry no source-code roll-ups, so the Cyclomatic / Cognitive
         // / LOC tables would all be zero.
         if language == Language::Sql {
-            // A SQL per-statement space carries only its line span. Emit that
-            // one fact so the heading isn't a content-free stub (the
-            // source-code metric tables would all be zero here).
+            // A SQL per-statement space carries only its line-span metric;
+            // routine (function) spaces nested under it carry none — fall
+            // back to the space's own span so neither heading is a
+            // content-free stub (the source-code metric tables would all
+            // be zero here).
             let lines = read_metric(&space.metrics, "sql.statement.lines");
-            if lines > 0.0 {
+            let lines = if lines > 0.0 {
+                lines as i64
+            } else if space.span.start_line > 0 && space.span.end_line >= space.span.start_line {
+                i64::from(space.span.end_line - space.span.start_line + 1)
+            } else {
+                0
+            };
+            if lines > 0 {
                 let _ = writeln!(out);
-                let _ = writeln!(out, "- Lines: {}", lines as i64);
+                let _ = writeln!(out, "- Lines: {lines}");
             }
         } else if language != Language::Markdown {
             let families = MetricsFamilies::from_metrics(&space.metrics);
