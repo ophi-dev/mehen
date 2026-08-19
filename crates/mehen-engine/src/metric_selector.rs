@@ -46,7 +46,30 @@ pub(crate) const KNOWN_METRICS: &[MetricDef] = &[
     // `history.*` family is reachable via the namespaced-key path.
     ("history.hotspot", "Hotspot", Polarity::LowerIsBetter),
     ("history.churn.relative", "Churn", Polarity::LowerIsBetter),
+    // The line-rate coverage column `mehen diff` appends to the
+    // default set when coverage reports are resolved
+    // (`--coverage`/`--base-coverage`); the rest of the `coverage.*`
+    // family is reachable via the namespaced-key path.
+    ("coverage.line", "Coverage", Polarity::HigherIsBetter),
 ];
+
+/// The selector for the coverage column `mehen diff` surfaces by
+/// default when coverage was resolved for either side and the caller
+/// passed no explicit `--metrics` list. Line rate is the one dimension
+/// every supported report format measures (a Go coverprofile has no
+/// branch records; LCOV function records are optional), so it is the
+/// only dimension promoted to a default column.
+pub(crate) fn coverage_line_selector() -> MetricSelector {
+    KNOWN_METRICS
+        .iter()
+        .find(|(name, ..)| *name == mehen_core::keys::COVERAGE_LINE)
+        .map(|&(name, label, polarity)| MetricSelector {
+            name,
+            label,
+            polarity,
+        })
+        .expect("coverage.line is a KNOWN_METRICS entry")
+}
 
 /// Default metric set for `diff` (kept here so both diff and top-offenders
 /// can surface the same fallback from a single source of truth).

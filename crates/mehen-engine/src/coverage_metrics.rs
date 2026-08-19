@@ -431,6 +431,67 @@ pub(crate) fn resolve_coverage(
     )))
 }
 
+/// Ingest the explicit base-revision reports (`mehen diff
+/// --base-coverage`) into a queryable index.
+///
+/// Explicit-path semantics match [`CoverageMode::Explicit`]: every
+/// failure is a hard, user-attributable error — a base report that
+/// silently disappears would quietly demote every coverage trend to a
+/// "new measurement". No discovery runs for the base side: the working
+/// tree holds *head* artifacts, and reading them as the base
+/// measurement would fabricate zero-delta trends.
+///
+/// Staleness is the [`warn_if_stale`] doctrine applied to the base
+/// side, judged against the *base commit's* committer time rather than
+/// the head clock: a report written before the base commit existed
+/// cannot describe that commit's code — recency-based retrieval
+/// fallbacks (e.g. a CI cache prefix key falling back to an older
+/// default-branch entry) land exactly here — so base-side line
+/// attribution may be shifted. Warn-only, gated by the same
+/// `stale-warning` config key.
+pub(crate) fn resolve_base_coverage(
+    paths: &[Utf8PathBuf],
+    roots: &[Utf8PathBuf],
+    base_commit_time: Option<std::time::SystemTime>,
+    config: Option<&crate::config_file::CoverageConfig>,
+) -> Result<Option<CoverageContext>, CoverageSetupError> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let mut parsed: Vec<mehen_coverage::CoverageData> = Vec::new();
+    let mut reports: Vec<(Utf8PathBuf, mehen_coverage::CoverageFormat)> = Vec::new();
+    for path in paths {
+        let (format, data) = ingest_report(path).map_err(CoverageSetupError)?;
+        if config.is_none_or(|c| c.stale_warning)
+            && let Ok(mtime) = std::fs::metadata(path.as_std_path()).and_then(|m| m.modified())
+            && let Some(base_time) = base_commit_time
+            && mtime < base_time
+        {
+            log::warn!(
+                "base coverage report `{path}` predates the base commit — it likely describes \
+                 an older revision, so base-side line attribution may be shifted (disable this \
+                 warning with `stale-warning = false` under [coverage])"
+            );
+        }
+        reports.push((path.clone(), format));
+        parsed.push(data);
+    }
+    log::info!(
+        "base coverage: ingesting {} report(s): {}",
+        reports.len(),
+        reports
+            .iter()
+            .map(|(p, f)| format!("{p} ({f})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let merged = mehen_coverage::merge::merge_reports(parsed);
+    Ok(Some(CoverageContext::new(
+        CoverageIndex::build(merged),
+        roots,
+    )))
+}
+
 /// Warn-only staleness: a report older than the newest HEAD commit
 /// across the roots likely predates the code under analysis, so line
 /// attribution may be shifted. mtime-based and heuristic — never an
