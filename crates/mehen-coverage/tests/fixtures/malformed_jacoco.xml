@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<report name="broken">
+  <package name="com/example">
+    <sourcefile name="Foo.java">
+      <line nr="1" mi="0" ci="5"/>
+      <!-- Missing closing tags intentionally -->
+</report>

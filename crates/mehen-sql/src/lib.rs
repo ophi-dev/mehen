@@ -182,6 +182,17 @@ impl LanguageAnalyzer for SqlAnalyzer {
             root.spaces.push(space);
         }
 
+        // Procedural units become `SpaceKind::Function` spaces nested under
+        // the statement that contains them (and under each other for
+        // subprograms declared inside a routine or package body). These are
+        // the function-shaped scopes per-function coverage enrichment — and,
+        // later, CRAP — attach to.
+        attach_procedural_unit_spaces(
+            &mut root,
+            &file_facts.procedural_units,
+            file_facts.statements.len() as u32 + 1,
+        );
+
         // Unparsable segments → non-fatal diagnostics (research foundation
         // §6.16). They lower confidence but don't block the report.
         let mut diagnostics = Vec::new();
@@ -225,6 +236,80 @@ impl LanguageAnalyzer for SqlAnalyzer {
 /// touches one place.
 fn requested_dialect() -> Option<DialectKind> {
     None
+}
+
+/// Nest procedural-unit spaces by byte containment and attach them to the
+/// space tree.
+///
+/// `units` is pre-order ([`facts::ProceduralUnitFacts`]'s contract): a
+/// container precedes its contents, so a stack suffices to rebuild the
+/// nesting — routines inside package bodies and subprograms declared in a
+/// routine's DECLARE section become children of their container's space.
+/// Each top-level unit attaches to the `sql.statement` space whose span
+/// contains it (the normal case — a routine definition *is* a statement),
+/// falling back to the root defensively.
+///
+/// The spaces carry `SpaceKind::Function`: the engine's coverage
+/// enrichment annotates exactly Function/Closure-kind spaces (recursing
+/// through the statement layer), which is what gives SQL routines
+/// per-function `coverage.*` keys — and, later, a CRAP denominator.
+fn attach_procedural_unit_spaces(
+    root: &mut MetricSpace,
+    units: &[facts::ProceduralUnitFacts],
+    first_id: u32,
+) {
+    /// Pop the innermost open unit and hand it to its parent (the new
+    /// stack top) or to the top-level list.
+    fn close_one(
+        stack: &mut Vec<(MetricSpace, u32, u32)>,
+        top_level: &mut Vec<(MetricSpace, u32, u32)>,
+    ) {
+        let done = stack.pop().expect("close_one on empty stack");
+        match stack.last_mut() {
+            Some((parent, _, _)) => parent.spaces.push(done.0),
+            None => top_level.push(done),
+        }
+    }
+
+    let mut stack: Vec<(MetricSpace, u32, u32)> = Vec::new();
+    let mut top_level: Vec<(MetricSpace, u32, u32)> = Vec::new();
+
+    for (next_id, unit) in (first_id..).zip(units.iter()) {
+        let mut space = MetricSpace::new(
+            SpaceId(next_id),
+            SpaceKind::Function,
+            SourceSpan {
+                start_byte: unit.start_byte,
+                end_byte: unit.end_byte,
+                start_line: unit.start_line,
+                end_line: unit.end_line,
+            },
+        );
+        space.name = unit.name.clone();
+        while let Some((_, _, open_end)) = stack.last() {
+            if unit.start_byte >= *open_end {
+                close_one(&mut stack, &mut top_level);
+            } else {
+                break;
+            }
+        }
+        stack.push((space, unit.start_byte, unit.end_byte));
+    }
+    while !stack.is_empty() {
+        close_one(&mut stack, &mut top_level);
+    }
+
+    for (space, start_byte, end_byte) in top_level {
+        let host = root.spaces.iter_mut().find(|s| {
+            matches!(s.kind, SpaceKind::Custom(_))
+                && s.span.start_byte <= start_byte
+                && end_byte <= s.span.end_byte
+        });
+        match host {
+            Some(statement_space) => statement_space.spaces.push(space),
+            None => root.spaces.push(space),
+        }
+    }
 }
 
 /// Publish the human-readable dialect labels as string-shaped metrics are not
@@ -513,6 +598,40 @@ mod tests {
             .get(&MetricKey::new(key))
             .map(|v| v.as_f64())
             .unwrap_or(0.0)
+    }
+
+    /// Every compiled-in dialect must survive a full analyze of a file
+    /// containing function calls. sqruff resolves grammar `Ref`s lazily
+    /// during matching, so a dialect grammar that references an
+    /// unregistered segment panics at *parse* time, not at grammar
+    /// construction — sqruff v0.39.0's oracle grammar did exactly that
+    /// (`JSONObjectContentSegment`, fixed upstream in v0.40.0; tracked
+    /// as ophi-dev/mehen#247). Parse *quality* is irrelevant here: a
+    /// dialect may find the file unparsable, but analysis must return,
+    /// never panic. The directive pins each dialect in turn; the
+    /// `is_<dialect>` assert proves the pin took effect instead of
+    /// silently falling back to inference.
+    #[test]
+    fn every_compiled_dialect_survives_function_call_parse() {
+        use strum::IntoEnumIterator;
+
+        use sqruff_lib_core::dialects::init::DialectKind;
+
+        for kind in DialectKind::iter() {
+            if dialect::dialect_for_kind(kind).is_none() {
+                continue; // not compiled into this build
+            }
+            let label = dialect_label(kind);
+            let sql = format!(
+                "-- sqlfluff:dialect:{label}\nselect coalesce(a, 1) from t where nullif(b, 0) > 1;\n"
+            );
+            let analysis = analyze(&sql);
+            assert_eq!(
+                metric(&analysis, &format!("sql.dialect.is_{label}")),
+                1.0,
+                "{label}: directive-pinned dialect must drive the parse"
+            );
+        }
     }
 
     /// Every key the analyzer publishes onto the *root* space — the

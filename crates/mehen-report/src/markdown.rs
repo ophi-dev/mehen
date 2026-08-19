@@ -111,6 +111,20 @@ fn write_unit_metrics(out: &mut String, metrics: &MetricSet, language: Language)
     let _ = writeln!(out);
     let _ = writeln!(out, "## Metrics");
 
+    // Coverage first when present, rendered on the flat-map path only
+    // for the flat-family languages (Markdown/SQL) whose early returns
+    // below never reach the `MetricsFamilies` pivot — a measured
+    // Markdown or SQL file carries coverage too. Source-code languages
+    // render coverage once, from `families.coverage` after the pivot;
+    // rendering here as well would emit the table twice. Unlike the
+    // always-rendered source-code tables it is omitted entirely when
+    // unmeasured ("no data" must stay distinguishable from 0%).
+    if matches!(language, Language::Markdown | Language::Sql)
+        && let Some(coverage) = crate::metrics_json::coverage(metrics)
+    {
+        write_coverage(out, &coverage);
+    }
+
     if language == Language::Markdown {
         // The Markdown analyzer publishes a different metric family
         // (`markdown.*` keys covering documentation-specific
@@ -136,6 +150,13 @@ fn write_unit_metrics(out: &mut String, metrics: &MetricSet, language: Language)
     }
 
     let families = MetricsFamilies::from_metrics(metrics);
+    // Coverage first when present: it is the family users gate CI on,
+    // and unlike the always-rendered source-code tables it is omitted
+    // entirely when unmeasured ("no data" must stay distinguishable
+    // from 0%).
+    if let Some(coverage) = &families.coverage {
+        write_coverage(out, coverage);
+    }
     write_cyclomatic(out, &families.cyclomatic);
     write_cognitive(out, &families.cognitive);
     write_loc(out, &families.loc);
@@ -502,13 +523,22 @@ fn write_nested_spaces(out: &mut String, spaces: &[MetricSpace], depth: usize, l
         // carry no source-code roll-ups, so the Cyclomatic / Cognitive
         // / LOC tables would all be zero.
         if language == Language::Sql {
-            // A SQL per-statement space carries only its line span. Emit that
-            // one fact so the heading isn't a content-free stub (the
-            // source-code metric tables would all be zero here).
+            // A SQL per-statement space carries only its line-span metric;
+            // routine (function) spaces nested under it carry none — fall
+            // back to the space's own span so neither heading is a
+            // content-free stub (the source-code metric tables would all
+            // be zero here).
             let lines = read_metric(&space.metrics, "sql.statement.lines");
-            if lines > 0.0 {
+            let lines = if lines > 0.0 {
+                lines as i64
+            } else if space.span.start_line > 0 && space.span.end_line >= space.span.start_line {
+                i64::from(space.span.end_line - space.span.start_line + 1)
+            } else {
+                0
+            };
+            if lines > 0 {
                 let _ = writeln!(out);
-                let _ = writeln!(out, "- Lines: {}", lines as i64);
+                let _ = writeln!(out, "- Lines: {lines}");
             }
         } else if language != Language::Markdown {
             let families = MetricsFamilies::from_metrics(&space.metrics);
@@ -537,6 +567,30 @@ fn space_kind_label(kind: &SpaceKind) -> &'static str {
 }
 
 // --- Per-family helpers --------------------------------------------
+
+/// Coverage table: one row per measured dimension. A dimension the
+/// ingested report never measured is skipped — "no data" must stay
+/// distinguishable from 0%.
+fn write_coverage(out: &mut String, m: &crate::metrics_json::Coverage) {
+    let _ = writeln!(out);
+    let _ = writeln!(out, "### Coverage");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "| dimension | coverage | covered | total |");
+    let _ = writeln!(out, "|---|---:|---:|---:|");
+    for (label, dimension) in [
+        ("line", &m.line),
+        ("branch", &m.branch),
+        ("function", &m.function),
+    ] {
+        if let Some(dimension) = dimension {
+            let _ = writeln!(
+                out,
+                "| {label} | {:.1}% | {} | {} |",
+                dimension.percent, dimension.covered, dimension.total,
+            );
+        }
+    }
+}
 
 fn write_cyclomatic(out: &mut String, m: &Cyclomatic) {
     let _ = writeln!(out);
@@ -780,6 +834,39 @@ mod tests {
             root,
             contributions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn coverage_renders_before_language_specific_early_returns() {
+        // Regression: the coverage table used to be emitted after the
+        // Markdown/SQL early returns, so a measured documentation or
+        // SQL file silently dropped its coverage from `--format
+        // markdown` output.
+        let coverage_keys: &[(&str, f64)] = &[
+            ("coverage.line", 50.0),
+            ("coverage.line.covered", 2.0),
+            ("coverage.line.total", 4.0),
+        ];
+        for language in [Language::Markdown, Language::Sql, Language::Python] {
+            let mut report = report_with_metrics(coverage_keys);
+            report.language = language;
+            let md = render_metrics_markdown(&report);
+            assert!(
+                md.contains("### Coverage") && md.contains("| line | 50.0% | 2 | 4 |"),
+                "{language:?} output must carry the coverage table:\n{md}"
+            );
+            // …and exactly once: source-code languages render it from
+            // the families pivot, the flat-family languages from the
+            // early path — never both.
+            assert_eq!(
+                md.matches("### Coverage").count(),
+                1,
+                "{language:?} output must carry exactly one coverage table:\n{md}"
+            );
+        }
+        // Unmeasured files omit the section entirely (absent ≠ 0%).
+        let md = render_metrics_markdown(&report_with_metrics(&[("loc.sloc", 3.0)]));
+        assert!(!md.contains("### Coverage"));
     }
 
     #[test]

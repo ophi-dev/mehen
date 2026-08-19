@@ -199,12 +199,40 @@
         ]
       },
       {
+        "tab": "Coverage",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "metrics/coverage/overview"
+            ]
+          },
+          {
+            "group": "Ingestion",
+            "pages": [
+              "metrics/coverage/supported-formats",
+              "metrics/coverage/auto-discovery",
+              "metrics/coverage/path-matching"
+            ]
+          },
+          {
+            "group": "Metrics",
+            "pages": [
+              "metrics/coverage/line",
+              "metrics/coverage/branch",
+              "metrics/coverage/function"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "SQL metrics",
         "groups": [
           {
             "group": "SQL",
             "pages": [
               "metrics/sql/overview",
+              "metrics/sql/coverage",
               "metrics/sql/roadmap"
             ]
           }

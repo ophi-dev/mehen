@@ -976,9 +976,9 @@ checksum = "de853764b47027c2e862a995c34978ffa63c1501f2e15f987ba11bd4f9bba193"
 
 [[package]]
 name = "fancy-regex"
-version = "0.18.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1e1dacd0d2082dfcf1351c4bdd566bbe89a2b263235a2b50058f1e130a47277"
+checksum = "476de73bddf2ef8490aa4ee8f1cf40b430bf1d56c48c22080e5186952cd580e6"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -2755,6 +2755,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "mehen-coverage"
+version = "1.9.0"
+dependencies = [
+ "camino",
+ "insta",
+ "pretty_assertions",
+ "quick-xml",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mehen-coverage-discovery"
+version = "1.9.0"
+dependencies = [
+ "camino",
+ "globset",
+ "ignore",
+ "insta",
+ "log",
+ "mehen-coverage",
+ "pretty_assertions",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "mehen-csharp"
 version = "1.9.0"
 dependencies = [
@@ -2788,6 +2818,8 @@ dependencies = [
  "log",
  "mehen-c",
  "mehen-core",
+ "mehen-coverage",
+ "mehen-coverage-discovery",
  "mehen-csharp",
  "mehen-git",
  "mehen-go",
@@ -3000,6 +3032,7 @@ dependencies = [
  "smol_str",
  "sqruff-lib-core",
  "sqruff-lib-dialects",
+ "strum",
 ]
 
 [[package]]
@@ -3912,6 +3945,15 @@ dependencies = [
  "bitflags",
  "memchr",
  "unicase",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -4898,8 +4940,9 @@ dependencies = [
 
 [[package]]
 name = "sqruff-lib-core"
-version = "0.39.0"
-source = "git+https://github.com/quarylabs/sqruff?tag=v0.39.0#839628591d651da69c26fd84e17bb3a15b519665"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdbd9d34c545d18dd806f286b47f88eb55aa0be76df213c580420a7293c4dd3f"
 dependencies = [
  "enum_dispatch",
  "fancy-regex",
@@ -4918,8 +4961,9 @@ dependencies = [
 
 [[package]]
 name = "sqruff-lib-dialects"
-version = "0.39.0"
-source = "git+https://github.com/quarylabs/sqruff?tag=v0.39.0#839628591d651da69c26fd84e17bb3a15b519665"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeb5b3fe08edc8df724b3fab2919f5b23d5e755d3650d4da6628b15119bc7c22"
 dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.15.0",

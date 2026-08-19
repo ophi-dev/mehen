@@ -123,4 +123,36 @@ pub mod keys {
         HISTORY_TWR,
         HISTORY_BUGFIX_COMMITS,
     ];
+
+    // Test-coverage metrics (`coverage.*` family). Report-scope:
+    // published by the engine's coverage enrichment from ingested
+    // coverage reports (LCOV, Cobertura, JaCoCo, …), not by language
+    // analyzers. Rates are percentages in `0.0..=100.0`; counts are
+    // covered/total pairs. A file absent from every report publishes
+    // nothing — "unmeasured" must stay distinguishable from "0%".
+    pub const COVERAGE_LINE: &str = "coverage.line";
+    pub const COVERAGE_LINE_COVERED: &str = "coverage.line.covered";
+    pub const COVERAGE_LINE_TOTAL: &str = "coverage.line.total";
+    pub const COVERAGE_BRANCH: &str = "coverage.branch";
+    pub const COVERAGE_BRANCH_COVERED: &str = "coverage.branch.covered";
+    pub const COVERAGE_BRANCH_TOTAL: &str = "coverage.branch.total";
+    pub const COVERAGE_FUNCTION: &str = "coverage.function";
+    pub const COVERAGE_FUNCTION_COVERED: &str = "coverage.function.covered";
+    pub const COVERAGE_FUNCTION_TOTAL: &str = "coverage.function.total";
+
+    /// The complete `coverage.*` family — fixed, like
+    /// [`HISTORY_ALL`], so selector/threshold typos are rejected up
+    /// front instead of triggering report discovery and parsing only
+    /// to read an unpublished key.
+    pub const COVERAGE_ALL: &[&str] = &[
+        COVERAGE_LINE,
+        COVERAGE_LINE_COVERED,
+        COVERAGE_LINE_TOTAL,
+        COVERAGE_BRANCH,
+        COVERAGE_BRANCH_COVERED,
+        COVERAGE_BRANCH_TOTAL,
+        COVERAGE_FUNCTION,
+        COVERAGE_FUNCTION_COVERED,
+        COVERAGE_FUNCTION_TOTAL,
+    ];
 }

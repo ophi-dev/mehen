@@ -2,9 +2,54 @@
 
 Mehen bundles several small data files derived from third-party sources.
 This file documents the origin, license, and attribution for each. The
-mehen Rust crate itself is released under MPL-2.0 (see `LICENSE`); the
-bundled data lives under `src/markdown/data/` and follows the licenses
-below.
+mehen Rust workspace itself is released under AGPL-3.0-only (see
+`LICENSE`); the bundled Markdown data lives under `src/markdown/data/`
+and follows the licenses below.
+
+## covrs coverage-report parsers (adapted source code)
+
+- Files: `crates/mehen-coverage/src/model.rs`,
+  `crates/mehen-coverage/src/parsers/{mod,lcov,gocover,istanbul,jacoco,clover,cobertura}.rs`,
+  and the parser test fixtures under
+  `crates/mehen-coverage/tests/fixtures/`.
+- Origin: covrs 0.3.2 — code coverage ingestion and reporting, by
+  Scott Nelson. https://github.com/scttnlsn/covrs
+- License: MIT, as declared by the upstream `Cargo.toml` `license`
+  field (the upstream repository ships no standalone LICENSE file; the
+  crates.io metadata is the license statement of record). The complete
+  MIT permission notice is reproduced below per its terms.
+- Use: The six coverage-report format parsers (LCOV, Go coverprofile,
+  Istanbul JSON, JaCoCo XML, Clover XML, Cobertura XML), their shared
+  detection helpers, the uniform coverage model, and the parser test
+  fixtures were adapted into `mehen-coverage`. Local modifications
+  (house error type, camino paths, quick-xml 0.41 API, record
+  normalization, regex removal) are noted in each file's provenance
+  header and are licensed under the repository's AGPL-3.0-only terms.
+
+```text
+MIT License
+
+Copyright (c) Scott Nelson
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
 
 ## NGSL 1.2 (New General Service List)
 

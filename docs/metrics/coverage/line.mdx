@@ -1,0 +1,89 @@
+---
+title: "Line coverage"
+description: "The share of instrumentable lines your tests execute — per file and per function, the denominator of test-suite risk and the coverage input of the CRAP index."
+keywords: ["line coverage", "statement coverage", "coverage percentage", "coverage gate", "untested code"]
+---
+
+**Line coverage** is the fraction of *instrumentable* lines executed at least once while the test
+suite ran. It is the lingua franca of coverage — every supported format measures it, every
+coverage service reports it — and the weakest claim in the family: an executed line proves the
+tests *reached* the code, not that they *asserted* anything about it. Read it as a risk
+denominator: low coverage marks code where the suite can catch nothing at all.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `coverage.line` | float | `covered / total × 100`, in `0..=100`. |
+| `coverage.line.covered` | int | Instrumentable lines executed at least once. |
+| `coverage.line.total` | int | Instrumentable lines the report recorded for the file. |
+
+Published on the file's root space **and, span-scoped, on every function and closure space** in
+the metric tree — the per-function values are what make the numbers actionable (and what the
+planned CRAP composite consumes).
+
+## Semantics
+
+- **Instrumentable lines only.** The denominator is the lines the coverage tool instrumented —
+  blank lines, comments, and non-executable declarations are excluded *by the producing tool*,
+  not by mehen. LCOV `DA` records with negative counts (non-instrumentable markers some
+  instrumenters emit) are dropped.
+- **Hit means hit at least once.** Execution counts are preserved internally (and used for
+  max-merging), but the rate counts a line as covered at any count ≥ 1 — matching how every
+  producing tool defines the percentage.
+- **Statements fold to lines.** Istanbul statement maps and Go basic blocks resolve to line
+  numbers; multiple statements on one line keep the maximum count.
+- **Unmeasured ≠ 0%.** A file absent from every report, or a function span containing no
+  instrumented lines (macro-generated code, `#[cfg(test)]` items, dead-code-eliminated
+  functions), publishes nothing. Only genuinely instrumented-but-unexecuted code reads `0`.
+- **Per-function attribution is line-range based.** A function space spanning lines 10–24
+  aggregates the report's records for those lines. Line ranges come from mehen's real parsers,
+  so the attribution is exact for the function body; a multi-line signature counts from the
+  declaration line the parser assigns.
+
+## How to read it
+
+| Signal | Interpretation |
+|---|---|
+| Low `coverage.line` on a high-[cognitive](/metrics/code/cognitive) function | The highest-risk combination this family can express — complex logic the suite never exercises. This intersection is the CRAP index's definition of change-risky code. |
+| Low file coverage, but the uncovered functions are trivial | Often acceptable — getters, glue, generated code. Rank by function, not by file, before reacting. |
+| 100% line coverage | The tests reach everything — it says nothing about assertion quality (mutation testing measures that). Treat as a floor, not a goal. |
+| Coverage dropping over time | New code is landing untested; a `coverage.line` minimum in `mehen.toml` stops the bleeding without demanding retroactive heroics. |
+
+Google's large-scale guidance is a useful calibration: they characterize 60% as acceptable, 75%
+as commendable, and 90% as exemplary — while explicitly warning against chasing the number for
+its own sake, because the marginal lines are usually the least valuable to cover. The empirical
+literature agrees from the other side: Inozemtseva & Holmes found coverage only weakly-to-
+moderately correlated with suite effectiveness once suite size is controlled, so a high
+percentage must never be read as proof of a strong suite.
+
+## Gating
+
+```toml
+[thresholds]
+"coverage.line" = 80          # higher-is-better: the limit is a minimum
+
+[languages.python.thresholds]
+"coverage.line" = 90          # stricter floor for Python files only
+```
+
+A configured `coverage.line` threshold is itself the trigger for
+[report ingestion](/metrics/coverage/auto-discovery) — no flag needed in CI. Unmeasured files
+skip the gate (never a fabricated violation); genuinely 0%-covered files fail it.
+
+## See also
+
+- [Branch coverage](/metrics/coverage/branch) — the stricter criterion.
+- [Function coverage](/metrics/coverage/function) — the coarser one.
+- [Cognitive complexity](/metrics/code/cognitive) — the number to cross line coverage with.
+
+## References
+
+- Ivanković, M., Petrović, G., Just, R., & Fraser, G. (2019). [Code coverage at
+  Google](https://research.google/pubs/code-coverage-at-google/). *ESEC/FSE 2019.*
+- Inozemtseva, L., & Holmes, R. (2014). [Coverage is not strongly correlated with test suite
+  effectiveness](https://dl.acm.org/doi/10.1145/2568225.2568271). *ICSE 2014.*
+- Marick, B. (1999). [How to misuse code coverage](http://www.exampler.com/testing-com/writings/coverage.pdf).
+- Fowler, M. (2012). [TestCoverage](https://martinfowler.com/bliki/TestCoverage.html). *martinfowler.com.*
+- Savoia, A., & Evans, B. (2007). [The CRAP metric](https://www.artima.com/weblogs/viewpost.jsp?thread=210575)
+  — the complexity × (1 − coverage)³ composite the per-function values feed.

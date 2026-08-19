@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<coverage version="1.0" timestamp="1234567890" lines-valid="0" lines-covered="0" line-rate="0" branches-valid="0" branches-covered="0" branch-rate="0" complexity="0">
+  <sources>
+    <source>/home/user/project</source>
+  </sources>
+  <packages>
+  </packages>
+</coverage>

@@ -1,0 +1,4 @@
+mode: count
+github.com/user/project/main.go:10.1,12.10 3 5
+github.com/user/project/main.go:14.1,16.10 2 0
+github.com/user/project/util.go:5.1,7.20 2 3

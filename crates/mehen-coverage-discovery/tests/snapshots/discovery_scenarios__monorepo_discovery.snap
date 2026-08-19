@@ -1,0 +1,20 @@
+---
+source: crates/mehen-coverage-discovery/tests/discovery_scenarios.rs
+expression: "projection(root, &outcome)"
+---
+- "report clover build/logs/clover.xml (tool-config:phpunit.xml.dist)"
+- "report cobertura qa/cov.xml (tool-config:pyproject.toml)"
+- "report lcov target/cov/lcov.info (tool-config:tarpaulin.toml)"
+- report istanbul .nyc_output/aaa.json (scan)
+- report cobertura TestResults/bbbb-2222/coverage.cobertura.xml (scan)
+- report lcov coverage/lcov.info (scan)
+- report gocover go/coverage.out (scan)
+- report jacoco ps/coverage.xml (scan)
+- report cobertura py/coverage.xml (scan)
+- report lcov target/llvm-cov/lcov.info (scan)
+- rejected TestResults/aaaa-1111/coverage.cobertura.xml OlderRun kept TestResults/bbbb-2222/coverage.cobertura.xml
+- rejected coverage/clover.xml Superseded by coverage/lcov.info
+- rejected coverage/coverage-final.json Superseded by coverage/lcov.info
+- rejected empty.lcov Empty
+- rejected notes/coverage.txt SniffMismatch
+- rejected target/cov/cobertura.xml Superseded by target/cov/lcov.info

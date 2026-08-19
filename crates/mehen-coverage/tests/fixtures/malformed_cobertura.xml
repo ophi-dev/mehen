@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<coverage version="1.0">
+  <packages>
+    <package name="test">
+      <classes>
+        <class name="Foo" filename="foo.rs">
+          <lines>
+            <line number="1" hits="5" />
+            <!-- Missing closing tags intentionally -->
+</coverage>

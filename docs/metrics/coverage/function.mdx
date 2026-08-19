@@ -1,0 +1,79 @@
+---
+title: "Function coverage"
+description: "The share of functions your tests execute at all — the bird's-eye dimension that finds entirely dead test blind spots in one glance."
+keywords: ["function coverage", "method coverage", "untested functions", "FNDA", "test blind spots"]
+---
+
+**Function coverage** counts functions executed at least once, out of the functions the report
+recorded. It is the coarsest dimension in the family — a function counts as covered the moment
+one test touches its first line — and that coarseness is its value: a function at zero is a
+*complete* blind spot, not a partially-tested one, and a file where half the functions never run
+tells a different story than a file where every function runs halfway. Crap4j, the original CRAP
+implementation, operated at exactly this granularity for the same reason: functions and methods
+are the unit developers reason about, test, and refactor.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `coverage.function` | float | `covered / total × 100`, in `0..=100`. |
+| `coverage.function.covered` | int | Recorded functions executed at least once. |
+| `coverage.function.total` | int | Functions the report recorded for the file. |
+
+Published on the file's **root space** (file-level totals from the report's own function
+records). Absent when the format records no functions — a Go coverprofile has none, and Clover
+only knows the `method` lines its instrumenter marked.
+
+## Where the records come from
+
+| Format | Function records |
+|---|---|
+| LCOV | `FN:<line>,<name>` + `FNDA:<count>,<name>` |
+| Istanbul | `fnMap` + `f` hit counts |
+| JaCoCo | `<method>` elements with `METHOD` counters |
+| Cobertura | `<method>` elements (hit derived from their line records) |
+| Clover | `<line type="method" signature="…">` entries |
+| Go coverprofile | — (dimension absent) |
+
+Note the subtle relationship with the *per-function line coverage* mehen also publishes: the
+file-level `coverage.function` above comes from the report's own records, while each function
+*space* in the metric tree carries `coverage.line`/`coverage.branch` computed from mehen's own
+parse of the function's line span. The two views agree on what "untested function" means but
+serve different queries — "how many of this file's functions run at all?" versus "how covered is
+*this* function?". The per-space values are the ones the CRAP composite will consume, because
+they exist even for formats without function records.
+
+## How to read it
+
+| Signal | Interpretation |
+|---|---|
+| `coverage.function` far below `coverage.line` | Coverage is concentrated: a few well-tested functions carry the percentage while others never run. The file-level line number is hiding dead zones. |
+| A function space whose `coverage.line` reads 0% on a public function | Either missing tests or dead API — both worth knowing. Cross-reference [NPM](/metrics/code/npm)/[NOM](/metrics/code/nom) for how much surface the file exposes. |
+| A hit function with low span line-coverage | Tests enter it but bail early — typically only the happy path's first branch. The per-function `coverage.line` on the space pinpoints these. |
+| Language-specific footnote | Import-time execution counts: a Python `def` line executes when the module loads, so an otherwise-untested function can show a hit declaration line while its body sits at zero. The body lines tell the truth. |
+
+## Gating
+
+```toml
+[thresholds]
+"coverage.function" = 90   # minimum share of recorded functions executed
+```
+
+Function coverage makes a forgiving first gate for legacy codebases: it demands *some* test
+reaches each function without dictating depth, and it is cheap to satisfy incrementally —
+one test per blind spot.
+
+## See also
+
+- [Line coverage](/metrics/coverage/line) — depth within the functions this metric counts.
+- [Branch coverage](/metrics/coverage/branch) — outcome-level depth.
+- [NOM](/metrics/code/nom) — how many functions a file defines in the first place.
+
+## References
+
+- [Crap4j](http://www.crap4j.org/) — the original method-granularity CRAP implementation.
+- Savoia, A., & Evans, B. (2007). [The CRAP metric](https://www.artima.com/weblogs/viewpost.jsp?thread=210575).
+- [geninfo(1)](https://ltp.sourceforge.net/coverage/lcov/geninfo.1.php) — `FN`/`FNDA` record
+  semantics.
+- Ivanković, M., Petrović, G., Just, R., & Fraser, G. (2019). [Code coverage at
+  Google](https://research.google/pubs/code-coverage-at-google/). *ESEC/FSE 2019.*

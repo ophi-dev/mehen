@@ -1,0 +1,146 @@
+---
+title: "Auto-discovery"
+description: "How bare --coverage finds report files with zero configuration: idiomatic locations, gitignored build directories, and declarative tool configs — bounded and deterministic."
+keywords: ["coverage discovery", "lcov.info", "coverage directory", "TestResults", "nyc_output", "zero configuration"]
+---
+
+Coverage reports live exactly where mehen's source walk refuses to look: `coverage/`, `target/`,
+`build/`, and `TestResults/` are gitignored in any healthy repository, and `.nyc_output/` is
+hidden. Bare `--coverage` (or `--coverage=auto`) therefore runs a *dedicated* discovery pass with
+the inverse policy — every ignore rule off, hidden entries visible — while staying strictly
+bounded and deterministic. (A configured `[coverage] discover = false` opts the scan out even
+under the flag; configured `reports` still load.)
+
+```bash
+mehen top-offenders src --metric coverage.line --coverage
+```
+
+Discovery also runs without the flag when something asks for coverage: a `coverage.*` metric
+selector, a configured `coverage.*` threshold, or an opting-in `[coverage]` section in
+`mehen.toml`. `--coverage=off` disables it unconditionally; explicit paths
+(`--coverage=lcov.info`) skip discovery entirely.
+
+## Three input tiers
+
+1. **Explicit reports** — `--coverage=<path>` (repeatable) or `reports = […]` under
+   `[coverage]`. These are *your* statement of intent: a missing or unparsable explicit report
+   is a hard error, because an explicit gate input that silently disappears is a broken CI gate.
+2. **Tool-config introspection** — mehen reads *declarative* tool configs that say where reports
+   get written:
+   - the c8/nyc JSON rc family (`.c8rc`, `.c8rc.json`, `.nycrc`, `.nycrc.json` — first found, in
+     c8's own precedence order): `reports-dir`/`report-dir`;
+   - `pyproject.toml`: `[tool.coverage.xml] output` and `[tool.coverage.lcov] output`
+     (coverage.py);
+   - `phpunit.xml` / `phpunit.xml.dist`: `<clover|cobertura outputFile="…">` and the legacy
+     `<log type="coverage-clover" target="…">` — PHPUnit writes **no** coverage file unless
+     configured, so this is the only zero-config path for PHP;
+   - `tarpaulin.toml` / `.tarpaulin.toml` (cargo-tarpaulin): the union of `out` formats and
+     `output-dir` values across run profiles and the reserved `[report]` table. Tarpaulin's file
+     names are fixed (`cobertura.xml`, `lcov.info`), so introspection matters exactly when
+     `output-dir` redirects them into territory the scan prunes (e.g. `target/cov/`).
+
+   Executable configs — `jest.config.ts`, `vitest.config.ts`, `.simplecov`, Gradle DSLs, Pester
+   scripts — are **never executed and never regex-scraped**. Their values are routinely computed
+   (env vars, imported constants), so extraction would silently be wrong; their tools' *default*
+   output locations are already covered by the scan below.
+3. **Artifact scan** — well-known report names and locations, matched relative to each discovery
+   root (the enclosing repository work dir, so reports at the repo root are found even when you
+   analyze `./src`): `lcov.info`, `coverage.info`, `*.lcov`, `coverage.out` / `cover.out` /
+   `coverage.txt` / `profile.cov` / `c.out` / `*.coverprofile`, `coverage-final.json`,
+   `.nyc_output/*.json`, `jacoco.xml`, `jacocoTestReport.xml`, `site/jacoco/*.xml`,
+   `reports/jacoco/**/*.xml`, `reports/kover/*.xml`, `coverage.xml`, `clover.xml`,
+   `cobertura.xml`, `coverage.cobertura.xml`. Every match is confirmed by
+   [content sniffing](/metrics/coverage/supported-formats#detection-is-content-based) before it
+   is believed.
+
+## Bounded by construction
+
+Build directories are enormous, so the walk carries explicit bounds — each converts a
+pathological repository from "hangs" into "warns":
+
+| Bound | Default | Why |
+|---|---|---|
+| Pruned directories | `node_modules`, `vendor`, `.venv`/`venv`, `.git`, tool caches (`.gradle`, `.m2`, `.cargo`, `__pycache__`, …) | No mainstream tool defaults report output into them; `node_modules` alone is ~100k directory entries of zero expected yield. |
+| Targeted descent in `target/` | only `llvm-cov/`, `tarpaulin/`, `site/` | `target/debug` is routinely 50k+ entries of compiler output; the three subtrees are the only idiomatic report locations (cargo-llvm-cov, tarpaulin, Maven `target/site/jacoco/`). |
+| Targeted descent in `build/` | only `reports/`, `logs/`, `coverage/` | Gradle reports, Jenkins-PHP `build/logs/clover.xml`, CMake coverage output. |
+| `coverage/tmp/` | never entered | c8/nyc raw V8 staging; never contains final reports. |
+| Depth | 12 | The deepest idiomatic path is ~7 components; 12 leaves monorepo headroom. |
+| Directory entries | 500,000 | Chromium-scale headroom after pruning. |
+| Candidates sniffed | 256 (4 KiB each) | Total sniff I/O ≤ 1 MiB. |
+| Candidates per directory | 64 | Bounds `.nyc_output` shard floods; the name-sorted walk keeps the lexicographically first shards. |
+| Report size | 256 MiB | Beyond the largest real-world LCOV files. |
+| Symlinks | never followed | A candidate that is a file symlink must resolve *inside* a discovery root, so a planted `lcov.info → /etc/passwd` is rejected unread. |
+
+An `extra-patterns` entry whose first component names a pruned directory lifts that directory for
+the run — the escape hatch for exotic layouts:
+
+```toml
+[coverage]
+extra-patterns = ["node_modules/.cache/**/lcov.info"]
+```
+
+## Deterministic selection
+
+When several candidates survive, selection is order-independent by construction:
+
+- **Same directory, several formats** — one Jest run writes `lcov.info` +
+  `coverage-final.json` + `clover.xml` into `coverage/`; they describe the same test run, so only
+  the highest-priority format is parsed and the rest are recorded as superseded.
+- **`TestResults/<run>/` re-runs** — coverlet writes each `dotnet test` run into a fresh GUID
+  directory; sibling runs holding the same report name keep only the newest (by mtime,
+  lexicographic tie-break). This is the *only* place mtimes are trusted — a fresh CI clone stamps
+  every file with clone time, so a global newest-wins rule would be meaningless.
+- **Same file found twice** (scanned *and* named by a tool config) — recorded once, attributed to
+  the config.
+
+Everything else merges (union + saturating-max — see
+[supported formats](/metrics/coverage/supported-formats#normalization-and-merge-semantics)), and
+discovery never fails a run: unreadable directories, malformed configs, and cap overruns degrade
+to warnings.
+
+## Staleness
+
+A report generated before the code it describes attributes hits to the wrong lines. When a
+discovered report's mtime predates the newest `HEAD` commit across the discovery roots, mehen
+warns (the report is still used — the heuristic has false positives around rebases and
+cherry-picks, and silently dropping your only report would be worse). Disable with
+`stale-warning = false` under `[coverage]`.
+
+## Configuration reference
+
+```toml
+[coverage]
+reports = ["ci-artifacts/lcov.info"]  # explicit paths; hard error if unusable
+discover = true                        # `true` also opts the run in without a flag
+extra-patterns = ["qa/**/*.lcov"]      # additive scan globs, root-relative
+stale-warning = true                   # the mtime-vs-HEAD warning above
+```
+
+Flag/file precedence is per mode, not blanket: `--coverage=off` disables coverage regardless of
+configuration, and `--coverage=<path>` uses exactly the supplied reports — but bare
+`--coverage`/`=auto` honors a configured `discover = false` (it forces ingestion of configured
+reports, not the scan). Unknown keys and wrong types are rejected at load time with a caret
+into the TOML source, like every other `mehen.toml` mistake.
+
+## See also
+
+- [Supported formats](/metrics/coverage/supported-formats) — what the candidates are sniffed
+  against.
+- [Path matching](/metrics/coverage/path-matching) — what happens to the reports after ingestion.
+- [Configuration](/configuration) — the rest of `mehen.toml`.
+
+## References
+
+- [c8 configuration](https://github.com/bcoe/c8#readme) and
+  [nyc configuration](https://github.com/istanbuljs/nyc#configuration-files) — the JSON rc
+  family and its precedence.
+- [coverage.py configuration reference](https://coverage.readthedocs.io/en/latest/config.html) —
+  `[xml] output` / `[lcov] output` (the `[tool.coverage.*]` tables in `pyproject.toml`).
+- [PHPUnit XML configuration](https://docs.phpunit.de/en/main/configuration.html) — the
+  `<coverage>`/`<report>` elements.
+- [cargo-tarpaulin config file](https://github.com/xd009642/tarpaulin#config-file) — run
+  profiles, the reserved `[report]` table, and the `out`/`output-dir` keys.
+- [coverlet VSTest integration](https://github.com/coverlet-coverage/coverlet/blob/master/Documentation/VSTestIntegration.md)
+  — why `TestResults/<guid>/coverage.cobertura.xml` re-run clusters exist.
+- [Kover Gradle plugin](https://kotlin.github.io/kotlinx-kover/gradle-plugin/) — the
+  JaCoCo-compatible `build/reports/kover/` XML.

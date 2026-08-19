@@ -1,0 +1,87 @@
+---
+title: "Supported formats"
+description: "The six coverage-report formats mehen parses — LCOV, Go coverprofile, Istanbul JSON, JaCoCo XML, Clover XML, Cobertura XML — and how they are detected and merged."
+keywords: ["lcov", "cobertura", "jacoco", "clover", "istanbul", "coverprofile", "coverage formats"]
+---
+
+mehen parses six report formats in-house — no external tools, no network — covering the default
+or one-flag-away output of the mainstream test runners in every language mehen analyzes. The
+parsers are streaming (large monorepo reports never sit fully in memory) and were adapted from
+the MIT-licensed [covrs](https://github.com/scttnlsn/covrs) project.
+
+## The formats
+
+| Format | Shape | Typical producers | Dimensions |
+|---|---|---|---|
+| **LCOV** | line records (`SF:`/`DA:`/`BRDA:`/`FN:`) | cargo-llvm-cov, tarpaulin, `lcov`/`geninfo` (C/C++), Jest & c8 & nyc (`lcov` reporter), simplecov-lcov (Ruby), coverlet (`lcov` format), coverage.py (`coverage lcov`) | line, branch, function |
+| **Go coverprofile** | `mode:` header + per-block ranges | `go test -coverprofile` | line |
+| **Istanbul JSON** | `statementMap`/`branchMap`/`fnMap` objects | Jest, Vitest, nyc, c8 (`coverage-final.json`) | line, branch, function |
+| **JaCoCo XML** | `<report>` → `<package>` → `<sourcefile>` | JaCoCo (Maven/Gradle), Kotlin Kover, Pester 5 (PowerShell) | line, branch, function |
+| **Clover XML** | `<coverage clover="…">` → `<file>` → `<line>` | PHPUnit, OpenClover, Jest/Vitest (`clover` reporter) | line, branch (from `cond` lines), function (from `method` lines) |
+| **Cobertura XML** | `<coverage>` → `<class filename="…">` | coverage.py (`coverage xml`), coverlet / `dotnet test`, gcovr, tarpaulin (`--out xml`) | line, branch (from `condition-coverage`), function (from `<method>`) |
+
+## Detection is content-based
+
+Filenames lie: Pester writes JaCoCo XML into `coverage.xml`, coverage.py writes Cobertura XML into
+the same name, and `.info` files are occasionally GNU documentation. mehen therefore *sniffs* the
+first 4 KiB of every candidate and requires format-specific content markers before believing a
+file, in a fixed priority order chosen so no format can false-positive on another's output:
+
+1. **LCOV** — `SF:` plus `DA:`/`FN:` records.
+2. **Go coverprofile** — a `mode: set|count|atomic` header or `file.go:N.N,N.N …` block lines.
+3. **Istanbul** — a JSON object containing `"statementMap"` and `"fnMap"`.
+4. **JaCoCo** — `<report` plus a JaCoCo DTD reference or `<package`.
+5. **Clover** — `<coverage` carrying a `clover="…"` version attribute.
+6. **Cobertura** — `<coverage` without the Clover marker.
+
+An explicit `--coverage=<path>` argument goes through the same detection; a file no parser
+recognizes is a hard error, while an auto-discovered candidate that fails sniffing is silently
+recorded as rejected (that is business as usual for e.g. `coverage.txt` text summaries).
+
+## Normalization and merge semantics
+
+Formats disagree about granularity, so parsed records are normalized into one model — per-file
+line hits, branch arms, and function records:
+
+- **Statements → lines.** Istanbul statements and Go blocks map onto lines; when several
+  statements share a line, the *maximum* hit count wins.
+- **Branch encodings → arms.** LCOV `BRDA` records, Cobertura `condition-coverage="50% (1/2)"`
+  fractions, JaCoCo `mb`/`cb` counters, Clover `truecount`/`falsecount` pairs, and Istanbul `b`
+  arrays all become flat *branch arms* (see [branch coverage](/metrics/coverage/branch) for what
+  that folding means).
+- **Duplicate records collapse.** `lcov -a`-merged tracefiles repeat `DA` lines; Cobertura emits
+  the same line under both `<method>` and `<class>` — duplicates keep the maximum.
+- **Cross-report merge.** All ingested reports fold into one dataset: union of files,
+  saturating-max hits for records shared between reports ("covered anywhere ⇒ covered"). Max is
+  commutative and associative, so the merged result is independent of discovery order —
+  determinism is a hard requirement for reproducible CI gates. Hit-count *summing* was rejected
+  because re-running the same suite twice would double every count; newest-file-wins was rejected
+  because git checkouts do not preserve mtimes.
+
+## Hardening
+
+Coverage artifacts are ingested from build directories that other tools write into, so the
+parsers are defensive by construction: branch expansion is capped at 1,024 arms per line, Go
+block spans at 100,000 lines, report files at 256 MiB; XML parsing never resolves DTDs or
+external entities (billion-laughs and XXE are structurally inert, and a regression test pins
+that); and a malformed report is a per-file diagnostic, never a crash.
+
+## What about raw instrumentation output?
+
+`.profraw`/`.gcda` (LLVM/GCC counters), SimpleCov's `.resultset.json`, c8's raw V8 dumps in
+`coverage/tmp/`, and coverlet's proprietary `coverage.json` are *not* report formats — decoding
+them requires the compiled binaries or the producing tool's internals. Export a report instead
+(`cargo llvm-cov --lcov`, `coverage xml`, `--coverageReporters=lcov`, …); grcov takes the same
+report-level stance for Firefox-scale ingestion.
+
+## References
+
+- [geninfo(1) — the LCOV tracefile format](https://ltp.sourceforge.net/coverage/lcov/geninfo.1.php). *Linux Test Project.*
+- [The cover story](https://go.dev/blog/cover) — Go's coverage design and the coverprofile format. *The Go Blog.*
+- [Istanbul.js](https://istanbul.js.org/) and the [istanbuljs coverage object](https://github.com/istanbuljs/istanbuljs).
+- [JaCoCo XML report documentation](https://www.jacoco.org/jacoco/trunk/doc/).
+- [OpenClover documentation](https://openclover.org/documentation) — the Clover XML schema.
+- [Cobertura](https://cobertura.github.io/cobertura/) — the original tool whose XML schema became
+  the de-facto interchange format.
+- [mozilla/grcov](https://github.com/mozilla/grcov) — prior art for multi-format coverage
+  aggregation at scale.

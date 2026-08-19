@@ -25,6 +25,7 @@
 pub mod ci;
 mod concurrent_files;
 mod config_file;
+mod coverage_metrics;
 mod detection;
 mod diff;
 mod dispatcher;
@@ -35,9 +36,10 @@ mod registry;
 mod top_offenders;
 
 pub use config_file::{
-    ConfigError, ConfigFile, ThresholdBreach, ThresholdPolicy, load_config, render_config_error,
-    render_threshold_report,
+    ConfigError, ConfigFile, CoverageConfig, ThresholdBreach, ThresholdPolicy, load_config,
+    render_config_error, render_threshold_report,
 };
+pub use coverage_metrics::{CoverageOpts, CoverageSetupError, enrich_metrics_with_coverage};
 pub use diff::{DiffOpts, run_diff};
 pub use top_offenders::{TopOffendersOpts, run_top_offenders};
 

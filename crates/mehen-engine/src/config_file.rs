@@ -196,6 +196,8 @@ const PUBLISHED_METRIC_KEYS: &[&str] = &[
 pub(crate) enum ResolveError {
     /// A `history.*` name outside the fixed family.
     UnknownHistory,
+    /// A `coverage.*` name outside the fixed family.
+    UnknownCoverage,
     /// A `sql.*` / `markdown.*` name the owning analyzer never
     /// publishes.
     UnknownNamespaced,
@@ -234,6 +236,17 @@ pub(crate) fn canonical_metric_key(name: &str) -> Result<String, ResolveError> {
             Ok(name.to_string())
         } else {
             Err(ResolveError::UnknownHistory)
+        };
+    }
+    if name == "coverage" || name.starts_with("coverage.") {
+        // The engine-published `coverage.*` family is fixed, like
+        // `history.*`: a typo must be rejected up front, or it would
+        // trigger report discovery/parsing only to read an
+        // unpublished key.
+        return if keys::COVERAGE_ALL.contains(&name) {
+            Ok(name.to_string())
+        } else {
+            Err(ResolveError::UnknownCoverage)
         };
     }
     if name.starts_with("sql.") {
@@ -305,6 +318,67 @@ pub struct ConfigFile {
     pub path: PathBuf,
     /// Per-metric threshold policy (global + per-language overrides).
     pub thresholds: ThresholdPolicy,
+    /// The `[coverage]` section, when present.
+    pub coverage: Option<CoverageConfig>,
+}
+
+/// The `[coverage]` section of `mehen.toml`:
+///
+/// ```toml
+/// [coverage]
+/// reports = ["ci-artifacts/lcov.info"]  # explicit report paths
+/// discover = true                       # artifact auto-discovery
+/// extra-patterns = ["qa/**/*.lcov"]     # additive scan globs
+/// stale-warning = true                  # mtime-vs-HEAD warning
+/// ```
+///
+/// The section's mere presence opts the run into coverage ingestion
+/// when it carries `reports` or an explicit `discover = true`; the
+/// `--coverage` CLI flag always wins over the file.
+#[derive(Debug, Clone)]
+pub struct CoverageConfig {
+    /// Explicit report paths (relative paths resolve against the
+    /// invocation's working directory, like every other CLI path).
+    pub reports: Vec<camino::Utf8PathBuf>,
+    /// Whether artifact auto-discovery may run. `None` when the key is
+    /// omitted (defaults to enabled once coverage is requested);
+    /// `Some(true)` additionally opts the run in by itself.
+    pub discover_key: Option<bool>,
+    /// Additive scan globs, matched relative to each discovery root.
+    pub extra_patterns: Vec<String>,
+    /// Whether to warn when a discovered report's mtime predates the
+    /// newest analyzed commit. Default: true.
+    pub stale_warning: bool,
+}
+
+/// Hand-written so the type carries its documented defaults — the
+/// derived impl would silently disable the staleness warning for any
+/// caller constructing the (public, re-exported) type directly.
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        Self {
+            reports: Vec::new(),
+            discover_key: None,
+            extra_patterns: Vec::new(),
+            stale_warning: true,
+        }
+    }
+}
+
+impl CoverageConfig {
+    /// Effective discovery toggle (`discover` defaults to enabled).
+    pub(crate) fn discover(&self) -> bool {
+        self.discover_key.unwrap_or(true)
+    }
+
+    /// Whether this section by itself opts the run into coverage
+    /// ingestion (used when the CLI flag is unset and no `coverage.*`
+    /// selector/threshold asked): explicit reports or an explicit
+    /// `discover = true`. A section carrying only tuning keys (e.g.
+    /// `stale-warning = false`) does not.
+    pub(crate) fn opts_in(&self) -> bool {
+        !self.reports.is_empty() || self.discover_key == Some(true)
+    }
 }
 
 /// A configuration loading/validation error.
@@ -474,6 +548,18 @@ impl ThresholdPolicy {
     /// True when no thresholds are configured at all.
     pub fn is_empty(&self) -> bool {
         self.global.is_empty() && self.per_language.iter().all(|(_, t)| t.is_empty())
+    }
+
+    /// Whether any configured metric name (global or per-language)
+    /// satisfies the predicate — e.g. "is any `coverage.*` threshold
+    /// configured?" for the lazy coverage-ingestion trigger. Names are
+    /// canonical at this point.
+    pub(crate) fn any_metric(&self, predicate: impl Fn(&str) -> bool) -> bool {
+        self.global.keys().map(String::as_str).any(&predicate)
+            || self
+                .per_language
+                .iter()
+                .any(|(_, thresholds)| thresholds.keys().map(String::as_str).any(&predicate))
     }
 
     /// The effective `canonical metric → entry` map for one language:
@@ -715,6 +801,7 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
 
     let mut global: BTreeMap<String, ThresholdEntry> = BTreeMap::new();
     let mut per_language: Vec<(Language, BTreeMap<String, ThresholdEntry>)> = Vec::new();
+    let mut coverage: Option<CoverageConfig> = None;
 
     for (key, value) in root.get_ref() {
         let key_str: &str = key.get_ref().as_ref();
@@ -722,6 +809,10 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
             "thresholds" => {
                 let table = expect_table(value, "thresholds", &ctx)?;
                 collect_thresholds(table, "thresholds", None, &mut global, &ctx)?;
+            }
+            "coverage" => {
+                let table = expect_table(value, "coverage", &ctx)?;
+                coverage = Some(collect_coverage(table, &ctx)?);
             }
             "languages" => {
                 let table = expect_table(value, "languages", &ctx)?;
@@ -790,8 +881,10 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
                 }
             }
             other => {
-                let mut help = "expected `thresholds` or `languages`".to_string();
-                if let Some(candidate) = closest_candidate(other, &["thresholds", "languages"]) {
+                let mut help = "expected `thresholds`, `languages`, or `coverage`".to_string();
+                if let Some(candidate) =
+                    closest_candidate(other, &["thresholds", "languages", "coverage"])
+                {
                     help.push_str(&format!("; did you mean `{candidate}`?"));
                 }
                 return Err(ctx
@@ -813,7 +906,106 @@ fn parse_config(text: &str, path: &Path) -> Result<ConfigFile, ConfigError> {
             global,
             per_language,
         },
+        coverage,
     })
+}
+
+/// Parse the `[coverage]` section. Unknown keys are rejected with a
+/// span-labeled error, like everywhere else in the file — a typo'd
+/// `extra-pattern` must not silently disable the intended scan.
+fn collect_coverage(
+    table: &toml::de::DeTable<'_>,
+    ctx: &ErrorContext<'_>,
+) -> Result<CoverageConfig, ConfigError> {
+    let mut config = CoverageConfig::default();
+    for (key, value) in table {
+        let key_str: &str = key.get_ref().as_ref();
+        match key_str {
+            "reports" => {
+                for entry in expect_string_array(value, "coverage.reports", ctx)? {
+                    config.reports.push(camino::Utf8PathBuf::from(entry));
+                }
+            }
+            "extra-patterns" => {
+                config.extra_patterns = expect_string_array(value, "coverage.extra-patterns", ctx)?;
+            }
+            "discover" => {
+                config.discover_key = Some(expect_bool(value, "coverage.discover", ctx)?);
+            }
+            "stale-warning" => {
+                config.stale_warning = expect_bool(value, "coverage.stale-warning", ctx)?;
+            }
+            other => {
+                let mut help =
+                    "expected `reports`, `discover`, `extra-patterns`, or `stale-warning`"
+                        .to_string();
+                if let Some(candidate) = closest_candidate(
+                    other,
+                    &["reports", "discover", "extra-patterns", "stale-warning"],
+                ) {
+                    help.push_str(&format!("; did you mean `{candidate}`?"));
+                }
+                return Err(ctx
+                    .error_at(
+                        key.span(),
+                        "unrecognized key",
+                        format!("unknown key `{other}` in [coverage]"),
+                    )
+                    .with_help(help));
+            }
+        }
+    }
+    Ok(config)
+}
+
+fn expect_string_array(
+    value: &toml::Spanned<toml::de::DeValue<'_>>,
+    context: &str,
+    ctx: &ErrorContext<'_>,
+) -> Result<Vec<String>, ConfigError> {
+    let toml::de::DeValue::Array(items) = value.get_ref() else {
+        return Err(ctx.error_at(
+            value.span(),
+            "not an array",
+            format!(
+                "`{context}` must be an array of strings, got {}",
+                value.get_ref().type_str()
+            ),
+        ));
+    };
+    let mut strings = Vec::with_capacity(items.len());
+    for item in items {
+        let toml::de::DeValue::String(s) = item.get_ref() else {
+            return Err(ctx.error_at(
+                item.span(),
+                "not a string",
+                format!(
+                    "`{context}` entries must be strings, got {}",
+                    item.get_ref().type_str()
+                ),
+            ));
+        };
+        strings.push(s.to_string());
+    }
+    Ok(strings)
+}
+
+fn expect_bool(
+    value: &toml::Spanned<toml::de::DeValue<'_>>,
+    context: &str,
+    ctx: &ErrorContext<'_>,
+) -> Result<bool, ConfigError> {
+    match value.get_ref() {
+        toml::de::DeValue::Boolean(b) => Ok(*b),
+        other => Err(ctx.error_at(
+            value.span(),
+            "not a boolean",
+            format!(
+                "`{context}` must be `true` or `false`, got {}",
+                other.type_str()
+            ),
+        )),
+    }
 }
 
 fn expect_table<'v, 'i>(
@@ -980,6 +1172,13 @@ fn language_can_publish(language: Language, canonical: &str) -> bool {
         // unavailable — exactly what `selector_available` encodes.
         return crate::history_metrics::selector_available(canonical, false, true)
             || crate::AnalyzerRegistry::default_set().has_analyzer_for(language);
+    }
+    if canonical.starts_with("coverage.") {
+        // Coverage keys come from ingested reports, never from an
+        // analyzer: they are injected even into an empty metric space
+        // when static analysis is unavailable, so a build without the
+        // language's analyzer can still fire this gate.
+        return true;
     }
     if !crate::AnalyzerRegistry::default_set().has_analyzer_for(language) {
         return false;
@@ -1177,6 +1376,16 @@ fn validate_metric_name(
                 "the fixed `history.*` family is: {}",
                 keys::HISTORY_ALL.join(", ")
             ))),
+        Err(ResolveError::UnknownCoverage) => Err(ctx
+            .error_at(
+                span,
+                "not a coverage metric",
+                format!("unknown coverage metric `{name}` in [{context}]"),
+            )
+            .with_help(format!(
+                "the fixed `coverage.*` family is: {}",
+                keys::COVERAGE_ALL.join(", ")
+            ))),
         #[cfg(not(feature = "lang-sql"))]
         Err(ResolveError::UnavailableNamespace) => Err(ctx
             .error_at(
@@ -1208,6 +1417,7 @@ fn validate_metric_name(
         Err(ResolveError::Unknown) => {
             let mut candidates: Vec<&str> = PUBLISHED_METRIC_KEYS.to_vec();
             candidates.extend_from_slice(keys::HISTORY_ALL);
+            candidates.extend_from_slice(keys::COVERAGE_ALL);
             // A name whose family publishes members gets the family
             // listing (`mi` → `mi.visual_studio`, …): an edit-distance
             // pick like `wmc` for `mi` would point away from the
@@ -1221,8 +1431,8 @@ fn validate_metric_name(
                     Some(candidate) => format!("did you mean `{candidate}`?"),
                     None => "use a key mehen publishes: the source-code families \
                              (cognitive, cyclomatic, loc.*, halstead.*, mi.*, abc, nargs, \
-                             nexit, nom.*, npa.*, npm.*, wmc), the fixed `history.*` keys, \
-                             or a namespaced `sql.*` / `markdown.*` key"
+                             nexit, nom.*, npa.*, npm.*, wmc), the fixed `history.*` and \
+                             `coverage.*` keys, or a namespaced `sql.*` / `markdown.*` key"
                         .to_string(),
                 },
             };
@@ -2290,5 +2500,99 @@ mod tests {
             "git init failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn coverage_thresholds_validate_against_the_fixed_family() {
+        // Every real coverage key is accepted…
+        for key in keys::COVERAGE_ALL {
+            let text = format!("[thresholds]\n\"{key}\" = 80\n");
+            let config = parse_config(&text, Path::new("mehen.toml"))
+                .unwrap_or_else(|e| panic!("{key} must validate: {e}"));
+            assert!(!config.thresholds.is_empty());
+        }
+        // …including inside a per-language table: coverage comes from
+        // ingested reports, never from an analyzer, so the gate stays
+        // valid even in builds compiled without that language (the
+        // `history.*` reachability property).
+        let per_language = parse_config(
+            "[languages.rust.thresholds]\n\"coverage.line\" = 80\n",
+            Path::new("mehen.toml"),
+        )
+        .expect("per-language coverage threshold must validate");
+        assert!(!per_language.thresholds.is_empty());
+        // …and a typo is rejected with the family listing, so the gate
+        // can never silently fail to fire.
+        let err = parse_config(
+            "[thresholds]\n\"coverage.lines\" = 80\n",
+            Path::new("mehen.toml"),
+        )
+        .expect_err("typo'd coverage key must be rejected");
+        let rendered = rendered(&err);
+        assert!(
+            rendered.contains("coverage.line"),
+            "help must list the fixed family: {rendered}"
+        );
+    }
+
+    #[test]
+    fn coverage_section_parses_and_validates() {
+        let config = parse_config(
+            "[coverage]\nreports = [\"ci/lcov.info\"]\ndiscover = false\n\
+             extra-patterns = [\"qa/**/*.lcov\"]\nstale-warning = false\n",
+            Path::new("mehen.toml"),
+        )
+        .expect("valid [coverage] section");
+        let coverage = config.coverage.expect("section present");
+        assert_eq!(
+            coverage.reports,
+            vec![camino::Utf8PathBuf::from("ci/lcov.info")]
+        );
+        assert_eq!(coverage.discover_key, Some(false));
+        assert!(!coverage.discover());
+        assert_eq!(coverage.extra_patterns, vec!["qa/**/*.lcov".to_string()]);
+        assert!(!coverage.stale_warning);
+        // reports non-empty → the section opts the run in even though
+        // discovery is off.
+        assert!(coverage.opts_in());
+
+        // A tuning-only section does not opt in by itself.
+        let tuning = parse_config(
+            "[coverage]\nstale-warning = false\n",
+            Path::new("mehen.toml"),
+        )
+        .expect("tuning-only section")
+        .coverage
+        .expect("section present");
+        assert!(!tuning.opts_in());
+        assert!(tuning.discover());
+    }
+
+    #[test]
+    fn coverage_section_rejects_unknown_and_mistyped_keys() {
+        let err = parse_config("[coverage]\nreport = [\"x\"]\n", Path::new("mehen.toml"))
+            .expect_err("unknown key must be rejected");
+        let rendered = rendered(&err);
+        assert!(
+            rendered.contains("did you mean `reports`?"),
+            "suggestion expected: {rendered}"
+        );
+
+        let err = parse_config("[coverage]\ndiscover = \"yes\"\n", Path::new("mehen.toml"))
+            .expect_err("non-boolean discover must be rejected");
+        assert!(rendered_contains(&err, "must be `true` or `false`"));
+
+        let err = parse_config(
+            "[coverage]\nreports = \"lcov.info\"\n",
+            Path::new("mehen.toml"),
+        )
+        .expect_err("non-array reports must be rejected");
+        assert!(rendered_contains(&err, "array of strings"));
+    }
+
+    fn rendered_contains(err: &ConfigError, needle: &str) -> bool {
+        let text = rendered(err);
+        assert!(text.contains(needle), "{text}");
+        true
     }
 }

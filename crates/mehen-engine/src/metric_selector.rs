@@ -192,7 +192,8 @@ pub(crate) fn parse_metric_selectors(specs: &[String]) -> Vec<MetricSelector> {
     selectors
 }
 
-/// Namespaced (`sql.*` / `markdown.*` / `history.*`) metric keys where a
+/// Namespaced (`sql.*` / `markdown.*` / `history.*` / `coverage.*`)
+/// metric keys where a
 /// *larger* value is healthier. Substring inference is too crude (e.g.
 /// `markdown.maintainability.artifact_debt_score` is a penalty despite
 /// containing "maintainability", and `sql.dialect.confidence` is
@@ -218,6 +219,17 @@ pub(crate) const NAMESPACED_HIGHER_IS_BETTER: &[&str] = &[
     // the low-risk end; every other `history.*` signal is a risk count.
     mehen_core::keys::HISTORY_AGE_MONTHS,
     mehen_core::keys::HISTORY_OWNERSHIP,
+    // Coverage *rates* — more covered code is always the healthier
+    // direction, so configured thresholds become minimums
+    // (`coverage.line = 80`). Deliberately only the three rates: for
+    // the raw `.covered`/`.total` counters a fixed polarity would gate
+    // a different measurement than the name suggests (a minimum
+    // "total instrumented lines" is not a coverage gate), so counters
+    // keep the neutral default and users flip with `+`/`-` when
+    // ranking by them.
+    mehen_core::keys::COVERAGE_LINE,
+    mehen_core::keys::COVERAGE_BRANCH,
+    mehen_core::keys::COVERAGE_FUNCTION,
 ];
 
 /// Whether a namespaced metric key is higher-is-better (see
@@ -232,7 +244,9 @@ pub(crate) fn is_namespaced_higher_is_better(name: &str) -> bool {
 /// the post-1.0 ranking polarity: `mi.*` variants, the Halstead
 /// program level (`L = 1/D` — inverse difficulty, so larger is the
 /// healthier direction, unlike the rest of the `halstead.*` family),
-/// and the enumerated namespaced quality scores.
+/// and the enumerated namespaced quality scores (including the three
+/// `coverage.*` rates — see [`NAMESPACED_HIGHER_IS_BETTER`] for why
+/// the coverage counters are not listed).
 pub(crate) fn is_higher_is_better_metric(key: &str) -> bool {
     key == "mi"
         || key.starts_with("mi.")

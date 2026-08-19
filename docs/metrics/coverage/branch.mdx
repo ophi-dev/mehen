@@ -1,0 +1,90 @@
+---
+title: "Branch coverage"
+description: "The share of branch arms your tests take — the criterion that catches the untested else, the short-circuited condition, and the error path line coverage waves through."
+keywords: ["branch coverage", "decision coverage", "condition coverage", "MC/DC", "branch arms"]
+---
+
+**Branch coverage** measures whether each *outcome* of each decision point executed: the taken
+and not-taken arm of every `if`, each `case` of a `switch`, each short-circuit of `&&`/`||`. It
+is strictly stronger than [line coverage](/metrics/coverage/line) — a one-line
+`if x: return None` reads 100% line-covered after a single truthy test, while its false arm (and
+whatever falls through) was never exercised. Testing folklore has carried this point since Myers:
+exercising every line is among the *weakest* adequacy criteria; exercising every decision outcome
+is the first one with teeth.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `coverage.branch` | float | `covered arms / total arms × 100`, in `0..=100`. |
+| `coverage.branch.covered` | int | Branch arms taken at least once. |
+| `coverage.branch.total` | int | Branch arms the report recorded. |
+
+Published on the file's root space and, span-scoped, on every function and closure space.
+**Absent when the report format measured no branches** — a Go coverprofile, or an LCOV file
+produced without branch instrumentation (`lcov`'s branch coverage is off by default), publishes
+no `coverage.branch` keys at all, rather than a fabricated 0% or 100%.
+
+## The arm model — how formats fold in
+
+Formats encode branch data with different vocabularies; mehen normalizes them all to flat
+*arms* — one countable outcome each:
+
+| Format | Encoding | Folding |
+|---|---|---|
+| LCOV | `BRDA:<line>,<block>,<branch>,<taken>` per arm | one arm per record; `-` taken-count means 0 |
+| Cobertura | `condition-coverage="50% (1/2)"` per line | the fraction expands to *n* arms, *covered* of them hit — per-arm counts are not recoverable from this format |
+| JaCoCo | `mb`/`cb` (missed/covered branches) per line | `mb + cb` arms, `cb` of them hit |
+| Clover | `truecount`/`falsecount` on `type="cond"` lines | two arms per condition (true and false) |
+| Istanbul | `b` arrays per branch site | one arm per array element |
+
+Two consequences worth knowing. First, **condition vs branch granularity is format-defined**:
+Clover counts each boolean *condition*'s two outcomes, while Cobertura's fraction may aggregate a
+whole decision — mehen reports what the tool measured and does not attempt to reconstruct a finer
+criterion than the report contains. Second, arm *identity* is positional per line, so merging two
+reports max-matches arms in order — sound for re-runs of the same build, approximate across
+different instrumentations of the same file.
+
+## How to read it
+
+| Signal | Interpretation |
+|---|---|
+| `coverage.branch` well below `coverage.line` | The classic gap: happy paths tested, error/edge arms not. The uncovered arms are usually `else` branches, early returns, and error handling — precisely the code that only runs when something goes wrong. |
+| Low branch coverage on a high-[cyclomatic](/metrics/code/cyclomatic) function | Cyclomatic complexity counts decision points; low branch coverage says their outcomes are untested. This pairing is the strongest per-function risk signal the coverage family offers. |
+| Branch ≈ line, both high | The suite genuinely walks the control flow — the numbers corroborate each other. |
+| Dimension absent | The report simply didn't measure branches. Re-instrument (e.g. `lcov --rc branch_coverage=1`, `coverage run --branch`) before concluding anything. |
+
+For safety-critical calibration: DO-178C requires decision coverage at level B and MC/DC
+(modified condition/decision coverage) at level A — criteria stronger than anything a mainstream
+report format carries. SQLite famously maintains 100% MC/DC of its core; the point of citing it
+is proportion — that standard costs person-years and is *not* the implied target of a CI gate.
+`coverage.branch` is the practical middle ground: strictly better evidence than line coverage,
+available from the tools you already run.
+
+## Gating
+
+```toml
+[thresholds]
+"coverage.branch" = 70   # minimum; files whose reports measured no branches skip the gate
+```
+
+## See also
+
+- [Line coverage](/metrics/coverage/line) — the weaker, universal criterion.
+- [Cyclomatic complexity](/metrics/code/cyclomatic) — counts the decision points whose outcomes
+  this metric checks.
+- [Supported formats](/metrics/coverage/supported-formats) — which producers emit branch data.
+
+## References
+
+- Myers, G. J., Sandler, C., & Badgett, T. (2011). *The Art of Software Testing*, 3rd ed. Wiley.
+  (Coverage criteria hierarchy: statement < decision < condition variants.)
+- Chilenski, J. J., & Miller, S. P. (1994). [Applicability of modified condition/decision
+  coverage to software testing](https://doi.org/10.1049/sej.1994.0025). *Software Engineering
+  Journal*, 9(5).
+- RTCA DO-178C (2011). *Software Considerations in Airborne Systems and Equipment
+  Certification.* (Structural-coverage objectives by criticality level.)
+- [How SQLite is tested](https://www.sqlite.org/testing.html) — 100% MC/DC in practice, and what
+  it costs.
+- [geninfo(1)](https://ltp.sourceforge.net/coverage/lcov/geninfo.1.php) — `BRDA` record
+  semantics.

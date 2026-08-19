@@ -1,0 +1,30 @@
+[package]
+name = "mehen-coverage-discovery"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Mehen 1.0 — automatic coverage-report discovery: bounded artifact scanning of ignored/hidden directories plus declarative tool-config introspection (internal)."
+publish = false
+
+[dependencies]
+mehen-coverage = { workspace = true }
+
+camino = { workspace = true }
+globset = { workspace = true }
+ignore = { workspace = true }
+log = { workspace = true }
+quick-xml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

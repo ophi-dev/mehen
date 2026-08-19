@@ -14,18 +14,22 @@ mehen-core = { workspace = true }
 smol_str = { workspace = true }
 
 # sqruff is the SQL parser backend (research: design-docs/sql_parser_comparison.md).
-# Pinned to a tagged git ref, mirroring the ruff pattern. It builds as a plain
-# `cargo build` (no Python/codegen), exposes one dialect-agnostic `SyntaxKind`
+# Registry-pinned (`=X.Y.Z`, the oxc/mago pattern) rather than a git tag:
+# sqruff publishes to crates.io, and Dependabot's cargo ecosystem only
+# updates registry dependencies — the `sqruff-*` group in dependabot.yml
+# never fired while these were git pins (ophi-dev/mehen#247). Both crates
+# must stay in lockstep. It builds as a plain `cargo build` (no
+# Python/codegen), exposes one dialect-agnostic `SyntaxKind`
 # node model, and ships CTE/scope/wildcard analysis. We depend only on
 # `lib-core` (lexer+parser+segment model+analysis utils) and `lib-dialects`
 # (feature-gated dialect grammars) — never the heavier `lib` crate, so no
 # Jinja templater plumbing or `pyo3` is pulled in.
-sqruff-lib-core = { git = "https://github.com/quarylabs/sqruff", tag = "v0.39.0" }
+sqruff-lib-core = "=0.40.0"
 # `ansi` is always compiled by sqruff (not a feature gate) and is the
 # inference fallback, so it is not listed here. `sparksql` transitively pulls
 # in `hive`. We deliberately omit `duckdb` (its dialect is a thin layer over
 # `postgres`, which we already ship).
-sqruff-lib-dialects = { git = "https://github.com/quarylabs/sqruff", tag = "v0.39.0", default-features = false, features = [
+sqruff-lib-dialects = { version = "=0.40.0", default-features = false, features = [
     "postgres",
     "tsql",
     "snowflake",
@@ -44,6 +48,10 @@ sqruff-lib-dialects = { git = "https://github.com/quarylabs/sqruff", tag = "v0.3
 insta = { workspace = true }
 mehen-report = { workspace = true }
 serde_json = { workspace = true }
+# Same 0.x line as sqruff-lib-core's own strum: `DialectKind: EnumIter`
+# comes from sqruff's derive, so the trait must resolve to the same crate
+# version to be visible (used by the every-dialect parse-health test).
+strum = "0.28"
 
 [lints]
 workspace = true
