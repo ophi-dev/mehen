@@ -515,6 +515,40 @@ mod tests {
             .unwrap_or(0.0)
     }
 
+    /// Every compiled-in dialect must survive a full analyze of a file
+    /// containing function calls. sqruff resolves grammar `Ref`s lazily
+    /// during matching, so a dialect grammar that references an
+    /// unregistered segment panics at *parse* time, not at grammar
+    /// construction — sqruff v0.39.0's oracle grammar did exactly that
+    /// (`JSONObjectContentSegment`, fixed upstream in v0.40.0; tracked
+    /// as ophi-dev/mehen#247). Parse *quality* is irrelevant here: a
+    /// dialect may find the file unparsable, but analysis must return,
+    /// never panic. The directive pins each dialect in turn; the
+    /// `is_<dialect>` assert proves the pin took effect instead of
+    /// silently falling back to inference.
+    #[test]
+    fn every_compiled_dialect_survives_function_call_parse() {
+        use strum::IntoEnumIterator;
+
+        use sqruff_lib_core::dialects::init::DialectKind;
+
+        for kind in DialectKind::iter() {
+            if dialect::dialect_for_kind(kind).is_none() {
+                continue; // not compiled into this build
+            }
+            let label = dialect_label(kind);
+            let sql = format!(
+                "-- sqlfluff:dialect:{label}\nselect coalesce(a, 1) from t where nullif(b, 0) > 1;\n"
+            );
+            let analysis = analyze(&sql);
+            assert_eq!(
+                metric(&analysis, &format!("sql.dialect.is_{label}")),
+                1.0,
+                "{label}: directive-pinned dialect must drive the parse"
+            );
+        }
+    }
+
     /// Every key the analyzer publishes onto the *root* space — the
     /// space thresholds and selectors read — must validate through
     /// `is_published_metric_key`, or `mehen.toml` threshold validation
