@@ -511,6 +511,10 @@ impl LanguageAnalyzer for PowerShellAnalyzer {
         // missing nodes; surface them as `error` diagnostics so the
         // metric output can't masquerade as clean (plan §9.3).
         let diagnostics = collect_recovered_errors(parser.root(), "powershell.syntax_error", 16);
+        // Per-space McCabe base rows (+1 per space, unit included) so
+        // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+        // cannot explain the rolled-up value (an empty function moves it).
+        evidence.record_cyclomatic_bases(&result.root);
         Ok(LanguageAnalysis {
             language: Language::PowerShell,
             backend: AnalysisBackend::TreeSitter,

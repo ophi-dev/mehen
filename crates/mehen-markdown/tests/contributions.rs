@@ -115,6 +115,71 @@ fn spans_are_sane_and_source_ordered() {
 }
 
 #[test]
+fn mcc_evidence_sums_to_the_published_score() {
+    // Every §8.1 charge and every (cap-scaled, negative) §8.4 scaffold
+    // credit is evidenced, so the amounts sum to the published MCC. The
+    // fixture exercises charges (headings, lists, links, code fence,
+    // table, blockquote) *and* a scaffold credit (labelled fence with
+    // adjacent prose).
+    let source = "\
+# Guide
+
+Intro prose explaining the example below.
+
+```rust
+let x = 1;
+```
+
+The fence above is explained. More context:
+
+- first item
+- second item with [a link](https://example.com)
+
+> A quoted remark.
+
+| a | b |
+|---|---|
+| 1 | 2 |
+";
+    let analysis = analyze(source, &AnalysisConfig::production());
+    let mcc_rows: Vec<_> = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.metric.as_str() == "markdown.complexity.cognitive_complexity")
+        .collect();
+    assert!(!mcc_rows.is_empty());
+    let sum: f64 = mcc_rows.iter().map(|item| item.amount).sum();
+    let published = metric(&analysis, "markdown.complexity.cognitive_complexity");
+    assert!(
+        (sum - published).abs() < 1e-9,
+        "MCC evidence must sum to the published score: {sum} vs {published}",
+    );
+    // Credits appear as negative amounts with their own reason namespace.
+    assert!(
+        mcc_rows.iter().any(|item| item.amount < 0.0
+            && item.reason.as_str() == "markdown.scaffold_credit.code_example"),
+        "expected a scaled scaffold-credit row, got {mcc_rows:?}",
+    );
+    // Ordinary structural elements are evidenced too (Codex review:
+    // a list-only document must not publish MCC without evidence).
+    let reasons: Vec<&str> = mcc_rows.iter().map(|item| item.reason.as_str()).collect();
+    for expected in [
+        "markdown.list",
+        "markdown.list_item",
+        "markdown.link",
+        "markdown.external_link_unchecked",
+        "markdown.code_fence",
+        "markdown.table",
+        "markdown.blockquote",
+    ] {
+        assert!(
+            reasons.contains(&expected),
+            "missing reason `{expected}` in {reasons:?}",
+        );
+    }
+}
+
+#[test]
 fn benchmark_profile_skips_evidence_without_changing_metrics() {
     let production = analyze(FIXTURE, &AnalysisConfig::production());
     let benchmark = analyze(FIXTURE, &AnalysisConfig::benchmark());

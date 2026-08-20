@@ -5,6 +5,7 @@
 - The analyzer/engine/CLI code is **not** a library or API for external use; it is internal to the CLI tool. The sole exception is the generated-only `crates/mehen-<lang>-parser/` crates, which are intentionally **publishable** so external tools can consume the vendored ANTLR parsers standalone (they carry no mehen-specific logic — just the generated lexer/parser + grammar on `antlr4_runtime`).
 
 ## Educational and Research Objective
+
 mehen's heuristic source-code metrics double as an educational and research instrument — the tool should teach what it measures, not just gate on it. When working on metrics:
 
 - **Explainability first**: when adding a new metric or improving an existing one, fill or improve the explainability gap — record contribution evidence (`MetricEvidence` in `mehen-metrics`: span + reason code + amount) so `mehen metrics` can answer *why* a value moved. Keep the evidence-sum invariants pinned by each crate's `tests/contributions.rs`.

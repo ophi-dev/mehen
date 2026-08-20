@@ -80,6 +80,10 @@ impl LanguageAnalyzer for PhpAnalyzer {
         let mut evidence = MetricEvidence::new("php", config.emit_contributions);
         let root = walker::walk_program(program, &source.text, &source.line_index, &mut evidence);
 
+        // Per-space McCabe base rows (+1 per space, unit included) so
+        // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+        // cannot explain the rolled-up value (an empty function moves it).
+        evidence.record_cyclomatic_bases(&root);
         Ok(LanguageAnalysis {
             language: Language::Php,
             backend: AnalysisBackend::Mago,

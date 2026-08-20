@@ -71,8 +71,18 @@ pub mod keys {
     pub const MI_ORIGINAL: &str = "mi.original";
     pub const MI_SEI: &str = "mi.sei";
     pub const ABC: &str = "abc";
+    /// ABC bucket sub-keys, published by `mehen-metrics::state::publish_abc`
+    /// and referenced by contribution evidence — shared so the two cannot
+    /// drift apart.
+    pub const ABC_ASSIGNMENTS: &str = "abc.assignments";
+    pub const ABC_BRANCHES: &str = "abc.branches";
+    pub const ABC_CONDITIONS: &str = "abc.conditions";
     pub const NARGS: &str = "nargs";
     pub const NOM: &str = "nom";
+    /// NOM bucket sub-keys, shared between `state::publish_nom` and
+    /// contribution evidence.
+    pub const NOM_FUNCTIONS: &str = "nom.functions";
+    pub const NOM_CLOSURES: &str = "nom.closures";
     pub const NEXIT: &str = "nexit";
     pub const NPA: &str = "npa";
     pub const NPM: &str = "npm";

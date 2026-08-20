@@ -180,11 +180,11 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: C) {
         // (defense-in-depth duplicate of the ElseClause reset).
         C::IfStatement if !is_else_if(node) => {
             let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
+            let before = ctx.current().cognitive.structural;
             ctx.current().cognitive.increase_nesting(effective);
             ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
-            ctx.record_evidence(node, |e, s| {
-                e.cognitive(s, effective.saturating_add(1), node.kind());
-            });
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(node, |e, s| e.cognitive(s, delta, node.kind()));
         }
         C::IfStatement => {
             ctx.current().cognitive.boolean_seq.reset();
@@ -195,16 +195,18 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: C) {
         | C::SwitchStatement
         | C::ConditionalExpression => {
             let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
+            let before = ctx.current().cognitive.structural;
             ctx.current().cognitive.increase_nesting(effective);
             ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
-            ctx.record_evidence(node, |e, s| {
-                e.cognitive(s, effective.saturating_add(1), node.kind());
-            });
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(node, |e, s| e.cognitive(s, delta, node.kind()));
         }
         C::ElseClause => {
+            let before = ctx.current().cognitive.structural;
             ctx.current().cognitive.increment_by_one();
             ctx.current().cognitive.boolean_seq.reset();
-            ctx.record_evidence(node, |e, s| e.cognitive(s, 1, node.kind()));
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(node, |e, s| e.cognitive(s, delta, node.kind()));
         }
         C::ExpressionStatement | C::ExpressionStatement2 | C::ReturnStatement | C::Declaration => {
             ctx.current().cognitive.boolean_seq.reset();

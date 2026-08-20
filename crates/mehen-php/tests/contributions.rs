@@ -76,6 +76,7 @@ fn evidence_sums_match_published_metrics() {
     assert!(!analysis.contributions.is_empty());
 
     for (evidence_key, metric_key) in [
+        ("cyclomatic", "cyclomatic.sum"),
         ("cognitive", "cognitive.sum"),
         ("nexit", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),
@@ -244,7 +245,11 @@ function pick(int $a): int
     let decisions: Vec<&str> = analysis
         .contributions
         .iter()
-        .filter(|item| item.metric.as_str() == "cyclomatic")
+        .filter(|item| {
+            item.metric.as_str() == "cyclomatic"
+                // Per-space McCabe base rows are not decision events.
+                && !item.reason.as_str().starts_with("php.cyclomatic.base.")
+        })
         .map(|item| item.reason.as_str())
         .collect();
     assert_eq!(decisions, vec!["php.cyclomatic.if", "php.cyclomatic.if"]);

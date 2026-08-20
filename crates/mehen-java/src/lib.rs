@@ -163,6 +163,10 @@ impl LanguageAnalyzer for JavaAnalyzer {
             &line_index,
         ));
 
+        // Per-space McCabe base rows (+1 per space, unit included) so
+        // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+        // cannot explain the rolled-up value (an empty function moves it).
+        evidence.record_cyclomatic_bases(&root);
         Ok(LanguageAnalysis {
             language: Language::Java,
             backend: AnalysisBackend::Antlr,

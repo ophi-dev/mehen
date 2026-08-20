@@ -52,7 +52,8 @@ pub mod types;
 mod visuals;
 mod words;
 
-pub use analyzer::{analyze_markdown, analyze_markdown_with_evidence};
+pub use analyzer::analyze_markdown;
+use analyzer::analyze_markdown_with_evidence;
 pub use embedded_code::{EmbeddedFenceMetrics, FenceLanguage, set_embedded_dispatch};
 
 use mehen_core::{

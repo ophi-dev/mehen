@@ -359,18 +359,21 @@ impl<'a, R: LanguageRules> Walker<'a, R> {
             CognitiveFact::None => {}
             CognitiveFact::IncreaseNesting => {
                 let effective_nesting = ctx.nesting + ctx.depth + ctx.lambda;
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increase_nesting(effective_nesting);
                 ctx.nesting += 1;
+                let delta = self.current().cognitive.structural.saturating_sub(before);
                 if let Some(span) = ev_span {
-                    self.evidence
-                        .cognitive(span, effective_nesting.saturating_add(1), node.kind());
+                    self.evidence.cognitive(span, delta, node.kind());
                 }
             }
             CognitiveFact::NonNestingPlusOne => {
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increment_by_one();
                 self.current().cognitive.boolean_seq.reset();
+                let delta = self.current().cognitive.structural.saturating_sub(before);
                 if let Some(span) = ev_span {
-                    self.evidence.cognitive(span, 1, node.kind());
+                    self.evidence.cognitive(span, delta, node.kind());
                 }
             }
             CognitiveFact::BooleanOperator(op) => {

@@ -76,6 +76,10 @@ impl LanguageAnalyzer for PythonAnalyzer {
             .iter()
             .map(|e| ParseDiagnostic::error("python.syntax_error", format!("{}", e)))
             .collect();
+        // Per-space McCabe base rows (+1 per space, unit included) so
+        // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+        // cannot explain the rolled-up value (an empty function moves it).
+        evidence.record_cyclomatic_bases(&root);
         Ok(LanguageAnalysis {
             language: Language::Python,
             backend: AnalysisBackend::PythonRuff,

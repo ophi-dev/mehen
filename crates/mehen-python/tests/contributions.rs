@@ -54,6 +54,7 @@ fn evidence_sums_match_published_metrics() {
     assert!(!analysis.contributions.is_empty());
 
     for (evidence_key, metric_key) in [
+        ("cyclomatic", "cyclomatic.sum"),
         ("cognitive", "cognitive.sum"),
         ("nexit", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),
@@ -260,6 +261,7 @@ def process(items, flag):
     let analysis = analyze(source, &AnalysisConfig::production());
 
     for (evidence_key, metric_key) in [
+        ("cyclomatic", "cyclomatic.sum"),
         ("cognitive", "cognitive.sum"),
         ("nexit", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),

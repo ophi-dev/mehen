@@ -201,11 +201,11 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: Go) {
         // `else` keyword adds the flat `+1`.
         Go::IfStatement if !is_else_if(node) => {
             let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
+            let before = ctx.current().cognitive.structural;
             ctx.current().cognitive.increase_nesting(effective);
             ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
-            ctx.record_evidence(node, |e, s| {
-                e.cognitive(s, effective.saturating_add(1), node.kind());
-            });
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(node, |e, s| e.cognitive(s, delta, node.kind()));
         }
         Go::IfStatement => {}
         Go::ForStatement
@@ -213,15 +213,17 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: Go) {
         | Go::TypeSwitchStatement
         | Go::SelectStatement => {
             let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
+            let before = ctx.current().cognitive.structural;
             ctx.current().cognitive.increase_nesting(effective);
             ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
-            ctx.record_evidence(node, |e, s| {
-                e.cognitive(s, effective.saturating_add(1), node.kind());
-            });
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(node, |e, s| e.cognitive(s, delta, node.kind()));
         }
         Go::Else => {
+            let before = ctx.current().cognitive.structural;
             ctx.current().cognitive.increment_by_one();
-            ctx.record_evidence(node, |e, s| e.cognitive(s, 1, node.kind()));
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(node, |e, s| e.cognitive(s, delta, node.kind()));
         }
         Go::ExpressionStatement
         | Go::SendStatement

@@ -72,10 +72,10 @@ fn evidence_sums_match_published_metrics() {
     assert!(!analysis.contributions.is_empty());
 
     // Families whose rolled-up value is exactly the sum of their
-    // per-event evidence. Cyclomatic is excluded on purpose: the
-    // published McCabe value adds a `+1` constant per space that has
-    // no evidence event.
+    // per-event evidence. Cyclomatic includes the per-space McCabe
+    // base rows (`rust.cyclomatic.base.<kind>`), so it sums exactly.
     for (evidence_key, metric_key) in [
+        ("cyclomatic", "cyclomatic.sum"),
         ("cognitive", "cognitive.sum"),
         ("nexit", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),

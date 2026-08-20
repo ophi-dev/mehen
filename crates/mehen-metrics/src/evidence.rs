@@ -25,7 +25,7 @@
 //! segment is the language crate's choice (usually the AST node kind);
 //! an empty detail collapses to `<lang>.<family>`.
 
-use mehen_core::{ContributionCollector, MetricContribution, SourceSpan, keys};
+use mehen_core::{ContributionCollector, MetricContribution, MetricSpace, SourceSpan, keys};
 
 /// A language-prefixed evidence sink wrapping [`ContributionCollector`].
 ///
@@ -47,11 +47,6 @@ impl MetricEvidence {
             collector: ContributionCollector::new(enabled),
             lang,
         }
-    }
-
-    /// A disabled sink — for callers that need a placeholder.
-    pub fn disabled(lang: &'static str) -> Self {
-        Self::new(lang, false)
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -83,6 +78,28 @@ impl MetricEvidence {
         }
         let reason = self.reason("cyclomatic", detail);
         self.record(keys::CYCLOMATIC, span, 1.0, reason);
+    }
+
+    /// Record the per-space McCabe base (+1) for every space in a finished
+    /// metric tree, the unit included.
+    ///
+    /// `cyclomatic.sum` rolls up `decisions + 1` per folded space, so
+    /// decision evidence alone can neither explain nor sum to it — adding
+    /// an empty function moves the metric without adding a decision.
+    /// Walkers call this once after the walk with the assembled root; each
+    /// space contributes one `<lang>.cyclomatic.base.<kind>` row spanning
+    /// the space, making Σ(cyclomatic evidence) == `cyclomatic.sum` by
+    /// construction.
+    pub fn record_cyclomatic_bases(&mut self, root: &MetricSpace) {
+        if !self.is_enabled() {
+            return;
+        }
+        let mut stack = vec![root];
+        while let Some(space) = stack.pop() {
+            let reason = self.reason("cyclomatic.base", space.kind.as_str());
+            self.record(keys::CYCLOMATIC, space.span, 1.0, reason);
+            stack.extend(space.spaces.iter());
+        }
     }
 
     /// One cognitive-complexity increment. `amount` is the structural
@@ -120,7 +137,7 @@ impl MetricEvidence {
             return;
         }
         let reason = self.reason("abc.assignment", detail);
-        self.record(ABC_ASSIGNMENTS, span, f64::from(count), reason);
+        self.record(keys::ABC_ASSIGNMENTS, span, f64::from(count), reason);
     }
 
     /// One ABC branch (`B` — calls, `goto`, object creation). Amount +1.
@@ -129,7 +146,7 @@ impl MetricEvidence {
             return;
         }
         let reason = self.reason("abc.branch", detail);
-        self.record(ABC_BRANCHES, span, 1.0, reason);
+        self.record(keys::ABC_BRANCHES, span, 1.0, reason);
     }
 
     /// One ABC condition (`C` — comparisons, conditional clauses).
@@ -139,7 +156,7 @@ impl MetricEvidence {
             return;
         }
         let reason = self.reason("abc.condition", detail);
-        self.record(ABC_CONDITIONS, span, 1.0, reason);
+        self.record(keys::ABC_CONDITIONS, span, 1.0, reason);
     }
 
     /// One function declaration (NOM). Amount +1.
@@ -148,7 +165,7 @@ impl MetricEvidence {
             return;
         }
         let reason = self.reason("nom.function", detail);
-        self.record(NOM_FUNCTIONS, span, 1.0, reason);
+        self.record(keys::NOM_FUNCTIONS, span, 1.0, reason);
     }
 
     /// One closure / lambda declaration (NOM). Amount +1.
@@ -157,7 +174,7 @@ impl MetricEvidence {
             return;
         }
         let reason = self.reason("nom.closure", detail);
-        self.record(NOM_CLOSURES, span, 1.0, reason);
+        self.record(keys::NOM_CLOSURES, span, 1.0, reason);
     }
 
     /// The declared parameter count of a function space (NArgs).
@@ -201,15 +218,6 @@ impl MetricEvidence {
         self.record(keys::NPM, span, 1.0, reason);
     }
 }
-
-// Contribution metric keys for families whose evidence attaches to a
-// published sub-key rather than the root key. Kept in sync with
-// `state::publish_abc` / `state::publish_nom` by the tests below.
-const ABC_ASSIGNMENTS: &str = "abc.assignments";
-const ABC_BRANCHES: &str = "abc.branches";
-const ABC_CONDITIONS: &str = "abc.conditions";
-const NOM_FUNCTIONS: &str = "nom.functions";
-const NOM_CLOSURES: &str = "nom.closures";
 
 #[cfg(test)]
 mod tests {
@@ -259,6 +267,40 @@ mod tests {
         let entries = e.finish();
         assert_eq!(entries[0].amount, 3.0);
         assert_eq!(entries[1].amount, 5.0);
+    }
+
+    #[test]
+    fn cyclomatic_bases_cover_every_space_in_the_tree() {
+        use mehen_core::{SpaceId, SpaceKind};
+        let mut root = MetricSpace::new(SpaceId(0), SpaceKind::Unit, span(0));
+        let mut class = MetricSpace::new(SpaceId(1), SpaceKind::Class, span(10));
+        class
+            .spaces
+            .push(MetricSpace::new(SpaceId(2), SpaceKind::Function, span(20)));
+        root.spaces.push(class);
+
+        let mut e = MetricEvidence::new("t", true);
+        e.record_cyclomatic_bases(&root);
+        let entries = e.finish();
+        let reasons: Vec<&str> = entries.iter().map(|c| c.reason.as_str()).collect();
+        assert_eq!(
+            reasons,
+            vec![
+                "t.cyclomatic.base.unit",
+                "t.cyclomatic.base.class",
+                "t.cyclomatic.base.function"
+            ]
+        );
+        assert!(entries.iter().all(|c| c.amount == 1.0));
+        assert!(
+            entries
+                .iter()
+                .all(|c| c.metric.as_str() == keys::CYCLOMATIC)
+        );
+
+        let mut disabled = MetricEvidence::new("t", false);
+        disabled.record_cyclomatic_bases(&root);
+        assert!(disabled.finish().is_empty());
     }
 
     #[test]

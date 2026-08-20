@@ -63,9 +63,10 @@ fn evidence_sums_match_published_metrics() {
     assert!(!analysis.contributions.is_empty());
 
     // Families whose rolled-up value is exactly the sum of their per-event
-    // evidence. (Cyclomatic is excluded by design: its published sum carries
-    // the +1 base complexity per space on top of the recorded decisions.)
+    // evidence. Cyclomatic includes the per-space McCabe base rows
+    // (`java.cyclomatic.base.<kind>`), so it sums exactly too.
     for (evidence_key, metric_key) in [
+        ("cyclomatic", "cyclomatic.sum"),
         ("cognitive", "cognitive.sum"),
         ("nexit", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),

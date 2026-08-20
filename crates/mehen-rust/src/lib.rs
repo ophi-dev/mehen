@@ -65,6 +65,10 @@ impl LanguageAnalyzer for RustAnalyzer {
             .take(16)
             .map(|e| ParseDiagnostic::error("rust.syntax_error", e.to_string()))
             .collect();
+        // Per-space McCabe base rows (+1 per space, unit included) so
+        // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+        // cannot explain the rolled-up value (an empty function moves it).
+        evidence.record_cyclomatic_bases(&root);
         Ok(LanguageAnalysis {
             language: Language::Rust,
             backend: AnalysisBackend::RaApSyntax,

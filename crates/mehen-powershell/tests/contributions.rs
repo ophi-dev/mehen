@@ -57,6 +57,7 @@ fn evidence_sums_match_published_metrics() {
     // Families whose rolled-up value is exactly the sum of their
     // per-event evidence.
     for key in [
+        "cyclomatic.sum",
         "cognitive.sum",
         "nexit.sum",
         "abc.assignments",

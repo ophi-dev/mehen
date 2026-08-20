@@ -394,15 +394,15 @@ pub(crate) fn publish_halstead(stats: &HalsteadStats, target: &mut MetricSet) {
 fn publish_abc(stats: &AbcStats, target: &mut MetricSet) {
     target.insert(MetricKey::new(keys::ABC), stats.magnitude());
     target.insert(
-        MetricKey::new(format!("{}.assignments", keys::ABC)),
+        MetricKey::new(keys::ABC_ASSIGNMENTS),
         stats.assignments_sum as i64,
     );
     target.insert(
-        MetricKey::new(format!("{}.branches", keys::ABC)),
+        MetricKey::new(keys::ABC_BRANCHES),
         stats.branches_sum as i64,
     );
     target.insert(
-        MetricKey::new(format!("{}.conditions", keys::ABC)),
+        MetricKey::new(keys::ABC_CONDITIONS),
         stats.conditions_sum as i64,
     );
     target.insert(
@@ -486,11 +486,11 @@ fn publish_nargs(stats: &NargsStats, nom: &NomStats, target: &mut MetricSet) {
 fn publish_nom(stats: &NomStats, target: &mut MetricSet) {
     target.insert(MetricKey::new(keys::NOM), stats.total() as i64);
     target.insert(
-        MetricKey::new(format!("{}.functions", keys::NOM)),
+        MetricKey::new(keys::NOM_FUNCTIONS),
         stats.functions_sum as i64,
     );
     target.insert(
-        MetricKey::new(format!("{}.closures", keys::NOM)),
+        MetricKey::new(keys::NOM_CLOSURES),
         stats.closures_sum as i64,
     );
     target.insert(

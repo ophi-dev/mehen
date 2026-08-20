@@ -55,6 +55,7 @@ fn evidence_sums_match_published_metrics() {
     assert!(!analysis.contributions.is_empty());
 
     for (evidence_key, metric_key) in [
+        ("cyclomatic", "cyclomatic.sum"),
         ("cognitive", "cognitive.sum"),
         ("nexit", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),
@@ -73,11 +74,25 @@ fn evidence_sums_match_published_metrics() {
 
 #[test]
 fn decision_evidence_counts_match_cyclomatic() {
-    // Root `cyclomatic.sum` = decision evidence + one McCabe constant
-    // per folded space (here: unit + one function = 2).
+    // Per-space base rows (`c.cyclomatic.base.<kind>`) cover the +1 McCabe
+    // constant per folded space, so cyclomatic evidence sums exactly.
     let analysis = analyze(FIXTURE, &AnalysisConfig::production());
-    let decisions = evidence_sum(&analysis, "cyclomatic");
-    assert_eq!(decisions + 2.0, metric(&analysis, "cyclomatic.sum"));
+    assert_eq!(
+        evidence_sum(&analysis, "cyclomatic"),
+        metric(&analysis, "cyclomatic.sum")
+    );
+    let mut bases: Vec<&str> = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.reason.as_str().starts_with("c.cyclomatic.base."))
+        .map(|item| item.reason.as_str())
+        .collect();
+    bases.sort_unstable();
+    // One function space + one unit.
+    assert_eq!(
+        bases,
+        vec!["c.cyclomatic.base.function", "c.cyclomatic.base.unit"]
+    );
 }
 
 #[test]

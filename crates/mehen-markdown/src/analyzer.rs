@@ -77,12 +77,12 @@ pub fn analyze_markdown(source: &str, path: &Path) -> MarkdownMetrics {
 }
 
 /// As [`analyze_markdown`], additionally recording contribution evidence
-/// (plan §5.4) into `evidence`: MCC prose-structure events (heading skips,
-/// oversized flat sections, over-long paragraphs, dense link clusters) with
-/// the exact weighted amounts they added. The registry-driven
-/// `LanguageAnalyzer::analyze` path uses this; `analyze_markdown` keeps its
-/// original signature for existing fixtures and callers.
-pub fn analyze_markdown_with_evidence(
+/// (plan §5.4) into `evidence`: every MCC adjustment (element charges and
+/// scaled scaffold credits) with the exact amounts applied. Crate-internal —
+/// the registry-driven `LanguageAnalyzer::analyze` path uses this;
+/// `analyze_markdown` keeps its original public signature for existing
+/// fixtures and callers.
+pub(crate) fn analyze_markdown_with_evidence(
     source: &str,
     path: &Path,
     evidence: &mut mehen_core::ContributionCollector,

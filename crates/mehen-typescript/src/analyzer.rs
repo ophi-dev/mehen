@@ -126,6 +126,10 @@ fn analyze_with_source_type(
         .map(|err| ParseDiagnostic::error("typescript.syntax_error", err.message.to_string()))
         .collect();
 
+    // Per-space McCabe base rows (+1 per space, unit included) so
+    // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+    // cannot explain the rolled-up value (an empty function moves it).
+    evidence.record_cyclomatic_bases(&root);
     LanguageAnalysis {
         language,
         backend: AnalysisBackend::Oxc,
