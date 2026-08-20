@@ -10,3 +10,4 @@ dist/
 .claude/setting.local.json.DS_Store
 .DS_Store
 .env
+target/llvm-cov/cobertura.xml
