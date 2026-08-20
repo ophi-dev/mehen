@@ -14,8 +14,8 @@ use mehen_core::{
     Result, SourceFile, SourceSpan, SpaceKind, byte_offset_clamped,
 };
 use mehen_tree_sitter::{
-    CognitiveFact, LanguageRules, NodeFacts, ScopeOpen, TreeSitterParser, collect_recovered_errors,
-    empty_space, text_of, walk,
+    CognitiveFact, LanguageRules, MetricEvidence, NodeFacts, ScopeOpen, TreeSitterParser,
+    collect_recovered_errors, empty_space, text_of, walk,
 };
 use tree_sitter::Node;
 
@@ -473,7 +473,7 @@ impl LanguageAnalyzer for PowerShellAnalyzer {
         AnalysisBackend::TreeSitter
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let parser = match TreeSitterParser::new(
             tree_sitter_pwsh::LANGUAGE.into(),
             source.text.clone().into_bytes(),
@@ -499,22 +499,28 @@ impl LanguageAnalyzer for PowerShellAnalyzer {
             }
         };
 
+        let mut evidence = MetricEvidence::new("powershell", config.emit_contributions);
         let result = walk(
             parser.root(),
             parser.source(),
             &source.line_index,
             &PowerShellRules,
+            &mut evidence,
         );
         // Tree-sitter recovers from syntax errors by inserting ERROR /
         // missing nodes; surface them as `error` diagnostics so the
         // metric output can't masquerade as clean (plan §9.3).
         let diagnostics = collect_recovered_errors(parser.root(), "powershell.syntax_error", 16);
+        // Per-space McCabe base rows (+1 per space, unit included) so
+        // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+        // cannot explain the rolled-up value (an empty function moves it).
+        evidence.record_cyclomatic_bases(&result.root);
         Ok(LanguageAnalysis {
             language: Language::PowerShell,
             backend: AnalysisBackend::TreeSitter,
             diagnostics,
             root: result.root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
     }
 }

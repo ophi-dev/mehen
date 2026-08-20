@@ -51,11 +51,11 @@
 
 use mehen_antlr::runtime::token::Token;
 use mehen_antlr::runtime::{FromRuleNode, Node, RuleNodeView, TerminalNodeView};
-use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
+use mehen_antlr::{LocToken, LocTokenKind, ctx_span, span_from_tokens};
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
 use mehen_metrics::{
-    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
-    apply_state_to, finalize_state, merge_child_into_parent,
+    ContainerKind, HalsteadOperand, HalsteadOperator, MetricEvidence, MetricTreeBuilder,
+    SpaceRangeTracker, State, apply_state_to, finalize_state, merge_child_into_parent,
 };
 use smol_str::SmolStr;
 
@@ -72,6 +72,7 @@ pub(crate) fn walk(
     line_index: &LineIndex,
     source_len: usize,
     loc_tokens: &[LocToken],
+    evidence: &mut MetricEvidence,
 ) -> MetricSpace {
     let unit_span = match tree.as_rule() {
         Some(rule) => ctx_span(rule, line_index, source_len),
@@ -92,6 +93,7 @@ pub(crate) fn walk(
         suppress_parent_wmc: vec![false],
         cognitive: CognitiveContext::default(),
         loc_routing: SpaceRangeTracker::new(),
+        evidence,
     };
 
     if let Some(rule) = tree.as_rule() {
@@ -213,11 +215,44 @@ struct Walker<'a> {
     /// Records each opened space's byte range so the post-walk LOC token
     /// pass can route code/comment lines to the deepest enclosing scope.
     loc_routing: SpaceRangeTracker,
+    /// Contribution-evidence sink (plan §5.4). Record methods are no-ops
+    /// when disabled, so classify hooks call them unconditionally via the
+    /// `record_rule_evidence` / `record_token_evidence` helpers.
+    evidence: &'a mut MetricEvidence,
 }
 
 impl Walker<'_> {
     fn current(&mut self) -> &mut State {
         self.stack.last_mut().expect("walker stack empty")
+    }
+
+    /// Record contribution evidence for a rule context. The span is only
+    /// computed when the sink is enabled, so classify hooks can call this
+    /// unconditionally next to each stat increment.
+    #[inline]
+    fn record_rule_evidence<F>(&mut self, ctx: RuleNodeView<'_>, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, mehen_core::SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let span = ctx_span(ctx, self.line_index, self.source_len);
+            record(self.evidence, span);
+        }
+    }
+
+    /// As [`Self::record_rule_evidence`] but for a single terminal token —
+    /// the span covers just the token, so operator evidence points at the
+    /// `&&` / `else` keyword itself.
+    #[inline]
+    fn record_token_evidence<F>(&mut self, term: TerminalNodeView<'_>, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, mehen_core::SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let sym = term.symbol();
+            let span = span_from_tokens(&sym, &sym, self.line_index, self.source_len);
+            record(self.evidence, span);
+        }
     }
 
     fn visit(&mut self, node: Node<'_>, hint: ChildHint) {
@@ -236,6 +271,8 @@ impl Walker<'_> {
         // Cyclomatic: each short-circuit boolean operator token.
         if matches!(tt, kp::CONJ | kp::DISJ) {
             self.current().cyclomatic.record_decision();
+            let op = if tt == kp::CONJ { "&&" } else { "||" };
+            self.record_token_evidence(term, |e, s| e.decision(s, op));
         }
 
         // Cognitive: `else` adds a flat +1 (covers `else if`); the boolean
@@ -244,11 +281,20 @@ impl Walker<'_> {
         // isolated at the rule level in `visit_rule` (see the
         // `is_logical_negation` boundary there). The `EXCL_*` tokens are
         // shared with the postfix `!!` not-null assertion, which must not
-        // affect a boolean run at all.
+        // affect a boolean run at all. Evidence amounts are the structural
+        // delta actually applied — a same-operator repeat records nothing.
         match tt {
-            kp::ELSE => self.current().cognitive.increment_by_one(),
-            kp::CONJ => self.current().cognitive.observe_boolean("&&"),
-            kp::DISJ => self.current().cognitive.observe_boolean("||"),
+            kp::ELSE => {
+                self.current().cognitive.increment_by_one();
+                self.record_token_evidence(term, |e, s| e.cognitive(s, 1, "else"));
+            }
+            kp::CONJ | kp::DISJ => {
+                let op = if tt == kp::CONJ { "&&" } else { "||" };
+                let before = self.current().cognitive.structural;
+                self.current().cognitive.observe_boolean(op);
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                self.record_token_evidence(term, |e, s| e.cognitive(s, delta, op));
+            }
             _ => {}
         }
 
@@ -256,6 +302,8 @@ impl Walker<'_> {
         // / not-null operators.
         if is_abc_condition_token(tt) {
             self.current().abc.record_condition();
+            let detail = condition_token_spelling(tt);
+            self.record_token_evidence(term, |e, s| e.abc_condition(s, detail));
         }
 
         // Halstead operator/operand token classification. A token reached
@@ -495,6 +543,11 @@ impl Walker<'_> {
     fn maybe_open_space(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) -> bool {
         match ri {
             kp::RULE_GETTER | kp::RULE_SETTER => {
+                let detail = if ri == kp::RULE_GETTER {
+                    "getter"
+                } else {
+                    "setter"
+                };
                 // A property accessor is a method of the enclosing class
                 // (NPM): its visibility is its own explicit modifier, else
                 // the owning property's visibility. Record it before
@@ -504,11 +557,20 @@ impl Walker<'_> {
                     let public =
                         visibility_from_modifiers_of(ctx).unwrap_or(owner.property_is_public);
                     self.current().npm.record_method(owner.container, public);
+                    if public {
+                        self.record_rule_evidence(ctx, |e, s| e.public_method(s, detail));
+                    }
                 }
                 let name = rule_name(ctx);
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_function();
-                state.nargs.record_function_args(count_function_args(ctx));
+                let argc = count_function_args(ctx);
+                state.nargs.record_function_args(argc);
+                if self.evidence.is_enabled() {
+                    let span = self.space_span(ctx);
+                    self.evidence.function(span, detail);
+                    self.evidence.function_args(span, argc, detail);
+                }
                 self.push_space(SpaceKind::Function, name, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
@@ -516,10 +578,21 @@ impl Walker<'_> {
             kp::RULE_FUNCTION_DECLARATION
             | kp::RULE_ANONYMOUS_FUNCTION
             | kp::RULE_SECONDARY_CONSTRUCTOR => {
+                let detail = match ri {
+                    kp::RULE_FUNCTION_DECLARATION => "function_declaration",
+                    kp::RULE_ANONYMOUS_FUNCTION => "anonymous_function",
+                    _ => "secondary_constructor",
+                };
                 let name = rule_name(ctx);
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_function();
-                state.nargs.record_function_args(count_function_args(ctx));
+                let argc = count_function_args(ctx);
+                state.nargs.record_function_args(argc);
+                if self.evidence.is_enabled() {
+                    let span = self.space_span(ctx);
+                    self.evidence.function(span, detail);
+                    self.evidence.function_args(span, argc, detail);
+                }
                 self.push_space(SpaceKind::Function, name, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
@@ -527,7 +600,13 @@ impl Walker<'_> {
             kp::RULE_LAMBDA_LITERAL => {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_closure();
-                state.nargs.record_closure_args(count_lambda_args(ctx));
+                let argc = count_lambda_args(ctx);
+                state.nargs.record_closure_args(argc);
+                if self.evidence.is_enabled() {
+                    let span = self.space_span(ctx);
+                    self.evidence.closure(span, "lambda_literal");
+                    self.evidence.closure_args(span, argc, "lambda_literal");
+                }
                 self.push_space(SpaceKind::Function, None, ctx, state, hint.in_anon_body);
                 self.enter_function_cognitive();
                 true
@@ -560,7 +639,14 @@ impl Walker<'_> {
                 } else {
                     ContainerKind::Class
                 };
-                record_constructor_properties(ctx, container, &mut state);
+                record_constructor_properties(
+                    ctx,
+                    container,
+                    &mut state,
+                    self.evidence,
+                    self.line_index,
+                    self.source_len,
+                );
                 // A class-like space owns its own WMC, so it never suppresses
                 // a parent contribution (and it has already cleared the
                 // enum-entry suppression for its own body).
@@ -689,16 +775,20 @@ impl Walker<'_> {
 
     /// Per-rule cyclomatic / cognitive / ABC / exit / LOC classification.
     fn classify_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) {
-        // Cyclomatic decisions: if / loops / when-entry.
-        if matches!(
-            ri,
-            kp::RULE_IF_EXPRESSION
-                | kp::RULE_FOR_STATEMENT
-                | kp::RULE_WHILE_STATEMENT
-                | kp::RULE_DO_WHILE_STATEMENT
-                | kp::RULE_WHEN_ENTRY
-        ) {
+        // Cyclomatic decisions: if / loops / when-entry. The match yields
+        // the evidence detail so the decision set and its reason codes
+        // cannot drift apart.
+        let decision_detail = match ri {
+            kp::RULE_IF_EXPRESSION => Some("if_expression"),
+            kp::RULE_FOR_STATEMENT => Some("for_statement"),
+            kp::RULE_WHILE_STATEMENT => Some("while_statement"),
+            kp::RULE_DO_WHILE_STATEMENT => Some("do_while_statement"),
+            kp::RULE_WHEN_ENTRY => Some("when_entry"),
+            _ => None,
+        };
+        if let Some(detail) = decision_detail {
             self.current().cyclomatic.record_decision();
+            self.record_rule_evidence(ctx, |e, s| e.decision(s, detail));
         }
 
         self.classify_cognitive(ctx, ri, hint);
@@ -749,6 +839,17 @@ impl Walker<'_> {
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
                 self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+                let detail = match ri {
+                    kp::RULE_IF_EXPRESSION => "if_expression",
+                    kp::RULE_FOR_STATEMENT => "for_statement",
+                    kp::RULE_WHILE_STATEMENT => "while_statement",
+                    kp::RULE_DO_WHILE_STATEMENT => "do_while_statement",
+                    kp::RULE_WHEN_EXPRESSION => "when_expression",
+                    _ => "catch_block",
+                };
+                self.record_rule_evidence(ctx, |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), detail);
+                });
             }
             // Label-qualified break/continue add +1 (goto-like).
             kp::RULE_JUMP_EXPRESSION => {
@@ -756,6 +857,7 @@ impl Walker<'_> {
                     && (jump.break_at_token().is_some() || jump.continue_at_token().is_some())
                 {
                     self.current().cognitive.increment_by_one();
+                    self.record_rule_evidence(ctx, |e, s| e.cognitive(s, 1, "jump_expression"));
                 }
                 self.current().cognitive.boolean_seq.reset();
             }
@@ -796,7 +898,10 @@ impl Walker<'_> {
 
     fn classify_abc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize) {
         match ri {
-            kp::RULE_ASSIGNMENT => self.current().abc.record_assignment(),
+            kp::RULE_ASSIGNMENT => {
+                self.current().abc.record_assignment();
+                self.record_rule_evidence(ctx, |e, s| e.abc_assignment(s, "assignment"));
+            }
             // A `propertyDeclaration` with an initializer (`= expr`) is an
             // assignment; `val`/`var` without `=` is not.
             kp::RULE_PROPERTY_DECLARATION
@@ -805,26 +910,51 @@ impl Walker<'_> {
                     .is_some() =>
             {
                 self.current().abc.record_assignment();
+                self.record_rule_evidence(ctx, |e, s| {
+                    e.abc_assignment(s, "property_declaration");
+                });
             }
             // A call: the `callSuffix` rule wraps the argument list of a
             // postfix call.
-            kp::RULE_CALL_SUFFIX => self.current().abc.record_branch(),
+            kp::RULE_CALL_SUFFIX => {
+                self.current().abc.record_branch();
+                self.record_rule_evidence(ctx, |e, s| e.abc_branch(s, "call_suffix"));
+            }
             // Multi-token operators modeled as rules: elvis (`?:`),
             // safe-nav (`?.`), and the `!!` not-null assertion.
-            kp::RULE_ELVIS | kp::RULE_SAFE_NAV => self.current().abc.record_condition(),
+            kp::RULE_ELVIS => {
+                self.current().abc.record_condition();
+                self.record_rule_evidence(ctx, |e, s| e.abc_condition(s, "?:"));
+            }
+            kp::RULE_SAFE_NAV => {
+                self.current().abc.record_condition();
+                self.record_rule_evidence(ctx, |e, s| e.abc_condition(s, "?."));
+            }
             kp::RULE_POSTFIX_UNARY_OPERATOR
                 if kp::PostfixUnaryOperatorContext::from_rule_node(ctx)
                     .and_then(|op| op.excl_no_ws_token())
                     .is_some() =>
             {
                 self.current().abc.record_condition();
+                self.record_rule_evidence(ctx, |e, s| e.abc_condition(s, "!!"));
             }
             kp::RULE_IF_EXPRESSION
             | kp::RULE_WHEN_ENTRY
             | kp::RULE_CATCH_BLOCK
             | kp::RULE_FOR_STATEMENT
             | kp::RULE_WHILE_STATEMENT
-            | kp::RULE_DO_WHILE_STATEMENT => self.current().abc.record_condition(),
+            | kp::RULE_DO_WHILE_STATEMENT => {
+                self.current().abc.record_condition();
+                let detail = match ri {
+                    kp::RULE_IF_EXPRESSION => "if_expression",
+                    kp::RULE_WHEN_ENTRY => "when_entry",
+                    kp::RULE_CATCH_BLOCK => "catch_block",
+                    kp::RULE_FOR_STATEMENT => "for_statement",
+                    kp::RULE_WHILE_STATEMENT => "while_statement",
+                    _ => "do_while_statement",
+                };
+                self.record_rule_evidence(ctx, |e, s| e.abc_condition(s, detail));
+            }
             _ => {}
         }
     }
@@ -835,10 +965,18 @@ impl Walker<'_> {
             // enclosing function. A labeled `return@label` (`RETURN_AT`)
             // returns from a lambda, not the function, so it is excluded
             // (matches SonarKotlin); `break`/`continue` are excluded too.
-            if let Some(jump) = kp::JumpExpressionContext::from_rule_node(ctx)
-                && (jump.return_token().is_some() || jump.throw_token().is_some())
-            {
-                self.current().nexit.record_exit();
+            if let Some(jump) = kp::JumpExpressionContext::from_rule_node(ctx) {
+                let detail = if jump.return_token().is_some() {
+                    Some("return")
+                } else if jump.throw_token().is_some() {
+                    Some("throw")
+                } else {
+                    None
+                };
+                if let Some(detail) = detail {
+                    self.current().nexit.record_exit();
+                    self.record_rule_evidence(ctx, |e, s| e.exit(s, detail));
+                }
             }
         }
     }
@@ -897,9 +1035,22 @@ impl Walker<'_> {
         match ri {
             kp::RULE_PROPERTY_DECLARATION => {
                 self.current().npa.record_attribute(container, public);
+                if public {
+                    self.record_rule_evidence(ctx, |e, s| {
+                        e.public_attribute(s, "property_declaration");
+                    });
+                }
             }
             kp::RULE_FUNCTION_DECLARATION | kp::RULE_SECONDARY_CONSTRUCTOR => {
                 self.current().npm.record_method(container, public);
+                if public {
+                    let detail = if ri == kp::RULE_FUNCTION_DECLARATION {
+                        "function_declaration"
+                    } else {
+                        "secondary_constructor"
+                    };
+                    self.record_rule_evidence(ctx, |e, s| e.public_method(s, detail));
+                }
             }
             _ => {}
         }
@@ -1073,6 +1224,9 @@ fn record_constructor_properties(
     class_ctx: RuleNodeView<'_>,
     container: ContainerKind,
     state: &mut State,
+    evidence: &mut MetricEvidence,
+    line_index: &LineIndex,
+    source_len: usize,
 ) {
     // Navigate the typed chain (0.15 runtime): a class declaration's optional
     // `primaryConstructor` holds a required `classParameters`, which holds the
@@ -1094,6 +1248,10 @@ fn record_constructor_properties(
         // context types, so it stays on the underlying node.
         let public = member_is_public(param.rule_node());
         state.npa.record_attribute(container, public);
+        if public && evidence.is_enabled() {
+            let span = ctx_span(param.rule_node(), line_index, source_len);
+            evidence.public_attribute(span, "class_parameter");
+        }
     }
 }
 
@@ -1188,6 +1346,25 @@ fn is_abc_condition_token(tt: i32) -> bool {
             | kp::CONJ
             | kp::DISJ
     )
+}
+
+/// Source spelling of an ABC-condition operator token, used as the
+/// evidence reason detail (`kotlin.abc.condition.==`). Kept in sync with
+/// [`is_abc_condition_token`].
+fn condition_token_spelling(tt: i32) -> &'static str {
+    match tt {
+        kp::EQEQ => "==",
+        kp::EXCL_EQ => "!=",
+        kp::EQEQEQ => "===",
+        kp::EXCL_EQEQ => "!==",
+        kp::LANGLE => "<",
+        kp::RANGLE => ">",
+        kp::LE => "<=",
+        kp::GE => ">=",
+        kp::CONJ => "&&",
+        kp::DISJ => "||",
+        _ => "condition",
+    }
 }
 
 /// Rules the `is_else_branch` hint is allowed to flow through on its way

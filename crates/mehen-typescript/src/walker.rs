@@ -25,8 +25,8 @@
 
 use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceKind};
 use mehen_metrics::{
-    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
-    apply_state_to, close_space, finalize_state,
+    ContainerKind, HalsteadOperand, HalsteadOperator, MetricEvidence, MetricTreeBuilder,
+    SpaceRangeTracker, State, apply_state_to, close_space, finalize_state,
 };
 use oxc_allocator::Vec as ArenaVec;
 use oxc_ast::AstKind;
@@ -42,15 +42,17 @@ use smol_str::SmolStr;
 
 /// Crate-internal entry point — drive the walker over a parsed
 /// program. Only the `*Analyzer::analyze` impls in this crate call
-/// this; not part of any cross-crate API.
+/// this; not part of any cross-crate API. Contribution evidence is
+/// recorded into the caller-owned `evidence` sink (plan §5.4).
 pub(crate) fn walk_program<'a>(
     program: &Program<'a>,
     tokens: &ArenaVec<'a, Token>,
     source: &str,
     line_index: &LineIndex,
+    evidence: &mut MetricEvidence,
 ) -> MetricSpace {
     let unit_span = program_span(program, line_index);
-    let mut visitor = Visitor::new(source, line_index, unit_span);
+    let mut visitor = Visitor::new(source, line_index, unit_span, evidence);
     visitor.visit_program(program);
 
     // Halstead is driven by the token stream. Each token is emitted into
@@ -85,6 +87,10 @@ fn span_to_source_span(span: Span, line_index: &LineIndex) -> SourceSpan {
 struct Visitor<'a> {
     source: &'a str,
     line_index: &'a LineIndex,
+    /// Contribution-evidence sink (plan §5.4). Record methods are
+    /// no-ops when disabled, so visits call them unconditionally via
+    /// `record_evidence` next to each stat increment.
+    evidence: &'a mut MetricEvidence,
     tree: MetricTreeBuilder,
     /// Per-space accumulator stack — index 0 is the unit.
     stack: Vec<State>,
@@ -118,7 +124,12 @@ struct CognitiveContext {
 }
 
 impl<'a> Visitor<'a> {
-    fn new(source: &'a str, line_index: &'a LineIndex, unit_span: SourceSpan) -> Self {
+    fn new(
+        source: &'a str,
+        line_index: &'a LineIndex,
+        unit_span: SourceSpan,
+        evidence: &'a mut MetricEvidence,
+    ) -> Self {
         let mut state = State::new();
         state.loc.set_span(
             unit_span.start_line.saturating_sub(1),
@@ -128,6 +139,7 @@ impl<'a> Visitor<'a> {
         Self {
             source,
             line_index,
+            evidence,
             tree: MetricTreeBuilder::new(unit_span),
             stack: vec![state],
             kinds: vec![SpaceKind::Unit],
@@ -139,6 +151,26 @@ impl<'a> Visitor<'a> {
 
     fn current(&mut self) -> &mut State {
         self.stack.last_mut().expect("walker stack empty")
+    }
+
+    /// Record contribution evidence for an Oxc span. The
+    /// `SourceSpan` is only computed when the sink is enabled, so
+    /// visits can call this unconditionally next to each stat
+    /// increment:
+    ///
+    /// ```ignore
+    /// self.current().cyclomatic.record_decision();
+    /// self.record_evidence(span, |e, s| e.decision(s, "if_statement"));
+    /// ```
+    #[inline]
+    fn record_evidence<F>(&mut self, span: Span, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let source_span = span_to_source_span(span, self.line_index);
+            record(self.evidence, source_span);
+        }
     }
 
     fn finish(mut self) -> MetricSpace {
@@ -446,11 +478,25 @@ impl<'a> Visit<'a> for Visitor<'a> {
 
         // NArgs — `record_function_args` / `record_closure_args` is
         // owned by the just-opened child state. Recursing immediately
-        // populates it.
+        // populates it. NOM itself is recorded by
+        // `State::for_opened_space` inside `open_space`; evidence for
+        // both is recorded here at the open site.
         let argc = it.params.items.len() as u32;
         match kind {
-            SpaceKind::Function => self.current().nargs.record_function_args(argc),
-            SpaceKind::Closure => self.current().nargs.record_closure_args(argc),
+            SpaceKind::Function => {
+                self.current().nargs.record_function_args(argc);
+                self.record_evidence(it.span, |e, s| {
+                    e.function(s, "function");
+                    e.function_args(s, argc, "function");
+                });
+            }
+            SpaceKind::Closure => {
+                self.current().nargs.record_closure_args(argc);
+                self.record_evidence(it.span, |e, s| {
+                    e.closure(s, "function_expression");
+                    e.closure_args(s, argc, "function_expression");
+                });
+            }
             _ => {}
         }
 
@@ -500,9 +546,12 @@ impl<'a> Visit<'a> for Visitor<'a> {
         // `visit_variable_declarator` by inspecting the init shape.
         let kind = SpaceKind::Closure;
         self.open_space(kind.clone(), it.span, None);
-        self.current()
-            .nargs
-            .record_closure_args(it.params.items.len() as u32);
+        let argc = it.params.items.len() as u32;
+        self.current().nargs.record_closure_args(argc);
+        self.record_evidence(it.span, |e, s| {
+            e.closure(s, "arrow_function_expression");
+            e.closure_args(s, argc, "arrow_function_expression");
+        });
 
         let mut ctx = self.cognitive;
         ctx.lambda = ctx.lambda.saturating_add(1);
@@ -540,6 +589,10 @@ impl<'a> Visit<'a> for Visitor<'a> {
 
         let argc = it.value.params.items.len() as u32;
         self.current().nargs.record_function_args(argc);
+        self.record_evidence(it.span, |e, s| {
+            e.function(s, "method_definition");
+            e.function_args(s, argc, "method_definition");
+        });
 
         let mut ctx = self.cognitive;
         let nested = self
@@ -581,6 +634,9 @@ impl<'a> Visit<'a> for Visitor<'a> {
             self.current()
                 .npm
                 .record_method(ContainerKind::Class, is_public);
+            if is_public {
+                self.record_evidence(it.span, |e, s| e.public_method(s, "method_definition"));
+            }
         }
     }
 
@@ -592,47 +648,81 @@ impl<'a> Visit<'a> for Visitor<'a> {
         // SwitchCase, CatchClause, ConditionalExpression`, plus `&&` /
         // `||` from `LogicalExpression`. Reference:
         // `crates/mehen-engine/src/legacy/metrics/cyclomatic.rs:136-159`.
-        if matches!(
-            kind,
-            AstKind::IfStatement(_)
-                | AstKind::ForStatement(_)
-                | AstKind::ForInStatement(_)
-                | AstKind::ForOfStatement(_)
-                | AstKind::WhileStatement(_)
-                | AstKind::DoWhileStatement(_)
-                | AstKind::SwitchCase(_)
-                | AstKind::CatchClause(_)
-                | AstKind::ConditionalExpression(_)
-        ) {
+        // The match yields the evidence detail so the decision set and
+        // its reason codes cannot drift apart.
+        let decision_detail = match kind {
+            AstKind::IfStatement(_) => Some("if_statement"),
+            AstKind::ForStatement(_) => Some("for_statement"),
+            AstKind::ForInStatement(_) => Some("for_in_statement"),
+            AstKind::ForOfStatement(_) => Some("for_of_statement"),
+            AstKind::WhileStatement(_) => Some("while_statement"),
+            AstKind::DoWhileStatement(_) => Some("do_while_statement"),
+            AstKind::SwitchCase(_) => Some("switch_case"),
+            AstKind::CatchClause(_) => Some("catch_clause"),
+            AstKind::ConditionalExpression(_) => Some("conditional_expression"),
+            _ => None,
+        };
+        if let Some(detail) = decision_detail {
             self.current().cyclomatic.record_decision();
+            self.record_evidence(ast_kind_span(kind), |e, s| e.decision(s, detail));
         }
         if let AstKind::LogicalExpression(le) = kind {
             use oxc_syntax::operator::LogicalOperator::*;
             if matches!(le.operator, And | Or) {
                 self.current().cyclomatic.record_decision();
+                let detail = if matches!(le.operator, And) {
+                    "&&"
+                } else {
+                    "||"
+                };
+                self.record_evidence(le.span, |e, s| e.decision(s, detail));
             }
         }
 
         // NExit — `ReturnStatement`, `ThrowStatement`. Legacy:
         // `crates/mehen-engine/src/legacy/metrics/exit.rs:132-152`.
-        if matches!(
-            kind,
-            AstKind::ReturnStatement(_) | AstKind::ThrowStatement(_)
-        ) {
+        let exit_detail = match kind {
+            AstKind::ReturnStatement(_) => Some("return_statement"),
+            AstKind::ThrowStatement(_) => Some("throw_statement"),
+            _ => None,
+        };
+        if let Some(detail) = exit_detail {
             self.current().nexit.record_exit();
+            self.record_evidence(ast_kind_span(kind), |e, s| e.exit(s, detail));
         }
 
         // ABC. Legacy:
         // `crates/mehen-engine/src/legacy/metrics/abc.rs:410-447`.
         match kind {
-            AstKind::AssignmentExpression(_) | AstKind::UpdateExpression(_) => {
+            AstKind::AssignmentExpression(_) => {
                 self.current().abc.record_assignment();
+                self.record_evidence(ast_kind_span(kind), |e, s| {
+                    e.abc_assignment(s, "assignment_expression");
+                });
+            }
+            AstKind::UpdateExpression(_) => {
+                self.current().abc.record_assignment();
+                self.record_evidence(ast_kind_span(kind), |e, s| {
+                    e.abc_assignment(s, "update_expression");
+                });
             }
             AstKind::VariableDeclarator(decl) if decl.init.is_some() => {
                 self.current().abc.record_assignment();
+                self.record_evidence(decl.span, |e, s| {
+                    e.abc_assignment(s, "variable_declarator");
+                });
             }
-            AstKind::CallExpression(_) | AstKind::NewExpression(_) => {
+            AstKind::CallExpression(_) => {
                 self.current().abc.record_branch();
+                self.record_evidence(ast_kind_span(kind), |e, s| {
+                    e.abc_branch(s, "call_expression");
+                });
+            }
+            AstKind::NewExpression(_) => {
+                self.current().abc.record_branch();
+                self.record_evidence(ast_kind_span(kind), |e, s| {
+                    e.abc_branch(s, "new_expression");
+                });
             }
             AstKind::IfStatement(_)
             | AstKind::ForStatement(_)
@@ -643,6 +733,11 @@ impl<'a> Visit<'a> for Visitor<'a> {
             | AstKind::SwitchCase(_)
             | AstKind::CatchClause(_) => {
                 self.current().abc.record_condition();
+                // `decision_detail` above covers the same construct
+                // names except ForOfStatement (not an ABC condition);
+                // recompute the label from the same table.
+                let detail = decision_detail.unwrap_or("condition");
+                self.record_evidence(ast_kind_span(kind), |e, s| e.abc_condition(s, detail));
             }
             // ABC condition counts the comparison binary operators
             // (`==`, `===`, `!=`, `!==`, `<`, `<=`, `>`, `>=`) plus
@@ -662,12 +757,20 @@ impl<'a> Visit<'a> for Visitor<'a> {
                         | GreaterEqualThan
                 ) {
                     self.current().abc.record_condition();
+                    let detail = comparison_op_str(be.operator);
+                    self.record_evidence(be.span, |e, s| e.abc_condition(s, detail));
                 }
             }
             AstKind::LogicalExpression(le) => {
                 use oxc_syntax::operator::LogicalOperator::*;
                 if matches!(le.operator, And | Or) {
                     self.current().abc.record_condition();
+                    let detail = if matches!(le.operator, And) {
+                        "&&"
+                    } else {
+                        "||"
+                    };
+                    self.record_evidence(le.span, |e, s| e.abc_condition(s, detail));
                 }
             }
             _ => {}
@@ -697,6 +800,8 @@ impl<'a> Visit<'a> for Visitor<'a> {
             use oxc_ast::ast::Statement;
             if !matches!(alt, Statement::IfStatement(_)) {
                 self.current().abc.record_condition();
+                use oxc_span::GetSpan;
+                self.record_evidence(alt.span(), |e, s| e.abc_condition(s, "else_clause"));
             }
         }
 
@@ -763,6 +868,9 @@ impl<'a> Visit<'a> for Visitor<'a> {
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
                 self.cognitive.nesting += 1;
+                self.record_evidence(ast_kind_span(kind), |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), "if_statement");
+                });
             }
             AstKind::ForStatement(_)
             | AstKind::ForInStatement(_)
@@ -777,6 +885,20 @@ impl<'a> Visit<'a> for Visitor<'a> {
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
                 self.cognitive.nesting += 1;
+                let detail = match kind {
+                    AstKind::ForStatement(_) => "for_statement",
+                    AstKind::ForInStatement(_) => "for_in_statement",
+                    AstKind::ForOfStatement(_) => "for_of_statement",
+                    AstKind::WhileStatement(_) => "while_statement",
+                    AstKind::DoWhileStatement(_) => "do_while_statement",
+                    AstKind::SwitchStatement(_) => "switch_statement",
+                    AstKind::TryStatement(_) => "try_statement",
+                    AstKind::CatchClause(_) => "catch_clause",
+                    _ => "conditional_expression",
+                };
+                self.record_evidence(ast_kind_span(kind), |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), detail);
+                });
             }
             AstKind::ExpressionStatement(_) => {
                 self.current().cognitive.boolean_seq.reset();
@@ -789,10 +911,19 @@ impl<'a> Visit<'a> for Visitor<'a> {
             }
             AstKind::LogicalExpression(le) => {
                 use oxc_syntax::operator::LogicalOperator::*;
-                if matches!(le.operator, And) {
-                    self.current().cognitive.observe_boolean("&&");
-                } else if matches!(le.operator, Or) {
-                    self.current().cognitive.observe_boolean("||");
+                let op = match le.operator {
+                    And => Some("&&"),
+                    Or => Some("||"),
+                    Coalesce => None,
+                };
+                if let Some(op) = op {
+                    // Evidence amount is the boolean-run delta the
+                    // collapser actually applied — a same-operator
+                    // repeat moves nothing and records nothing.
+                    let before = self.current().cognitive.structural;
+                    self.current().cognitive.observe_boolean(op);
+                    let delta = self.current().cognitive.structural.saturating_sub(before);
+                    self.record_evidence(le.span, |e, s| e.cognitive(s, delta, op));
                 }
             }
             _ => {}
@@ -814,6 +945,11 @@ impl<'a> Visit<'a> for Visitor<'a> {
                         _ => ContainerKind::Class,
                     };
                     self.current().npa.record_attribute(container, is_public);
+                    if is_public {
+                        self.record_evidence(pd.span, |e, s| {
+                            e.public_attribute(s, "property_definition");
+                        });
+                    }
                 }
                 AstKind::AccessorProperty(ap) => {
                     let is_public = ts_field_visibility(
@@ -823,19 +959,28 @@ impl<'a> Visit<'a> for Visitor<'a> {
                     self.current()
                         .npa
                         .record_attribute(ContainerKind::Class, is_public);
+                    if is_public {
+                        self.record_evidence(ap.span, |e, s| {
+                            e.public_attribute(s, "accessor_property");
+                        });
+                    }
                 }
                 AstKind::TSPropertySignature(ts) => {
                     // Interface field — always public in TS.
-                    let _ = ts;
                     self.current()
                         .npa
                         .record_attribute(ContainerKind::Interface, true);
+                    self.record_evidence(ts.span, |e, s| {
+                        e.public_attribute(s, "ts_property_signature");
+                    });
                 }
                 AstKind::TSMethodSignature(ts) => {
-                    let _ = ts;
                     self.current()
                         .npm
                         .record_method(ContainerKind::Interface, true);
+                    self.record_evidence(ts.span, |e, s| {
+                        e.public_method(s, "ts_method_signature");
+                    });
                 }
                 _ => {}
             }
@@ -1039,6 +1184,23 @@ fn ts_field_visibility(
 fn ast_kind_span(kind: AstKind<'_>) -> Span {
     use oxc_span::GetSpan;
     kind.span()
+}
+
+/// Spelling of a comparison operator for evidence reason codes
+/// (`typescript.abc.condition.===`).
+fn comparison_op_str(op: oxc_syntax::operator::BinaryOperator) -> &'static str {
+    use oxc_syntax::operator::BinaryOperator::*;
+    match op {
+        Equality => "==",
+        Inequality => "!=",
+        StrictEquality => "===",
+        StrictInequality => "!==",
+        LessThan => "<",
+        LessEqualThan => "<=",
+        GreaterThan => ">",
+        GreaterEqualThan => ">=",
+        _ => "comparison",
+    }
 }
 
 #[allow(dead_code)]

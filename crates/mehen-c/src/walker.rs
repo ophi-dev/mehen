@@ -59,7 +59,7 @@
 //!   loc/cyclomatic/halstead — no C-specific logic.
 
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
-use mehen_metrics::{HalsteadOperand, HalsteadOperator, State};
+use mehen_metrics::{HalsteadOperand, HalsteadOperator, MetricEvidence, State};
 use mehen_tree_sitter::{OpenSpaceRequest, WalkerCtx, WalkerHooks, node_span, run, text_of};
 use smol_str::SmolStr;
 use tree_sitter::Node;
@@ -68,10 +68,16 @@ use crate::grammar::C;
 
 /// Drive the walker over the parsed C tree and return the populated
 /// `MetricSpace`. Plugs C classification into the shared
-/// [`mehen_tree_sitter::run`] scaffold.
-pub(crate) fn walk_program(root: Node<'_>, source: &[u8], line_index: &LineIndex) -> MetricSpace {
+/// [`mehen_tree_sitter::run`] scaffold. Contribution evidence is
+/// recorded into the caller-owned `evidence` sink (plan §5.4).
+pub(crate) fn walk_program(
+    root: Node<'_>,
+    source: &[u8],
+    line_index: &LineIndex,
+    evidence: &mut MetricEvidence,
+) -> MetricSpace {
     let mut hooks = CHooks;
-    run(&mut hooks, root, source, line_index)
+    run(&mut hooks, root, source, line_index, evidence)
 }
 
 struct CHooks;
@@ -91,6 +97,10 @@ impl WalkerHooks for CHooks {
                 state.nom.record_function();
                 let argc = count_c_args(node, ctx.source);
                 state.nargs.record_function_args(argc);
+                if ctx.evidence.is_enabled() {
+                    ctx.evidence.function(span, node.kind());
+                    ctx.evidence.function_args(span, argc, node.kind());
+                }
                 Some(OpenSpaceRequest {
                     kind: SpaceKind::Function,
                     name,
@@ -144,6 +154,7 @@ impl WalkerHooks for CHooks {
                 | C::PIPEPIPE
         ) {
             ctx.current().cyclomatic.record_decision();
+            ctx.record_evidence(node, |e, s| e.decision(s, node.kind()));
         }
 
         classify_cognitive(ctx, node, kind);
@@ -153,6 +164,7 @@ impl WalkerHooks for CHooks {
         // break/continue/goto are intra-function flow.
         if matches!(kind, C::ReturnStatement) {
             ctx.current().nexit.record_exit();
+            ctx.record_evidence(node, |e, s| e.exit(s, node.kind()));
         }
 
         classify_loc(ctx, node, kind);
@@ -168,8 +180,11 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: C) {
         // (defense-in-depth duplicate of the ElseClause reset).
         C::IfStatement if !is_else_if(node) => {
             let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
+            let before = ctx.current().cognitive.structural;
             ctx.current().cognitive.increase_nesting(effective);
             ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(node, |e, s| e.cognitive(s, delta, node.kind()));
         }
         C::IfStatement => {
             ctx.current().cognitive.boolean_seq.reset();
@@ -180,12 +195,18 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: C) {
         | C::SwitchStatement
         | C::ConditionalExpression => {
             let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
+            let before = ctx.current().cognitive.structural;
             ctx.current().cognitive.increase_nesting(effective);
             ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(node, |e, s| e.cognitive(s, delta, node.kind()));
         }
         C::ElseClause => {
+            let before = ctx.current().cognitive.structural;
             ctx.current().cognitive.increment_by_one();
             ctx.current().cognitive.boolean_seq.reset();
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(node, |e, s| e.cognitive(s, delta, node.kind()));
         }
         C::ExpressionStatement | C::ExpressionStatement2 | C::ReturnStatement | C::Declaration => {
             ctx.current().cognitive.boolean_seq.reset();
@@ -193,13 +214,19 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: C) {
         C::BinaryExpression | C::BinaryExpression2 => {
             // Legacy `compute_booleans::<C>(node, &AMPAMP, &PIPEPIPE)`:
             // walk the children and feed each `&&`/`||` operator into
-            // the sequence collapser.
+            // the sequence collapser. Evidence spans point at the
+            // operator token; same-operator repeats apply no delta and
+            // record nothing.
             for child in iter_children(node) {
-                match C::from(child.kind_id()) {
-                    C::AMPAMP => ctx.current().cognitive.observe_boolean("&&"),
-                    C::PIPEPIPE => ctx.current().cognitive.observe_boolean("||"),
-                    _ => {}
-                }
+                let op = match C::from(child.kind_id()) {
+                    C::AMPAMP => "&&",
+                    C::PIPEPIPE => "||",
+                    _ => continue,
+                };
+                let before = ctx.current().cognitive.structural;
+                ctx.current().cognitive.observe_boolean(op);
+                let delta = ctx.current().cognitive.structural.saturating_sub(before);
+                ctx.record_evidence(&child, |e, s| e.cognitive(s, delta, op));
             }
         }
         _ => {}
@@ -210,12 +237,15 @@ fn classify_abc(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: C) {
     match kind {
         C::AssignmentExpression | C::UpdateExpression => {
             ctx.current().abc.record_assignment();
+            ctx.record_evidence(node, |e, s| e.abc_assignment(s, node.kind()));
         }
         C::InitDeclarator if has_child_kind(node, C::EQ) => {
             ctx.current().abc.record_assignment();
+            ctx.record_evidence(node, |e, s| e.abc_assignment(s, node.kind()));
         }
         C::CallExpression | C::CallExpression2 => {
             ctx.current().abc.record_branch();
+            ctx.record_evidence(node, |e, s| e.abc_branch(s, node.kind()));
         }
         C::IfStatement
         | C::ElseClause
@@ -234,6 +264,7 @@ fn classify_abc(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: C) {
         | C::PIPEPIPE
         | C::BANG => {
             ctx.current().abc.record_condition();
+            ctx.record_evidence(node, |e, s| e.abc_condition(s, node.kind()));
         }
         _ => {}
     }

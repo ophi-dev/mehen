@@ -76,8 +76,10 @@ fn write_contributions(out: &mut String, contributions: &[MetricContribution]) {
         let _ = writeln!(
             out,
             "| `{}` | {sign}{amount} | `{}` | {lines} |",
-            contribution.metric,
-            contribution.reason.as_str(),
+            escape_table_cell(contribution.metric.as_str()),
+            // Reasons may carry operator spellings (`c.cyclomatic.||`);
+            // escape pipes so the table doesn't gain phantom columns.
+            escape_table_cell(contribution.reason.as_str()),
         );
     }
 }
@@ -951,6 +953,36 @@ mod tests {
         assert!(md.contains("## Contributions"));
         assert!(md.contains("| `sql.change_risk_score` | +8 |"));
         assert!(md.contains("`sql.change_risk.drop` | L2–L3"));
+    }
+
+    #[test]
+    fn contribution_reasons_with_pipes_are_escaped_in_the_table() {
+        // Operator-spelling reasons (`c.cyclomatic.||`) carry pipes;
+        // unescaped they would split the Markdown table into phantom
+        // columns (Codex review on PR #252).
+        let mut report = report_with_metrics(&[("cyclomatic.sum", 2.0)]);
+        report.contributions.push(MetricContribution {
+            metric: MetricKey::new("cyclomatic.sum"),
+            span: SourceSpan::new(4, 6, 1, 1),
+            amount: 1.0,
+            reason: ContributionReason::new("c.cyclomatic.||"),
+        });
+        let md = render_metrics_markdown(&report);
+        assert!(
+            md.contains(r"`c.cyclomatic.\|\|`"),
+            "pipes in reasons must be escaped:\n{md}"
+        );
+        // Every contribution row keeps exactly the 4-column shape.
+        for row in md
+            .lines()
+            .filter(|l| l.starts_with("| `") && l.contains("cyclomatic"))
+        {
+            assert_eq!(
+                row.matches(" | ").count(),
+                3,
+                "row gained phantom columns: {row}"
+            );
+        }
     }
 
     #[test]

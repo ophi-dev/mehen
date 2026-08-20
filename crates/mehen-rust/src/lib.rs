@@ -19,6 +19,7 @@ use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
     ParseDiagnostic, Result, SourceFile,
 };
+use mehen_metrics::MetricEvidence;
 use ra_ap_syntax::{Edition, SourceFile as RustSourceFile};
 
 pub struct RustAnalyzer;
@@ -44,7 +45,7 @@ impl LanguageAnalyzer for RustAnalyzer {
         AnalysisBackend::RaApSyntax
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         // ra_ap_syntax always returns a tree, even on parse errors. Errors
         // are surfaced through `parse.errors()`; we don't fail the
         // analysis on recoverable errors — the legacy tree-sitter
@@ -56,19 +57,24 @@ impl LanguageAnalyzer for RustAnalyzer {
         let parse = RustSourceFile::parse(&source.text, Edition::CURRENT);
         let file = parse.tree();
         let line_index = LineIndex::new(&source.text);
-        let root = walker::walk_source_file(&file, &source.text, &line_index);
+        let mut evidence = MetricEvidence::new("rust", config.emit_contributions);
+        let root = walker::walk_source_file(&file, &source.text, &line_index, &mut evidence);
         let diagnostics: Vec<ParseDiagnostic> = parse
             .errors()
             .iter()
             .take(16)
             .map(|e| ParseDiagnostic::error("rust.syntax_error", e.to_string()))
             .collect();
+        // Per-space McCabe base rows (+1 per space, unit included) so
+        // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+        // cannot explain the rolled-up value (an empty function moves it).
+        evidence.record_cyclomatic_bases(&root);
         Ok(LanguageAnalysis {
             language: Language::Rust,
             backend: AnalysisBackend::RaApSyntax,
             diagnostics,
             root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
     }
 }

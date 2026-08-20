@@ -54,6 +54,11 @@ impl From<String> for MetricKey {
 /// renames stay in one place.
 pub mod keys {
     pub const CYCLOMATIC: &str = "cyclomatic";
+    /// Rolled-up cyclomatic complexity (`Σ decisions + 1` per folded
+    /// space) as published by the shared walker. Contribution evidence
+    /// attaches here — the bare per-space key does not move when a
+    /// nested function's complexity changes.
+    pub const CYCLOMATIC_SUM: &str = "cyclomatic.sum";
     pub const COGNITIVE: &str = "cognitive";
     pub const LOC: &str = "loc";
     pub const LOC_LLOC: &str = "loc.lloc";
@@ -71,9 +76,23 @@ pub mod keys {
     pub const MI_ORIGINAL: &str = "mi.original";
     pub const MI_SEI: &str = "mi.sei";
     pub const ABC: &str = "abc";
+    /// ABC bucket sub-keys, published by `mehen-metrics::state::publish_abc`
+    /// and referenced by contribution evidence — shared so the two cannot
+    /// drift apart.
+    pub const ABC_ASSIGNMENTS: &str = "abc.assignments";
+    pub const ABC_BRANCHES: &str = "abc.branches";
+    pub const ABC_CONDITIONS: &str = "abc.conditions";
     pub const NARGS: &str = "nargs";
     pub const NOM: &str = "nom";
+    /// NOM bucket sub-keys, shared between `state::publish_nom` and
+    /// contribution evidence.
+    pub const NOM_FUNCTIONS: &str = "nom.functions";
+    pub const NOM_CLOSURES: &str = "nom.closures";
     pub const NEXIT: &str = "nexit";
+    /// Rolled-up exit count across folded spaces — the aggregate that
+    /// moves when a function gains an exit; contribution evidence
+    /// attaches here.
+    pub const NEXIT_SUM: &str = "nexit.sum";
     pub const NPA: &str = "npa";
     pub const NPM: &str = "npm";
     pub const WMC: &str = "wmc";

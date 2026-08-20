@@ -16,7 +16,8 @@
 
 use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceId, SpaceKind};
 use mehen_metrics::{
-    MetricTreeBuilder, State, apply_state_to, finalize_state, merge_child_into_parent,
+    MetricEvidence, MetricTreeBuilder, State, apply_state_to, finalize_state,
+    merge_child_into_parent,
 };
 use tree_sitter::Node;
 
@@ -194,11 +195,18 @@ pub struct WalkResult {
 ///    `loc`,
 /// 5. on close, publishes the per-space metric set via the shared
 ///    [`apply_state_to`] helper, then folds it back into the parent.
+///
+/// Because every fact flows through this one function, contribution
+/// evidence (plan §5.4) is recorded centrally: the caller passes a
+/// [`MetricEvidence`] sink and each applied fact records a span +
+/// reason derived from the node kind. The caller finishes the sink to
+/// obtain the contributions.
 pub fn walk<R: LanguageRules>(
     root_node: Node<'_>,
     source_text: &[u8],
     line_index: &LineIndex,
     rules: &R,
+    evidence: &mut MetricEvidence,
 ) -> WalkResult {
     let unit_span = node_span(&root_node, line_index);
     let mut walker = Walker {
@@ -208,6 +216,7 @@ pub fn walk<R: LanguageRules>(
         stack: vec![State::new()],
         kinds: vec![SpaceKind::Unit],
         rules,
+        evidence,
     };
     // The unit space's LOC span covers the full source.
     walker.stack[0].loc.set_span(
@@ -234,6 +243,7 @@ struct Walker<'a, R: LanguageRules> {
     /// length as `stack`; index 0 is the unit.
     kinds: Vec<SpaceKind>,
     rules: &'a R,
+    evidence: &'a mut MetricEvidence,
 }
 
 /// Per-node cognitive-complexity context threaded through the walker
@@ -279,11 +289,19 @@ impl<'a, R: LanguageRules> Walker<'a, R> {
                         child_state.nom.record_function();
                         let count = self.rules.count_args(&node, self.source_text);
                         child_state.nargs.record_function_args(count);
+                        if self.evidence.is_enabled() {
+                            self.evidence.function(span, node.kind());
+                            self.evidence.function_args(span, count, node.kind());
+                        }
                     }
                     SpaceKind::Closure => {
                         child_state.nom.record_closure();
                         let count = self.rules.count_args(&node, self.source_text);
                         child_state.nargs.record_closure_args(count);
+                        if self.evidence.is_enabled() {
+                            self.evidence.closure(span, node.kind());
+                            self.evidence.closure_args(span, count, node.kind());
+                        }
                     }
                     SpaceKind::Class | SpaceKind::Impl => {
                         // Mark NPA / NPM / WMC as having seen a class-like
@@ -309,25 +327,62 @@ impl<'a, R: LanguageRules> Walker<'a, R> {
         let opened_space = opened_kind.is_some();
 
         let facts = self.rules.classify(&node);
+        // Contribution evidence (plan §5.4): one span per node, computed
+        // only when the sink is enabled and a fact that can move a
+        // metric actually fired. Detail codes reuse the tree-sitter
+        // node kind, so reasons read `powershell.cyclomatic.if_statement`.
+        let ev_span = if self.evidence.is_enabled()
+            && (facts.cyclomatic_decision
+                || facts.nexit
+                || facts.abc_branch
+                || facts.abc_condition
+                || facts.abc_assignment
+                || !matches!(facts.cognitive, CognitiveFact::None))
+        {
+            Some(node_span(&node, self.line_index))
+        } else {
+            None
+        };
         if facts.cyclomatic_decision {
             self.current().cyclomatic.record_decision();
+            if let Some(span) = ev_span {
+                self.evidence.decision(span, node.kind());
+            }
         }
         // Cognitive — drive the per-node state machine. The walker
         // tracks `(nesting, depth, lambda)` via `ctx`, threaded through
         // the recursion. See [`CognitiveFact`] for variant semantics.
+        // Evidence amounts are the structural delta each variant
+        // actually applied — boolean-run bookkeeping that doesn't move
+        // the metric records nothing.
         match &facts.cognitive {
             CognitiveFact::None => {}
             CognitiveFact::IncreaseNesting => {
                 let effective_nesting = ctx.nesting + ctx.depth + ctx.lambda;
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increase_nesting(effective_nesting);
                 ctx.nesting += 1;
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                if let Some(span) = ev_span {
+                    self.evidence.cognitive(span, delta, node.kind());
+                }
             }
             CognitiveFact::NonNestingPlusOne => {
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increment_by_one();
                 self.current().cognitive.boolean_seq.reset();
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                if let Some(span) = ev_span {
+                    self.evidence.cognitive(span, delta, node.kind());
+                }
             }
             CognitiveFact::BooleanOperator(op) => {
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.observe_boolean(op.as_str());
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                if let Some(span) = ev_span {
+                    self.evidence.cognitive(span, delta, node.kind());
+                }
             }
             CognitiveFact::NotOperator(op) => {
                 self.current()
@@ -340,13 +395,23 @@ impl<'a, R: LanguageRules> Walker<'a, R> {
             }
             CognitiveFact::StatementBoundaryWithBooleans(ops) => {
                 self.current().cognitive.boolean_seq.reset();
+                let before = self.current().cognitive.structural;
                 for op in ops {
                     self.current().cognitive.observe_boolean(op.as_str());
                 }
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                if let Some(span) = ev_span {
+                    self.evidence.cognitive(span, delta, node.kind());
+                }
             }
             CognitiveFact::BooleanContainer(ops) => {
+                let before = self.current().cognitive.structural;
                 for op in ops {
                     self.current().cognitive.observe_boolean(op.as_str());
+                }
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                if let Some(span) = ev_span {
+                    self.evidence.cognitive(span, delta, node.kind());
                 }
             }
             CognitiveFact::FunctionEntry => {
@@ -392,15 +457,27 @@ impl<'a, R: LanguageRules> Walker<'a, R> {
         }
         if facts.nexit {
             self.current().nexit.record_exit();
+            if let Some(span) = ev_span {
+                self.evidence.exit(span, node.kind());
+            }
         }
         if facts.abc_branch {
             self.current().abc.record_branch();
+            if let Some(span) = ev_span {
+                self.evidence.abc_branch(span, node.kind());
+            }
         }
         if facts.abc_condition {
             self.current().abc.record_condition();
+            if let Some(span) = ev_span {
+                self.evidence.abc_condition(span, node.kind());
+            }
         }
         if facts.abc_assignment {
             self.current().abc.record_assignment();
+            if let Some(span) = ev_span {
+                self.evidence.abc_assignment(span, node.kind());
+            }
         }
         // NPA / NPM — language-classified attribute / method
         // declarations. The enclosing class-like state owns the
@@ -432,6 +509,10 @@ impl<'a, R: LanguageRules> Walker<'a, R> {
                 };
                 if let Some(parent) = self.stack.get_mut(parent_idx) {
                     parent.npa.record_attribute(cls.container, cls.is_public);
+                    if cls.is_public && self.evidence.is_enabled() {
+                        let span = node_span(&node, self.line_index);
+                        self.evidence.public_attribute(span, node.kind());
+                    }
                 }
             }
             if let Some(cls) = self.rules.classify_method(&node, self.source_text) {
@@ -442,6 +523,10 @@ impl<'a, R: LanguageRules> Walker<'a, R> {
                 };
                 if let Some(parent) = self.stack.get_mut(parent_idx) {
                     parent.npm.record_method(cls.container, cls.is_public);
+                    if cls.is_public && self.evidence.is_enabled() {
+                        let span = node_span(&node, self.line_index);
+                        self.evidence.public_method(span, node.kind());
+                    }
                 }
             }
         }

@@ -1,25 +1,21 @@
 {
-  "name": "kiro_default",
-  "description": "Default agent for the mehen repo. Rust-focused, with skills loaded from .agents/skills (shared with other assistants).",
-  "prompt": "You are the default Kiro agent for the mehen repository — a Rust CLI for heuristic source code metrics. Follow the repo's AGENTS.md and README conventions: keep metric behavior deterministic, never edit generated files (src/languages/language_*.rs), and prefer cargo nextest + cargo insta for verification. Use the loaded skills when their descriptions match the task.",
-  "resources": [
-    "file://AGENTS.md",
-    "file://README.md",
-    "file://Cargo.toml",
-    "skill://.agents/skills/**/SKILL.md"
-  ],
-  "toolsSettings": {
-    "execute_bash": {
-      "autoAllowReadonly": true,
-      "allowedCommands": [
-        "cargo check",
-        "cargo build",
-        "cargo fmt --all",
-        "cargo clippy --all-targets --all-features --locked",
-        "cargo nextest run --all-features",
-        "cargo insta test --all-features --check --unreferenced reject --test-runner nextest --no-test-runner-fallback --disable-nextest-doctest"
-      ]
+  "name" : "kiro_default",
+  "description" : "Default agent for the mehen repo. Rust-focused, with skills loaded from .agents/skills (shared with other assistants).",
+  "prompt" : "You are the default Kiro agent for the mehen repository — a Rust CLI for heuristic source code metrics. Follow the repo's AGENTS.md and README conventions: keep metric behavior deterministic, never edit generated files (src/languages/language_*.rs), and prefer cargo nextest + cargo insta for verification. Use the loaded skills when their descriptions match the task.",
+  "resources" : [ "file://AGENTS.md", "file://README.md", "file://Cargo.toml", "skill://.agents/skills/**/SKILL.md" ],
+  "toolsSettings" : {
+    "execute_bash" : {
+      "autoAllowReadonly" : true,
+      "allowedCommands" : [ "cargo check", "cargo build", "cargo fmt --all", "cargo clippy --all-targets --all-features --locked", "cargo nextest run --all-features", "cargo insta test --all-features --check --unreferenced reject --test-runner nextest --no-test-runner-fallback --disable-nextest-doctest" ]
     }
   },
-  "welcomeMessage": "mehen agent ready. Skills from .agents/skills are loaded (pr-comment, mintlify)."
+  "welcomeMessage" : "mehen agent ready. Skills from .agents/skills are loaded (pr-comment, mintlify).",
+  "mcpServers" : {
+    "creds-agent" : {
+      "command" : "aim",
+      "args" : [ "mcp", "start-server", "local-creds-agent-mcp" ]
+    }
+  },
+  "tools" : [ "@creds-agent" ],
+  "allowedTools" : [ "@creds-agent" ]
 }

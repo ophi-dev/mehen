@@ -67,17 +67,19 @@ use mago_syntax_core::input::Input;
 
 use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceKind};
 use mehen_metrics::{
-    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
-    apply_state_to, finalize_state, merge_child_into_parent,
+    ContainerKind, HalsteadOperand, HalsteadOperator, MetricEvidence, MetricTreeBuilder,
+    SpaceRangeTracker, State, apply_state_to, finalize_state, merge_child_into_parent,
 };
 use smol_str::SmolStr;
 
 /// Crate-internal entry point — drive the walker over a parsed
-/// `Program`.
+/// `Program`. Contribution evidence is recorded into the caller-owned
+/// `evidence` sink (plan §5.4).
 pub(crate) fn walk_program<'arena>(
     program: &Program<'arena>,
     source: &str,
     line_index: &LineIndex,
+    evidence: &mut MetricEvidence,
 ) -> MetricSpace {
     let unit_span = SourceSpan {
         start_byte: 0,
@@ -86,7 +88,7 @@ pub(crate) fn walk_program<'arena>(
         end_line: line_index.line_count(),
     };
 
-    let mut visitor = Visitor::new(source, line_index, unit_span);
+    let mut visitor = Visitor::new(source, line_index, unit_span, evidence);
 
     let walker = MehenPhpWalker;
     walker.walk_program(program, &mut visitor);
@@ -141,10 +143,18 @@ struct Visitor<'a> {
     /// flagged the same gap on the Python walker; the PHP walker had
     /// the same `stack[0]`-only behaviour.
     halstead_routing: SpaceRangeTracker,
+    /// Contribution-evidence sink (plan §5.4). Recording happens next
+    /// to each stat increment, through [`Visitor::record_evidence`].
+    evidence: &'a mut MetricEvidence,
 }
 
 impl<'a> Visitor<'a> {
-    fn new(source: &'a str, line_index: &'a LineIndex, unit_span: SourceSpan) -> Self {
+    fn new(
+        source: &'a str,
+        line_index: &'a LineIndex,
+        unit_span: SourceSpan,
+        evidence: &'a mut MetricEvidence,
+    ) -> Self {
         let mut state = State::new();
         state.loc.set_span(
             unit_span.start_line.saturating_sub(1),
@@ -161,11 +171,27 @@ impl<'a> Visitor<'a> {
             saved_cognitive: Vec::new(),
             suppress_next_if_nesting: false,
             halstead_routing: SpaceRangeTracker::new(),
+            evidence,
         }
     }
 
     fn current(&mut self) -> &mut State {
         self.stack.last_mut().expect("walker stack empty")
+    }
+
+    /// Record contribution evidence for the construct at `span`. The
+    /// span conversion only runs when the sink is enabled, so walker
+    /// callbacks can call this unconditionally next to each stat
+    /// increment (mirrors `mehen_tree_sitter::WalkerCtx::record_evidence`).
+    #[inline]
+    fn record_evidence<F>(&mut self, span: Span, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let source_span = self.span_to_source(span);
+            record(self.evidence, source_span);
+        }
     }
 
     fn observe_trivia(
@@ -449,6 +475,11 @@ impl<'a> Visitor<'a> {
             _ => php_modifiers_are_public(&method.modifiers),
         };
         self.current().npm.record_method(container, public);
+        // Only public members are evidenced — the headline NPM metric
+        // counts public methods only.
+        if public {
+            self.record_evidence(method.span(), |e, s| e.public_method(s, "method"));
+        }
     }
 
     fn record_property(&mut self, property: &Property<'_>) {
@@ -462,7 +493,7 @@ impl<'a> Visitor<'a> {
         // items: `public $a, $b;` declares two attributes — record
         // one entry per item.
         let (modifiers, items) = match property {
-            Property::Plain(p) => (&p.modifiers, p.items.iter().count()),
+            Property::Plain(p) => (&p.modifiers, &p.items),
             Property::Hooked(_h) => {
                 // Hooked properties always declare a single property.
                 // Treat the modifier list as the visibility source.
@@ -470,8 +501,13 @@ impl<'a> Visitor<'a> {
             }
         };
         let public = php_modifiers_are_public(modifiers);
-        for _ in 0..items {
+        for item in items.iter() {
             self.current().npa.record_attribute(container, public);
+            // Only public members are evidenced — the headline NPA
+            // metric counts public attributes only.
+            if public {
+                self.record_evidence(item.span(), |e, s| e.public_attribute(s, "property"));
+            }
         }
     }
 }
@@ -761,6 +797,26 @@ fn is_constructor(name: &str) -> bool {
     name.eq_ignore_ascii_case("__construct")
 }
 
+/// Stable reason-detail string for a comparison operator (ABC.C
+/// evidence). Matches the PHP source token spelling, same convention
+/// as the tree-sitter walkers' operator-token kinds.
+fn comparison_op_str(op: &BinaryOperator<'_>) -> &'static str {
+    match op {
+        BinaryOperator::Equal(_) => "==",
+        BinaryOperator::NotEqual(_) => "!=",
+        BinaryOperator::Identical(_) => "===",
+        BinaryOperator::NotIdentical(_) => "!==",
+        BinaryOperator::AngledNotEqual(_) => "<>",
+        BinaryOperator::LessThan(_) => "<",
+        BinaryOperator::LessThanOrEqual(_) => "<=",
+        BinaryOperator::GreaterThan(_) => ">",
+        BinaryOperator::GreaterThanOrEqual(_) => ">=",
+        BinaryOperator::Spaceship(_) => "<=>",
+        // Callers only pass the comparison variants above.
+        _ => "comparison",
+    }
+}
+
 // =====================================================================
 // Walker implementation
 // =====================================================================
@@ -786,6 +842,10 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
         let argc = function.parameter_list.parameters.iter().count() as u32;
         ctx.current().nargs.record_function_args(argc);
+        ctx.record_evidence(function.span(), |e, s| {
+            e.function(s, "function");
+            e.function_args(s, argc, "function");
+        });
     }
 
     fn walk_out_function(&self, _function: &Function<'arena>, ctx: &mut Visitor<'_>) {
@@ -814,6 +874,13 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
                     let public = php_modifiers_are_public(&param.modifiers);
                     let container = ContainerKind::Class;
                     ctx.current().npa.record_attribute(container, public);
+                    // Only public members are evidenced (headline NPA
+                    // counts public attributes only).
+                    if public {
+                        ctx.record_evidence(param.span(), |e, s| {
+                            e.public_attribute(s, "promoted_property");
+                        });
+                    }
                 }
             }
         }
@@ -833,6 +900,10 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         // parameter (it really IS a parameter at the call site).
         let argc = method.parameter_list.parameters.iter().count() as u32;
         ctx.current().nargs.record_function_args(argc);
+        ctx.record_evidence(method.span(), |e, s| {
+            e.function(s, "method");
+            e.function_args(s, argc, "method");
+        });
     }
 
     fn walk_out_method(&self, method: &Method<'arena>, ctx: &mut Visitor<'_>) {
@@ -849,6 +920,10 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
         let argc = closure.parameter_list.parameters.iter().count() as u32;
         ctx.current().nargs.record_closure_args(argc);
+        ctx.record_evidence(closure.span(), |e, s| {
+            e.closure(s, "closure");
+            e.closure_args(s, argc, "closure");
+        });
     }
 
     fn walk_out_closure(&self, _closure: &Closure<'arena>, ctx: &mut Visitor<'_>) {
@@ -862,6 +937,10 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
         let argc = arrow.parameter_list.parameters.iter().count() as u32;
         ctx.current().nargs.record_closure_args(argc);
+        ctx.record_evidence(arrow.span(), |e, s| {
+            e.closure(s, "arrow_function");
+            e.closure_args(s, argc, "arrow_function");
+        });
     }
 
     fn walk_out_arrow_function(&self, _arrow: &ArrowFunction<'arena>, ctx: &mut Visitor<'_>) {
@@ -932,7 +1011,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.record_property(p);
     }
 
-    fn walk_in_enum_case(&self, _ec: &EnumCase<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_enum_case(&self, ec: &EnumCase<'arena>, ctx: &mut Visitor<'_>) {
         // PHP enum cases are typed constants on the enum, not
         // instance attributes (they have no per-instance state).
         // Record them as class-like attributes so NPA reflects the
@@ -946,6 +1025,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.current()
             .npa
             .record_attribute(ContainerKind::Class, true);
+        ctx.record_evidence(ec.span(), |e, s| e.public_attribute(s, "enum_case"));
     }
 
     // -----------------------------------------------------------------
@@ -970,24 +1050,34 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
             // Cyclomatic decision still counts (each `if` is a path).
             ctx.current().cyclomatic.record_decision();
             ctx.current().abc.record_condition();
+            ctx.record_evidence(if_node.span(), |e, s| {
+                e.decision(s, "if");
+                e.abc_condition(s, "if");
+            });
             false
         } else {
             ctx.current().cyclomatic.record_decision();
             ctx.current().abc.record_condition();
             let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
             ctx.current().cognitive.increase_nesting(effective);
+            ctx.record_evidence(if_node.span(), |e, s| {
+                e.decision(s, "if");
+                e.abc_condition(s, "if");
+                e.cognitive(s, effective.saturating_add(1), "if");
+            });
             true
         };
 
         // Mirror the legacy "if has a else clause" `+1` rule. Mago
         // surfaces the else clause as a nested AST node, so we only
         // need to detect its presence here.
-        let has_else = match &if_node.body {
-            IfBody::Statement(b) => b.else_clause.is_some(),
-            IfBody::ColonDelimited(b) => b.else_clause.is_some(),
+        let else_span = match &if_node.body {
+            IfBody::Statement(b) => b.else_clause.as_ref().map(|c| c.span()),
+            IfBody::ColonDelimited(b) => b.else_clause.as_ref().map(|c| c.span()),
         };
-        if has_else {
+        if let Some(else_span) = else_span {
             ctx.current().cognitive.increment_by_one();
+            ctx.record_evidence(else_span, |e, s| e.cognitive(s, 1, "else"));
         }
 
         ctx.current().cognitive.boolean_seq.reset();
@@ -1003,7 +1093,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_if_statement_body_else_if_clause(
         &self,
-        _clause: &mago_syntax::cst::IfStatementBodyElseIfClause<'arena>,
+        clause: &mago_syntax::cst::IfStatementBodyElseIfClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         // `elseif` keyword form: flat +1 cognitive, no extra nesting.
@@ -1013,17 +1103,27 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.current().abc.record_condition();
         ctx.current().cognitive.increment_by_one();
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(clause.span(), |e, s| {
+            e.decision(s, "elseif");
+            e.abc_condition(s, "elseif");
+            e.cognitive(s, 1, "elseif");
+        });
     }
 
     fn walk_in_if_colon_delimited_body_else_if_clause(
         &self,
-        _clause: &mago_syntax::cst::IfColonDelimitedBodyElseIfClause<'arena>,
+        clause: &mago_syntax::cst::IfColonDelimitedBodyElseIfClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().cyclomatic.record_decision();
         ctx.current().abc.record_condition();
         ctx.current().cognitive.increment_by_one();
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(clause.span(), |e, s| {
+            e.decision(s, "elseif");
+            e.abc_condition(s, "elseif");
+            e.cognitive(s, 1, "elseif");
+        });
     }
 
     fn walk_in_if_statement_body_else_clause(
@@ -1035,6 +1135,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         // original spec (same convention applied to `default`).
         ctx.current().abc.record_condition();
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(clause.span(), |e, s| e.abc_condition(s, "else"));
         // The `else if` (spaced) form is a single `If` statement
         // whose direct parent is this else_clause. When that's the
         // case, defer to the inner `If` callback to record the
@@ -1053,20 +1154,26 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_if_colon_delimited_body_else_clause(
         &self,
-        _clause: &mago_syntax::cst::IfColonDelimitedBodyElseClause<'arena>,
+        clause: &mago_syntax::cst::IfColonDelimitedBodyElseClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().abc.record_condition();
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(clause.span(), |e, s| e.abc_condition(s, "else"));
     }
 
-    fn walk_in_while(&self, _w: &While<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_while(&self, w: &While<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
         ctx.current().cyclomatic.record_decision();
         ctx.current().abc.record_condition();
         let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
         ctx.current().cognitive.increase_nesting(effective);
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(w.span(), |e, s| {
+            e.decision(s, "while");
+            e.abc_condition(s, "while");
+            e.cognitive(s, effective.saturating_add(1), "while");
+        });
         ctx.save_cognitive();
         ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
     }
@@ -1074,13 +1181,18 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.restore_cognitive();
     }
 
-    fn walk_in_for(&self, _f: &For<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_for(&self, f: &For<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
         ctx.current().cyclomatic.record_decision();
         ctx.current().abc.record_condition();
         let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
         ctx.current().cognitive.increase_nesting(effective);
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(f.span(), |e, s| {
+            e.decision(s, "for");
+            e.abc_condition(s, "for");
+            e.cognitive(s, effective.saturating_add(1), "for");
+        });
         ctx.save_cognitive();
         ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
     }
@@ -1088,13 +1200,18 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.restore_cognitive();
     }
 
-    fn walk_in_foreach(&self, _f: &Foreach<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_foreach(&self, f: &Foreach<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
         ctx.current().cyclomatic.record_decision();
         ctx.current().abc.record_condition();
         let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
         ctx.current().cognitive.increase_nesting(effective);
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(f.span(), |e, s| {
+            e.decision(s, "foreach");
+            e.abc_condition(s, "foreach");
+            e.cognitive(s, effective.saturating_add(1), "foreach");
+        });
         ctx.save_cognitive();
         ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
     }
@@ -1102,13 +1219,18 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.restore_cognitive();
     }
 
-    fn walk_in_do_while(&self, _d: &DoWhile<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_do_while(&self, d: &DoWhile<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
         ctx.current().cyclomatic.record_decision();
         ctx.current().abc.record_condition();
         let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
         ctx.current().cognitive.increase_nesting(effective);
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(d.span(), |e, s| {
+            e.decision(s, "do_while");
+            e.abc_condition(s, "do_while");
+            e.cognitive(s, effective.saturating_add(1), "do_while");
+        });
         ctx.save_cognitive();
         ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
     }
@@ -1116,7 +1238,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.restore_cognitive();
     }
 
-    fn walk_in_switch(&self, _s: &Switch<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_switch(&self, sw: &Switch<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
         // The `switch` itself does not contribute a decision; each
         // `case` does. Cognitive: opens a nesting frame so nested
@@ -1125,6 +1247,10 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
         ctx.current().cognitive.increase_nesting(effective);
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(sw.span(), |e, s| {
+            e.abc_condition(s, "switch");
+            e.cognitive(s, effective.saturating_add(1), "switch");
+        });
         ctx.save_cognitive();
         ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
     }
@@ -1134,7 +1260,7 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_switch_expression_case(
         &self,
-        _c: &mago_syntax::cst::SwitchExpressionCase<'arena>,
+        c: &mago_syntax::cst::SwitchExpressionCase<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         // Each `case <expr>:` is its own LLOC line and a cyclomatic
@@ -1142,11 +1268,15 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.current().loc.observe_lloc();
         ctx.current().cyclomatic.record_decision();
         ctx.current().abc.record_condition();
+        ctx.record_evidence(c.span(), |e, s| {
+            e.decision(s, "switch_case");
+            e.abc_condition(s, "switch_case");
+        });
     }
 
     fn walk_in_switch_default_case(
         &self,
-        _c: &mago_syntax::cst::SwitchDefaultCase<'arena>,
+        c: &mago_syntax::cst::SwitchDefaultCase<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         // `default` is its own LLOC line. It's *not* a cyclomatic
@@ -1154,13 +1284,18 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         // Fitzpatrick — same convention we use for `else_clause`.
         ctx.current().loc.observe_lloc();
         ctx.current().abc.record_condition();
+        ctx.record_evidence(c.span(), |e, s| e.abc_condition(s, "switch_default_case"));
     }
 
-    fn walk_in_match(&self, _m: &Match<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_match(&self, m: &Match<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().abc.record_condition();
         let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
         ctx.current().cognitive.increase_nesting(effective);
         ctx.current().cognitive.boolean_seq.reset();
+        ctx.record_evidence(m.span(), |e, s| {
+            e.abc_condition(s, "match");
+            e.cognitive(s, effective.saturating_add(1), "match");
+        });
         ctx.save_cognitive();
         ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
     }
@@ -1170,25 +1305,33 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_match_expression_arm(
         &self,
-        _a: &mago_syntax::cst::MatchExpressionArm<'arena>,
+        a: &mago_syntax::cst::MatchExpressionArm<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().cyclomatic.record_decision();
         ctx.current().abc.record_condition();
+        ctx.record_evidence(a.span(), |e, s| {
+            e.decision(s, "match_arm");
+            e.abc_condition(s, "match_arm");
+        });
     }
 
     fn walk_in_match_default_arm(
         &self,
-        _a: &mago_syntax::cst::MatchDefaultArm<'arena>,
+        a: &mago_syntax::cst::MatchDefaultArm<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().abc.record_condition();
+        ctx.record_evidence(a.span(), |e, s| e.abc_condition(s, "match_default_arm"));
     }
 
-    fn walk_in_try(&self, _t: &Try<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_try(&self, t: &Try<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
         let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
         ctx.current().cognitive.increase_nesting(effective);
+        ctx.record_evidence(t.span(), |e, s| {
+            e.cognitive(s, effective.saturating_add(1), "try");
+        });
         ctx.save_cognitive();
         ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
     }
@@ -1198,13 +1341,18 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
 
     fn walk_in_try_catch_clause(
         &self,
-        _c: &mago_syntax::cst::TryCatchClause<'arena>,
+        c: &mago_syntax::cst::TryCatchClause<'arena>,
         ctx: &mut Visitor<'_>,
     ) {
         ctx.current().cyclomatic.record_decision();
         ctx.current().abc.record_condition();
         let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
         ctx.current().cognitive.increase_nesting(effective);
+        ctx.record_evidence(c.span(), |e, s| {
+            e.decision(s, "catch");
+            e.abc_condition(s, "catch");
+            e.cognitive(s, effective.saturating_add(1), "catch");
+        });
         ctx.save_cognitive();
         ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
     }
@@ -1216,12 +1364,17 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx.restore_cognitive();
     }
 
-    fn walk_in_conditional(&self, _c: &Conditional<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_conditional(&self, c: &Conditional<'arena>, ctx: &mut Visitor<'_>) {
         // PHP ternary `cond ? then : else` is a cyclomatic decision.
         ctx.current().cyclomatic.record_decision();
         ctx.current().abc.record_condition();
         let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
         ctx.current().cognitive.increase_nesting(effective);
+        ctx.record_evidence(c.span(), |e, s| {
+            e.decision(s, "conditional");
+            e.abc_condition(s, "conditional");
+            e.cognitive(s, effective.saturating_add(1), "conditional");
+        });
         ctx.save_cognitive();
         ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
     }
@@ -1234,27 +1387,30 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
     // -----------------------------------------------------------------
 
     fn walk_in_binary(&self, b: &Binary<'arena>, ctx: &mut Visitor<'_>) {
+        /// Shared shape for the four short-circuiting boolean
+        /// operators: decision + ABC.C + boolean-run collapse. The
+        /// cognitive evidence amount is the delta the collapser
+        /// actually applied (0 for a same-operator repeat, which the
+        /// sink skips). Evidence spans point at the operator token,
+        /// same as the tree-sitter walkers.
+        fn boolean_op(ctx: &mut Visitor<'_>, span: Span, op: &'static str) {
+            ctx.current().cyclomatic.record_decision();
+            ctx.current().abc.record_condition();
+            let before = ctx.current().cognitive.structural;
+            ctx.current().cognitive.observe_boolean(op);
+            let delta = ctx.current().cognitive.structural.saturating_sub(before);
+            ctx.record_evidence(span, |e, s| {
+                e.decision(s, op);
+                e.abc_condition(s, op);
+                e.cognitive(s, delta, op);
+            });
+        }
+
         match &b.operator {
-            BinaryOperator::And(_) => {
-                ctx.current().cyclomatic.record_decision();
-                ctx.current().abc.record_condition();
-                ctx.current().cognitive.observe_boolean("&&");
-            }
-            BinaryOperator::Or(_) => {
-                ctx.current().cyclomatic.record_decision();
-                ctx.current().abc.record_condition();
-                ctx.current().cognitive.observe_boolean("||");
-            }
-            BinaryOperator::LowAnd(_) => {
-                ctx.current().cyclomatic.record_decision();
-                ctx.current().abc.record_condition();
-                ctx.current().cognitive.observe_boolean("and");
-            }
-            BinaryOperator::LowOr(_) => {
-                ctx.current().cyclomatic.record_decision();
-                ctx.current().abc.record_condition();
-                ctx.current().cognitive.observe_boolean("or");
-            }
+            BinaryOperator::And(_) => boolean_op(ctx, b.operator.span(), "&&"),
+            BinaryOperator::Or(_) => boolean_op(ctx, b.operator.span(), "||"),
+            BinaryOperator::LowAnd(_) => boolean_op(ctx, b.operator.span(), "and"),
+            BinaryOperator::LowOr(_) => boolean_op(ctx, b.operator.span(), "or"),
             // `xor` is intentionally excluded: it does not short-circuit,
             // so it adds no execution path.
             BinaryOperator::LowXor(_) => {}
@@ -1270,6 +1426,8 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
             | BinaryOperator::GreaterThanOrEqual(_)
             | BinaryOperator::Spaceship(_) => {
                 ctx.current().abc.record_condition();
+                let op = comparison_op_str(&b.operator);
+                ctx.record_evidence(b.operator.span(), |e, s| e.abc_condition(s, op));
             }
             _ => {}
         }
@@ -1278,11 +1436,18 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
     fn walk_in_unary_prefix(&self, u: &UnaryPrefix<'arena>, ctx: &mut Visitor<'_>) {
         match u.operator {
             UnaryPrefixOperator::Not(_) => {
+                // Boolean-sequence bookkeeping only — no metric moves
+                // here, so nothing is evidenced.
                 ctx.current().cognitive.boolean_seq.not_operator("!");
             }
             // ABC.A: prefix `++` and `--` are assignments.
-            UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_) => {
+            UnaryPrefixOperator::PreIncrement(_) => {
                 ctx.current().abc.record_assignment();
+                ctx.record_evidence(u.span(), |e, s| e.abc_assignment(s, "pre_increment"));
+            }
+            UnaryPrefixOperator::PreDecrement(_) => {
+                ctx.current().abc.record_assignment();
+                ctx.record_evidence(u.span(), |e, s| e.abc_assignment(s, "pre_decrement"));
             }
             _ => {}
         }
@@ -1292,8 +1457,9 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
     // ABC.A: assignments and update (++/--)
     // -----------------------------------------------------------------
 
-    fn walk_in_assignment(&self, _a: &Assignment<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_assignment(&self, a: &Assignment<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().abc.record_assignment();
+        ctx.record_evidence(a.span(), |e, s| e.abc_assignment(s, "assignment"));
     }
 
     fn walk_in_unary_postfix(
@@ -1302,11 +1468,15 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         ctx: &mut Visitor<'_>,
     ) {
         use mago_syntax::cst::UnaryPostfixOperator;
-        if matches!(
-            u.operator,
-            UnaryPostfixOperator::PostIncrement(_) | UnaryPostfixOperator::PostDecrement(_)
-        ) {
-            ctx.current().abc.record_assignment();
+        match u.operator {
+            UnaryPostfixOperator::PostIncrement(_) => {
+                ctx.current().abc.record_assignment();
+                ctx.record_evidence(u.span(), |e, s| e.abc_assignment(s, "post_increment"));
+            }
+            UnaryPostfixOperator::PostDecrement(_) => {
+                ctx.current().abc.record_assignment();
+                ctx.record_evidence(u.span(), |e, s| e.abc_assignment(s, "post_decrement"));
+            }
         }
     }
 
@@ -1314,8 +1484,9 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
     // ABC.B: function / method / instantiation / construct calls
     // -----------------------------------------------------------------
 
-    fn walk_in_call(&self, _c: &Call<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_call(&self, c: &Call<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().abc.record_branch();
+        ctx.record_evidence(c.span(), |e, s| e.abc_branch(s, "call"));
     }
 
     fn walk_in_null_safe_method_call(
@@ -1330,22 +1501,38 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         // walker macro). Keep this empty so the trait method exists.
     }
 
-    fn walk_in_instantiation(&self, _i: &Instantiation<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_instantiation(&self, i: &Instantiation<'arena>, ctx: &mut Visitor<'_>) {
         // `new Foo(...)` is a branch.
         ctx.current().abc.record_branch();
+        ctx.record_evidence(i.span(), |e, s| e.abc_branch(s, "instantiation"));
     }
 
     fn walk_in_construct(&self, c: &Construct<'arena>, ctx: &mut Visitor<'_>) {
         // PHP language-level transfer-of-control intrinsics.
         match c {
-            Construct::Include(_)
-            | Construct::IncludeOnce(_)
-            | Construct::Require(_)
-            | Construct::RequireOnce(_) => {
+            Construct::Include(_) => {
                 ctx.current().abc.record_branch();
+                ctx.record_evidence(c.span(), |e, s| e.abc_branch(s, "include"));
             }
-            Construct::Exit(_) | Construct::Die(_) => {
+            Construct::IncludeOnce(_) => {
+                ctx.current().abc.record_branch();
+                ctx.record_evidence(c.span(), |e, s| e.abc_branch(s, "include_once"));
+            }
+            Construct::Require(_) => {
+                ctx.current().abc.record_branch();
+                ctx.record_evidence(c.span(), |e, s| e.abc_branch(s, "require"));
+            }
+            Construct::RequireOnce(_) => {
+                ctx.current().abc.record_branch();
+                ctx.record_evidence(c.span(), |e, s| e.abc_branch(s, "require_once"));
+            }
+            Construct::Exit(_) => {
                 ctx.current().nexit.record_exit();
+                ctx.record_evidence(c.span(), |e, s| e.exit(s, "exit"));
+            }
+            Construct::Die(_) => {
+                ctx.current().nexit.record_exit();
+                ctx.record_evidence(c.span(), |e, s| e.exit(s, "die"));
             }
             // `print` is a quirky expression-statement (returns 1) —
             // not really a branch. `isset`/`empty`/`eval` aren't
@@ -1354,26 +1541,29 @@ impl<'arena> Walker<'_, 'arena, Visitor<'_>> for MehenPhpWalker {
         }
     }
 
-    fn walk_in_yield(&self, _y: &Yield<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_yield(&self, y: &Yield<'arena>, ctx: &mut Visitor<'_>) {
         // `yield` is a branch — same convention as Ruby's `yield`.
         ctx.current().abc.record_branch();
+        ctx.record_evidence(y.span(), |e, s| e.abc_branch(s, "yield"));
     }
 
     // -----------------------------------------------------------------
     // Function exits
     // -----------------------------------------------------------------
 
-    fn walk_in_return(&self, _r: &Return<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_return(&self, r: &Return<'arena>, ctx: &mut Visitor<'_>) {
         ctx.current().loc.observe_lloc();
         ctx.current().nexit.record_exit();
+        ctx.record_evidence(r.span(), |e, s| e.exit(s, "return"));
     }
 
-    fn walk_in_throw(&self, _t: &Throw<'arena>, ctx: &mut Visitor<'_>) {
+    fn walk_in_throw(&self, t: &Throw<'arena>, ctx: &mut Visitor<'_>) {
         // `Throw` here is the *expression* form (`throw new …`).
         // The throw token itself counts as an exit (legacy `throw`
         // rule). LLOC for the *statement* form is recorded by the
         // wrapping ExpressionStatement.
         ctx.current().nexit.record_exit();
+        ctx.record_evidence(t.span(), |e, s| e.exit(s, "throw"));
     }
 
     fn walk_in_break(&self, _b: &mago_syntax::cst::Break<'arena>, ctx: &mut Visitor<'_>) {

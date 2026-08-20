@@ -22,6 +22,10 @@ use crate::syntax_tree::Node;
 use crate::tree_helpers::{
     count_table_cells, find_link_label, has_scheme as is_external, node_line_span,
 };
+use mehen_core::{ContributionCollector, SourceSpan};
+
+/// The published metric key MCC evidence attaches to.
+const MCC_KEY: &str = "markdown.complexity.cognitive_complexity";
 
 /// §8 aggregate: positive weight before credit, credit amount used, final
 /// MCC. Only `mcc` is exported to the public record; `positive` and
@@ -37,16 +41,44 @@ pub(crate) struct MccResult {
 }
 
 /// Public entry point.
-pub(crate) fn compute_mcc(root: &Node<'_>, document: &MarkdownDocument, source: &str) -> MccResult {
-    let mut ctx = Walker::new(source, document);
+///
+/// `evidence` receives one contribution record (plan §5.4) for **every**
+/// MCC adjustment: each §8.1 element charge is recorded with the exact
+/// weighted amount it added to the positive term, and each §8.4 scaffold
+/// credit is recorded as a negative amount scaled by the global
+/// `0.25 * positive` cap — so the recorded amounts sum to the published
+/// score. Reason codes: `markdown.<element>` for charges (e.g.
+/// `markdown.heading_skip`, `markdown.code_fence`) and
+/// `markdown.scaffold_credit.<kind>` for credits.
+pub(crate) fn compute_mcc(
+    root: &Node<'_>,
+    document: &MarkdownDocument,
+    source: &str,
+    evidence: &mut ContributionCollector,
+) -> MccResult {
+    let mut ctx = Walker::new(source, document, evidence);
     // Pass 1: collect artifact lines for the 20-line-window cluster density
     // and record each block's sequence index for §8.4 locality lookup.
     ctx.scan_blocks(root);
     // Pass 2: accumulate weights and queue scaffold-credit candidates.
     ctx.walk(root);
 
-    let credit_raw: f64 = ctx.pending_credits.iter().sum();
+    let credit_raw: f64 = ctx.pending_credits.iter().map(|c| c.raw).sum();
     let credit = credit_raw.min(0.25 * ctx.positive);
+    // Evidence the applied credit per §8.4 candidate. The cap is global, so
+    // each candidate's share is its raw credit scaled by `credit /
+    // credit_raw` — negative amounts, keeping Σ(evidence) == mcc.
+    if credit > 0.0 && ctx.evidence.is_enabled() {
+        let scale = credit / credit_raw;
+        for pending in &ctx.pending_credits {
+            ctx.evidence.record(
+                MCC_KEY,
+                pending.span,
+                -(pending.raw * scale),
+                format!("markdown.scaffold_credit.{}", pending.kind),
+            );
+        }
+    }
     let mcc = (ctx.positive - credit).max(0.0);
     MccResult {
         positive: ctx.positive,
@@ -55,13 +87,25 @@ pub(crate) fn compute_mcc(root: &Node<'_>, document: &MarkdownDocument, source: 
     }
 }
 
-struct Walker<'a, 'doc> {
+/// A queued §8.4 scaffold-credit candidate. The raw amounts are summed and
+/// capped at `0.25 * positive` after the walk; the span + kind let the cap
+/// be attributed back to each candidate as negative evidence.
+struct PendingCredit {
+    span: SourceSpan,
+    kind: &'static str,
+    raw: f64,
+}
+
+struct Walker<'a, 'doc, 'ev> {
     source: &'a str,
     document: &'doc MarkdownDocument,
+    /// Contribution-evidence sink (plan §5.4). `record` is a no-op when
+    /// collection is disabled.
+    evidence: &'ev mut ContributionCollector,
     positive: f64,
     /// Individual scaffold-credit contributions queued during the walk.
     /// They are summed and capped at `0.25 * positive` after the walk.
-    pending_credits: Vec<f64>,
+    pending_credits: Vec<PendingCredit>,
     last_heading_level: Option<u8>,
     /// Each physical line has `1` if an artifact block touches it, else `0`.
     /// Used for the §8.3 cluster multiplier.
@@ -86,8 +130,12 @@ enum BlockKind {
     Other,
 }
 
-impl<'a, 'doc> Walker<'a, 'doc> {
-    fn new(source: &'a str, document: &'doc MarkdownDocument) -> Self {
+impl<'a, 'doc, 'ev> Walker<'a, 'doc, 'ev> {
+    fn new(
+        source: &'a str,
+        document: &'doc MarkdownDocument,
+        evidence: &'ev mut ContributionCollector,
+    ) -> Self {
         let mut lines = 1usize;
         for b in source.bytes() {
             if b == b'\n' {
@@ -100,6 +148,7 @@ impl<'a, 'doc> Walker<'a, 'doc> {
         Self {
             source,
             document,
+            evidence,
             positive: 0.0,
             pending_credits: Vec::new(),
             last_heading_level: None,
@@ -108,6 +157,44 @@ impl<'a, 'doc> Walker<'a, 'doc> {
             list_depth: 0,
             blockquote_depth: 0,
             callout_depth: 0,
+        }
+    }
+
+    /// Span of `node` in byte + 1-based-line coordinates for evidence
+    /// records. The syntax tree exposes byte offsets and 0-based rows
+    /// directly, so no `LineIndex` round-trip is needed.
+    fn node_span(node: &Node<'_>) -> SourceSpan {
+        let (end_row, end_col) = node.end_position();
+        let mut end = end_row;
+        if end > node.start_row() && end_col == 0 {
+            end -= 1;
+        }
+        SourceSpan {
+            start_byte: mehen_core::byte_offset_clamped(node.start_byte()),
+            end_byte: mehen_core::byte_offset_clamped(node.end_byte()),
+            start_line: node.start_row() as u32 + 1,
+            end_line: end as u32 + 1,
+        }
+    }
+
+    /// Add `amount` to the positive MCC term and record it as evidence.
+    /// Every §8.1 charge funnels through here so the recorded amounts sum
+    /// to the positive term by construction.
+    fn charge(&mut self, node: &Node<'_>, amount: f64, reason: &'static str) {
+        self.positive += amount;
+        self.evidence
+            .record(MCC_KEY, Self::node_span(node), amount, reason);
+    }
+
+    /// Queue a §8.4 scaffold-credit candidate. Credits are capped and
+    /// recorded as negative evidence in [`compute_mcc`].
+    fn queue_credit(&mut self, node: &Node<'_>, kind: &'static str, raw: f64) {
+        if raw > 0.0 {
+            self.pending_credits.push(PendingCredit {
+                span: Self::node_span(node),
+                kind,
+                raw,
+            });
         }
     }
 
@@ -151,11 +238,15 @@ impl<'a, 'doc> Walker<'a, 'doc> {
             {
                 // Deeper level. Penalize a heading skip (>= 2 steps)
                 // with 1.00; a smooth +1 step earns the normal 0.20.
+                // The skip reason is plan §5.4's canonical Markdown
+                // example — a structure defect a reader can point at.
                 let delta = level.saturating_sub(prev);
                 if delta == 1 {
-                    self.positive += 0.20 * self.current_nest_multiplier();
+                    let amount = 0.20 * self.current_nest_multiplier();
+                    self.charge(node, amount, "markdown.heading_step");
                 } else {
-                    self.positive += 1.00 * self.current_nest_multiplier();
+                    let amount = 1.00 * self.current_nest_multiplier();
+                    self.charge(node, amount, "markdown.heading_skip");
                 }
             }
             // First heading and going-shallower: no penalty.
@@ -167,7 +258,8 @@ impl<'a, 'doc> Walker<'a, 'doc> {
         if is_section(kind) && section_has_no_sub_heading(node) {
             let words = count_section_words(node);
             if words > 800 {
-                self.positive += 2.00 * self.current_nest_multiplier();
+                let amount = 2.00 * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.oversized_flat_section");
             }
         }
 
@@ -175,20 +267,22 @@ impl<'a, 'doc> Walker<'a, 'doc> {
         if matches!(kind, Paragraph) {
             let words = count_word_tokens(node);
             if words > 160 {
-                self.positive += 1.25 * self.current_nest_multiplier();
+                let amount = 1.25 * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.overlong_paragraph");
             }
             // Dense link cluster: > 4 inline links in a paragraph → 1.50.
             let links = count_inline_links(node);
             if links > 4 {
-                self.positive +=
-                    1.50 * self.cluster_multiplier(node) * self.current_nest_multiplier();
+                let amount = 1.50 * self.cluster_multiplier(node) * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.dense_link_cluster");
             }
         }
 
         // Lists and list structures.
         match kind {
             List => {
-                self.positive += 0.40 * self.current_nest_multiplier();
+                let amount = 0.40 * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.list");
                 self.list_depth += 1;
                 self.recurse(node);
                 self.list_depth -= 1;
@@ -199,21 +293,24 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                 // here is the current list-depth *before* the list-item
                 // increments it further; using list_depth directly approximates
                 // "level" since each outer list already incremented the depth.
-                self.positive +=
-                    0.50 * self.list_depth.max(1) as f64 * self.current_nest_multiplier();
+                let amount = 0.50 * self.list_depth.max(1) as f64 * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.list_item");
             }
             ListItem { task: true } => {
-                self.positive += 0.35 * self.current_nest_multiplier();
+                let amount = 0.35 * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.task_list_item");
             }
             BlockQuote => {
-                self.positive += 0.50 * self.current_nest_multiplier();
+                let amount = 0.50 * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.blockquote");
                 self.blockquote_depth += 1;
                 self.recurse(node);
                 self.blockquote_depth -= 1;
                 return;
             }
             Callout => {
-                self.positive += 0.75 * self.current_nest_multiplier();
+                let amount = 0.75 * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.callout");
                 self.callout_depth += 1;
                 self.recurse(node);
                 self.callout_depth -= 1;
@@ -224,7 +321,8 @@ impl<'a, 'doc> Walker<'a, 'doc> {
 
         // Inline links / images (not the whole paragraph).
         if matches!(kind, Link) {
-            self.positive += 0.25 * self.current_nest_multiplier();
+            let amount = 0.25 * self.current_nest_multiplier();
+            self.charge(node, amount, "markdown.link");
             // External link unchecked → +0.30 per §8.1. Phase B applies this
             // universally until Phase C differentiates valid / broken.
             if let Some(dest) = self
@@ -232,7 +330,8 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                 .link_destination_by_span(node.start_byte(), node.end_byte())
                 && is_external(dest)
             {
-                self.positive += 0.30 * self.current_nest_multiplier();
+                let amount = 0.30 * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.external_link_unchecked");
             }
             // TODO(Phase C): broken internal/relative link → +3.00;
             // external broken → +4.00. Left at 0.00 until the link
@@ -241,12 +340,14 @@ impl<'a, 'doc> Walker<'a, 'doc> {
 
         // Footnote reference.
         if matches!(kind, FootnoteReference) {
-            self.positive += 0.60 * self.current_nest_multiplier();
+            let amount = 0.60 * self.current_nest_multiplier();
+            self.charge(node, amount, "markdown.footnote_reference");
         }
 
         // Images.
         if matches!(kind, Image) {
-            self.positive += 0.50 * self.current_nest_multiplier();
+            let amount = 0.50 * self.current_nest_multiplier();
+            self.charge(node, amount, "markdown.image");
             // §8.4 credit: image with alt/caption + nearby explanation,
             // bounded. We approximate `alt` as the non-empty link-label
             // text inside the Image node.
@@ -258,9 +359,7 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                 // Base credit for image 0.80; bounded = 1 since we have no
                 // size for the rendered image yet — Phase C can refine.
                 let credit = 0.80 * (local as f64) * 1.0;
-                if credit > 0.0 {
-                    self.pending_credits.push(credit);
-                }
+                self.queue_credit(node, "image", credit);
             }
         }
         // Code fences.
@@ -272,8 +371,8 @@ impl<'a, 'doc> Walker<'a, 'doc> {
             let loc = block.content_line_count();
             let is_diagram = block.language.as_deref().is_some_and(is_diagram_language);
             if is_diagram {
-                self.positive +=
-                    1.50 * self.cluster_multiplier(node) * self.current_nest_multiplier();
+                let amount = 1.50 * self.cluster_multiplier(node) * self.current_nest_multiplier();
+                self.charge(node, amount, "markdown.diagram_fence");
                 // §8.4 diagram credit: 1.25 * local_explanation *
                 // has_label * bounded. Phase B doesn't have a caption
                 // detector yet — use a conservative `has_label = 1`
@@ -282,9 +381,7 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                 let start = block.start_line.saturating_sub(1) as u32;
                 let local = local_explanation(&self.blocks, start);
                 let credit = 1.25 * (local as f64) * 1.0;
-                if credit > 0.0 {
-                    self.pending_credits.push(credit);
-                }
+                self.queue_credit(node, "diagram", credit);
                 // TODO(Phase C): diagram parse error → +3.00. Stub.
             } else {
                 let base = if loc <= 12 {
@@ -293,12 +390,14 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                     1.00 + 0.08 * (loc as f64 - 12.0)
                 };
                 let unlabelled = !block.is_fenced() || block.language.is_none();
-                let mut weight = base;
+                let multipliers = self.cluster_multiplier(node) * self.current_nest_multiplier();
+                // The size-based base and the missing-label penalty are
+                // separate explainable facts — two evidence rows whose
+                // sum is the §8.1 weight.
+                self.charge(node, base * multipliers, "markdown.code_fence");
                 if unlabelled {
-                    weight += 1.50;
+                    self.charge(node, 1.50 * multipliers, "markdown.unlabelled_code_fence");
                 }
-                self.positive +=
-                    weight * self.cluster_multiplier(node) * self.current_nest_multiplier();
                 // §8.4 scaffold credit for code examples:
                 //   0.75 * local_explanation * has_label * bounded
                 // where has_label = language tag present, bounded = 1 if
@@ -308,9 +407,7 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                     let local = local_explanation(&self.blocks, start);
                     let bounded = bounded_size(loc as f64, 30.0, 60.0);
                     let credit = 0.75 * (local as f64) * bounded;
-                    if credit > 0.0 {
-                        self.pending_credits.push(credit);
-                    }
+                    self.queue_credit(node, "code_example", credit);
                 }
             }
         }
@@ -323,8 +420,8 @@ impl<'a, 'doc> Walker<'a, 'doc> {
             } else {
                 0.75 + 0.03 * (cells as f64 - 60.0).powf(0.85)
             };
-            self.positive +=
-                weight * self.cluster_multiplier(node) * self.current_nest_multiplier();
+            let amount = weight * self.cluster_multiplier(node) * self.current_nest_multiplier();
+            self.charge(node, amount, "markdown.table");
             // §8.4 table credit: 1.00 * local_explanation * has_header *
             // bounded. `bounded` fades from 1 at 60 cells to 0 at 150.
             let has_header = pipe_table_has_header(node);
@@ -333,15 +430,14 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                 let local = local_explanation(&self.blocks, start);
                 let bounded = bounded_size(cells as f64, 60.0, 150.0);
                 let credit = 1.00 * (local as f64) * bounded;
-                if credit > 0.0 {
-                    self.pending_credits.push(credit);
-                }
+                self.queue_credit(node, "table", credit);
             }
         }
 
         // Math blocks.
         if matches!(kind, MathBlock) {
-            self.positive += 1.50 * self.cluster_multiplier(node) * self.current_nest_multiplier();
+            let amount = 1.50 * self.cluster_multiplier(node) * self.current_nest_multiplier();
+            self.charge(node, amount, "markdown.math_block");
             // §8.4 math credit: 0.50 * local_explanation * bounded. Use
             // line span as the size proxy.
             let start = node.start_row() as u32;
@@ -349,17 +445,15 @@ impl<'a, 'doc> Walker<'a, 'doc> {
             let lines = node_line_span(node) as f64;
             let bounded = bounded_size(lines, 6.0, 20.0);
             let credit = 0.50 * (local as f64) * bounded;
-            if credit > 0.0 {
-                self.pending_credits.push(credit);
-            }
+            self.queue_credit(node, "math", credit);
         }
 
         // Raw HTML blocks: 0.30 * lines, cap 8.
         if matches!(kind, HtmlBlock) {
             let lines = node_line_span(node) as f64;
             let weight = (0.30 * lines).min(8.0);
-            self.positive +=
-                weight * self.cluster_multiplier(node) * self.current_nest_multiplier();
+            let amount = weight * self.cluster_multiplier(node) * self.current_nest_multiplier();
+            self.charge(node, amount, "markdown.raw_html_block");
         }
 
         self.recurse(node);
@@ -539,7 +633,43 @@ mod tests {
 
     fn compute(src: &str) -> MccResult {
         let (tree, document) = crate::syntax_tree::parse_with_document(src);
-        compute_mcc(&tree.root(), &document, src)
+        let mut evidence = ContributionCollector::new(false);
+        compute_mcc(&tree.root(), &document, src, &mut evidence)
+    }
+
+    fn compute_with_evidence(src: &str) -> (MccResult, Vec<mehen_core::MetricContribution>) {
+        let (tree, document) = crate::syntax_tree::parse_with_document(src);
+        let mut evidence = ContributionCollector::new(true);
+        let result = compute_mcc(&tree.root(), &document, src, &mut evidence);
+        (result, evidence.finish())
+    }
+
+    #[test]
+    fn heading_skip_records_evidence_with_the_applied_weight() {
+        let src = "# Top\n\n### Skipped\n";
+        let (result, contributions) = compute_with_evidence(src);
+        let skip: Vec<_> = contributions
+            .iter()
+            .filter(|c| c.reason.as_str() == "markdown.heading_skip")
+            .collect();
+        assert_eq!(skip.len(), 1);
+        assert_eq!(skip[0].amount, 1.0);
+        assert_eq!(skip[0].span.start_line, 3);
+        assert_eq!(
+            skip[0].metric.as_str(),
+            "markdown.complexity.cognitive_complexity"
+        );
+        assert!(result.positive >= skip[0].amount);
+    }
+
+    #[test]
+    fn oversized_flat_section_and_overlong_paragraph_record_evidence() {
+        let filler = "word ".repeat(801);
+        let src = format!("# Title\n\n{}\n", filler);
+        let (_, contributions) = compute_with_evidence(&src);
+        let reasons: Vec<&str> = contributions.iter().map(|c| c.reason.as_str()).collect();
+        assert!(reasons.contains(&"markdown.oversized_flat_section"));
+        assert!(reasons.contains(&"markdown.overlong_paragraph"));
     }
 
     #[test]

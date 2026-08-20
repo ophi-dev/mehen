@@ -16,7 +16,7 @@ use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, ParseDiagnostic,
     Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
-use mehen_tree_sitter::{TreeSitterParser, collect_recovered_errors, empty_space};
+use mehen_tree_sitter::{MetricEvidence, TreeSitterParser, collect_recovered_errors, empty_space};
 
 /// Tree-sitter `Language` accessor for `xtask tree-sitter generate`.
 ///
@@ -52,7 +52,7 @@ impl LanguageAnalyzer for CAnalyzer {
         AnalysisBackend::TreeSitter
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let parser = match TreeSitterParser::new(
             tree_sitter_c::LANGUAGE.into(),
             source.text.clone().into_bytes(),
@@ -78,17 +78,27 @@ impl LanguageAnalyzer for CAnalyzer {
             }
         };
 
-        let root = walker::walk_program(parser.root(), parser.source(), &source.line_index);
+        let mut evidence = MetricEvidence::new("c", config.emit_contributions);
+        let root = walker::walk_program(
+            parser.root(),
+            parser.source(),
+            &source.line_index,
+            &mut evidence,
+        );
         // Tree-sitter recovers from syntax errors by inserting ERROR /
         // missing nodes; surface them as `error` diagnostics so the
         // metric output can't masquerade as clean (plan §9.3).
         let diagnostics = collect_recovered_errors(parser.root(), "c.syntax_error", 16);
+        // Per-space McCabe base rows (+1 per space, unit included) so
+        // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+        // cannot explain the rolled-up value (an empty function moves it).
+        evidence.record_cyclomatic_bases(&root);
         Ok(LanguageAnalysis {
             language: Language::C,
             backend: AnalysisBackend::TreeSitter,
             diagnostics,
             root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
     }
 }

@@ -66,8 +66,8 @@
 
 use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceKind};
 use mehen_metrics::{
-    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, State, apply_state_to,
-    close_space, finalize_state,
+    ContainerKind, HalsteadOperand, HalsteadOperator, MetricEvidence, MetricTreeBuilder, State,
+    apply_state_to, close_space, finalize_state,
 };
 use ruby_prism::{
     AndNode, BeginNode, BlockNode, BreakNode, CallNode, CallOperatorWriteNode, CaseMatchNode,
@@ -94,11 +94,13 @@ use smol_str::SmolStr;
 
 /// Drive the walker over a parsed Ruby program. Crate-internal entry
 /// point — only `mehen_ruby::RubyAnalyzer::analyze` calls this; not
-/// part of any cross-crate API.
+/// part of any cross-crate API. Contribution evidence is recorded into
+/// the caller-owned `evidence` sink (plan §5.4).
 pub(crate) fn walk_program(
     parse: &ParseResult<'_>,
     source: &str,
     line_index: &LineIndex,
+    evidence: &mut MetricEvidence,
 ) -> MetricSpace {
     let unit_span = SourceSpan {
         start_byte: 0,
@@ -107,7 +109,7 @@ pub(crate) fn walk_program(
         end_line: line_index.line_count(),
     };
 
-    let mut visitor = Visitor::new(line_index, unit_span);
+    let mut visitor = Visitor::new(line_index, unit_span, evidence);
     let root = parse.node();
     visitor.visit(&root);
 
@@ -138,6 +140,10 @@ pub(crate) fn walk_program(
 
 struct Visitor<'a> {
     line_index: &'a LineIndex,
+    /// Contribution-evidence sink (plan §5.4). Record methods are
+    /// no-ops when disabled, so visit hooks call them unconditionally
+    /// (via `record_evidence`) next to each stat increment.
+    evidence: &'a mut MetricEvidence,
     tree: MetricTreeBuilder,
     /// Per-space accumulator stack — index 0 is the unit.
     stack: Vec<State>,
@@ -177,7 +183,11 @@ struct CognitiveContext {
 }
 
 impl<'a> Visitor<'a> {
-    fn new(line_index: &'a LineIndex, unit_span: SourceSpan) -> Self {
+    fn new(
+        line_index: &'a LineIndex,
+        unit_span: SourceSpan,
+        evidence: &'a mut MetricEvidence,
+    ) -> Self {
         let mut state = State::new();
         state.loc.set_span(
             unit_span.start_line.saturating_sub(1),
@@ -186,6 +196,7 @@ impl<'a> Visitor<'a> {
         );
         Self {
             line_index,
+            evidence,
             tree: MetricTreeBuilder::new(unit_span),
             stack: vec![state],
             kinds: vec![SpaceKind::Unit],
@@ -199,6 +210,38 @@ impl<'a> Visitor<'a> {
 
     fn current(&mut self) -> &mut State {
         self.stack.last_mut().expect("walker stack empty")
+    }
+
+    /// Resolve a Prism `Location` to a `SourceSpan` (1-based lines) —
+    /// same byte→line formula as `open_space`.
+    fn span_for(&self, loc: &ruby_prism::Location<'_>) -> SourceSpan {
+        let start = u32::try_from(loc.start_offset()).unwrap_or(0);
+        let end = u32::try_from(loc.end_offset()).unwrap_or(0);
+        SourceSpan {
+            start_byte: start,
+            end_byte: end,
+            start_line: self.line_index.line_at(start),
+            end_line: self.line_index.line_at(end.saturating_sub(1)),
+        }
+    }
+
+    /// Record contribution evidence for a Prism location. The span is
+    /// only computed when the sink is enabled, so visit hooks can call
+    /// this unconditionally next to each stat increment:
+    ///
+    /// ```ignore
+    /// self.current().cyclomatic.record_decision();
+    /// self.record_evidence(&node.location(), |e, s| e.decision(s, "if_node"));
+    /// ```
+    #[inline]
+    fn record_evidence<F>(&mut self, loc: &ruby_prism::Location<'_>, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let span = self.span_for(loc);
+            record(self.evidence, span);
+        }
     }
 
     fn finish(mut self) -> MetricSpace {
@@ -273,11 +316,14 @@ impl<'a> Visitor<'a> {
     }
 
     /// Increase nesting + boolean-seq reset, mirroring legacy
-    /// `increase_nesting` from `cognitive.rs:239`.
-    fn cognitive_increase_nesting(&mut self) {
+    /// `increase_nesting` from `cognitive.rs:239`. Returns the
+    /// structural delta actually applied (`effective + 1`) so callers
+    /// can record it as contribution evidence.
+    fn cognitive_increase_nesting(&mut self) -> u32 {
         let effective = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
         self.current().cognitive.increase_nesting(effective);
         self.current().cognitive.boolean_seq.reset();
+        effective.saturating_add(1)
     }
 
     fn cognitive_increment_by_one(&mut self) {
@@ -358,6 +404,11 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
             self.current()
                 .npm
                 .record_method(ContainerKind::Class, is_public);
+            // NPM evidence covers public members only — the headline
+            // metric counts public methods.
+            if is_public {
+                self.record_evidence(&loc, |e, s| e.public_method(s, "def_node"));
+            }
         }
 
         // `def` keyword as Halstead operator; method name as operand.
@@ -381,6 +432,9 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         }
 
         self.open_space(SpaceKind::Function, start, end, name);
+        // NOM/NArgs evidence at the space-open site: `open_space` (via
+        // `State::for_opened_space`) records the `nom` function.
+        self.record_evidence(&loc, |e, s| e.function(s, "def_node"));
         // `def` is LLOC per the legacy Ruby `Loc` rule (`Method` arm).
         // Also pin the `end` keyword line as ploc so PLOC matches the
         // legacy tree-sitter walker (which saw the `end` keyword as a
@@ -391,6 +445,7 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // Parameters → nargs.
         let argc = node.parameters().map(|p| count_parameters(&p)).unwrap_or(0);
         self.current().nargs.record_function_args(argc);
+        self.record_evidence(&loc, |e, s| e.function_args(s, argc, "def_node"));
 
         // Cognitive: function entry resets nesting/lambda. If this
         // method is nested inside another method, depth bumps by 1.
@@ -482,12 +537,16 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         let start = u32::try_from(loc.start_offset()).unwrap_or(0);
         let end = u32::try_from(loc.end_offset()).unwrap_or(0);
         self.open_space(SpaceKind::Closure, start, end, None);
+        // NOM/NArgs evidence at the space-open site (`open_space`
+        // records the `nom` closure via `State::for_opened_space`).
+        self.record_evidence(&loc, |e, s| e.closure(s, "block_node"));
         let argc = node
             .parameters()
             .as_ref()
             .map(count_block_parameters)
             .unwrap_or(0);
         self.current().nargs.record_closure_args(argc);
+        self.record_evidence(&loc, |e, s| e.closure_args(s, argc, "block_node"));
 
         let mut ctx = self.cognitive;
         ctx.lambda = ctx.lambda.saturating_add(1);
@@ -505,12 +564,16 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         let start = u32::try_from(loc.start_offset()).unwrap_or(0);
         let end = u32::try_from(loc.end_offset()).unwrap_or(0);
         self.open_space(SpaceKind::Closure, start, end, None);
+        // NOM/NArgs evidence at the space-open site (`open_space`
+        // records the `nom` closure via `State::for_opened_space`).
+        self.record_evidence(&loc, |e, s| e.closure(s, "lambda_node"));
         let argc = node
             .parameters()
             .as_ref()
             .map(count_block_parameters)
             .unwrap_or(0);
         self.current().nargs.record_closure_args(argc);
+        self.record_evidence(&loc, |e, s| e.closure_args(s, argc, "lambda_node"));
 
         let mut ctx = self.cognitive;
         ctx.lambda = ctx.lambda.saturating_add(1);
@@ -543,6 +606,10 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // point per Sonar / McCabe).
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "if_node");
+            e.abc_condition(s, "if_node");
+        });
         self.record_halstead_op(if is_ternary { "?:" } else { "if" });
 
         if is_modifier || is_ternary {
@@ -550,9 +617,11 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
             // without nesting (per Sonar spec: trailing modifier sits on
             // a statement edge; ternary is a single-decision form).
             self.cognitive_increment_by_one();
+            self.record_evidence(&node.location(), |e, s| e.cognitive(s, 1, "if_node"));
         } else {
             // Block form: nesting structure.
-            self.cognitive_increase_nesting();
+            let delta = self.cognitive_increase_nesting();
+            self.record_evidence(&node.location(), |e, s| e.cognitive(s, delta, "if_node"));
             self.observe_optional_keyword_line(node.end_keyword_loc());
             self.cognitive.nesting += 1;
             visit_if_node(self, node);
@@ -577,13 +646,21 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         );
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "unless_node");
+            e.abc_condition(s, "unless_node");
+        });
         self.record_halstead_op("unless");
 
         if is_modifier {
             self.cognitive_increment_by_one();
+            self.record_evidence(&node.location(), |e, s| e.cognitive(s, 1, "unless_node"));
             visit_unless_node(self, node);
         } else {
-            self.cognitive_increase_nesting();
+            let delta = self.cognitive_increase_nesting();
+            self.record_evidence(&node.location(), |e, s| {
+                e.cognitive(s, delta, "unless_node")
+            });
             self.observe_optional_keyword_line(node.end_keyword_loc());
             self.cognitive.nesting += 1;
             visit_unless_node(self, node);
@@ -600,13 +677,19 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         );
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "while_node");
+            e.abc_condition(s, "while_node");
+        });
         self.record_halstead_op("while");
 
         if is_modifier {
             self.cognitive_increment_by_one();
+            self.record_evidence(&node.location(), |e, s| e.cognitive(s, 1, "while_node"));
             visit_while_node(self, node);
         } else {
-            self.cognitive_increase_nesting();
+            let delta = self.cognitive_increase_nesting();
+            self.record_evidence(&node.location(), |e, s| e.cognitive(s, delta, "while_node"));
             self.observe_optional_keyword_line(node.closing_loc());
             self.cognitive.nesting += 1;
             visit_while_node(self, node);
@@ -623,13 +706,19 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         );
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "until_node");
+            e.abc_condition(s, "until_node");
+        });
         self.record_halstead_op("until");
 
         if is_modifier {
             self.cognitive_increment_by_one();
+            self.record_evidence(&node.location(), |e, s| e.cognitive(s, 1, "until_node"));
             visit_until_node(self, node);
         } else {
-            self.cognitive_increase_nesting();
+            let delta = self.cognitive_increase_nesting();
+            self.record_evidence(&node.location(), |e, s| e.cognitive(s, delta, "until_node"));
             self.observe_optional_keyword_line(node.closing_loc());
             self.cognitive.nesting += 1;
             visit_until_node(self, node);
@@ -644,8 +733,13 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         );
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "for_node");
+            e.abc_condition(s, "for_node");
+        });
         self.record_halstead_op("for");
-        self.cognitive_increase_nesting();
+        let delta = self.cognitive_increase_nesting();
+        self.record_evidence(&node.location(), |e, s| e.cognitive(s, delta, "for_node"));
         // ForNode also has end_keyword_loc.
         self.cognitive.nesting += 1;
         visit_for_node(self, node);
@@ -662,7 +756,8 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
             true,
         );
         self.record_halstead_op("case");
-        self.cognitive_increase_nesting();
+        let delta = self.cognitive_increase_nesting();
+        self.record_evidence(&node.location(), |e, s| e.cognitive(s, delta, "case_node"));
         self.observe_keyword_line(&node.end_keyword_loc());
         self.cognitive.nesting += 1;
         visit_case_node(self, node);
@@ -674,6 +769,10 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // condition; cognitive is unchanged (cost paid by `case`).
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "when_node");
+            e.abc_condition(s, "when_node");
+        });
         self.record_halstead_op("when");
         visit_when_node(self, node);
     }
@@ -687,7 +786,10 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
             true,
         );
         self.record_halstead_op("case");
-        self.cognitive_increase_nesting();
+        let delta = self.cognitive_increase_nesting();
+        self.record_evidence(&node.location(), |e, s| {
+            e.cognitive(s, delta, "case_match_node");
+        });
         self.observe_keyword_line(&node.end_keyword_loc());
         self.cognitive.nesting += 1;
         visit_case_match_node(self, node);
@@ -697,6 +799,10 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
     fn visit_in_node(&mut self, node: &InNode<'pr>) {
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "in_node");
+            e.abc_condition(s, "in_node");
+        });
         self.record_halstead_op("in");
         visit_in_node(self, node);
     }
@@ -705,6 +811,10 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // `expr in pat` (one-line pattern test) — single decision.
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "match_predicate_node");
+            e.abc_condition(s, "match_predicate_node");
+        });
         visit_match_predicate_node(self, node);
     }
 
@@ -713,6 +823,7 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // (the `if`/`case` already picked a branch), +1 cognitive
         // without nesting (per Sonar).
         self.cognitive_increment_by_one();
+        self.record_evidence(&node.location(), |e, s| e.cognitive(s, 1, "else_node"));
         self.record_halstead_op("else");
         visit_else_node(self, node);
     }
@@ -736,8 +847,15 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // rule).
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "rescue_node");
+            e.abc_condition(s, "rescue_node");
+        });
         self.record_halstead_op("rescue");
-        self.cognitive_increase_nesting();
+        let delta = self.cognitive_increase_nesting();
+        self.record_evidence(&node.location(), |e, s| {
+            e.cognitive(s, delta, "rescue_node")
+        });
         self.cognitive.nesting += 1;
         visit_rescue_node(self, node);
         self.cognitive.nesting -= 1;
@@ -751,6 +869,11 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         self.current().abc.record_condition();
         self.record_halstead_op("rescue");
         self.cognitive_increment_by_one();
+        self.record_evidence(&node.location(), |e, s| {
+            e.decision(s, "rescue_modifier_node");
+            e.abc_condition(s, "rescue_modifier_node");
+            e.cognitive(s, 1, "rescue_modifier_node");
+        });
         visit_rescue_modifier_node(self, node);
     }
 
@@ -767,7 +890,16 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // both collapse but legacy distinguishes them by token text.
         let op_text = std::str::from_utf8(node.operator_loc().as_slice()).unwrap_or("&&");
         let label = if op_text == "and" { "and" } else { "&&" };
+        let before = self.current().cognitive.structural;
         self.current().cognitive.observe_boolean(label);
+        let delta = self.current().cognitive.structural.saturating_sub(before);
+        // Evidence spans point at the operator token; a same-operator
+        // repeat applies no delta and records nothing.
+        self.record_evidence(&node.operator_loc(), |e, s| {
+            e.decision(s, label);
+            e.abc_condition(s, label);
+            e.cognitive(s, delta, label);
+        });
         self.bool_depth = self.bool_depth.saturating_add(1);
         visit_and_node(self, node);
         self.bool_depth = self.bool_depth.saturating_sub(1);
@@ -779,7 +911,14 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         self.record_halstead_op("||");
         let op_text = std::str::from_utf8(node.operator_loc().as_slice()).unwrap_or("||");
         let label = if op_text == "or" { "or" } else { "||" };
+        let before = self.current().cognitive.structural;
         self.current().cognitive.observe_boolean(label);
+        let delta = self.current().cognitive.structural.saturating_sub(before);
+        self.record_evidence(&node.operator_loc(), |e, s| {
+            e.decision(s, label);
+            e.abc_condition(s, label);
+            e.cognitive(s, delta, label);
+        });
         self.bool_depth = self.bool_depth.saturating_add(1);
         visit_or_node(self, node);
         self.bool_depth = self.bool_depth.saturating_sub(1);
@@ -808,6 +947,7 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
 
         if !is_operator_call {
             self.current().abc.record_branch();
+            self.record_evidence(&node.location(), |e, s| e.abc_branch(s, "call_node"));
         }
 
         // Legacy walker counted `binary` (e.g. `a > 0`, `a == b`) as
@@ -818,6 +958,7 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
             && is_ruby_comparison_method(name)
         {
             self.current().abc.record_condition();
+            self.record_evidence(&node.location(), |e, s| e.abc_condition(s, name));
         }
 
         if let Some(name) = name_str {
@@ -850,24 +991,28 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
 
     fn visit_return_node(&mut self, node: &ReturnNode<'pr>) {
         self.current().nexit.record_exit();
+        self.record_evidence(&node.location(), |e, s| e.exit(s, "return_node"));
         self.record_halstead_op("return");
         visit_return_node(self, node);
     }
 
     fn visit_break_node(&mut self, node: &BreakNode<'pr>) {
         self.current().nexit.record_exit();
+        self.record_evidence(&node.location(), |e, s| e.exit(s, "break_node"));
         self.record_halstead_op("break");
         visit_break_node(self, node);
     }
 
     fn visit_next_node(&mut self, node: &NextNode<'pr>) {
         self.current().nexit.record_exit();
+        self.record_evidence(&node.location(), |e, s| e.exit(s, "next_node"));
         self.record_halstead_op("next");
         visit_next_node(self, node);
     }
 
     fn visit_redo_node(&mut self, node: &RedoNode<'pr>) {
         self.current().nexit.record_exit();
+        self.record_evidence(&node.location(), |e, s| e.exit(s, "redo_node"));
         self.record_halstead_op("redo");
         visit_redo_node(self, node);
     }
@@ -877,6 +1022,9 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
     fn visit_local_variable_write_node(&mut self, node: &LocalVariableWriteNode<'pr>) {
         self.current().loc.observe_lloc();
         self.current().abc.record_assignment();
+        self.record_evidence(&node.location(), |e, s| {
+            e.abc_assignment(s, "local_variable_write_node");
+        });
         self.record_halstead_op("=");
         if let Ok(name) = std::str::from_utf8(node.name().as_slice()) {
             self.record_halstead_operand_text("Identifier", name);
@@ -891,6 +1039,9 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // `x += 1`, `x *= 2`, etc. — augmented assignment.
         self.current().loc.observe_lloc();
         self.current().abc.record_assignment();
+        self.record_evidence(&node.location(), |e, s| {
+            e.abc_assignment(s, "local_variable_operator_write_node");
+        });
         self.record_halstead_op_text(
             "op_assign",
             std::str::from_utf8(node.binary_operator_loc().as_slice()).unwrap_or(""),
@@ -908,6 +1059,11 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         self.current().abc.record_assignment();
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.abc_assignment(s, "local_variable_and_write_node");
+            e.decision(s, "local_variable_and_write_node");
+            e.abc_condition(s, "local_variable_and_write_node");
+        });
         self.record_halstead_op("&&=");
         if let Ok(name) = std::str::from_utf8(node.name().as_slice()) {
             self.record_halstead_operand_text("Identifier", name);
@@ -921,6 +1077,11 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         self.current().abc.record_assignment();
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(&node.location(), |e, s| {
+            e.abc_assignment(s, "local_variable_or_write_node");
+            e.decision(s, "local_variable_or_write_node");
+            e.abc_condition(s, "local_variable_or_write_node");
+        });
         self.record_halstead_op("||=");
         if let Ok(name) = std::str::from_utf8(node.name().as_slice()) {
             self.record_halstead_operand_text("Identifier", name);
@@ -931,13 +1092,17 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
     fn visit_instance_variable_write_node(&mut self, node: &InstanceVariableWriteNode<'pr>) {
         self.current().loc.observe_lloc();
         self.current().abc.record_assignment();
+        self.record_evidence(&node.location(), |e, s| {
+            e.abc_assignment(s, "instance_variable_write_node");
+        });
         self.record_halstead_op("=");
 
         // Class-body @ivar assignment → NPA on the enclosing class.
+        // Ruby ivars are non-public (`@x` is private until exposed via
+        // `attr_reader`), so the public-members-only NPA evidence
+        // intentionally records nothing here.
         let parent_kind = self.kinds.last().cloned().unwrap_or(SpaceKind::Unit);
         if matches!(parent_kind, SpaceKind::Class | SpaceKind::Impl) {
-            // Ruby ivars are non-public by convention (`@x` is private
-            // until exposed via `attr_reader`).
             self.current()
                 .npa
                 .record_attribute(ContainerKind::Class, false);
@@ -951,6 +1116,9 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
     fn visit_constant_write_node(&mut self, node: &ConstantWriteNode<'pr>) {
         self.current().loc.observe_lloc();
         self.current().abc.record_assignment();
+        self.record_evidence(&node.location(), |e, s| {
+            e.abc_assignment(s, "constant_write_node");
+        });
         self.record_halstead_op("=");
         if let Ok(name) = std::str::from_utf8(node.name().as_slice()) {
             self.record_halstead_operand_text("Constant", name);
@@ -962,6 +1130,9 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // `obj.attr += 1` — receiver method op-assign.
         self.current().loc.observe_lloc();
         self.current().abc.record_assignment();
+        self.record_evidence(&node.location(), |e, s| {
+            e.abc_assignment(s, "call_operator_write_node");
+        });
         self.record_halstead_op_text(
             "op_assign",
             std::str::from_utf8(node.binary_operator_loc().as_slice()).unwrap_or(""),
@@ -973,6 +1144,9 @@ impl<'pr> Visit<'pr> for Visitor<'_> {
         // `a[k] += 1` — index op-assign.
         self.current().loc.observe_lloc();
         self.current().abc.record_assignment();
+        self.record_evidence(&node.location(), |e, s| {
+            e.abc_assignment(s, "index_operator_write_node");
+        });
         self.record_halstead_op_text(
             "op_assign",
             std::str::from_utf8(node.binary_operator_loc().as_slice()).unwrap_or(""),

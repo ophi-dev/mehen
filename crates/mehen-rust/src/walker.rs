@@ -41,8 +41,8 @@
 
 use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceKind};
 use mehen_metrics::{
-    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
-    apply_state_to, close_space, finalize_state,
+    ContainerKind, HalsteadOperand, HalsteadOperator, MetricEvidence, MetricTreeBuilder,
+    SpaceRangeTracker, State, apply_state_to, close_space, finalize_state,
 };
 use ra_ap_syntax::{
     AstNode, NodeOrToken, SourceFile, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, WalkEvent,
@@ -52,16 +52,19 @@ use smol_str::SmolStr;
 
 /// Crate-internal entry point — drive the walker over a parsed
 /// `SourceFile`. Only `mehen_rust::RustAnalyzer::analyze` calls this;
-/// the function is not part of any cross-crate API.
+/// the function is not part of any cross-crate API. Contribution
+/// evidence is recorded into the caller-owned `evidence` sink
+/// (plan §5.4).
 pub(crate) fn walk_source_file(
     file: &SourceFile,
     source: &str,
     line_index: &LineIndex,
+    evidence: &mut MetricEvidence,
 ) -> MetricSpace {
     let unit_range = file.syntax().text_range();
     let unit_span = text_range_to_source_span(unit_range, line_index);
 
-    let mut visitor = Visitor::new(source, line_index, unit_span);
+    let mut visitor = Visitor::new(source, line_index, unit_span, evidence);
     visitor.walk(file.syntax());
     visitor.emit_halstead_from_tokens(file.syntax());
     visitor.finish()
@@ -108,10 +111,18 @@ struct Visitor<'a> {
     /// flagged the same gap on the Python walker; the Rust walker had
     /// the same `stack[0]`-only behaviour.
     halstead_routing: SpaceRangeTracker,
+    /// Contribution-evidence sink (plan §5.4). Recorded next to each
+    /// stat increment, usually through [`Visitor::record_evidence`].
+    evidence: &'a mut MetricEvidence,
 }
 
 impl<'a> Visitor<'a> {
-    fn new(source: &'a str, line_index: &'a LineIndex, unit_span: SourceSpan) -> Self {
+    fn new(
+        source: &'a str,
+        line_index: &'a LineIndex,
+        unit_span: SourceSpan,
+        evidence: &'a mut MetricEvidence,
+    ) -> Self {
         let mut state = State::new();
         state.loc.set_span(
             unit_span.start_line.saturating_sub(1),
@@ -128,11 +139,27 @@ impl<'a> Visitor<'a> {
             macro_opaque_ranges: Vec::new(),
             macro_opaque_depth: 0,
             halstead_routing: SpaceRangeTracker::new(),
+            evidence,
         }
     }
 
     fn current(&mut self) -> &mut State {
         self.stack.last_mut().expect("walker stack empty")
+    }
+
+    /// Record contribution evidence for `range`. The span is only
+    /// computed when the sink is enabled, so call sites can invoke this
+    /// unconditionally next to each stat increment — mirrors
+    /// `mehen_tree_sitter::WalkerCtx::record_evidence`.
+    #[inline]
+    fn record_evidence<F>(&mut self, range: TextRange, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let span = text_range_to_source_span(range, self.line_index);
+            record(self.evidence, span);
+        }
     }
 
     fn finish(mut self) -> MetricSpace {
@@ -289,6 +316,13 @@ impl<'a> Visitor<'a> {
                     .map(|pl| count_params(&pl) as u32)
                     .unwrap_or(0);
                 self.current().nargs.record_function_args(argc);
+                // NOM function is recorded by `State::for_opened_space`
+                // inside `open_space`; evidence for both NOM and NArgs
+                // attaches to the space-open site.
+                self.record_evidence(node.text_range(), |e, s| {
+                    e.function(s, "fn");
+                    e.function_args(s, argc, "fn");
+                });
 
                 LeaveAction::CloseSpaceAndRestoreCognitive(saved)
             }
@@ -299,6 +333,9 @@ impl<'a> Visitor<'a> {
                 self.cognitive = ctx;
 
                 self.open_space(SpaceKind::Closure, node.text_range(), None);
+                // NOM closure is recorded by `State::for_opened_space`
+                // inside `open_space`; evidence attaches to the open site.
+                self.record_evidence(node.text_range(), |e, s| e.closure(s, "closure_expr"));
 
                 if let Some(closure) = ast::ClosureExpr::cast(node.clone()) {
                     let argc = closure
@@ -306,6 +343,9 @@ impl<'a> Visitor<'a> {
                         .map(|pl| count_params(&pl) as u32)
                         .unwrap_or(0);
                     self.current().nargs.record_closure_args(argc);
+                    self.record_evidence(node.text_range(), |e, s| {
+                        e.closure_args(s, argc, "closure_expr");
+                    });
                 }
                 LeaveAction::CloseSpaceAndRestoreCognitive(saved)
             }
@@ -328,10 +368,17 @@ impl<'a> Visitor<'a> {
             SyntaxKind::IF_EXPR => {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                self.record_evidence(node.text_range(), |e, s| {
+                    e.decision(s, "if_expr");
+                    e.abc_condition(s, "if_expr");
+                });
                 let bumped_nesting = if !is_else_if(node) {
                     let effective =
                         self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                     self.current().cognitive.increase_nesting(effective);
+                    self.record_evidence(node.text_range(), |e, s| {
+                        e.cognitive(s, effective.saturating_add(1), "if_expr");
+                    });
                     true
                 } else {
                     // `else if` — the legacy walker emits the +1 (flat)
@@ -346,11 +393,15 @@ impl<'a> Visitor<'a> {
                 // ra_ap_syntax doesn't surface a dedicated Else AST
                 // node — but each IF_EXPR exposes its own `else_token()`
                 // / `else_branch()`. Attribute the +1 to the IF_EXPR
-                // that owns the else branch.
+                // that owns the else branch. Evidence points at the
+                // `else` keyword itself.
                 if let Some(if_expr) = ast::IfExpr::cast(node.clone())
-                    && if_expr.else_token().is_some()
+                    && let Some(else_token) = if_expr.else_token()
                 {
                     self.current().cognitive.increment_by_one();
+                    self.record_evidence(else_token.text_range(), |e, s| {
+                        e.cognitive(s, 1, "else_kw");
+                    });
                 }
                 self.current().cognitive.boolean_seq.reset();
                 let saved = self.cognitive;
@@ -360,11 +411,21 @@ impl<'a> Visitor<'a> {
                 LeaveAction::RestoreCognitive(saved)
             }
             SyntaxKind::WHILE_EXPR | SyntaxKind::FOR_EXPR | SyntaxKind::LOOP_EXPR => {
+                let detail = match kind {
+                    SyntaxKind::WHILE_EXPR => "while_expr",
+                    SyntaxKind::FOR_EXPR => "for_expr",
+                    _ => "loop_expr",
+                };
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
                 let effective =
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
+                self.record_evidence(node.text_range(), |e, s| {
+                    e.decision(s, detail);
+                    e.abc_condition(s, detail);
+                    e.cognitive(s, effective.saturating_add(1), detail);
+                });
                 self.current().cognitive.boolean_seq.reset();
                 let saved = self.cognitive;
                 self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
@@ -375,6 +436,10 @@ impl<'a> Visitor<'a> {
                 let effective =
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
+                self.record_evidence(node.text_range(), |e, s| {
+                    e.abc_condition(s, "match_expr");
+                    e.cognitive(s, effective.saturating_add(1), "match_expr");
+                });
                 self.current().cognitive.boolean_seq.reset();
                 let saved = self.cognitive;
                 self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
@@ -383,6 +448,10 @@ impl<'a> Visitor<'a> {
             SyntaxKind::MATCH_ARM => {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                self.record_evidence(node.text_range(), |e, s| {
+                    e.decision(s, "match_arm");
+                    e.abc_condition(s, "match_arm");
+                });
                 LeaveAction::None
             }
             SyntaxKind::TRY_EXPR => {
@@ -392,38 +461,75 @@ impl<'a> Visitor<'a> {
                 self.current().cognitive.increment_by_one();
                 self.current().abc.record_condition();
                 self.current().nexit.record_exit();
+                self.record_evidence(node.text_range(), |e, s| {
+                    e.decision(s, "try_expr");
+                    e.cognitive(s, 1, "try_expr");
+                    e.abc_condition(s, "try_expr");
+                    e.exit(s, "try_expr");
+                });
                 LeaveAction::None
             }
             SyntaxKind::RETURN_EXPR => {
                 self.current().nexit.record_exit();
+                self.record_evidence(node.text_range(), |e, s| e.exit(s, "return_expr"));
                 LeaveAction::None
             }
             SyntaxKind::BREAK_EXPR | SyntaxKind::CONTINUE_EXPR => {
                 if has_label_child(node) {
+                    let detail = if kind == SyntaxKind::BREAK_EXPR {
+                        "break_expr"
+                    } else {
+                        "continue_expr"
+                    };
                     self.current().cognitive.increment_by_one();
+                    self.record_evidence(node.text_range(), |e, s| e.cognitive(s, 1, detail));
                 }
                 LeaveAction::None
             }
             SyntaxKind::BIN_EXPR => {
                 if let Some(bin) = ast::BinExpr::cast(node.clone())
-                    && let Some(op) = bin.op_kind()
+                    && let Some((op_token, op)) = bin.op_details()
                 {
                     match op {
                         BinaryOp::LogicOp(LogicOp::And) => {
                             self.current().cyclomatic.record_decision();
                             self.current().abc.record_condition();
+                            // Evidence spans point at the operator
+                            // token; same-operator repeats apply no
+                            // cognitive delta and record nothing.
+                            let before = self.current().cognitive.structural;
                             self.current().cognitive.observe_boolean("&&");
+                            let delta = self.current().cognitive.structural.saturating_sub(before);
+                            self.record_evidence(op_token.text_range(), |e, s| {
+                                e.decision(s, "&&");
+                                e.abc_condition(s, "&&");
+                                e.cognitive(s, delta, "&&");
+                            });
                         }
                         BinaryOp::LogicOp(LogicOp::Or) => {
                             self.current().cyclomatic.record_decision();
                             self.current().abc.record_condition();
+                            let before = self.current().cognitive.structural;
                             self.current().cognitive.observe_boolean("||");
+                            let delta = self.current().cognitive.structural.saturating_sub(before);
+                            self.record_evidence(op_token.text_range(), |e, s| {
+                                e.decision(s, "||");
+                                e.abc_condition(s, "||");
+                                e.cognitive(s, delta, "||");
+                            });
                         }
                         BinaryOp::CmpOp(_) => {
                             self.current().abc.record_condition();
+                            let op_text: &str = op_token.text();
+                            self.record_evidence(op_token.text_range(), |e, s| {
+                                e.abc_condition(s, op_text);
+                            });
                         }
                         BinaryOp::Assignment { .. } => {
                             self.current().abc.record_assignment();
+                            self.record_evidence(node.text_range(), |e, s| {
+                                e.abc_assignment(s, "bin_expr");
+                            });
                         }
                         BinaryOp::ArithOp(_) => {}
                     }
@@ -447,6 +553,9 @@ impl<'a> Visitor<'a> {
                     && stmt.eq_token().is_some()
                 {
                     self.current().abc.record_assignment();
+                    self.record_evidence(node.text_range(), |e, s| {
+                        e.abc_assignment(s, "let_stmt");
+                    });
                 }
                 self.current().loc.observe_lloc();
                 LeaveAction::None
@@ -460,11 +569,18 @@ impl<'a> Visitor<'a> {
             // Branches (B in ABC)
             // -----------------------------------------------------------------
             SyntaxKind::CALL_EXPR | SyntaxKind::METHOD_CALL_EXPR => {
+                let detail = if kind == SyntaxKind::CALL_EXPR {
+                    "call_expr"
+                } else {
+                    "method_call_expr"
+                };
                 self.current().abc.record_branch();
+                self.record_evidence(node.text_range(), |e, s| e.abc_branch(s, detail));
                 LeaveAction::None
             }
             SyntaxKind::MACRO_CALL => {
                 self.current().abc.record_branch();
+                self.record_evidence(node.text_range(), |e, s| e.abc_branch(s, "macro_call"));
                 self.macro_opaque_ranges.push(node.text_range());
                 self.macro_opaque_depth += 1;
                 LeaveAction::ExitMacroOpaque
@@ -495,6 +611,12 @@ impl<'a> Visitor<'a> {
                     self.current()
                         .npa
                         .record_attribute(ContainerKind::Class, is_public);
+                    // Only public members move the headline NPA value.
+                    if is_public {
+                        self.record_evidence(node.text_range(), |e, s| {
+                            e.public_attribute(s, "record_field");
+                        });
+                    }
                 }
                 LeaveAction::None
             }
@@ -504,6 +626,11 @@ impl<'a> Visitor<'a> {
                     self.current()
                         .npa
                         .record_attribute(ContainerKind::Class, is_public);
+                    if is_public {
+                        self.record_evidence(node.text_range(), |e, s| {
+                            e.public_attribute(s, "tuple_field");
+                        });
+                    }
                 }
                 LeaveAction::None
             }
@@ -529,6 +656,11 @@ impl<'a> Visitor<'a> {
         };
         let is_public = matches!(grand_kind, SyntaxKind::TRAIT) || func.visibility().is_some();
         self.current().npm.record_method(container, is_public);
+        // Only public methods move the headline NPM value. Trait and
+        // impl methods both fold into the published `npm` total.
+        if is_public {
+            self.record_evidence(func.syntax().text_range(), |e, s| e.public_method(s, "fn"));
+        }
     }
 
     /// Token-stream Halstead emission — runs after the AST walk.

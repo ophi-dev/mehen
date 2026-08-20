@@ -72,6 +72,21 @@ use crate::words::count_words;
 /// output's `path` field; the caller controls whether it is absolute or
 /// relative.
 pub fn analyze_markdown(source: &str, path: &Path) -> MarkdownMetrics {
+    let mut evidence = mehen_core::ContributionCollector::new(false);
+    analyze_markdown_with_evidence(source, path, &mut evidence)
+}
+
+/// As [`analyze_markdown`], additionally recording contribution evidence
+/// (plan §5.4) into `evidence`: every MCC adjustment (element charges and
+/// scaled scaffold credits) with the exact amounts applied. Crate-internal —
+/// the registry-driven `LanguageAnalyzer::analyze` path uses this;
+/// `analyze_markdown` keeps its original public signature for existing
+/// fixtures and callers.
+pub(crate) fn analyze_markdown_with_evidence(
+    source: &str,
+    path: &Path,
+    evidence: &mut mehen_core::ContributionCollector,
+) -> MarkdownMetrics {
     let (tree, document) = parse_with_document(source);
     let root = tree.root();
 
@@ -94,7 +109,7 @@ pub fn analyze_markdown(source: &str, path: &Path) -> MarkdownMetrics {
     // Phase B: complexity surface (MRPC, MCC, Halstead). DMI is deferred
     // until Phase D has computed its inputs.
     let mrpc = compute_mrpc(&root, &document, source);
-    let mcc = compute_mcc(&root, &document, source);
+    let mcc = compute_mcc(&root, &document, source, evidence);
     let mut halstead = compute_halstead(&root, &document, source);
     let emb = embedded_volume(&document);
     halstead.embedded_volume = emb;

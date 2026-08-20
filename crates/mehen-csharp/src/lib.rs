@@ -63,6 +63,7 @@ use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, LineIndex,
     ParseDiagnostic, Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
+use mehen_metrics::MetricEvidence;
 
 use mehen_csharp_parser::c_sharp_lexer::CSharpLexer;
 use mehen_csharp_parser::c_sharp_parser;
@@ -149,7 +150,7 @@ impl LanguageAnalyzer for CSharpAnalyzer {
         AnalysisBackend::Antlr
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         // `with_unicode_separators`, not `new`: this grammar's lexer treats NEL,
         // U+2028, and U+2029 as line terminators (ECMA-334 §6.3.1), so they are real row
         // breaks here. The default policy is LF/CRLF-only because every
@@ -182,7 +183,14 @@ impl LanguageAnalyzer for CSharpAnalyzer {
         // The `ParsedFile` owns the token store and CST; `tree()` is the root
         // `Node` borrowing view the walker traverses.
         let tree = parsed.parsed.tree();
-        let root = walker::walk(tree, &line_index, source.text.len(), &parsed.loc_tokens);
+        let mut evidence = MetricEvidence::new("csharp", config.emit_contributions);
+        let root = walker::walk(
+            tree,
+            &line_index,
+            source.text.len(),
+            &parsed.loc_tokens,
+            &mut evidence,
+        );
 
         // Recovered ANTLR error nodes are surfaced as `error` so the
         // diagnostic contract treats the analysis as incomplete.
@@ -195,12 +203,16 @@ impl LanguageAnalyzer for CSharpAnalyzer {
             &line_index,
         ));
 
+        // Per-space McCabe base rows (+1 per space, unit included) so
+        // cyclomatic evidence sums to `cyclomatic.sum` — decisions alone
+        // cannot explain the rolled-up value (an empty function moves it).
+        evidence.record_cyclomatic_bases(&root);
         Ok(LanguageAnalysis {
             language: Language::CSharp,
             backend: AnalysisBackend::Antlr,
             diagnostics,
             root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
     }
 }
