@@ -163,7 +163,7 @@ impl LanguageAnalyzer for KotlinAnalyzer {
         AnalysisBackend::Antlr
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let line_index = LineIndex::new(&source.text);
 
         // Kotlin has two top-level entry rules: `kotlinFile` (a compilation
@@ -208,7 +208,14 @@ impl LanguageAnalyzer for KotlinAnalyzer {
         // The `ParsedFile` owns the token store and CST; `tree()` is the root
         // `Node` borrowing view the walker traverses.
         let tree = parsed.parsed.tree();
-        let root = walker::walk(tree, &line_index, source.text.len(), &parsed.loc_tokens);
+        let mut evidence = mehen_metrics::MetricEvidence::new("kotlin", config.emit_contributions);
+        let root = walker::walk(
+            tree,
+            &line_index,
+            source.text.len(),
+            &parsed.loc_tokens,
+            &mut evidence,
+        );
 
         // Recovered ANTLR error nodes are surfaced as `error` (not
         // `warning`) so the diagnostic contract (plan §9.3) treats the
@@ -228,7 +235,7 @@ impl LanguageAnalyzer for KotlinAnalyzer {
             backend: AnalysisBackend::Antlr,
             diagnostics,
             root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
     }
 }

@@ -41,8 +41,8 @@
 
 use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceKind};
 use mehen_metrics::{
-    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
-    apply_state_to, close_space, finalize_state,
+    ContainerKind, HalsteadOperand, HalsteadOperator, MetricEvidence, MetricTreeBuilder,
+    SpaceRangeTracker, State, apply_state_to, close_space, finalize_state,
 };
 use ruff_python_ast::token::TokenKind;
 use ruff_python_ast::visitor::source_order::{SourceOrderVisitor, walk_expr, walk_stmt};
@@ -56,11 +56,13 @@ use smol_str::SmolStr;
 
 /// Drive the walker over a parsed Python module. Crate-internal entry
 /// point — only `mehen_python::PythonAnalyzer::analyze` calls this; not
-/// part of any cross-crate API.
+/// part of any cross-crate API. Contribution evidence is recorded into
+/// the caller-owned `evidence` sink (plan §5.4).
 pub(crate) fn walk_module(
     parsed: &Parsed<ModModule>,
     source: &str,
     line_index: &LineIndex,
+    evidence: &mut MetricEvidence,
 ) -> MetricSpace {
     let module = parsed.syntax();
     let unit_span = SourceSpan {
@@ -70,7 +72,7 @@ pub(crate) fn walk_module(
         end_line: line_index.line_at(module.range.end().to_u32()),
     };
 
-    let mut visitor = Visitor::new(source, line_index, unit_span);
+    let mut visitor = Visitor::new(source, line_index, unit_span, evidence);
     visitor.record_module_docstring(&module.body);
     visitor.visit_body(&module.body);
 
@@ -105,6 +107,11 @@ struct Visitor<'a> {
     /// even though the unit rollup is correct (PR #95
     /// discussion_r3265658502).
     halstead_routing: SpaceRangeTracker,
+    /// Contribution-evidence sink (plan §5.4). Record methods are
+    /// no-ops when disabled; call sites go through
+    /// [`Visitor::record_evidence`] so spans are only computed when
+    /// the sink is enabled.
+    evidence: &'a mut MetricEvidence,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -121,7 +128,12 @@ struct CognitiveContext {
 }
 
 impl<'a> Visitor<'a> {
-    fn new(source: &'a str, line_index: &'a LineIndex, unit_span: SourceSpan) -> Self {
+    fn new(
+        source: &'a str,
+        line_index: &'a LineIndex,
+        unit_span: SourceSpan,
+        evidence: &'a mut MetricEvidence,
+    ) -> Self {
         let mut state = State::new();
         state.loc.set_span(
             unit_span.start_line.saturating_sub(1),
@@ -137,6 +149,22 @@ impl<'a> Visitor<'a> {
             cognitive: CognitiveContext::default(),
             docstring_ranges: Vec::new(),
             halstead_routing: SpaceRangeTracker::new(),
+            evidence,
+        }
+    }
+
+    /// Record contribution evidence for `range`. The span is only
+    /// computed when the sink is enabled, so call sites can invoke
+    /// this unconditionally next to each stat increment (mirrors
+    /// `WalkerCtx::record_evidence` in `mehen-tree-sitter`).
+    #[inline]
+    fn record_evidence<F>(&mut self, range: TextRange, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let span = text_range_to_source_span(range, self.line_index);
+            record(self.evidence, span);
         }
     }
 
@@ -226,6 +254,13 @@ impl<'a> Visitor<'a> {
         );
         let argc = func.parameters.len() as u32;
         self.current().nargs.record_function_args(argc);
+        // NOM is recorded inside `State::for_opened_space(Function)`
+        // (called by `open_space`); the evidence for both families is
+        // attached here, at the site that opened the space.
+        self.record_evidence(func.range, |e, s| e.function(s, "stmt_function_def"));
+        self.record_evidence(func.range, |e, s| {
+            e.function_args(s, argc, "stmt_function_def")
+        });
 
         // Cognitive — function entry resets nesting/lambda and bumps
         // depth when nested inside another function.
@@ -313,6 +348,13 @@ impl<'a> Visitor<'a> {
                     self.current()
                         .npa
                         .record_attribute(ContainerKind::Class, is_public);
+                    // NPA headline counts public members only — evidence
+                    // follows suit and skips non-public names.
+                    if is_public {
+                        self.record_evidence(name.range, |e, s| {
+                            e.public_attribute(s, "stmt_ann_assign");
+                        });
+                    }
                 }
             }
             Stmt::Assign(ast::StmtAssign { targets, .. }) => {
@@ -322,6 +364,11 @@ impl<'a> Visitor<'a> {
                         self.current()
                             .npa
                             .record_attribute(ContainerKind::Class, is_public);
+                        if is_public {
+                            self.record_evidence(name.range, |e, s| {
+                                e.public_attribute(s, "stmt_assign");
+                            });
+                        }
                     }
                 }
             }
@@ -330,6 +377,11 @@ impl<'a> Visitor<'a> {
                 self.current()
                     .npm
                     .record_method(ContainerKind::Class, is_public);
+                if is_public {
+                    self.record_evidence(stmt.range(), |e, s| {
+                        e.public_method(s, "stmt_function_def");
+                    });
+                }
             }
             _ => {}
         }
@@ -343,6 +395,10 @@ impl<'a> Visitor<'a> {
             .map(|p| p.len() as u32)
             .unwrap_or(0);
         self.current().nargs.record_closure_args(argc);
+        // NOM is recorded inside `State::for_opened_space(Closure)`
+        // (called by `open_space`); evidence attaches here.
+        self.record_evidence(lam.range, |e, s| e.closure(s, "expr_lambda"));
+        self.record_evidence(lam.range, |e, s| e.closure_args(s, argc, "expr_lambda"));
 
         let mut ctx = self.cognitive;
         ctx.lambda = ctx.lambda.saturating_add(1);
@@ -519,9 +575,14 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
             }) => {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                self.record_evidence(stmt.range(), |e, s| e.decision(s, "stmt_if"));
+                self.record_evidence(stmt.range(), |e, s| e.abc_condition(s, "stmt_if"));
                 let effective =
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
+                self.record_evidence(stmt.range(), |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), "stmt_if");
+                });
                 // Match legacy `increase_nesting` (mehen-engine cognitive.rs:239):
                 // a new control-flow scope resets the boolean sequence so two
                 // sibling `if a and b: ...` blocks each contribute +1 for their
@@ -548,9 +609,14 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
             }) => {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                self.record_evidence(stmt.range(), |e, s| e.decision(s, "stmt_for"));
+                self.record_evidence(stmt.range(), |e, s| e.abc_condition(s, "stmt_for"));
                 let effective =
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
+                self.record_evidence(stmt.range(), |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), "stmt_for");
+                });
                 self.current().cognitive.boolean_seq.reset();
                 self.cognitive.nesting += 1;
                 self.visit_expr(target);
@@ -565,6 +631,11 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                     self.current().cyclomatic.record_decision();
                     self.current().cognitive.increment_by_one();
                     self.current().abc.record_condition();
+                    if let Some(range) = body_range(orelse) {
+                        self.record_evidence(range, |e, s| e.decision(s, "for_else"));
+                        self.record_evidence(range, |e, s| e.cognitive(s, 1, "for_else"));
+                        self.record_evidence(range, |e, s| e.abc_condition(s, "for_else"));
+                    }
                     self.visit_body(orelse);
                 }
             }
@@ -573,9 +644,14 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
             }) => {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                self.record_evidence(stmt.range(), |e, s| e.decision(s, "stmt_while"));
+                self.record_evidence(stmt.range(), |e, s| e.abc_condition(s, "stmt_while"));
                 let effective =
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
+                self.record_evidence(stmt.range(), |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), "stmt_while");
+                });
                 self.current().cognitive.boolean_seq.reset();
                 self.cognitive.nesting += 1;
                 self.visit_expr(test);
@@ -585,6 +661,11 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                     self.current().cyclomatic.record_decision();
                     self.current().cognitive.increment_by_one();
                     self.current().abc.record_condition();
+                    if let Some(range) = body_range(orelse) {
+                        self.record_evidence(range, |e, s| e.decision(s, "while_else"));
+                        self.record_evidence(range, |e, s| e.cognitive(s, 1, "while_else"));
+                        self.record_evidence(range, |e, s| e.abc_condition(s, "while_else"));
+                    }
                     self.visit_body(orelse);
                 }
             }
@@ -603,9 +684,13 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                 // Ruff AST, but children of the `try_statement` in
                 // tree-sitter — both should see the same nesting).
                 self.current().abc.record_condition();
+                self.record_evidence(stmt.range(), |e, s| e.abc_condition(s, "stmt_try"));
                 let effective =
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
+                self.record_evidence(stmt.range(), |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), "stmt_try");
+                });
                 self.current().cognitive.boolean_seq.reset();
                 self.cognitive.nesting += 1;
                 self.visit_body(body);
@@ -614,10 +699,16 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                 }
                 if !orelse.is_empty() {
                     self.current().cognitive.increment_by_one();
+                    if let Some(range) = body_range(orelse) {
+                        self.record_evidence(range, |e, s| e.cognitive(s, 1, "try_else"));
+                    }
                     self.visit_body(orelse);
                 }
                 if !finalbody.is_empty() {
                     self.current().cognitive.increment_by_one();
+                    if let Some(range) = body_range(finalbody) {
+                        self.record_evidence(range, |e, s| e.cognitive(s, 1, "try_finally"));
+                    }
                     self.visit_body(finalbody);
                 }
                 self.cognitive.nesting -= 1;
@@ -627,9 +718,13 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                 // `case` does. ABC records `match` as a condition once
                 // (the match itself is a structural branch).
                 self.current().abc.record_condition();
+                self.record_evidence(stmt.range(), |e, s| e.abc_condition(s, "stmt_match"));
                 let effective =
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
+                self.record_evidence(stmt.range(), |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), "stmt_match");
+                });
                 self.current().cognitive.boolean_seq.reset();
                 self.cognitive.nesting += 1;
                 self.visit_expr(subject);
@@ -645,6 +740,9 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                 let effective =
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
+                self.record_evidence(stmt.range(), |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), "stmt_with");
+                });
                 self.current().cognitive.boolean_seq.reset();
                 self.cognitive.nesting += 1;
                 for item in items {
@@ -658,12 +756,14 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
             }
             Stmt::Return(ast::StmtReturn { value, .. }) => {
                 self.current().nexit.record_exit();
+                self.record_evidence(stmt.range(), |e, s| e.exit(s, "stmt_return"));
                 if let Some(v) = value {
                     self.visit_expr(v);
                 }
             }
             Stmt::Raise(ast::StmtRaise { exc, cause, .. }) => {
                 self.current().nexit.record_exit();
+                self.record_evidence(stmt.range(), |e, s| e.exit(s, "stmt_raise"));
                 if let Some(e) = exc {
                     self.visit_expr(e);
                 }
@@ -671,13 +771,22 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                     self.visit_expr(c);
                 }
             }
-            Stmt::Assign(_) | Stmt::AugAssign(_) => {
+            Stmt::Assign(_) => {
                 self.current().abc.record_assignment();
+                self.record_evidence(stmt.range(), |e, s| e.abc_assignment(s, "stmt_assign"));
+                walk_stmt(self, stmt);
+            }
+            Stmt::AugAssign(_) => {
+                self.current().abc.record_assignment();
+                self.record_evidence(stmt.range(), |e, s| e.abc_assignment(s, "stmt_aug_assign"));
                 walk_stmt(self, stmt);
             }
             Stmt::AnnAssign(ast::StmtAnnAssign { value, .. }) => {
                 if value.is_some() {
                     self.current().abc.record_assignment();
+                    self.record_evidence(stmt.range(), |e, s| {
+                        e.abc_assignment(s, "stmt_ann_assign");
+                    });
                 }
                 walk_stmt(self, stmt);
             }
@@ -691,6 +800,7 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                 // `type X = Y` (PEP 695 type alias). The target is an
                 // assignment — count it once.
                 self.current().abc.record_assignment();
+                self.record_evidence(stmt.range(), |e, s| e.abc_assignment(s, "stmt_type_alias"));
                 walk_stmt(self, stmt);
             }
             // Plain descent — defaults handle the children we'd visit
@@ -716,11 +826,19 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         match expr {
             Expr::BoolOp(ast::ExprBoolOp { op, values, .. }) => {
+                let label = match op {
+                    BoolOp::And => "and",
+                    BoolOp::Or => "or",
+                };
                 // Boolean `and` / `or` — each operand beyond the first
-                // is one decision point per legacy.
-                for _ in 1..values.len() {
+                // is one decision point per legacy. Evidence spans point
+                // at the extra operand (Ruff's AST has no operator-token
+                // node to anchor to).
+                for value in values.iter().skip(1) {
                     self.current().cyclomatic.record_decision();
                     self.current().abc.record_condition();
+                    self.record_evidence(value.range(), |e, s| e.decision(s, label));
+                    self.record_evidence(value.range(), |e, s| e.abc_condition(s, label));
                 }
                 // Lambda-ancestor bonus (legacy cognitive.rs:281): the
                 // *outermost* BoolOp inside a statement adds one structural
@@ -735,12 +853,14 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                 };
                 if lambda_bonus > 0 {
                     self.current().cognitive.record_increment(lambda_bonus);
+                    self.record_evidence(expr.range(), |e, s| {
+                        e.cognitive(s, lambda_bonus, "bool_op_lambda_bonus");
+                    });
                 }
-                let label = match op {
-                    BoolOp::And => "and",
-                    BoolOp::Or => "or",
-                };
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.observe_boolean(label);
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                self.record_evidence(expr.range(), |e, s| e.cognitive(s, delta, label));
                 self.cognitive.bool_op_depth = self.cognitive.bool_op_depth.saturating_add(1);
                 for v in values {
                     self.visit_expr(v);
@@ -749,6 +869,7 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
             }
             Expr::Named(_) => {
                 self.current().abc.record_assignment();
+                self.record_evidence(expr.range(), |e, s| e.abc_assignment(s, "expr_named"));
                 walk_expr(self, expr);
             }
             Expr::UnaryOp(ast::ExprUnaryOp { op, .. }) => {
@@ -766,9 +887,14 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
                 // Conditional expression `a if b else c` — one decision.
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                self.record_evidence(expr.range(), |e, s| e.decision(s, "expr_if"));
+                self.record_evidence(expr.range(), |e, s| e.abc_condition(s, "expr_if"));
                 let effective =
                     self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                 self.current().cognitive.increase_nesting(effective);
+                self.record_evidence(expr.range(), |e, s| {
+                    e.cognitive(s, effective.saturating_add(1), "expr_if");
+                });
                 self.current().cognitive.boolean_seq.reset();
                 self.cognitive.nesting += 1;
                 self.visit_expr(test);
@@ -778,14 +904,19 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
             }
             Expr::Compare(ast::ExprCompare { comparators, .. }) => {
                 // Comparison ops (`==`, `<`, ...) — each pair counts as
-                // one ABC condition.
-                for _ in comparators.iter() {
+                // one ABC condition. Evidence spans point at the
+                // right-hand comparator of each pair.
+                for comparator in comparators.iter() {
                     self.current().abc.record_condition();
+                    self.record_evidence(comparator.range(), |e, s| {
+                        e.abc_condition(s, "expr_compare");
+                    });
                 }
                 walk_expr(self, expr);
             }
             Expr::Call(_) => {
                 self.current().abc.record_branch();
+                self.record_evidence(expr.range(), |e, s| e.abc_branch(s, "expr_call"));
                 walk_expr(self, expr);
             }
             // Halstead-wise, `a.b` is two operand tokens (`a` and `b`)
@@ -820,9 +951,14 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
             self.current().cognitive.increment_by_one();
             self.current().cognitive.boolean_seq.reset();
             self.current().abc.record_condition();
+            self.record_evidence(clause.range, |e, s| e.decision(s, "elif_clause"));
+            self.record_evidence(clause.range, |e, s| e.cognitive(s, 1, "elif_clause"));
+            self.record_evidence(clause.range, |e, s| e.abc_condition(s, "elif_clause"));
         } else {
             self.current().cognitive.increment_by_one();
             self.current().abc.record_condition();
+            self.record_evidence(clause.range, |e, s| e.cognitive(s, 1, "else_clause"));
+            self.record_evidence(clause.range, |e, s| e.abc_condition(s, "else_clause"));
         }
         if let Some(test) = &clause.test {
             self.visit_expr(test);
@@ -835,8 +971,13 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
             handler;
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(handler.range(), |e, s| e.decision(s, "except_handler"));
+        self.record_evidence(handler.range(), |e, s| e.abc_condition(s, "except_handler"));
         let effective = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
         self.current().cognitive.increase_nesting(effective);
+        self.record_evidence(handler.range(), |e, s| {
+            e.cognitive(s, effective.saturating_add(1), "except_handler");
+        });
         self.current().cognitive.boolean_seq.reset();
         self.cognitive.nesting += 1;
         if let Some(t) = type_ {
@@ -849,8 +990,13 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
     fn visit_match_case(&mut self, case: &'a MatchCase) {
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
+        self.record_evidence(case.range, |e, s| e.decision(s, "match_case"));
+        self.record_evidence(case.range, |e, s| e.abc_condition(s, "match_case"));
         let effective = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
         self.current().cognitive.increase_nesting(effective);
+        self.record_evidence(case.range, |e, s| {
+            e.cognitive(s, effective.saturating_add(1), "match_case");
+        });
         self.current().cognitive.boolean_seq.reset();
         self.cognitive.nesting += 1;
         // We deliberately do NOT call `self.visit_pattern(&case.pattern)` —
@@ -868,9 +1014,13 @@ impl<'a> SourceOrderVisitor<'a> for Visitor<'a> {
         // implicit `for`); each `if` filter is also +1.
         self.current().cyclomatic.record_decision();
         self.current().abc.record_condition();
-        for _ in &comp.ifs {
+        self.record_evidence(comp.range, |e, s| e.decision(s, "comprehension"));
+        self.record_evidence(comp.range, |e, s| e.abc_condition(s, "comprehension"));
+        for f in &comp.ifs {
             self.current().cyclomatic.record_decision();
             self.current().abc.record_condition();
+            self.record_evidence(f.range(), |e, s| e.decision(s, "comprehension_if"));
+            self.record_evidence(f.range(), |e, s| e.abc_condition(s, "comprehension_if"));
         }
         self.visit_expr(&comp.target);
         self.visit_expr(&comp.iter);
@@ -887,6 +1037,16 @@ fn text_range_to_source_span(range: TextRange, line_index: &LineIndex) -> Source
         start_line: line_index.line_at(range.start().to_u32()),
         end_line: line_index.line_at(range.end().to_u32()),
     }
+}
+
+/// Byte range covering a non-empty statement body (first statement's
+/// start to last statement's end). Used to anchor evidence for
+/// clause-shaped increments that have no node of their own in the Ruff
+/// AST (`for`/`while`/`try` else-branches, `finally` bodies).
+fn body_range(body: &[Stmt]) -> Option<TextRange> {
+    let first = body.first()?;
+    let last = body.last()?;
+    Some(TextRange::new(first.range().start(), last.range().end()))
 }
 
 fn leading_docstring_range(body: &[Stmt]) -> Option<TextRange> {

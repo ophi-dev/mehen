@@ -52,15 +52,16 @@ pub mod types;
 mod visuals;
 mod words;
 
-pub use analyzer::analyze_markdown;
+pub use analyzer::{analyze_markdown, analyze_markdown_with_evidence};
 pub use embedded_code::{EmbeddedFenceMetrics, FenceLanguage, set_embedded_dispatch};
 
 use mehen_core::{
-    AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, MetricKey,
-    MetricSet, MetricSpace, SourceFile, SourceSpan, SpaceId, SpaceKind, byte_offset_clamped,
+    AnalysisBackend, AnalysisConfig, ContributionCollector, Language, LanguageAnalysis,
+    LanguageAnalyzer, MetricKey, MetricSet, MetricSpace, SourceFile, SourceSpan, SpaceId,
+    SpaceKind, byte_offset_clamped,
 };
 
-use crate::types::MarkdownMetrics;
+use crate::types::{LinkClass, MarkdownMetrics};
 
 /// Pulldown-cmark-backed Markdown analyzer for the engine registry.
 ///
@@ -98,7 +99,7 @@ impl LanguageAnalyzer for MarkdownAnalyzer {
     fn analyze(
         &self,
         source: &SourceFile,
-        _config: &AnalysisConfig,
+        config: &AnalysisConfig,
     ) -> mehen_core::Result<LanguageAnalysis> {
         let span = SourceSpan {
             start_byte: 0,
@@ -106,7 +107,10 @@ impl LanguageAnalyzer for MarkdownAnalyzer {
             start_line: 1,
             end_line: source.line_index.line_count(),
         };
-        let metrics = analyze_markdown(&source.text, source.path.as_std_path());
+        let mut evidence = ContributionCollector::new(config.emit_contributions);
+        let metrics =
+            analyze_markdown_with_evidence(&source.text, source.path.as_std_path(), &mut evidence);
+        record_broken_link_evidence(&metrics, source, &mut evidence);
         let mut root = MetricSpace::new(SpaceId(0), SpaceKind::Unit, span);
         publish_markdown_metrics(&metrics, &mut root.metrics);
         Ok(LanguageAnalysis {
@@ -114,8 +118,63 @@ impl LanguageAnalyzer for MarkdownAnalyzer {
             backend: AnalysisBackend::PulldownCmark,
             diagnostics: Vec::new(),
             root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
+    }
+}
+
+/// Record one contribution per broken link (plan §5.4 / research §39.4):
+/// each `LinkRecord` whose resolution failed adds +1 toward the published
+/// `markdown.links.broken` count, spanning the link's source line. The
+/// aggregate in `links.rs` counts exactly the `resolved == Some(false)`
+/// records, so the evidence amounts sum to the metric by construction.
+fn record_broken_link_evidence(
+    metrics: &MarkdownMetrics,
+    source: &SourceFile,
+    evidence: &mut ContributionCollector,
+) {
+    if !evidence.is_enabled() {
+        return;
+    }
+    let total_len = byte_offset_clamped(source.text.len());
+    for record in &metrics.link_records {
+        if !matches!(record.resolved, Some(false)) {
+            continue;
+        }
+        let line = u32::try_from(record.line).unwrap_or(u32::MAX);
+        let (start_byte, end_byte) = source
+            .line_index
+            .line_byte_range(line, total_len)
+            .unwrap_or((0, 0));
+        let span = SourceSpan {
+            start_byte,
+            end_byte,
+            start_line: line,
+            end_line: line,
+        };
+        evidence.record(
+            "markdown.links.broken",
+            span,
+            1.0,
+            format!("markdown.broken_link.{}", link_class_label(record.class)),
+        );
+    }
+}
+
+/// The snake_case label a [`LinkClass`] serializes as — reused for
+/// broken-link evidence reason codes.
+fn link_class_label(class: LinkClass) -> &'static str {
+    match class {
+        LinkClass::Internal => "internal",
+        LinkClass::Relative => "relative",
+        LinkClass::AbsoluteSameRepo => "absolute_same_repo",
+        LinkClass::External => "external",
+        LinkClass::ExternalVendor => "external_vendor",
+        LinkClass::Scholarly => "scholarly",
+        LinkClass::IssuePr => "issue_pr",
+        LinkClass::Footnote => "footnote",
+        LinkClass::UnresolvedReferenceUse => "unresolved_reference_use",
+        LinkClass::ReferenceDefinition => "reference_definition",
     }
 }
 

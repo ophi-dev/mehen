@@ -127,11 +127,11 @@
 
 use mehen_antlr::runtime::token::Token;
 use mehen_antlr::runtime::{FromRuleNode, Node, RuleNodeView, TerminalNodeView};
-use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
+use mehen_antlr::{LocToken, LocTokenKind, ctx_span, span_from_tokens};
 use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceKind};
 use mehen_metrics::{
-    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
-    apply_state_to, finalize_state, merge_child_into_parent,
+    ContainerKind, HalsteadOperand, HalsteadOperator, MetricEvidence, MetricTreeBuilder,
+    SpaceRangeTracker, State, apply_state_to, finalize_state, merge_child_into_parent,
 };
 use smol_str::SmolStr;
 
@@ -147,12 +147,14 @@ use mehen_csharp_parser::c_sharp_parser::{
 
 /// Drive the walk over the parsed `compilation_unit` tree and return the unit
 /// `MetricSpace`. LOC is computed from `loc_tokens` in a single ordered pass
-/// *after* the tree walk has opened and closed every space.
+/// *after* the tree walk has opened and closed every space. Contribution
+/// evidence is recorded into the caller-owned `evidence` sink (plan §5.4).
 pub(crate) fn walk(
     tree: Node<'_>,
     line_index: &LineIndex,
     source_len: usize,
     loc_tokens: &[LocToken],
+    evidence: &mut MetricEvidence,
 ) -> MetricSpace {
     let unit_span = match tree.as_rule() {
         Some(rule) => ctx_span(rule, line_index, source_len),
@@ -174,6 +176,7 @@ pub(crate) fn walk(
         cognitive: CognitiveContext::default(),
         primary_ctor_close: None,
         loc_routing: SpaceRangeTracker::new(),
+        evidence,
     };
 
     if let Some(rule) = tree.as_rule() {
@@ -401,11 +404,51 @@ struct Walker<'a> {
     /// such close is pending.
     primary_ctor_close: Option<CognitiveContext>,
     loc_routing: SpaceRangeTracker,
+    /// Contribution-evidence sink (plan §5.4). All record methods are no-ops
+    /// when disabled, so classification sites call them unconditionally next
+    /// to each stat increment — usually through [`Walker::record_evidence`] /
+    /// [`Walker::record_token_evidence`], which also skip the span computation
+    /// when the sink is off.
+    evidence: &'a mut MetricEvidence,
 }
 
 impl Walker<'_> {
     fn current(&mut self) -> &mut State {
         self.stack.last_mut().expect("walker stack empty")
+    }
+
+    /// Record contribution evidence spanning a rule node. Skips the span
+    /// computation entirely when the sink is disabled, so call sites can
+    /// invoke this unconditionally next to the stat increment:
+    ///
+    /// ```ignore
+    /// self.current().cyclomatic.record_decision();
+    /// self.record_evidence(ctx, |e, s| e.decision(s, rule_name(ri)));
+    /// ```
+    #[inline]
+    fn record_evidence<F>(&mut self, ctx: RuleNodeView<'_>, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let span = ctx_span(ctx, self.line_index, self.source_len);
+            record(self.evidence, span);
+        }
+    }
+
+    /// Record contribution evidence spanning a single terminal token — for the
+    /// token-level classification sites (`&&`, `==`, `++`, …), where the
+    /// operator token itself is the construct a reader should be pointed at.
+    #[inline]
+    fn record_token_evidence<F>(&mut self, term: &TerminalNodeView<'_>, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let symbol = term.symbol();
+            let span = span_from_tokens(&symbol, &symbol, self.line_index, self.source_len);
+            record(self.evidence, span);
+        }
     }
 
     fn visit(&mut self, node: Node<'_>, hint: &ChildHint) {
@@ -434,9 +477,22 @@ impl Walker<'_> {
         // own signatures.
         if !hint.in_attributes && !hint.in_operator_symbol {
             match tt {
-                cl::KW_ELSE => self.current().cognitive.increment_by_one(),
-                cl::AMP_AMP => self.current().cognitive.observe_boolean("&&"),
-                cl::PIPE_PIPE => self.current().cognitive.observe_boolean("||"),
+                cl::KW_ELSE => {
+                    let before = self.current().cognitive.structural;
+                    self.current().cognitive.increment_by_one();
+                    let delta = self.current().cognitive.structural.saturating_sub(before);
+                    self.record_token_evidence(&term, |e, s| e.cognitive(s, delta, "else"));
+                }
+                cl::AMP_AMP | cl::PIPE_PIPE => {
+                    // Same-operator repeats collapse into one run and apply no
+                    // delta; the sink skips zero-amount events, so only the
+                    // operator that actually moved the metric is evidenced.
+                    let op = if tt == cl::AMP_AMP { "&&" } else { "||" };
+                    let before = self.current().cognitive.structural;
+                    self.current().cognitive.observe_boolean(op);
+                    let delta = self.current().cognitive.structural.saturating_sub(before);
+                    self.record_token_evidence(&term, |e, s| e.cognitive(s, delta, op));
+                }
                 _ => {}
             }
 
@@ -444,6 +500,8 @@ impl Walker<'_> {
             // decision (independent of the cognitive run collapse).
             if matches!(tt, cl::AMP_AMP | cl::PIPE_PIPE) {
                 self.current().cyclomatic.record_decision();
+                let op = if tt == cl::AMP_AMP { "&&" } else { "||" };
+                self.record_token_evidence(&term, |e, s| e.decision(s, op));
             }
 
             // ABC conditions: comparison / equality / boolean / null-coalescing
@@ -458,12 +516,17 @@ impl Walker<'_> {
             //   comparisons (`in_type_delimiter`).
             if is_abc_condition_token(tt) && !hint.in_shift_operator && !hint.in_type_delimiter {
                 self.current().abc.record_condition();
+                self.record_token_evidence(&term, |e, s| {
+                    e.abc_condition(s, condition_token_spelling(tt));
+                });
             }
 
             // ABC assignments: `++`/`--` (Fitzpatrick lists both under A).
             // The `=`/compound forms are handled at the assignment expression.
             if matches!(tt, cl::PLUS_PLUS | cl::MINUS_MINUS) {
                 self.current().abc.record_assignment();
+                let op = if tt == cl::PLUS_PLUS { "++" } else { "--" };
+                self.record_token_evidence(&term, |e, s| e.abc_assignment(s, op));
             }
         }
 
@@ -1031,7 +1094,10 @@ impl Walker<'_> {
             {
                 if seen_operand {
                     // The right operand is next, so the operator sits here.
+                    let before = self.current().cognitive.structural;
                     self.current().cognitive.observe_boolean(op);
+                    let delta = self.current().cognitive.structural.saturating_sub(before);
+                    self.record_evidence(ctx, |e, s| e.cognitive(s, delta, op));
                 } else {
                     seen_operand = true;
                 }
@@ -1169,6 +1235,10 @@ impl Walker<'_> {
             let default_public = matches!(container, ContainerKind::Interface);
             let public = visibility_from_modifiers(span_ctx).unwrap_or(default_public);
             self.current().npm.record_method(container, public);
+            if public {
+                let detail = rule_name(fn_ctx.rule_index());
+                self.record_evidence(span_ctx, |e, s| e.public_method(s, detail));
+            }
         }
         // Widen the declaration-node span up to its member wrapper so own-line
         // attributes/modifiers belong to the member. Unused when opening at the
@@ -1178,12 +1248,22 @@ impl Walker<'_> {
         // declaration itself, so the space's own span already starts at the
         // member's first attribute row rather than after it.
         let is_closure = matches!(kind, SpaceKind::Closure);
+        let argc = count_args(fn_ctx, hint);
+        let detail = rule_name(fn_ctx.rule_index());
         if is_closure {
             state.nom.record_closure();
-            state.nargs.record_closure_args(count_args(fn_ctx, hint));
+            state.nargs.record_closure_args(argc);
+            self.record_evidence(span_ctx, |e, s| {
+                e.closure(s, detail);
+                e.closure_args(s, argc, detail);
+            });
         } else {
             state.nom.record_function();
-            state.nargs.record_function_args(count_args(fn_ctx, hint));
+            state.nargs.record_function_args(argc);
+            self.record_evidence(span_ctx, |e, s| {
+                e.function(s, detail);
+                e.function_args(s, argc, detail);
+            });
         }
         // A local function's and a lambda's complexity belongs to the enclosing
         // method (already counted there), so neither rolls into the type's WMC.
@@ -1285,6 +1365,14 @@ impl Walker<'_> {
             // metrics must be omitted or recorded *together*.
             if name.is_some() {
                 self.current().npm.record_method(ContainerKind::Class, true);
+                // Evidence points at the parameter list — the constructor's
+                // whole declaration, since Roslyn synthesizes no
+                // `constructor_declaration` node for the primary form.
+                if let Some(params) = type_ctx.child_rule(cp::RULE_PARAMETER_LIST) {
+                    self.record_evidence(params, |e, s| {
+                        e.public_method(s, "primary_constructor");
+                    });
+                }
             }
             // The space itself opens when the walk *reaches* the parameter list and
             // stays open through the base list — see `open_primary_ctor_space` and the
@@ -1488,8 +1576,14 @@ impl Walker<'_> {
             span.end_line = span.end_line.max(call_span.end_line);
         }
         let mut state = self.new_space_state_at(span);
+        let argc = count_parameters(params);
         state.nom.record_function();
-        state.nargs.record_function_args(count_parameters(params));
+        state.nargs.record_function_args(argc);
+        // The space's own (widened) span is already computed, so the sink's
+        // internal no-op check suffices here — no lazy span helper needed.
+        self.evidence.function(span, "primary_constructor");
+        self.evidence
+            .function_args(span, argc, "primary_constructor");
         self.push_space_at(
             SpaceKind::Function,
             Some(name.to_owned()),
@@ -1622,6 +1716,8 @@ impl Walker<'_> {
     /// these are rule-index matches rather than keyword probes.
     fn classify_control_flow(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) {
         let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
+        // Evidence reason detail: the grammar rule's own snake_case name.
+        let detail = rule_name(ri);
 
         // Roslyn gives each statement form its own rule, so these are rule-index
         // matches rather than keyword probes on a shared
@@ -1634,9 +1730,16 @@ impl Walker<'_> {
             cp::RULE_IF_STATEMENT => {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                self.record_evidence(ctx, |e, s| {
+                    e.decision(s, detail);
+                    e.abc_condition(s, detail);
+                });
                 if !hint.is_else_branch {
+                    let before = self.current().cognitive.structural;
                     self.current().cognitive.increase_nesting(eff);
                     self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+                    let delta = self.current().cognitive.structural.saturating_sub(before);
+                    self.record_evidence(ctx, |e, s| e.cognitive(s, delta, detail));
                 }
                 self.current().cognitive.boolean_seq.reset();
             }
@@ -1647,15 +1750,25 @@ impl Walker<'_> {
             | cp::RULE_FOR_EACH_VARIABLE_STATEMENT => {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increase_nesting(eff);
                 self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                self.record_evidence(ctx, |e, s| {
+                    e.decision(s, detail);
+                    e.abc_condition(s, detail);
+                    e.cognitive(s, delta, detail);
+                });
                 self.current().cognitive.boolean_seq.reset();
             }
             // `switch` itself adds cognitive nesting but not cyclomatic — the
             // `case` labels carry the decisions.
             cp::RULE_SWITCH_STATEMENT => {
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increase_nesting(eff);
                 self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                self.record_evidence(ctx, |e, s| e.cognitive(s, delta, detail));
                 self.current().cognitive.boolean_seq.reset();
             }
             // A switch *expression* arm (`v switch { 1 => …, _ => … }`) is the same
@@ -1681,6 +1794,10 @@ impl Walker<'_> {
                 if !is_discard_arm(ctx) {
                     self.current().cyclomatic.record_decision();
                     self.current().abc.record_condition();
+                    self.record_evidence(ctx, |e, s| {
+                        e.decision(s, detail);
+                        e.abc_condition(s, detail);
+                    });
                 }
                 self.current().cognitive.boolean_seq.reset();
             }
@@ -1692,6 +1809,7 @@ impl Walker<'_> {
             // `mehen-java`.
             cp::RULE_RETURN_STATEMENT | cp::RULE_THROW_STATEMENT => {
                 self.current().nexit.record_exit();
+                self.record_evidence(ctx, |e, s| e.exit(s, detail));
                 self.current().cognitive.boolean_seq.reset();
             }
             // An expression body IS the return, for a member that returns a value.
@@ -1705,6 +1823,7 @@ impl Walker<'_> {
             // it actually returns a value.
             cp::RULE_ARROW_EXPRESSION_CLAUSE if hint.returns_value && !arrow_body_is_throw(ctx) => {
                 self.current().nexit.record_exit();
+                self.record_evidence(ctx, |e, s| e.exit(s, detail));
                 self.current().cognitive.boolean_seq.reset();
             }
             // The same thing for a lambda, which needs its own arm because it has no
@@ -1735,17 +1854,22 @@ impl Walker<'_> {
                     && !lambda_returns_void(ctx) =>
             {
                 self.current().nexit.record_exit();
+                self.record_evidence(ctx, |e, s| e.exit(s, detail));
                 self.current().cognitive.boolean_seq.reset();
             }
             // `yield return` / `yield break` both leave the iterator.
             cp::RULE_YIELD_STATEMENT => {
                 self.current().nexit.record_exit();
+                self.record_evidence(ctx, |e, s| e.exit(s, detail));
                 self.current().cognitive.boolean_seq.reset();
             }
             // `goto` (including `goto case` / `goto default`) is goto-like: a
             // flat +1, no nesting.
             cp::RULE_GOTO_STATEMENT => {
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increment_by_one();
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                self.record_evidence(ctx, |e, s| e.cognitive(s, delta, detail));
                 self.current().cognitive.boolean_seq.reset();
             }
             // A `case` label is a decision (cyclomatic) and a condition (ABC) in
@@ -1755,6 +1879,10 @@ impl Walker<'_> {
             cp::RULE_CASE_SWITCH_LABEL | cp::RULE_CASE_PATTERN_SWITCH_LABEL => {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                self.record_evidence(ctx, |e, s| {
+                    e.decision(s, detail);
+                    e.abc_condition(s, detail);
+                });
             }
             // A `when` guard is a distinct boolean test — on a `case` label
             // (`case int i when i > 0:`) or a switch-expression arm — so it
@@ -1764,6 +1892,7 @@ impl Walker<'_> {
             // save/restore around its subtree, not here — see the `saved_bool` note.
             cp::RULE_WHEN_CLAUSE | cp::RULE_CATCH_FILTER_CLAUSE => {
                 self.current().abc.record_condition();
+                self.record_evidence(ctx, |e, s| e.abc_condition(s, detail));
             }
             // A pattern combinator (`o is int and > 5`, `is not null`) is a boolean
             // decision, the same as the `&&`/`||`/`!` it replaces. C# 9 spells these
@@ -1792,7 +1921,7 @@ impl Walker<'_> {
                     } else {
                         None
                     };
-                    if combinator.is_some() {
+                    if let Some(op) = combinator {
                         // Cyclomatic and ABC are order-insensitive — each combinator adds
                         // one wherever it is seen — so they stay here.
                         //
@@ -1806,6 +1935,10 @@ impl Walker<'_> {
                         // `visit_children`.
                         self.current().cyclomatic.record_decision();
                         self.current().abc.record_condition();
+                        self.record_evidence(ctx, |e, s| {
+                            e.decision(s, op);
+                            e.abc_condition(s, op);
+                        });
                     }
                 }
             }
@@ -1819,13 +1952,22 @@ impl Walker<'_> {
             // increment plus an ABC condition, but no cyclomatic decision. One
             // rule now covers both the typed and bare forms.
             cp::RULE_CATCH_CLAUSE => {
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increase_nesting(eff);
                 self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+                let delta = self.current().cognitive.structural.saturating_sub(before);
                 self.current().abc.record_condition();
+                self.record_evidence(ctx, |e, s| {
+                    e.cognitive(s, delta, detail);
+                    e.abc_condition(s, detail);
+                });
             }
             // A `throw` *expression* (`x ?? throw new E()`, C# 7) is an exit that
             // the statement form above never sees.
-            cp::RULE_THROW_EXPRESSION => self.current().nexit.record_exit(),
+            cp::RULE_THROW_EXPRESSION => {
+                self.current().nexit.record_exit();
+                self.record_evidence(ctx, |e, s| e.exit(s, detail));
+            }
             // Statement-shaped positions that are not one of the forms above
             // still start a fresh boolean sequence, so operators never collapse
             // across a boundary — `F(a && b); G(c && d)` is +2, not +1.
@@ -1909,6 +2051,10 @@ impl Walker<'_> {
         // filtered by name.)
         if expr.argument_list().is_some() && !is_nameof_callee(&expr) {
             self.current().abc.record_branch();
+            // Hub inlining folds `invocation_expression` into `expression`, so
+            // the Roslyn syntax-node name is spelled out rather than read from
+            // the rule table.
+            self.record_evidence(ctx, |e, s| e.abc_branch(s, "invocation_expression"));
         }
 
         // `>>=` and `>>>=` are the only assignment operators the prep splits into
@@ -1920,6 +2066,12 @@ impl Walker<'_> {
             || expr.unsigned_right_shift_assignment().is_some()
         {
             self.current().abc.record_assignment();
+            let detail = if expr.right_shift_assignment().is_some() {
+                "right_shift_assignment"
+            } else {
+                "unsigned_right_shift_assignment"
+            };
+            self.record_evidence(ctx, |e, s| e.abc_assignment(s, detail));
         }
 
         // A switch expression nests exactly like a switch statement (SonarSource
@@ -1928,8 +2080,11 @@ impl Walker<'_> {
         // decisions, recorded at `switch_expression_arm`.
         if expr.kw_switch_token().is_some() {
             let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
+            let before = self.current().cognitive.structural;
             self.current().cognitive.increase_nesting(eff);
             self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+            let delta = self.current().cognitive.structural.saturating_sub(before);
+            self.record_evidence(ctx, |e, s| e.cognitive(s, delta, "switch_expression"));
             self.current().cognitive.boolean_seq.reset();
         }
 
@@ -1951,7 +2106,10 @@ impl Walker<'_> {
                 | cl::CARET_EQ
                 | cl::PIPE_EQ
                 | cl::LT_LT_EQ
-                | cl::QUESTION_QUESTION_EQ => self.current().abc.record_assignment(),
+                | cl::QUESTION_QUESTION_EQ => {
+                    self.current().abc.record_assignment();
+                    self.record_evidence(ctx, |e, s| e.abc_assignment(s, "assignment_expression"));
+                }
                 // The ternary `?:` — a decision, an ABC condition, and a
                 // cognitive nesting structure (SonarSource scores it like an
                 // `if`). Keyed on `?` so the `:` does not score a second time.
@@ -1968,15 +2126,30 @@ impl Walker<'_> {
                 cl::QUESTION => {
                     let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
                     self.current().cyclomatic.record_decision();
+                    let before = self.current().cognitive.structural;
                     self.current().cognitive.increase_nesting(eff);
                     self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
+                    let delta = self.current().cognitive.structural.saturating_sub(before);
                     self.current().abc.record_condition();
+                    self.record_evidence(ctx, |e, s| {
+                        e.decision(s, "conditional_expression");
+                        e.cognitive(s, delta, "conditional_expression");
+                        e.abc_condition(s, "conditional_expression");
+                    });
                 }
                 // The type tests. Equality, relational, `&&`/`||`, and `??` are
                 // counted by the token-level scan in `visit_terminal`, which sees
                 // every token exactly once — so they must not be counted again
                 // here.
-                cl::KW_IS | cl::KW_AS => self.current().abc.record_condition(),
+                cl::KW_IS | cl::KW_AS => {
+                    let op = if terminal.symbol().token_type() == cl::KW_IS {
+                        "is"
+                    } else {
+                        "as"
+                    };
+                    self.current().abc.record_condition();
+                    self.record_evidence(ctx, |e, s| e.abc_condition(s, op));
+                }
                 _ => {}
             }
         }
@@ -1985,6 +2158,8 @@ impl Walker<'_> {
     /// ABC accounting for the non-`expression` rules that carry an assignment or
     /// a branch.
     fn classify_abc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: &ChildHint) {
+        // Evidence reason detail: the grammar rule's own snake_case name.
+        let detail = rule_name(ri);
         match ri {
             // Object creation is its own rule rather than part of the inlined
             // expression cycle, so its branch is recorded here.
@@ -2011,7 +2186,10 @@ impl Walker<'_> {
             | cp::RULE_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
             | cp::RULE_IMPLICIT_STACK_ALLOC_ARRAY_CREATION_EXPRESSION
             | cp::RULE_CONSTRUCTOR_INITIALIZER
-            | cp::RULE_PRIMARY_CONSTRUCTOR_BASE_TYPE => self.current().abc.record_branch(),
+            | cp::RULE_PRIMARY_CONSTRUCTOR_BASE_TYPE => {
+                self.current().abc.record_branch();
+                self.record_evidence(ctx, |e, s| e.abc_branch(s, detail));
+            }
             // A *bare* initializer is an allocation: `int[] v = { 1, 2 };` has no `new`
             // and no `[…]`, so Roslyn puts an `initializer_expression` directly on the
             // right-hand side and nothing above fired — it scored 0 where `new[] { 1, 2 }`
@@ -2022,6 +2200,7 @@ impl Walker<'_> {
             // score `new[] { 1, 2 }` twice.
             cp::RULE_INITIALIZER_EXPRESSION if !hint.in_creation_expression => {
                 self.current().abc.record_branch();
+                self.record_evidence(ctx, |e, s| e.abc_branch(s, detail));
             }
             // A *named* anonymous-object member (`new { A = 1 }`) is an assignment.
             // Roslyn puts the `A =` in a `name_equals` child of
@@ -2038,13 +2217,17 @@ impl Walker<'_> {
                 if ctx.child_rule(cp::RULE_NAME_EQUALS).is_some() =>
             {
                 self.current().abc.record_assignment();
+                self.record_evidence(ctx, |e, s| e.abc_assignment(s, detail));
             }
             // A LINQ `where` is a filter predicate — the query-expression equivalent of
             // an `if`, and one ABC condition. Its own comparison (if any) is counted
             // separately by the token scan, exactly as `if (x > 0)` counts two; a
             // predicate that is already boolean (`where enabled`) has no comparison and
             // so scored nothing at all before this.
-            cp::RULE_WHERE_CLAUSE => self.current().abc.record_condition(),
+            cp::RULE_WHERE_CLAUSE => {
+                self.current().abc.record_condition();
+                self.record_evidence(ctx, |e, s| e.abc_condition(s, detail));
+            }
             // A LINQ `join … on a.Id equals b.Id` is an equality test, so it is a
             // condition for the same reason. `equals` is the join's comparison operator,
             // but Roslyn spells it as the `KW_EQUALS` contextual keyword rather than as
@@ -2056,7 +2239,10 @@ impl Walker<'_> {
             // clause is the unit that exists exactly once per comparison, and `equals`
             // stays a legal identifier elsewhere (it is contextual, so a variable named
             // `equals` must not score).
-            cp::RULE_JOIN_CLAUSE => self.current().abc.record_condition(),
+            cp::RULE_JOIN_CLAUSE => {
+                self.current().abc.record_condition();
+                self.record_evidence(ctx, |e, s| e.abc_condition(s, detail));
+            }
             // An initialized declarator is an assignment. Roslyn spells the
             // initializer as an `equals_value_clause` child rather than a bare
             // `=` token, so the presence of that child *is* the initialization.
@@ -2079,13 +2265,17 @@ impl Walker<'_> {
                 if ctx.child_rule(cp::RULE_EQUALS_VALUE_CLAUSE).is_some() =>
             {
                 self.current().abc.record_assignment();
+                self.record_evidence(ctx, |e, s| e.abc_assignment(s, detail));
             }
             // A query `let` binds a name to a value (`from x in s let y = f(x) …`),
             // which is an assignment by any reading. Its `=` is a bare token on
             // `let_clause : KW_LET identifier_token EQ expression` rather than an
             // `equals_value_clause`, and `let_clause` is not part of the inlined
             // `expression`, so neither the token scan nor `classify_expression` saw it.
-            cp::RULE_LET_CLAUSE => self.current().abc.record_assignment(),
+            cp::RULE_LET_CLAUSE => {
+                self.current().abc.record_assignment();
+                self.record_evidence(ctx, |e, s| e.abc_assignment(s, detail));
+            }
             _ => {}
         }
     }
@@ -2211,6 +2401,12 @@ impl Walker<'_> {
         container: ContainerKind,
         public: bool,
     ) {
+        // Evidence reason detail: the grammar rule's own snake_case name. Only
+        // *public* members are evidenced — the headline NPA/NPM count public
+        // members only, and `container` here is always class- or
+        // interface-like (it comes from `ChildHint::member_container`), so
+        // `public` alone decides whether the metric moved.
+        let detail = rule_name(ri);
         match ri {
             // A field or event-field declaration can declare several variables
             // (`int a, b, c;` / `event E a, b;`). `const` is a modifier here
@@ -2221,10 +2417,20 @@ impl Walker<'_> {
                 for _ in 0..count {
                     self.current().npa.record_attribute(container, public);
                 }
+                if public {
+                    self.record_evidence(ctx, |e, s| {
+                        for _ in 0..count {
+                            e.public_attribute(s, detail);
+                        }
+                    });
+                }
             }
             // A named `event` with accessors declares exactly one member.
             cp::RULE_EVENT_DECLARATION => {
                 self.current().npa.record_attribute(container, public);
+                if public {
+                    self.record_evidence(ctx, |e, s| e.public_attribute(s, detail));
+                }
             }
             // An `enum` member (`enum E { A, B }`) is a public constant field
             // of the enum → a public class attribute.
@@ -2232,6 +2438,7 @@ impl Walker<'_> {
                 self.current()
                     .npa
                     .record_attribute(ContainerKind::Class, true);
+                self.record_evidence(ctx, |e, s| e.public_attribute(s, detail));
             }
             // Methods, constructors, operators, and the property/indexer forms
             // are all methods for NPM purposes (SonarC# counts a property as a
@@ -2244,6 +2451,9 @@ impl Walker<'_> {
             | cp::RULE_PROPERTY_DECLARATION
             | cp::RULE_INDEXER_DECLARATION => {
                 self.current().npm.record_method(container, public);
+                if public {
+                    self.record_evidence(ctx, |e, s| e.public_method(s, detail));
+                }
             }
             _ => {}
         }
@@ -2865,6 +3075,34 @@ fn is_abc_condition_token(tt: i32) -> bool {
             | cl::LE
             | cl::GE
     )
+}
+
+/// The operator spelling for a condition token accepted by
+/// [`is_abc_condition_token`], used as the evidence reason detail so
+/// `csharp.abc.condition.==` and `csharp.abc.condition.&&` stay
+/// distinguishable — the operator IS the construct at these token-level
+/// sites, exactly as the Go walker uses tree-sitter's `&&` node kind.
+fn condition_token_spelling(tt: i32) -> &'static str {
+    match tt {
+        cl::EQ_EQ => "==",
+        cl::NE => "!=",
+        cl::AMP_AMP => "&&",
+        cl::PIPE_PIPE => "||",
+        cl::QUESTION_QUESTION => "??",
+        cl::LT => "<",
+        cl::GT => ">",
+        cl::LE => "<=",
+        cl::GE => ">=",
+        _ => "",
+    }
+}
+
+/// The grammar's own snake_case name for a rule index, used as the evidence
+/// reason detail at rule-level classification sites (`if_statement`,
+/// `switch_expression_arm`, …). Out-of-range indices collapse to the bare
+/// `csharp.<family>` reason rather than panicking.
+fn rule_name(ri: usize) -> &'static str {
+    cp::rule_names().get(ri).copied().unwrap_or("")
 }
 
 // --------------------------------------------------------------------

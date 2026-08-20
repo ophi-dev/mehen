@@ -5,7 +5,7 @@ use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, ParseDiagnostic,
     Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
-use mehen_metrics::MetricTreeBuilder;
+use mehen_metrics::{MetricEvidence, MetricTreeBuilder};
 use ruff_python_parser::parse_module;
 
 use crate::walker::walk_module;
@@ -40,7 +40,7 @@ impl LanguageAnalyzer for PythonAnalyzer {
         AnalysisBackend::PythonRuff
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let parsed = match parse_module(source.text.as_str()) {
             Ok(p) => p,
             Err(err) => {
@@ -65,7 +65,8 @@ impl LanguageAnalyzer for PythonAnalyzer {
             }
         };
 
-        let root = walk_module(&parsed, &source.text, &source.line_index);
+        let mut evidence = MetricEvidence::new("python", config.emit_contributions);
+        let root = walk_module(&parsed, &source.text, &source.line_index, &mut evidence);
         // Recovered Ruff syntax errors are surfaced as `error` (not
         // `warning`) so the diagnostic contract (plan §9.3) treats the
         // analysis as incomplete: `mehen metrics` exits 1 and
@@ -80,7 +81,7 @@ impl LanguageAnalyzer for PythonAnalyzer {
             backend: AnalysisBackend::PythonRuff,
             diagnostics,
             root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
     }
 }

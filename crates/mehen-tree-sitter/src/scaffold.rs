@@ -25,7 +25,8 @@
 
 use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceKind};
 use mehen_metrics::{
-    MetricTreeBuilder, State, apply_state_to, finalize_state, merge_child_into_parent,
+    MetricEvidence, MetricTreeBuilder, State, apply_state_to, finalize_state,
+    merge_child_into_parent,
 };
 use tree_sitter::Node;
 
@@ -124,6 +125,9 @@ pub struct WalkerCtx<'a> {
     pub stack: &'a mut Vec<State>,
     pub kinds: &'a mut Vec<SpaceKind>,
     pub cognitive: &'a mut CognitiveContext,
+    /// Contribution-evidence sink (plan §5.4). Hooks record next to the
+    /// stat increment, usually through [`WalkerCtx::record_evidence`].
+    pub evidence: &'a mut MetricEvidence,
 }
 
 impl<'a> WalkerCtx<'a> {
@@ -131,6 +135,25 @@ impl<'a> WalkerCtx<'a> {
     #[inline]
     pub fn current(&mut self) -> &mut State {
         self.stack.last_mut().expect("walker stack empty")
+    }
+
+    /// Record contribution evidence for `node`. The span is only
+    /// computed when the sink is enabled, so classify hooks can call
+    /// this unconditionally next to each stat increment:
+    ///
+    /// ```ignore
+    /// ctx.current().cyclomatic.record_decision();
+    /// ctx.record_evidence(node, |e, s| e.decision(s, "if_statement"));
+    /// ```
+    #[inline]
+    pub fn record_evidence<F>(&mut self, node: &Node<'_>, record: F)
+    where
+        F: FnOnce(&mut MetricEvidence, SourceSpan),
+    {
+        if self.evidence.is_enabled() {
+            let span = node_span(node, self.line_index);
+            record(self.evidence, span);
+        }
     }
 
     /// The kind for the currently-open space.
@@ -171,16 +194,22 @@ struct Walker<'a> {
     stack: Vec<State>,
     kinds: Vec<SpaceKind>,
     cognitive: CognitiveContext,
+    evidence: &'a mut MetricEvidence,
 }
 
 /// Drive the shared walker over `root`. Mirrors the per-crate
 /// `walk_program` entries that previously existed in `mehen-c`,
 /// `mehen-go`, and `mehen-kotlin`.
+///
+/// `evidence` is the caller-owned contribution sink; the host's hooks
+/// reach it through [`WalkerCtx::record_evidence`], and the caller
+/// finishes it after the walk to obtain the recorded contributions.
 pub fn run<H: WalkerHooks>(
     hooks: &mut H,
     root: Node<'_>,
     source: &[u8],
     line_index: &LineIndex,
+    evidence: &mut MetricEvidence,
 ) -> MetricSpace {
     let unit_span = node_span(&root, line_index);
 
@@ -198,6 +227,7 @@ pub fn run<H: WalkerHooks>(
         stack: vec![unit_state],
         kinds: vec![SpaceKind::Unit],
         cognitive: CognitiveContext::default(),
+        evidence,
     };
     walker.visit(hooks, root);
 
@@ -215,6 +245,7 @@ impl Walker<'_> {
             stack: &mut self.stack,
             kinds: &mut self.kinds,
             cognitive: &mut self.cognitive,
+            evidence: &mut *self.evidence,
         }
     }
 

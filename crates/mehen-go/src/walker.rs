@@ -52,7 +52,7 @@
 //!   `impl X for GoCode` empty bodies.
 
 use mehen_core::{LineIndex, MetricSpace, SpaceKind};
-use mehen_metrics::{HalsteadOperand, HalsteadOperator, State};
+use mehen_metrics::{HalsteadOperand, HalsteadOperator, MetricEvidence, State};
 use mehen_tree_sitter::{OpenSpaceRequest, WalkerCtx, WalkerHooks, node_span, run, text_of};
 use smol_str::SmolStr;
 use tree_sitter::Node;
@@ -61,10 +61,16 @@ use crate::grammar::Go;
 
 /// Drive the walker over the parsed Go tree and return the populated
 /// `MetricSpace`. Plugs Go classification into the shared
-/// [`mehen_tree_sitter::run`] scaffold.
-pub(crate) fn walk_program(root: Node<'_>, source: &[u8], line_index: &LineIndex) -> MetricSpace {
+/// [`mehen_tree_sitter::run`] scaffold. Contribution evidence is
+/// recorded into the caller-owned `evidence` sink (plan §5.4).
+pub(crate) fn walk_program(
+    root: Node<'_>,
+    source: &[u8],
+    line_index: &LineIndex,
+    evidence: &mut MetricEvidence,
+) -> MetricSpace {
     let mut hooks = GoHooks;
-    run(&mut hooks, root, source, line_index)
+    run(&mut hooks, root, source, line_index, evidence)
 }
 
 struct GoHooks;
@@ -86,6 +92,10 @@ impl WalkerHooks for GoHooks {
                 state.nom.record_function();
                 let argc = count_go_args(node);
                 state.nargs.record_function_args(argc);
+                if ctx.evidence.is_enabled() {
+                    ctx.evidence.function(span, node.kind());
+                    ctx.evidence.function_args(span, argc, node.kind());
+                }
                 Some(OpenSpaceRequest {
                     kind: SpaceKind::Function,
                     name,
@@ -104,6 +114,10 @@ impl WalkerHooks for GoHooks {
                 state.nom.record_closure();
                 let argc = count_go_args(node);
                 state.nargs.record_closure_args(argc);
+                if ctx.evidence.is_enabled() {
+                    ctx.evidence.closure(span, node.kind());
+                    ctx.evidence.closure_args(span, argc, node.kind());
+                }
                 Some(OpenSpaceRequest {
                     kind: SpaceKind::Closure,
                     name: None,
@@ -162,6 +176,7 @@ impl WalkerHooks for GoHooks {
             && parent_kind(node) == Some(Go::SelectStatement));
         if is_decision {
             ctx.current().cyclomatic.record_decision();
+            ctx.record_evidence(node, |e, s| e.decision(s, node.kind()));
         }
 
         classify_cognitive(ctx, node, kind);
@@ -170,6 +185,7 @@ impl WalkerHooks for GoHooks {
         // NExit — legacy `Exit for GoCode`.
         if matches!(kind, Go::ReturnStatement) {
             ctx.current().nexit.record_exit();
+            ctx.record_evidence(node, |e, s| e.exit(s, node.kind()));
         }
 
         classify_loc(ctx, node, kind);
@@ -187,6 +203,9 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: Go) {
             let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
             ctx.current().cognitive.increase_nesting(effective);
             ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
+            ctx.record_evidence(node, |e, s| {
+                e.cognitive(s, effective.saturating_add(1), node.kind());
+            });
         }
         Go::IfStatement => {}
         Go::ForStatement
@@ -196,9 +215,13 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: Go) {
             let effective = ctx.cognitive.nesting + ctx.cognitive.depth + ctx.cognitive.lambda;
             ctx.current().cognitive.increase_nesting(effective);
             ctx.cognitive.nesting = ctx.cognitive.nesting.saturating_add(1);
+            ctx.record_evidence(node, |e, s| {
+                e.cognitive(s, effective.saturating_add(1), node.kind());
+            });
         }
         Go::Else => {
             ctx.current().cognitive.increment_by_one();
+            ctx.record_evidence(node, |e, s| e.cognitive(s, 1, node.kind()));
         }
         Go::ExpressionStatement
         | Go::SendStatement
@@ -225,13 +248,19 @@ fn classify_cognitive(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: Go) {
             // Legacy `compute_booleans::<Go>`: walk the children;
             // for each `&&` / `||` operator child, feed the
             // sequence collapser. The actual punctuation is one of
-            // the binary expression's children.
+            // the binary expression's children. Evidence spans point
+            // at the operator token; same-operator repeats apply no
+            // delta and record nothing.
             for child in iter_children(node) {
-                match Go::from(child.kind_id()) {
-                    Go::AMPAMP => ctx.current().cognitive.observe_boolean("&&"),
-                    Go::PIPEPIPE => ctx.current().cognitive.observe_boolean("||"),
-                    _ => {}
-                }
+                let op = match Go::from(child.kind_id()) {
+                    Go::AMPAMP => "&&",
+                    Go::PIPEPIPE => "||",
+                    _ => continue,
+                };
+                let before = ctx.current().cognitive.structural;
+                ctx.current().cognitive.observe_boolean(op);
+                let delta = ctx.current().cognitive.structural.saturating_sub(before);
+                ctx.record_evidence(&child, |e, s| e.cognitive(s, delta, op));
             }
         }
         _ => {}
@@ -243,24 +272,30 @@ fn classify_abc(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: Go) {
         Go::AssignmentStatement | Go::ShortVarDeclaration => {
             let count = go_assignment_target_count(node);
             ctx.current().abc.assignments = ctx.current().abc.assignments.saturating_add(count);
+            ctx.record_evidence(node, |e, s| e.abc_assignments_n(s, count, node.kind()));
         }
         Go::ReceiveStatement | Go::RangeClause if node.child_by_field_name("left").is_some() => {
             let count = go_assignment_target_count(node);
             ctx.current().abc.assignments = ctx.current().abc.assignments.saturating_add(count);
+            ctx.record_evidence(node, |e, s| e.abc_assignments_n(s, count, node.kind()));
         }
         Go::IncStatement | Go::DecStatement => {
             ctx.current().abc.record_assignment();
+            ctx.record_evidence(node, |e, s| e.abc_assignment(s, node.kind()));
         }
         Go::ConstSpec => {
             let count = go_spec_name_count(node);
             ctx.current().abc.assignments = ctx.current().abc.assignments.saturating_add(count);
+            ctx.record_evidence(node, |e, s| e.abc_assignments_n(s, count, node.kind()));
         }
         Go::VarSpec if has_child_kind(node, Go::EQ) => {
             let count = go_spec_name_count(node);
             ctx.current().abc.assignments = ctx.current().abc.assignments.saturating_add(count);
+            ctx.record_evidence(node, |e, s| e.abc_assignments_n(s, count, node.kind()));
         }
         Go::CallExpression => {
             ctx.current().abc.record_branch();
+            ctx.record_evidence(node, |e, s| e.abc_branch(s, node.kind()));
         }
         Go::IfStatement
         | Go::ForStatement
@@ -278,6 +313,7 @@ fn classify_abc(ctx: &mut WalkerCtx<'_>, node: &Node<'_>, kind: Go) {
         | Go::PIPEPIPE
         | Go::BANG => {
             ctx.current().abc.record_condition();
+            ctx.record_evidence(node, |e, s| e.abc_condition(s, node.kind()));
         }
         _ => {}
     }

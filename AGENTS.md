@@ -4,6 +4,14 @@
 
 This repository is a CLI-first Rust project (`mehen`). Prefer changes that keep behavior centered on the `mehen` binary.
 
+## Educational and Research Objective
+
+mehen's heuristic source-code metrics are also an educational and research instrument, not just a CI gate. When touching metrics:
+
+- When adding a new metric or improving an existing one, close the explainability gap: emit contribution evidence (`MetricEvidence` — span + reason code + amount) so output can answer *why* a value moved, and keep the evidence-sum invariants in each crate's `tests/contributions.rs` intact.
+- Keep errors and warnings approachable for users without deep metrics knowledge — concise yet explanatory messaging over jargon or bare codes.
+- Every metric page under `docs/metrics/` keeps a schoolbook style — scientific but teaching-oriented — with high-quality paper links in its `## References` section.
+
 ## Build and Test
 
 Use these commands from the repo root:

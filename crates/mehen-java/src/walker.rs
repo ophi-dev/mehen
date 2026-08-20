@@ -68,11 +68,11 @@
 
 use mehen_antlr::runtime::token::Token;
 use mehen_antlr::runtime::{FromRuleNode, Node, RuleNodeView, TerminalNodeView};
-use mehen_antlr::{LocToken, LocTokenKind, ctx_span};
-use mehen_core::{LineIndex, MetricSpace, SpaceKind};
+use mehen_antlr::{LocToken, LocTokenKind, ctx_span, span_from_tokens};
+use mehen_core::{LineIndex, MetricSpace, SourceSpan, SpaceKind};
 use mehen_metrics::{
-    ContainerKind, HalsteadOperand, HalsteadOperator, MetricTreeBuilder, SpaceRangeTracker, State,
-    apply_state_to, finalize_state, merge_child_into_parent,
+    ContainerKind, HalsteadOperand, HalsteadOperator, MetricEvidence, MetricTreeBuilder,
+    SpaceRangeTracker, State, apply_state_to, finalize_state, merge_child_into_parent,
 };
 use smol_str::SmolStr;
 
@@ -81,12 +81,15 @@ use mehen_java_parser::java_parser as jp;
 
 /// Drive the walk over the parsed `compilationUnit` tree and return the unit
 /// `MetricSpace`. LOC is computed from `loc_tokens` in a single ordered pass
-/// *after* the tree walk has opened and closed every space.
+/// *after* the tree walk has opened and closed every space. Contribution
+/// evidence is recorded into the caller-owned `evidence` sink (plan §5.4);
+/// every record is a no-op when the sink is disabled.
 pub(crate) fn walk(
     tree: Node<'_>,
     line_index: &LineIndex,
     source_len: usize,
     loc_tokens: &[LocToken],
+    evidence: &mut MetricEvidence,
 ) -> MetricSpace {
     let unit_span = match tree.as_rule() {
         Some(rule) => ctx_span(rule, line_index, source_len),
@@ -107,6 +110,7 @@ pub(crate) fn walk(
         suppress_parent_wmc: vec![false],
         cognitive: CognitiveContext::default(),
         loc_routing: SpaceRangeTracker::new(),
+        evidence,
     };
 
     if let Some(rule) = tree.as_rule() {
@@ -272,11 +276,43 @@ struct Walker<'a> {
     suppress_parent_wmc: Vec<bool>,
     cognitive: CognitiveContext,
     loc_routing: SpaceRangeTracker,
+    /// Contribution-evidence sink (plan §5.4). Owned by the analyzer;
+    /// disabled sinks make every record call a no-op, and span conversion
+    /// is skipped entirely on the disabled path.
+    evidence: &'a mut MetricEvidence,
 }
 
 impl Walker<'_> {
     fn current(&mut self) -> &mut State {
         self.stack.last_mut().expect("walker stack empty")
+    }
+
+    /// Record contribution evidence for `ctx`'s covered span. The span is
+    /// converted only when the sink is enabled so the disabled (benchmark)
+    /// path pays nothing beyond the flag check.
+    fn record_evidence(
+        &mut self,
+        ctx: RuleNodeView<'_>,
+        f: impl FnOnce(&mut MetricEvidence, SourceSpan),
+    ) {
+        if self.evidence.is_enabled() {
+            let span = ctx_span(ctx, self.line_index, self.source_len);
+            f(&mut *self.evidence, span);
+        }
+    }
+
+    /// Span of the first direct terminal child of `ctx` with `token_type`
+    /// (e.g. the `ELSE` keyword of an `if` statement), if present. Gives
+    /// keyword-level evidence a tighter span than the whole statement.
+    fn first_token_span(&self, ctx: RuleNodeView<'_>, token_type: i32) -> Option<SourceSpan> {
+        ctx.children().find_map(|child| {
+            child
+                .as_terminal()
+                .filter(|t| t.symbol().token_type() == token_type)
+                .map(|t| {
+                    span_from_tokens(&t.symbol(), &t.symbol(), self.line_index, self.source_len)
+                })
+        })
     }
 
     fn visit(&mut self, node: Node<'_>, hint: ChildHint) {
@@ -774,6 +810,12 @@ impl Walker<'_> {
             let default_public = matches!(container, ContainerKind::Interface);
             let public = visibility_from_modifiers(span_ctx).unwrap_or(default_public);
             self.current().npm.record_method(container, public);
+            // NPM evidence only for public members — the headline metric
+            // counts public methods only.
+            if public {
+                let detail = method_space_detail(method_ctx.rule_index());
+                self.record_evidence(span_ctx, |e, s| e.public_method(s, detail));
+            }
         }
         // Widen the declaration-node span up to its body-declaration wrapper so
         // own-line modifiers belong to the method. Unused when opening at the
@@ -811,6 +853,14 @@ impl Walker<'_> {
             count_formal_params(method_ctx)
         };
         state.nargs.record_function_args(nargs);
+        // NOM/NArgs evidence at the space-open site, spanning the same
+        // (possibly modifier-widened) range the metric space records.
+        if self.evidence.is_enabled() {
+            let span = self.space_span(span_ctx, widened);
+            let detail = method_space_detail(method_ctx.rule_index());
+            self.evidence.function(span, detail);
+            self.evidence.function_args(span, nargs, detail);
+        }
         self.push_space_widened(
             SpaceKind::Function,
             name,
@@ -860,10 +910,32 @@ impl Walker<'_> {
             state.wmc.record_class_like();
             // `record R(...)` component parameters are class attributes.
             record_record_components(type_ctx, &mut state);
+            self.record_component_evidence(type_ctx);
             SpaceKind::Class
         };
         self.push_space_widened(kind, name, span_ctx, state, false, None);
         self.enter_class_cognitive();
+    }
+
+    /// NPA evidence for a record's component parameters — one public
+    /// attribute per declared component, at the component's own span.
+    /// Walks the same typed-context path as [`count_record_components`]
+    /// (which drives [`record_record_components`]), so the evidence count
+    /// always equals the recorded stat count.
+    fn record_component_evidence(&mut self, type_ctx: RuleNodeView<'_>) {
+        if !self.evidence.is_enabled() {
+            return;
+        }
+        let Some(list) = jp::RecordDeclarationContext::from_rule_node(type_ctx)
+            .and_then(|record| record.record_header().ok())
+            .and_then(|header| header.record_component_list())
+        else {
+            return;
+        };
+        for component in list.record_component_children() {
+            let span = ctx_span(component.rule_node(), self.line_index, self.source_len);
+            self.evidence.public_attribute(span, "record_component");
+        }
     }
 
     /// Open a metric space for space-introducing rules. Returns whether a
@@ -921,7 +993,13 @@ impl Walker<'_> {
             jp::RULE_LAMBDA_EXPRESSION => {
                 let mut state = self.new_space_state(ctx);
                 state.nom.record_closure();
-                state.nargs.record_closure_args(count_lambda_args(ctx));
+                let argc = count_lambda_args(ctx);
+                state.nargs.record_closure_args(argc);
+                if self.evidence.is_enabled() {
+                    let span = ctx_span(ctx, self.line_index, self.source_len);
+                    self.evidence.closure(span, "lambda_expression");
+                    self.evidence.closure_args(span, argc, "lambda_expression");
+                }
                 // A lambda is a `Closure`, not a `Function`: NOM/NArgs already
                 // record it as a closure, and its cyclomatic must NOT roll into
                 // the enclosing class's WMC (WMC weights *methods*). A lambda in
@@ -972,6 +1050,22 @@ impl Walker<'_> {
         self.new_space_state_widened(ctx, None)
     }
 
+    /// The metric-space span for `ctx`: its covered token range with the
+    /// start widened (byte + line) to `widened_start` when that precedes the
+    /// context's own start. Single source of the span recorded by
+    /// [`push_space_widened`](Self::push_space_widened) and attached to
+    /// NOM/NArgs evidence at space-open sites.
+    fn space_span(&self, ctx: RuleNodeView<'_>, widened_start: Option<(u32, u32)>) -> SourceSpan {
+        let mut span = ctx_span(ctx, self.line_index, self.source_len);
+        if let Some((start_byte, start_line)) = widened_start
+            && start_byte < span.start_byte
+        {
+            span.start_byte = start_byte;
+            span.start_line = start_line;
+        }
+        span
+    }
+
     /// Build a space's initial `State`, optionally widening the span's start
     /// (byte + line) upward to `widened_start`. A method/constructor uses this
     /// to cover own-line modifiers/annotations that live on its
@@ -1020,13 +1114,7 @@ impl Walker<'_> {
         suppress_parent_wmc: bool,
         widened_start: Option<(u32, u32)>,
     ) {
-        let mut span = ctx_span(ctx, self.line_index, self.source_len);
-        if let Some((start_byte, start_line)) = widened_start
-            && start_byte < span.start_byte
-        {
-            span.start_byte = start_byte;
-            span.start_line = start_line;
-        }
+        let span = self.space_span(ctx, widened_start);
         let space_id = self.tree.open(kind.clone(), span, name);
         self.loc_routing
             .record_open(space_id, span.start_byte, span.end_byte);
@@ -1137,6 +1225,10 @@ impl Walker<'_> {
             if ctx.has_token(jl::CASE) {
                 self.current().cyclomatic.record_decision();
                 self.current().abc.record_condition();
+                self.record_evidence(ctx, |e, s| {
+                    e.decision(s, "switch_case");
+                    e.abc_condition(s, "switch_case");
+                });
             }
         }
         // A pattern-switch guard (`case String s when expr -> …`, grammar
@@ -1148,6 +1240,7 @@ impl Walker<'_> {
         // already carries the decision and the `switch` the nesting.
         if ri == jp::RULE_GUARD {
             self.current().abc.record_condition();
+            self.record_evidence(ctx, |e, s| e.abc_condition(s, "guard"));
         }
         // A `switch` *expression* (Java 14+) owns its `SWITCH` token in the
         // separate `switchExpression` rule — the statement-form handler in
@@ -1159,7 +1252,10 @@ impl Walker<'_> {
         // it afterward).
         if ri == jp::RULE_SWITCH_EXPRESSION {
             let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
+            let before = self.current().cognitive.structural;
             self.current().cognitive.increase_nesting(eff);
+            let delta = self.current().cognitive.structural.saturating_sub(before);
+            self.record_evidence(ctx, |e, s| e.cognitive(s, delta, "switch_expression"));
             self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
         }
         // An enum constant (`enum E { A, B }`) is a public static final field
@@ -1175,6 +1271,7 @@ impl Walker<'_> {
             self.current()
                 .npa
                 .record_attribute(ContainerKind::Class, true);
+            self.record_evidence(ctx, |e, s| e.public_attribute(s, "enum_constant"));
         }
         // Annotation values (`@Ann(value = true && false)`, `@Ann(x = c ? 1 : 2)`)
         // are compile-time metadata, not executable code, so a composed constant
@@ -1199,31 +1296,81 @@ impl Walker<'_> {
             // `else if` (flat +1 emitted when the ELSE token is visited).
             self.current().cyclomatic.record_decision();
             self.current().abc.record_condition();
+            self.record_evidence(ctx, |e, s| {
+                e.decision(s, "if_statement");
+                e.abc_condition(s, "if_statement");
+            });
             if !hint.is_else_branch {
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increase_nesting(eff);
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                self.record_evidence(ctx, |e, s| e.cognitive(s, delta, "if_statement"));
                 self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
             }
-            // `else` adds a flat +1 (covers `else if`).
+            // `else` adds a flat +1 (covers `else if`). Evidence points at
+            // the ELSE keyword itself, not the whole if statement.
             if ctx.has_token(jl::ELSE) {
+                let before = self.current().cognitive.structural;
                 self.current().cognitive.increment_by_one();
+                let delta = self.current().cognitive.structural.saturating_sub(before);
+                if self.evidence.is_enabled() {
+                    let span = self
+                        .first_token_span(ctx, jl::ELSE)
+                        .unwrap_or_else(|| ctx_span(ctx, self.line_index, self.source_len));
+                    self.evidence.cognitive(span, delta, "else");
+                }
             }
         } else if ctx.has_token(jl::FOR) || ctx.has_token(jl::WHILE) || ctx.has_token(jl::DO) {
+            // A `do … while` statement carries both DO and WHILE as direct
+            // tokens, so the DO probe must come first when naming the
+            // construct for the evidence reason.
+            let detail = if ctx.has_token(jl::DO) {
+                "do_statement"
+            } else if ctx.has_token(jl::FOR) {
+                "for_statement"
+            } else {
+                "while_statement"
+            };
             self.current().cyclomatic.record_decision();
             self.current().abc.record_condition();
+            let before = self.current().cognitive.structural;
             self.current().cognitive.increase_nesting(eff);
+            let delta = self.current().cognitive.structural.saturating_sub(before);
+            self.record_evidence(ctx, |e, s| {
+                e.decision(s, detail);
+                e.abc_condition(s, detail);
+                e.cognitive(s, delta, detail);
+            });
             self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
         } else if ctx.has_token(jl::SWITCH) {
             // `switch` itself adds cognitive nesting but not cyclomatic — the
             // individual `case` labels carry the cyclomatic/ABC decisions.
+            let before = self.current().cognitive.structural;
             self.current().cognitive.increase_nesting(eff);
+            let delta = self.current().cognitive.structural.saturating_sub(before);
+            self.record_evidence(ctx, |e, s| e.cognitive(s, delta, "switch_statement"));
             self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
         } else if ctx.has_token(jl::RETURN) || ctx.has_token(jl::THROW) {
             self.current().nexit.record_exit();
+            let detail = if ctx.has_token(jl::RETURN) {
+                "return_statement"
+            } else {
+                "throw_statement"
+            };
+            self.record_evidence(ctx, |e, s| e.exit(s, detail));
         } else if (ctx.has_token(jl::BREAK) || ctx.has_token(jl::CONTINUE))
             && ctx.child_rule(jp::RULE_IDENTIFIER).is_some()
         {
             // A labeled break/continue is goto-like: flat +1 (cognitive).
+            let detail = if ctx.has_token(jl::BREAK) {
+                "labeled_break"
+            } else {
+                "labeled_continue"
+            };
+            let before = self.current().cognitive.structural;
             self.current().cognitive.increment_by_one();
+            let delta = self.current().cognitive.structural.saturating_sub(before);
+            self.record_evidence(ctx, |e, s| e.cognitive(s, delta, detail));
         }
     }
 
@@ -1236,9 +1383,15 @@ impl Walker<'_> {
             // `catch` is cognitive-only (matches SonarJava): nesting increment
             // + an ABC condition, but no cyclomatic decision.
             let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
+            let before = self.current().cognitive.structural;
             self.current().cognitive.increase_nesting(eff);
+            let delta = self.current().cognitive.structural.saturating_sub(before);
             self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
             self.current().abc.record_condition();
+            self.record_evidence(ctx, |e, s| {
+                e.cognitive(s, delta, "catch_clause");
+                e.abc_condition(s, "catch_clause");
+            });
             return;
         }
         if ri != jp::RULE_EXPRESSION {
@@ -1258,9 +1411,26 @@ impl Walker<'_> {
         // helper as `visit_children`'s run-threading so both agree on the
         // operator.
         let this_op = expression_bool_op(ctx);
-        if let Some(_op) = this_op {
+        if let Some(op) = this_op {
+            let detail = bool_op_detail(op);
             self.current().cyclomatic.record_decision();
             self.current().abc.record_condition();
+            // Per-operator evidence points at the `&&`/`||` token itself —
+            // tighter than the whole boolean expression, whose operands can
+            // span lines.
+            if self.evidence.is_enabled() {
+                let token = match op {
+                    BoolOp::And => expr.and_token(),
+                    BoolOp::Or => expr.or_token(),
+                };
+                let span = token
+                    .map(|t| {
+                        span_from_tokens(&t.symbol(), &t.symbol(), self.line_index, self.source_len)
+                    })
+                    .unwrap_or_else(|| ctx_span(ctx, self.line_index, self.source_len));
+                self.evidence.decision(span, detail);
+                self.evidence.abc_condition(span, detail);
+            }
             // Cognitive: SonarSource counts +1 per *sequence of like logical
             // operators*, computed by flattening the boolean expression in
             // SOURCE ORDER and adding +1 whenever the operator kind changes
@@ -1290,7 +1460,12 @@ impl Walker<'_> {
                     prev = Some(op);
                 }
                 if increments > 0 {
+                    let before = self.current().cognitive.structural;
                     self.current().cognitive.record_increment(increments);
+                    let delta = self.current().cognitive.structural.saturating_sub(before);
+                    // One evidence row for the whole run, at the run root's
+                    // span, named after the root operator.
+                    self.record_evidence(ctx, |e, s| e.cognitive(s, delta, detail));
                 }
             }
         }
@@ -1302,9 +1477,16 @@ impl Walker<'_> {
         if expr.question_token().is_some() && expr.colon_token().is_some() {
             let eff = self.cognitive.nesting + self.cognitive.depth + self.cognitive.lambda;
             self.current().cyclomatic.record_decision();
+            let before = self.current().cognitive.structural;
             self.current().cognitive.increase_nesting(eff);
+            let delta = self.current().cognitive.structural.saturating_sub(before);
             self.cognitive.nesting = self.cognitive.nesting.saturating_add(1);
             self.current().abc.record_condition();
+            self.record_evidence(ctx, |e, s| {
+                e.decision(s, "ternary_expression");
+                e.cognitive(s, delta, "ternary_expression");
+                e.abc_condition(s, "ternary_expression");
+            });
         }
         // Comparison / equality / instanceof → ABC conditions only. A bit-shift
         // (`<<`, `>>`, `>>>`) is NOT a condition — but the grammar spells it
@@ -1324,14 +1506,31 @@ impl Walker<'_> {
             || expr.instanceof_token().is_some()
         {
             self.current().abc.record_condition();
+            let detail = if expr.instanceof_token().is_some() {
+                "instanceof"
+            } else {
+                "comparison"
+            };
+            self.record_evidence(ctx, |e, s| e.abc_condition(s, detail));
         }
     }
 
     fn classify_abc_rule(&mut self, ctx: RuleNodeView<'_>, ri: usize, hint: ChildHint) {
         match ri {
             // A method/constructor call, or object creation, is a branch.
-            jp::RULE_METHOD_CALL => self.current().abc.record_branch(),
-            jp::RULE_CREATOR | jp::RULE_INNER_CREATOR => self.current().abc.record_branch(),
+            jp::RULE_METHOD_CALL => {
+                self.current().abc.record_branch();
+                self.record_evidence(ctx, |e, s| e.abc_branch(s, "method_call"));
+            }
+            jp::RULE_CREATOR | jp::RULE_INNER_CREATOR => {
+                self.current().abc.record_branch();
+                let detail = if ri == jp::RULE_CREATOR {
+                    "creator"
+                } else {
+                    "inner_creator"
+                };
+                self.record_evidence(ctx, |e, s| e.abc_branch(s, detail));
+            }
             // Calls that don't route through `methodCall`. The Java grammar
             // reaches several call forms via suffix rules; count each call
             // exactly once at the innermost call-bearing node to avoid the
@@ -1353,11 +1552,15 @@ impl Walker<'_> {
             // `arguments` child (a call), not a bare field read.
             jp::RULE_SUPER_SUFFIX if ctx.child_rule(jp::RULE_ARGUMENTS).is_some() => {
                 self.current().abc.record_branch();
+                self.record_evidence(ctx, |e, s| e.abc_branch(s, "super_suffix"));
             }
             jp::RULE_EXPLICIT_GENERIC_INVOCATION_SUFFIX
                 if ctx.child_rule(jp::RULE_ARGUMENTS).is_some() =>
             {
                 self.current().abc.record_branch();
+                self.record_evidence(ctx, |e, s| {
+                    e.abc_branch(s, "explicit_generic_invocation_suffix");
+                });
             }
             // A generic explicit constructor invocation (`<String>this(arg)`)
             // routes through `primary: nonWildcardTypeArguments THIS arguments`
@@ -1369,6 +1572,7 @@ impl Walker<'_> {
                 if ctx.has_token(jl::THIS) && ctx.child_rule(jp::RULE_ARGUMENTS).is_some() =>
             {
                 self.current().abc.record_branch();
+                self.record_evidence(ctx, |e, s| e.abc_branch(s, "this_call"));
             }
             // An `expression` carrying an assignment operator is an assignment.
             // Compound assigns (`+=`, `-=`, …) and the increment/decrement
@@ -1381,6 +1585,14 @@ impl Walker<'_> {
             // generator.
             jp::RULE_EXPRESSION if has_assignment_op(ctx) && !hint.in_annotation => {
                 self.current().abc.record_assignment();
+                // `++`/`--` are named apart from `=`/compound assigns in the
+                // evidence reason (both count under ABC's A component).
+                let detail = if has_update_op(ctx) {
+                    "update_expression"
+                } else {
+                    "assignment_expression"
+                };
+                self.record_evidence(ctx, |e, s| e.abc_assignment(s, detail));
             }
             // A local variable / field / record-component declarator with an
             // initializer (`= …`) is an assignment.
@@ -1388,6 +1600,12 @@ impl Walker<'_> {
                 if ctx.has_token(jl::ASSIGN) =>
             {
                 self.current().abc.record_assignment();
+                let detail = if ri == jp::RULE_VARIABLE_DECLARATOR {
+                    "variable_declarator"
+                } else {
+                    "constant_declarator"
+                };
+                self.record_evidence(ctx, |e, s| e.abc_assignment(s, detail));
             }
             // A `var x = expr` local-variable declaration places its `=` as a
             // direct child of `localVariableDeclaration` (no `variableDeclarator`
@@ -1401,6 +1619,12 @@ impl Walker<'_> {
                 if ctx.has_token(jl::ASSIGN) =>
             {
                 self.current().abc.record_assignment();
+                let detail = if ri == jp::RULE_LOCAL_VARIABLE_DECLARATION {
+                    "local_variable_declaration"
+                } else {
+                    "resource"
+                };
+                self.record_evidence(ctx, |e, s| e.abc_assignment(s, detail));
             }
             _ => {}
         }
@@ -1492,11 +1716,25 @@ impl Walker<'_> {
                 for _ in 0..count {
                     self.current().npa.record_attribute(container, public);
                 }
+                // NPA evidence only for public members — one row per declared
+                // variable, all at the declaration's span.
+                if public && self.evidence.is_enabled() {
+                    let span = ctx_span(ctx, self.line_index, self.source_len);
+                    for _ in 0..count {
+                        self.evidence.public_attribute(span, "field_declaration");
+                    }
+                }
             }
             jp::RULE_CONST_DECLARATION => {
                 let count = ctx.child_rules(jp::RULE_CONSTANT_DECLARATOR).count().max(1);
                 for _ in 0..count {
                     self.current().npa.record_attribute(container, true);
+                }
+                if self.evidence.is_enabled() {
+                    let span = ctx_span(ctx, self.line_index, self.source_len);
+                    for _ in 0..count {
+                        self.evidence.public_attribute(span, "const_declaration");
+                    }
                 }
             }
             // Interface methods are counted at `interfaceCommonBodyDeclaration`
@@ -1508,6 +1746,10 @@ impl Walker<'_> {
             | jp::RULE_CONSTRUCTOR_DECLARATION
             | jp::RULE_INTERFACE_COMMON_BODY_DECLARATION => {
                 self.current().npm.record_method(container, public);
+                if public {
+                    let detail = method_space_detail(ri);
+                    self.record_evidence(ctx, |e, s| e.public_method(s, detail));
+                }
             }
             // A compact record constructor (`record R(int x) { public R {} }`)
             // is reached directly under `recordBody`, so the threaded `public`
@@ -1521,6 +1763,11 @@ impl Walker<'_> {
                     .or(hint.enclosing_record_public)
                     .unwrap_or(public);
                 self.current().npm.record_method(container, is_public);
+                if is_public {
+                    self.record_evidence(ctx, |e, s| {
+                        e.public_method(s, "compact_constructor_declaration");
+                    });
+                }
             }
             // An annotation element (`@interface A { String value(); }`) is an
             // implicitly-public interface-like method — `annotationMethodRest`
@@ -1528,6 +1775,7 @@ impl Walker<'_> {
             // (`annotationTypeElementRest → annotationMethodOrConstantRest`).
             jp::RULE_ANNOTATION_METHOD_REST => {
                 self.current().npm.record_method(container, true);
+                self.record_evidence(ctx, |e, s| e.public_method(s, "annotation_method_rest"));
             }
             // An annotation constant (`int X = 1;` in an `@interface`) is an
             // implicitly-public attribute; `annotationConstantRest` wraps a
@@ -1541,6 +1789,13 @@ impl Walker<'_> {
                     .max(1);
                 for _ in 0..count {
                     self.current().npa.record_attribute(container, true);
+                }
+                if self.evidence.is_enabled() {
+                    let span = ctx_span(ctx, self.line_index, self.source_len);
+                    for _ in 0..count {
+                        self.evidence
+                            .public_attribute(span, "annotation_constant_rest");
+                    }
                 }
             }
             _ => {}
@@ -1713,6 +1968,27 @@ fn expression_bool_op(ctx: RuleNodeView<'_>) -> Option<BoolOp> {
         Some(BoolOp::Or)
     } else {
         None
+    }
+}
+
+/// Stable snake_case evidence detail for a short-circuit boolean operator.
+fn bool_op_detail(op: BoolOp) -> &'static str {
+    match op {
+        BoolOp::And => "logical_and",
+        BoolOp::Or => "logical_or",
+    }
+}
+
+/// Stable snake_case evidence detail for a method-shaped declaration rule —
+/// the grammar rule that opens the function space / records the NPM member.
+fn method_space_detail(ri: usize) -> &'static str {
+    match ri {
+        jp::RULE_METHOD_DECLARATION => "method_declaration",
+        jp::RULE_CONSTRUCTOR_DECLARATION => "constructor_declaration",
+        jp::RULE_COMPACT_CONSTRUCTOR_DECLARATION => "compact_constructor_declaration",
+        jp::RULE_INTERFACE_COMMON_BODY_DECLARATION => "interface_common_body_declaration",
+        jp::RULE_ANNOTATION_METHOD_REST => "annotation_method_rest",
+        _ => "method_declaration",
     }
 }
 
@@ -2160,6 +2436,14 @@ fn has_assignment_op(ctx: RuleNodeView<'_>) -> bool {
         || expr.urshift_assign_token().is_some()
         || expr.inc_token().is_some()
         || expr.dec_token().is_some()
+}
+
+/// Whether an `expression` carries a top-level `++`/`--` operator — the
+/// "update" subset of [`has_assignment_op`], named separately in the ABC
+/// assignment evidence reason (`java.abc.assignment.update_expression`).
+fn has_update_op(ctx: RuleNodeView<'_>) -> bool {
+    jp::ExpressionContext::from_rule_node(ctx)
+        .is_some_and(|expr| expr.inc_token().is_some() || expr.dec_token().is_some())
 }
 
 /// Find the first descendant rule with `rule_index`, searching direct children

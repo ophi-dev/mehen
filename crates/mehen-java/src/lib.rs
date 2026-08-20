@@ -34,6 +34,7 @@ use mehen_core::{
 use mehen_java_parser::hooks::JavaParserBase;
 use mehen_java_parser::java_lexer::JavaLexer;
 use mehen_java_parser::java_parser::JavaParser;
+use mehen_metrics::MetricEvidence;
 
 pub struct JavaAnalyzer;
 
@@ -112,7 +113,7 @@ impl LanguageAnalyzer for JavaAnalyzer {
         AnalysisBackend::Antlr
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let line_index = LineIndex::new(&source.text);
 
         let parsed = match self.parse(&source.text, &line_index) {
@@ -138,9 +139,18 @@ impl LanguageAnalyzer for JavaAnalyzer {
         };
 
         // The `ParsedFile` owns the token store and CST; `tree()` is the root
-        // `Node` borrowing view the walker traverses.
+        // `Node` borrowing view the walker traverses. Contribution evidence is
+        // recorded into the walker-threaded sink (plan §5.4); a benchmark
+        // profile disables it without changing any metric.
         let tree = parsed.parsed.tree();
-        let root = walker::walk(tree, &line_index, source.text.len(), &parsed.loc_tokens);
+        let mut evidence = MetricEvidence::new("java", config.emit_contributions);
+        let root = walker::walk(
+            tree,
+            &line_index,
+            source.text.len(),
+            &parsed.loc_tokens,
+            &mut evidence,
+        );
 
         // Recovered ANTLR error nodes are surfaced as `error` so the
         // diagnostic contract treats the analysis as incomplete.
@@ -158,7 +168,7 @@ impl LanguageAnalyzer for JavaAnalyzer {
             backend: AnalysisBackend::Antlr,
             diagnostics,
             root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
     }
 }

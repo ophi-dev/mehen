@@ -12,7 +12,7 @@ use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, ParseDiagnostic,
     Result, SourceFile, SourceSpan, byte_offset_clamped,
 };
-use mehen_metrics::MetricTreeBuilder;
+use mehen_metrics::{MetricEvidence, MetricTreeBuilder};
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_parser::config::TokensParserConfig;
@@ -69,6 +69,7 @@ fn analyze_with_source_type(
     language: Language,
     source: &SourceFile,
     source_type: SourceType,
+    emit_contributions: bool,
 ) -> LanguageAnalysis {
     let source_type = refine_source_type(source_type, source);
     let allocator = Allocator::default();
@@ -100,11 +101,16 @@ fn analyze_with_source_type(
         };
     }
 
+    // Reason codes are prefixed with the analyzed language's canonical
+    // name so a `.tsx` file yields `tsx.*` reasons and a `.js` file
+    // `javascript.*` (plan §5.4).
+    let mut evidence = MetricEvidence::new(language.canonical(), emit_contributions);
     let root = walker::walk_program(
         &parser_return.program,
         &parser_return.tokens,
         source.text.as_str(),
         &source.line_index,
+        &mut evidence,
     );
 
     // Oxc commonly returns a non-panicking parse with `diagnostics`
@@ -125,7 +131,7 @@ fn analyze_with_source_type(
         backend: AnalysisBackend::Oxc,
         diagnostics,
         root,
-        contributions: Vec::new(),
+        contributions: evidence.finish(),
     }
 }
 
@@ -157,9 +163,14 @@ macro_rules! ts_analyzer {
             fn analyze(
                 &self,
                 source: &SourceFile,
-                _config: &AnalysisConfig,
+                config: &AnalysisConfig,
             ) -> Result<LanguageAnalysis> {
-                Ok(analyze_with_source_type($lang, source, $source_type))
+                Ok(analyze_with_source_type(
+                    $lang,
+                    source,
+                    $source_type,
+                    config.emit_contributions,
+                ))
             }
         }
     };

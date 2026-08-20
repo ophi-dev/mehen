@@ -22,6 +22,10 @@ use crate::syntax_tree::Node;
 use crate::tree_helpers::{
     count_table_cells, find_link_label, has_scheme as is_external, node_line_span,
 };
+use mehen_core::{ContributionCollector, SourceSpan};
+
+/// The published metric key MCC evidence attaches to.
+const MCC_KEY: &str = "markdown.complexity.cognitive_complexity";
 
 /// §8 aggregate: positive weight before credit, credit amount used, final
 /// MCC. Only `mcc` is exported to the public record; `positive` and
@@ -37,8 +41,21 @@ pub(crate) struct MccResult {
 }
 
 /// Public entry point.
-pub(crate) fn compute_mcc(root: &Node<'_>, document: &MarkdownDocument, source: &str) -> MccResult {
-    let mut ctx = Walker::new(source, document);
+///
+/// `evidence` receives contribution records (plan §5.4) for the
+/// prose-structure events a doc author can act on directly — heading
+/// skips, oversized flat sections, over-long paragraphs, dense link
+/// clusters — with the exact weighted amount each added to the positive
+/// MCC term. Scaffold credit is applied globally (capped), so the final
+/// `mcc` is not a plain sum of the evidence; the evidence explains the
+/// positive side.
+pub(crate) fn compute_mcc(
+    root: &Node<'_>,
+    document: &MarkdownDocument,
+    source: &str,
+    evidence: &mut ContributionCollector,
+) -> MccResult {
+    let mut ctx = Walker::new(source, document, evidence);
     // Pass 1: collect artifact lines for the 20-line-window cluster density
     // and record each block's sequence index for §8.4 locality lookup.
     ctx.scan_blocks(root);
@@ -55,9 +72,12 @@ pub(crate) fn compute_mcc(root: &Node<'_>, document: &MarkdownDocument, source: 
     }
 }
 
-struct Walker<'a, 'doc> {
+struct Walker<'a, 'doc, 'ev> {
     source: &'a str,
     document: &'doc MarkdownDocument,
+    /// Contribution-evidence sink (plan §5.4). `record` is a no-op when
+    /// collection is disabled.
+    evidence: &'ev mut ContributionCollector,
     positive: f64,
     /// Individual scaffold-credit contributions queued during the walk.
     /// They are summed and capped at `0.25 * positive` after the walk.
@@ -86,8 +106,12 @@ enum BlockKind {
     Other,
 }
 
-impl<'a, 'doc> Walker<'a, 'doc> {
-    fn new(source: &'a str, document: &'doc MarkdownDocument) -> Self {
+impl<'a, 'doc, 'ev> Walker<'a, 'doc, 'ev> {
+    fn new(
+        source: &'a str,
+        document: &'doc MarkdownDocument,
+        evidence: &'ev mut ContributionCollector,
+    ) -> Self {
         let mut lines = 1usize;
         for b in source.bytes() {
             if b == b'\n' {
@@ -100,6 +124,7 @@ impl<'a, 'doc> Walker<'a, 'doc> {
         Self {
             source,
             document,
+            evidence,
             positive: 0.0,
             pending_credits: Vec::new(),
             last_heading_level: None,
@@ -108,6 +133,23 @@ impl<'a, 'doc> Walker<'a, 'doc> {
             list_depth: 0,
             blockquote_depth: 0,
             callout_depth: 0,
+        }
+    }
+
+    /// Span of `node` in byte + 1-based-line coordinates for evidence
+    /// records. The syntax tree exposes byte offsets and 0-based rows
+    /// directly, so no `LineIndex` round-trip is needed.
+    fn node_span(node: &Node<'_>) -> SourceSpan {
+        let (end_row, end_col) = node.end_position();
+        let mut end = end_row;
+        if end > node.start_row() && end_col == 0 {
+            end -= 1;
+        }
+        SourceSpan {
+            start_byte: mehen_core::byte_offset_clamped(node.start_byte()),
+            end_byte: mehen_core::byte_offset_clamped(node.end_byte()),
+            start_line: node.start_row() as u32 + 1,
+            end_line: end as u32 + 1,
         }
     }
 
@@ -155,7 +197,17 @@ impl<'a, 'doc> Walker<'a, 'doc> {
                 if delta == 1 {
                     self.positive += 0.20 * self.current_nest_multiplier();
                 } else {
-                    self.positive += 1.00 * self.current_nest_multiplier();
+                    let amount = 1.00 * self.current_nest_multiplier();
+                    self.positive += amount;
+                    // Plan §5.4's canonical Markdown example: a heading
+                    // that skips levels (## → ####) is a structure
+                    // defect a reader can point at.
+                    self.evidence.record(
+                        MCC_KEY,
+                        Self::node_span(node),
+                        amount,
+                        "markdown.heading_skip",
+                    );
                 }
             }
             // First heading and going-shallower: no penalty.
@@ -167,7 +219,14 @@ impl<'a, 'doc> Walker<'a, 'doc> {
         if is_section(kind) && section_has_no_sub_heading(node) {
             let words = count_section_words(node);
             if words > 800 {
-                self.positive += 2.00 * self.current_nest_multiplier();
+                let amount = 2.00 * self.current_nest_multiplier();
+                self.positive += amount;
+                self.evidence.record(
+                    MCC_KEY,
+                    Self::node_span(node),
+                    amount,
+                    "markdown.oversized_flat_section",
+                );
             }
         }
 
@@ -175,13 +234,26 @@ impl<'a, 'doc> Walker<'a, 'doc> {
         if matches!(kind, Paragraph) {
             let words = count_word_tokens(node);
             if words > 160 {
-                self.positive += 1.25 * self.current_nest_multiplier();
+                let amount = 1.25 * self.current_nest_multiplier();
+                self.positive += amount;
+                self.evidence.record(
+                    MCC_KEY,
+                    Self::node_span(node),
+                    amount,
+                    "markdown.overlong_paragraph",
+                );
             }
             // Dense link cluster: > 4 inline links in a paragraph → 1.50.
             let links = count_inline_links(node);
             if links > 4 {
-                self.positive +=
-                    1.50 * self.cluster_multiplier(node) * self.current_nest_multiplier();
+                let amount = 1.50 * self.cluster_multiplier(node) * self.current_nest_multiplier();
+                self.positive += amount;
+                self.evidence.record(
+                    MCC_KEY,
+                    Self::node_span(node),
+                    amount,
+                    "markdown.dense_link_cluster",
+                );
             }
         }
 
@@ -539,7 +611,43 @@ mod tests {
 
     fn compute(src: &str) -> MccResult {
         let (tree, document) = crate::syntax_tree::parse_with_document(src);
-        compute_mcc(&tree.root(), &document, src)
+        let mut evidence = ContributionCollector::new(false);
+        compute_mcc(&tree.root(), &document, src, &mut evidence)
+    }
+
+    fn compute_with_evidence(src: &str) -> (MccResult, Vec<mehen_core::MetricContribution>) {
+        let (tree, document) = crate::syntax_tree::parse_with_document(src);
+        let mut evidence = ContributionCollector::new(true);
+        let result = compute_mcc(&tree.root(), &document, src, &mut evidence);
+        (result, evidence.finish())
+    }
+
+    #[test]
+    fn heading_skip_records_evidence_with_the_applied_weight() {
+        let src = "# Top\n\n### Skipped\n";
+        let (result, contributions) = compute_with_evidence(src);
+        let skip: Vec<_> = contributions
+            .iter()
+            .filter(|c| c.reason.as_str() == "markdown.heading_skip")
+            .collect();
+        assert_eq!(skip.len(), 1);
+        assert_eq!(skip[0].amount, 1.0);
+        assert_eq!(skip[0].span.start_line, 3);
+        assert_eq!(
+            skip[0].metric.as_str(),
+            "markdown.complexity.cognitive_complexity"
+        );
+        assert!(result.positive >= skip[0].amount);
+    }
+
+    #[test]
+    fn oversized_flat_section_and_overlong_paragraph_record_evidence() {
+        let filler = "word ".repeat(801);
+        let src = format!("# Title\n\n{}\n", filler);
+        let (_, contributions) = compute_with_evidence(&src);
+        let reasons: Vec<&str> = contributions.iter().map(|c| c.reason.as_str()).collect();
+        assert!(reasons.contains(&"markdown.oversized_flat_section"));
+        assert!(reasons.contains(&"markdown.overlong_paragraph"));
     }
 
     #[test]

@@ -18,6 +18,7 @@ use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, ParseDiagnostic,
     Result, SourceFile,
 };
+use mehen_metrics::MetricEvidence;
 
 /// Ruby Prism analyzer (Phase 9, see `docs/ruby-prism-spec.md`).
 pub struct RubyAnalyzer;
@@ -43,9 +44,10 @@ impl LanguageAnalyzer for RubyAnalyzer {
         AnalysisBackend::Prism
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         let parse = ruby_prism::parse(source.text.as_bytes());
-        let root = walker::walk_program(&parse, &source.text, &source.line_index);
+        let mut evidence = MetricEvidence::new("ruby", config.emit_contributions);
+        let root = walker::walk_program(&parse, &source.text, &source.line_index, &mut evidence);
         // Recovered Prism syntax errors are surfaced as `error` (not
         // `warning`) so the diagnostic contract (plan §9.3) treats the
         // analysis as incomplete: `mehen metrics` exits 1 and
@@ -59,7 +61,7 @@ impl LanguageAnalyzer for RubyAnalyzer {
             backend: AnalysisBackend::Prism,
             diagnostics,
             root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
     }
 }

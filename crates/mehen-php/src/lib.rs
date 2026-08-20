@@ -29,6 +29,7 @@ use mehen_core::{
     AnalysisBackend, AnalysisConfig, Language, LanguageAnalysis, LanguageAnalyzer, ParseDiagnostic,
     Result, SourceFile,
 };
+use mehen_metrics::MetricEvidence;
 
 pub struct PhpAnalyzer;
 
@@ -53,7 +54,7 @@ impl LanguageAnalyzer for PhpAnalyzer {
         AnalysisBackend::Mago
     }
 
-    fn analyze(&self, source: &SourceFile, _config: &AnalysisConfig) -> Result<LanguageAnalysis> {
+    fn analyze(&self, source: &SourceFile, config: &AnalysisConfig) -> Result<LanguageAnalysis> {
         // mago-syntax allocates everything into a bump arena. The
         // arena lives only for this `analyze` call; everything we
         // put into `LanguageAnalysis` must be owned (no borrow
@@ -76,14 +77,15 @@ impl LanguageAnalyzer for PhpAnalyzer {
             .map(|err| ParseDiagnostic::error("php.parse_error", format!("mago-syntax: {err}")))
             .collect();
 
-        let root = walker::walk_program(program, &source.text, &source.line_index);
+        let mut evidence = MetricEvidence::new("php", config.emit_contributions);
+        let root = walker::walk_program(program, &source.text, &source.line_index, &mut evidence);
 
         Ok(LanguageAnalysis {
             language: Language::Php,
             backend: AnalysisBackend::Mago,
             diagnostics,
             root,
-            contributions: Vec::new(),
+            contributions: evidence.finish(),
         })
     }
 }
