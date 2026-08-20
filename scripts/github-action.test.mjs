@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+import zlib from "node:zlib";
 
 import {
   DEFAULT_TEST_EXCLUDES,
@@ -11,6 +14,7 @@ import {
   collectThresholdViolations,
   diffJsonHasDocs,
   extractMarkdownDocsSection,
+  extractZip,
   formatMetricCell,
   inferPolarity,
   isBaseCoverageFailure,
@@ -21,6 +25,7 @@ import {
   parseList,
   parseThresholds,
   parseVersionOutput,
+  pickBaseArtifact,
   renderFooter,
   unionMetricColumns,
 } from "./github-action.mjs";
@@ -596,4 +601,164 @@ test("isBaseCoverageFailure matches only stderr naming a base report path", () =
     isBaseCoverageFailure(failure("failed to parse coverage report"), []),
     false,
   );
+});
+
+
+// ── Workflow-artifact base source (issue #254, rung 2) ───────────────
+
+/**
+ * Build a standard ZIP archive in memory — local headers, central
+ * directory, end-of-central-directory — so extractZip is tested
+ * against real archive bytes without a binary fixture. Entries:
+ * `{ name, content, method }` with method 0 (stored) or 8 (deflate),
+ * matching what GitHub serves for workflow artifacts.
+ */
+function buildZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const nameBytes = Buffer.from(entry.name, "utf8");
+    const raw = Buffer.from(entry.content ?? "", "utf8");
+    const method = entry.method ?? 8;
+    const data = method === 8 ? zlib.deflateRawSync(raw) : raw;
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(data.length, 18); // compressed size
+    local.writeUInt32LE(raw.length, 22); // uncompressed size
+    local.writeUInt16LE(nameBytes.length, 26);
+    localParts.push(local, nameBytes, data);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 6); // version needed
+    central.writeUInt16LE(method, 10);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(raw.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt32LE(offset, 42); // local header offset
+    centralParts.push(central, nameBytes);
+
+    offset += 30 + nameBytes.length + data.length;
+  }
+  const centralStart = offset;
+  const centralBuffer = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralBuffer.length, 12);
+  eocd.writeUInt32LE(centralStart, 16);
+  return Buffer.concat([...localParts, centralBuffer, eocd]);
+}
+
+function tempExtractDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "mehen-zip-test-"));
+}
+
+test("extractZip extracts stored and deflated entries with nested paths", () => {
+  const zip = buildZip([
+    { name: "lcov.info", content: "TN:\nSF:a.rs\nDA:1,1\nend_of_record\n" },
+    {
+      name: "nested/dir/cobertura.xml",
+      content: "<coverage/>",
+      method: 0,
+    },
+  ]);
+  const dir = tempExtractDir();
+  try {
+    const files = extractZip(zip, dir);
+    assert.deepEqual(
+      files.map((f) => path.relative(dir, f)).sort(),
+      ["lcov.info", path.join("nested", "dir", "cobertura.xml")].sort(),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(dir, "lcov.info"), "utf8"),
+      "TN:\nSF:a.rs\nDA:1,1\nend_of_record\n",
+    );
+    assert.equal(
+      fs.readFileSync(path.join(dir, "nested", "dir", "cobertura.xml"), "utf8"),
+      "<coverage/>",
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("extractZip skips directory entries and rejects zip-slip escapes", () => {
+  const clean = buildZip([
+    { name: "reports/", content: "" },
+    { name: "reports/lcov.info", content: "SF:a\nDA:1,1\nend_of_record\n" },
+  ]);
+  const dir = tempExtractDir();
+  try {
+    const files = extractZip(clean, dir);
+    assert.equal(files.length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // A hostile entry escaping the destination is an integrity failure,
+  // not a degradation case: extraction must throw, never write.
+  const hostile = buildZip([{ name: "../evil.txt", content: "boom" }]);
+  const dir2 = tempExtractDir();
+  try {
+    assert.throws(
+      () => extractZip(hostile, dir2),
+      /escapes the extraction directory/,
+    );
+    assert.ok(!fs.existsSync(path.join(dir2, "..", "evil.txt")));
+  } finally {
+    fs.rmSync(dir2, { recursive: true, force: true });
+  }
+});
+
+test("extractZip rejects non-zip input", () => {
+  const dir = tempExtractDir();
+  try {
+    assert.throws(
+      () => extractZip(Buffer.from("definitely not a zip"), dir),
+      /not a zip archive/,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pickBaseArtifact picks the newest non-expired artifact for the base SHA", () => {
+  const baseSha = "a".repeat(40);
+  const artifacts = [
+    {
+      id: 1,
+      expired: false,
+      created_at: "2026-08-01T00:00:00Z",
+      workflow_run: { head_sha: baseSha },
+    },
+    {
+      id: 2,
+      expired: false,
+      created_at: "2026-08-02T00:00:00Z",
+      workflow_run: { head_sha: baseSha },
+    },
+    // Expired entries and other SHAs never match.
+    {
+      id: 3,
+      expired: true,
+      created_at: "2026-08-03T00:00:00Z",
+      workflow_run: { head_sha: baseSha },
+    },
+    {
+      id: 4,
+      expired: false,
+      created_at: "2026-08-04T00:00:00Z",
+      workflow_run: { head_sha: "b".repeat(40) },
+    },
+  ];
+  assert.equal(pickBaseArtifact(artifacts, baseSha)?.id, 2);
+  assert.equal(pickBaseArtifact(artifacts, "c".repeat(40)), null);
+  assert.equal(pickBaseArtifact([], baseSha), null);
+  assert.equal(pickBaseArtifact(undefined, baseSha), null);
+  assert.equal(pickBaseArtifact(artifacts, ""), null);
 });
