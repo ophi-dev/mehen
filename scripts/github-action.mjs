@@ -580,6 +580,8 @@ async function fetchArtifactBaseReports(context, artifactName) {
         "GET",
         `/repos/${owner}/${repo}/actions/artifacts?name=${encodeURIComponent(artifactName)}&per_page=100&page=${page}`,
         token,
+        undefined,
+        { timeoutMs: ARTIFACT_DOWNLOAD_TIMEOUT_MS },
       );
       const artifacts = Array.isArray(listing?.artifacts)
         ? listing.artifacts
@@ -1521,7 +1523,7 @@ async function listComments(owner, repo, issueNumber, token) {
   }
 }
 
-async function githubRequest(method, apiPath, token, body = undefined) {
+async function githubRequest(method, apiPath, token, body = undefined, options = {}) {
   const response = await fetch(`https://api.github.com${apiPath}`, {
     method,
     headers: {
@@ -1531,6 +1533,9 @@ async function githubRequest(method, apiPath, token, body = undefined) {
       "X-GitHub-Api-Version": "2022-11-28",
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+    // Callers on a degradation path (the artifact rung) bound their
+    // requests so a stalled API call becomes a fallback, not a hang.
+    signal: options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined,
   });
 
   if (!response.ok) {

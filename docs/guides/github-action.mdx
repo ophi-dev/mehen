@@ -212,6 +212,7 @@ permissions:
   pull-requests: write
   issues: write
   code-quality: write   # actions/upload-code-coverage
+  actions: read         # mehen's artifact base-coverage rung (coverage-artifact-name)
 
 steps:
   - run: pytest --cov=. --cov-report=xml         # one Cobertura report...
