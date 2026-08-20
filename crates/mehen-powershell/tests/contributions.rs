@@ -68,7 +68,7 @@ fn evidence_sums_match_published_metrics() {
         "nargs",
     ] {
         assert_eq!(
-            evidence_sum(&analysis, key.trim_end_matches(".sum")),
+            evidence_sum(&analysis, key),
             metric(&analysis, key),
             "evidence for `{key}` must sum to the published value",
         );
@@ -173,7 +173,7 @@ function Test-Nesting($a, $b) {
     let cognitive: Vec<f64> = analysis
         .contributions
         .iter()
-        .filter(|item| item.metric.as_str() == "cognitive")
+        .filter(|item| item.metric.as_str() == "cognitive.sum")
         .map(|item| item.amount)
         .collect();
     assert_eq!(cognitive, vec![1.0, 2.0]);

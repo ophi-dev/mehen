@@ -66,9 +66,9 @@ fn evidence_sums_match_published_metrics() {
     // evidence. Cyclomatic includes the per-space McCabe base rows
     // (`java.cyclomatic.base.<kind>`), so it sums exactly too.
     for (evidence_key, metric_key) in [
-        ("cyclomatic", "cyclomatic.sum"),
-        ("cognitive", "cognitive.sum"),
-        ("nexit", "nexit.sum"),
+        ("cyclomatic.sum", "cyclomatic.sum"),
+        ("cognitive.sum", "cognitive.sum"),
+        ("nexit.sum", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),
         ("abc.branches", "abc.branches"),
         ("abc.conditions", "abc.conditions"),
@@ -162,7 +162,7 @@ class Nest {
     let cognitive: Vec<f64> = analysis
         .contributions
         .iter()
-        .filter(|item| item.metric.as_str() == "cognitive")
+        .filter(|item| item.metric.as_str() == "cognitive.sum")
         .map(|item| item.amount)
         .collect();
     assert_eq!(cognitive, vec![1.0, 2.0]);

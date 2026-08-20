@@ -54,6 +54,11 @@ impl From<String> for MetricKey {
 /// renames stay in one place.
 pub mod keys {
     pub const CYCLOMATIC: &str = "cyclomatic";
+    /// Rolled-up cyclomatic complexity (`Σ decisions + 1` per folded
+    /// space) as published by the shared walker. Contribution evidence
+    /// attaches here — the bare per-space key does not move when a
+    /// nested function's complexity changes.
+    pub const CYCLOMATIC_SUM: &str = "cyclomatic.sum";
     pub const COGNITIVE: &str = "cognitive";
     pub const LOC: &str = "loc";
     pub const LOC_LLOC: &str = "loc.lloc";
@@ -84,6 +89,10 @@ pub mod keys {
     pub const NOM_FUNCTIONS: &str = "nom.functions";
     pub const NOM_CLOSURES: &str = "nom.closures";
     pub const NEXIT: &str = "nexit";
+    /// Rolled-up exit count across folded spaces — the aggregate that
+    /// moves when a function gains an exit; contribution evidence
+    /// attaches here.
+    pub const NEXIT_SUM: &str = "nexit.sum";
     pub const NPA: &str = "npa";
     pub const NPM: &str = "npm";
     pub const WMC: &str = "wmc";

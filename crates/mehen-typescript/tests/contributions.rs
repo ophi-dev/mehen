@@ -57,9 +57,9 @@ fn evidence_sums_match_published_metrics() {
     assert!(!analysis.contributions.is_empty());
 
     for (evidence_key, metric_key) in [
-        ("cyclomatic", "cyclomatic.sum"),
-        ("cognitive", "cognitive.sum"),
-        ("nexit", "nexit.sum"),
+        ("cyclomatic.sum", "cyclomatic.sum"),
+        ("cognitive.sum", "cognitive.sum"),
+        ("nexit.sum", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),
         ("abc.branches", "abc.branches"),
         ("abc.conditions", "abc.conditions"),

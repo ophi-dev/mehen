@@ -76,9 +76,9 @@ fn evidence_sums_match_published_metrics() {
     assert!(!analysis.contributions.is_empty());
 
     for (evidence_key, metric_key) in [
-        ("cyclomatic", "cyclomatic.sum"),
-        ("cognitive", "cognitive.sum"),
-        ("nexit", "nexit.sum"),
+        ("cyclomatic.sum", "cyclomatic.sum"),
+        ("cognitive.sum", "cognitive.sum"),
+        ("nexit.sum", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),
         ("abc.branches", "abc.branches"),
         ("abc.conditions", "abc.conditions"),
@@ -215,7 +215,7 @@ function nested(int $a, int $b): int
     let cognitive: Vec<f64> = analysis
         .contributions
         .iter()
-        .filter(|item| item.metric.as_str() == "cognitive")
+        .filter(|item| item.metric.as_str() == "cognitive.sum")
         .map(|item| item.amount)
         .collect();
     assert_eq!(cognitive, vec![1.0, 2.0]);
@@ -246,7 +246,7 @@ function pick(int $a): int
         .contributions
         .iter()
         .filter(|item| {
-            item.metric.as_str() == "cyclomatic"
+            item.metric.as_str() == "cyclomatic.sum"
                 // Per-space McCabe base rows are not decision events.
                 && !item.reason.as_str().starts_with("php.cyclomatic.base.")
         })
@@ -257,7 +257,7 @@ function pick(int $a): int
     let cognitive: Vec<(&str, f64)> = analysis
         .contributions
         .iter()
-        .filter(|item| item.metric.as_str() == "cognitive")
+        .filter(|item| item.metric.as_str() == "cognitive.sum")
         .map(|item| (item.reason.as_str(), item.amount))
         .collect();
     assert_eq!(
@@ -265,7 +265,7 @@ function pick(int $a): int
         vec![("php.cognitive.if", 1.0), ("php.cognitive.else", 1.0)]
     );
     assert_eq!(
-        evidence_sum(&analysis, "cognitive"),
+        evidence_sum(&analysis, "cognitive.sum"),
         metric(&analysis, "cognitive.sum"),
     );
 }

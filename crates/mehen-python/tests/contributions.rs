@@ -54,9 +54,9 @@ fn evidence_sums_match_published_metrics() {
     assert!(!analysis.contributions.is_empty());
 
     for (evidence_key, metric_key) in [
-        ("cyclomatic", "cyclomatic.sum"),
-        ("cognitive", "cognitive.sum"),
-        ("nexit", "nexit.sum"),
+        ("cyclomatic.sum", "cyclomatic.sum"),
+        ("cognitive.sum", "cognitive.sum"),
+        ("nexit.sum", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),
         ("abc.branches", "abc.branches"),
         ("abc.conditions", "abc.conditions"),
@@ -203,7 +203,7 @@ def nested(a, b):
     let cognitive: Vec<f64> = analysis
         .contributions
         .iter()
-        .filter(|item| item.metric.as_str() == "cognitive")
+        .filter(|item| item.metric.as_str() == "cognitive.sum")
         .map(|item| item.amount)
         .collect();
     assert_eq!(cognitive, vec![1.0, 2.0]);
@@ -261,9 +261,9 @@ def process(items, flag):
     let analysis = analyze(source, &AnalysisConfig::production());
 
     for (evidence_key, metric_key) in [
-        ("cyclomatic", "cyclomatic.sum"),
-        ("cognitive", "cognitive.sum"),
-        ("nexit", "nexit.sum"),
+        ("cyclomatic.sum", "cyclomatic.sum"),
+        ("cognitive.sum", "cognitive.sum"),
+        ("nexit.sum", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),
         ("abc.branches", "abc.branches"),
         ("abc.conditions", "abc.conditions"),

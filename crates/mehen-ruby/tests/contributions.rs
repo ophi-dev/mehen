@@ -57,9 +57,9 @@ fn evidence_sums_match_published_metrics() {
     assert!(!analysis.contributions.is_empty());
 
     for (evidence_key, metric_key) in [
-        ("cyclomatic", "cyclomatic.sum"),
-        ("cognitive", "cognitive.sum"),
-        ("nexit", "nexit.sum"),
+        ("cyclomatic.sum", "cyclomatic.sum"),
+        ("cognitive.sum", "cognitive.sum"),
+        ("nexit.sum", "nexit.sum"),
         ("abc.assignments", "abc.assignments"),
         ("abc.branches", "abc.branches"),
         ("abc.conditions", "abc.conditions"),
@@ -149,7 +149,7 @@ end
         .collect();
     assert_eq!(boolean, vec![1.0]);
     assert_eq!(metric(&analysis, "cognitive.sum"), 2.0); // if + first &&
-    assert_eq!(evidence_sum(&analysis, "cognitive"), 2.0);
+    assert_eq!(evidence_sum(&analysis, "cognitive.sum"), 2.0);
 }
 
 #[test]
@@ -161,7 +161,8 @@ fn modifier_forms_record_flat_cognitive_increments() {
         .contributions
         .iter()
         .filter(|item| {
-            item.metric.as_str() == "cognitive" && item.reason.as_str() == "ruby.cognitive.if_node"
+            item.metric.as_str() == "cognitive.sum"
+                && item.reason.as_str() == "ruby.cognitive.if_node"
         })
         .map(|item| item.amount)
         .collect();

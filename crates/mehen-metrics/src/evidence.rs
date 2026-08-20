@@ -71,13 +71,15 @@ impl MetricEvidence {
         }
     }
 
-    /// One cyclomatic decision point (`if`, `case`, `&&`, …). Amount +1.
+    /// One cyclomatic decision point (`if`, `case`, `&&`, …). Amount +1,
+    /// attached to the rolled-up `cyclomatic.sum` key — the aggregate
+    /// that moves when a nested space gains a decision.
     pub fn decision(&mut self, span: SourceSpan, detail: &str) {
         if !self.is_enabled() {
             return;
         }
         let reason = self.reason("cyclomatic", detail);
-        self.record(keys::CYCLOMATIC, span, 1.0, reason);
+        self.record(keys::CYCLOMATIC_SUM, span, 1.0, reason);
     }
 
     /// Record the per-space McCabe base (+1) for every space in a finished
@@ -97,7 +99,7 @@ impl MetricEvidence {
         let mut stack = vec![root];
         while let Some(space) = stack.pop() {
             let reason = self.reason("cyclomatic.base", space.kind.as_str());
-            self.record(keys::CYCLOMATIC, space.span, 1.0, reason);
+            self.record(keys::CYCLOMATIC_SUM, space.span, 1.0, reason);
             stack.extend(space.spaces.iter());
         }
     }
@@ -112,16 +114,17 @@ impl MetricEvidence {
             return;
         }
         let reason = self.reason("cognitive", detail);
-        self.record(keys::COGNITIVE, span, f64::from(amount), reason);
+        self.record(keys::COGNITIVE_SUM, span, f64::from(amount), reason);
     }
 
-    /// One exit point (`return`, `throw`, `raise`, …). Amount +1.
+    /// One exit point (`return`, `throw`, `raise`, …). Amount +1,
+    /// attached to the rolled-up `nexit.sum` key.
     pub fn exit(&mut self, span: SourceSpan, detail: &str) {
         if !self.is_enabled() {
             return;
         }
         let reason = self.reason("nexit", detail);
-        self.record(keys::NEXIT, span, 1.0, reason);
+        self.record(keys::NEXIT_SUM, span, 1.0, reason);
     }
 
     /// One ABC assignment (`A`). Amount +1.
@@ -295,7 +298,7 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .all(|c| c.metric.as_str() == keys::CYCLOMATIC)
+                .all(|c| c.metric.as_str() == keys::CYCLOMATIC_SUM)
         );
 
         let mut disabled = MetricEvidence::new("t", false);
