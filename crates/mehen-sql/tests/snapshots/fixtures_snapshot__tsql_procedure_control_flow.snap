@@ -102,7 +102,7 @@ expression: "serde_json :: json!\n({\n    \"backend\" : analysis.backend.label()
     "sql.predicate.null_semantics_risk_count": 0,
     "sql.procedural.block_count": 6,
     "sql.procedural.case_statement_count": 0,
-    "sql.procedural.cognitive_complexity": 7.0,
+    "sql.procedural.cognitive_complexity": 8.0,
     "sql.procedural.cyclomatic_complexity": 8.0,
     "sql.procedural.dynamic_sql_count": 1,
     "sql.procedural.exception_handler_count": 1,

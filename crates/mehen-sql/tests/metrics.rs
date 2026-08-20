@@ -1249,3 +1249,125 @@ fn in_subquery_count_ignores_procedural_in_keywords() {
     let predicate = metrics("SELECT a FROM t WHERE a IN (SELECT id FROM u)");
     assert_eq!(get(&predicate, "sql.subquery.in_count"), 1.0);
 }
+
+// ── PR #257 review regressions (procedural state machine) ──────────────
+
+/// Homogeneous boolean chains cost one cognitive *sequence*, not one per
+/// operator — operands must not break the run (Codex P2, PR #257).
+#[test]
+fn boolean_sequences_charge_per_run_not_per_operator() {
+    let homogeneous = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           if a = 1 and b = 2 and c = 3 then\n\
+             null;\n\
+           end if;\n\
+         end;\n\
+         /\n",
+    );
+    // Cyclomatic: entry 1 + if 1 + two ANDs = 4.
+    assert_eq!(
+        get(&homogeneous, "sql.procedural.cyclomatic_complexity"),
+        4.0
+    );
+    // Cognitive: if 1 + ONE sequence for the AND-run = 2.
+    assert_eq!(
+        get(&homogeneous, "sql.procedural.cognitive_complexity"),
+        2.0
+    );
+
+    let mixed = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           if a = 1 and b = 2 or c = 3 then\n\
+             null;\n\
+           end if;\n\
+         end;\n\
+         /\n",
+    );
+    // Cognitive: if 1 + AND-run 1 + OR-run 1 = 3 (operator change re-charges).
+    assert_eq!(get(&mixed, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// `WHEN NOT <cond>` in a procedural CASE is a real branch; only the MERGE
+/// `WHEN [NOT] MATCHED` token shape is declaratively excluded (Codex P2,
+/// PR #257).
+#[test]
+fn case_when_not_condition_still_counts() {
+    // The Oracle grammar sends procedural CASE to Unparsable inside the
+    // block region — the token machine must still see both WHEN arms.
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           case when not done then null; when ready then null; end case;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.case_statement_count"), 1.0);
+    // Cyclomatic: two WHEN arms. The Oracle grammar cannot parse procedural
+    // CASE, so the whole block degrades to an Unparsable fragment — no typed
+    // block node forms, the statement is not classified `anonymous_block`,
+    // and no entry path is credited (only classified regions earn entries).
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+    // MERGE keeps its clauses out of the procedural family.
+    let merge = metrics(
+        "MERGE INTO t USING s ON t.id = s.id \
+         WHEN MATCHED THEN UPDATE SET c = 2 \
+         WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)",
+    );
+    assert_eq!(get(&merge, "sql.procedural.case_statement_count"), 0.0);
+    assert_eq!(get(&merge, "sql.procedural.cyclomatic_complexity"), 0.0);
+}
+
+/// Parenthesized conditions are ordinary statements (`IF (@x > 0)`), not the
+/// scalar `IF(…)` function — the discriminator is the parsed function-name
+/// shape, not the following `(` (Codex P2, PR #257).
+#[test]
+fn parenthesized_if_condition_counts_as_control_flow() {
+    let tsql = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if (@batch > 0)\n\
+         begin\n\
+           select 1;\n\
+         end\n",
+    );
+    assert_eq!(get(&tsql, "sql.procedural.if_count"), 1.0);
+
+    // The MySQL scalar IF() *function* in parsed SQL stays declarative.
+    let scalar = metrics("-- sqlfluff:dialect:mysql\nSELECT IF(x > 0, 1, 2) FROM t;\n");
+    assert_eq!(get(&scalar, "sql.procedural.if_count"), 0.0);
+}
+
+/// A T-SQL `WHILE … BEGIN … END` body carries the loop's nesting: the IF
+/// inside costs 1 + 1, exactly like its PL/SQL `WHILE … LOOP` equivalent
+/// (Codex P2, PR #257).
+#[test]
+fn tsql_while_begin_body_nests_its_contents() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         while @x > 0\n\
+         begin\n\
+           if @x = 5 break;\n\
+           set @x = @x - 1;\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    // Cognitive: while 1 + if (1 + 1 nesting) = 3.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// `DBMS_SQL.PARSE(…)` is dynamic SQL even though the parsed package
+/// qualifier lexes as a `NakedIdentifier` (Codex P2, PR #257).
+#[test]
+fn dbms_sql_package_reference_counts_as_dynamic_sql() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           dbms_sql.parse(c, 'drop table scratch', 1);\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    assert!(get(&m, "sql.change_risk_score") >= 5.0);
+}

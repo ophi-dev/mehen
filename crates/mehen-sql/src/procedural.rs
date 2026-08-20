@@ -145,6 +145,10 @@ struct PToken {
     /// (e.g. a column named `raise` in parsed SQL) is *not* keyword-like and
     /// can never trip the machine.
     keyword_like: bool,
+    /// Whether the token is a parsed function-call name
+    /// (`FunctionNameIdentifier`) — distinguishes the scalar `IF(…)` function
+    /// from a statement-level `IF (cond)` with a parenthesized condition.
+    is_function_name: bool,
     span: SourceSpan,
 }
 
@@ -177,6 +181,7 @@ fn tokens_of(region: &ErasedSegment, line_at: &impl Fn(u32) -> u32) -> Vec<PToke
                     kind,
                     SyntaxKind::Keyword | SyntaxKind::Word | SyntaxKind::FunctionNameIdentifier
                 ),
+                is_function_name: kind == SyntaxKind::FunctionNameIdentifier,
                 span,
             });
             return;
@@ -234,6 +239,10 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
 enum Ctx {
     Block {
         exception_section: bool,
+        /// This block is the `BEGIN … END` body of a T-SQL `WHILE` — it
+        /// carries the loop's nesting so an `IF` inside `WHILE … BEGIN … END`
+        /// costs `1 + 1` like its PL/SQL `WHILE … LOOP` equivalent.
+        loop_body: bool,
     },
     Try,
     Catch,
@@ -292,7 +301,15 @@ impl Machine<'_> {
             .filter(|c| {
                 matches!(
                     c,
-                    Ctx::If { .. } | Ctx::Loop | Ctx::Case { .. } | Ctx::Catch | Ctx::Handler
+                    Ctx::If { .. }
+                        | Ctx::Loop
+                        | Ctx::Case { .. }
+                        | Ctx::Catch
+                        | Ctx::Handler
+                        | Ctx::Block {
+                            loop_body: true,
+                            ..
+                        }
                 )
             })
             .count() as u32
@@ -421,18 +438,25 @@ impl Machine<'_> {
                         _ => {
                             self.in_body = true;
                             self.facts.block_count += 1;
-                            // A block opening directly under a fresh T-SQL IF
+                            // The block is a T-SQL `WHILE … BEGIN` loop body
+                            // when a loop header is pending — it then carries
+                            // the loop's nesting (Codex P2). Otherwise a
+                            // block opening directly under a fresh T-SQL IF
                             // binds to it: the IF closes with the block.
-                            if let Some(Ctx::If {
-                                with_then: false,
-                                bound,
-                            }) = self.stack.last_mut()
-                            {
-                                *bound = true;
-                            }
+                            let loop_body = self.pending_loop_header;
                             self.pending_loop_header = false;
+                            if !loop_body {
+                                if let Some(Ctx::If {
+                                    with_then: false,
+                                    bound,
+                                }) = self.stack.last_mut()
+                                {
+                                    *bound = true;
+                                }
+                            }
                             self.stack.push(Ctx::Block {
                                 exception_section: false,
+                                loop_body,
                             });
                             self.facts.max_block_depth =
                                 self.facts.max_block_depth.max(self.block_depth());
@@ -517,8 +541,15 @@ impl Machine<'_> {
                         .map(|j| tokens[j].word.as_str())
                         .unwrap_or("");
                     // `DROP TABLE IF EXISTS` / `CREATE TABLE IF NOT EXISTS`
-                    // guards and the `IF(…)` conditional function are not
-                    // control flow.
+                    // guards and the `IF(…)` conditional *function* are not
+                    // control flow. The function is recognized by its parse
+                    // shape (`FunctionNameIdentifier`), not by a following
+                    // `(` — `IF (@count > 0) BEGIN … END` / `IF (ready)
+                    // THEN` are ordinary statements with parenthesized
+                    // conditions and must count (Codex P2). In unparsable
+                    // runs everything is a `Word`, so a scalar `IF(…)` there
+                    // counts as a branch — erring toward keeping control
+                    // flow visible.
                     let ddl_guard = matches!(
                         prev,
                         "TABLE"
@@ -538,7 +569,7 @@ impl Machine<'_> {
                             | "USER"
                             | "EXISTS"
                     );
-                    if !ddl_guard && word(i + 1) != "(" {
+                    if !ddl_guard && !t.is_function_name {
                         self.facts.if_count += 1;
                         let nesting = self.nesting();
                         self.cyclo(t.span, reason::IF);
@@ -584,8 +615,13 @@ impl Machine<'_> {
                 }
                 "WHEN" if kw => {
                     self.break_bool_run();
-                    // MERGE clauses (`WHEN [NOT] MATCHED`) are declarative.
-                    if matches!(word(i + 1), "MATCHED" | "NOT") {
+                    // MERGE clauses (`WHEN MATCHED` / `WHEN NOT MATCHED`) are
+                    // declarative. Only that exact token shape is excluded —
+                    // a searched CASE arm like `WHEN NOT done THEN …` is a
+                    // real branch (Codex P2).
+                    if word(i + 1) == "MATCHED"
+                        || (word(i + 1) == "NOT" && word(i + 2) == "MATCHED")
+                    {
                         i += 1;
                         continue;
                     }
@@ -593,6 +629,7 @@ impl Machine<'_> {
                         Some(Ctx::Case { whens, .. }) => whens.push(t.span),
                         Some(Ctx::Block {
                             exception_section: true,
+                            ..
                         }) => {
                             self.facts.exception_handler_count += 1;
                             let nesting = self.nesting();
@@ -625,9 +662,12 @@ impl Machine<'_> {
                         .rev()
                         .find(|c| matches!(c, Ctx::Block { .. }))
                     {
-                        Some(Ctx::Block { exception_section }) => *exception_section = true,
+                        Some(Ctx::Block {
+                            exception_section, ..
+                        }) => *exception_section = true,
                         _ => self.stack.push(Ctx::Block {
                             exception_section: true,
+                            loop_body: false,
                         }),
                     }
                 }
@@ -760,7 +800,11 @@ impl Machine<'_> {
                         self.count_dynamic_sql(t.span);
                     }
                 }
-                "DBMS_SQL" if kw => {
+                "DBMS_SQL" => {
+                    // The Oracle dynamic-SQL package. In a parsed call
+                    // (`DBMS_SQL.PARSE(…)`) the package qualifier lexes as a
+                    // `NakedIdentifier` — not keyword-like — so this arm
+                    // deliberately has no `kw` guard (Codex P2).
                     self.break_bool_run();
                     if self.in_body {
                         self.count_dynamic_sql(t.span);
@@ -784,12 +828,33 @@ impl Machine<'_> {
                             self.cognitive(t.span, 1.0, reason::BOOLEAN_SEQUENCE);
                         }
                         self.last_bool = Some(op);
-                        i += 1;
-                        continue; // skip the run-break below
                     }
                 }
                 _ => {
-                    self.break_bool_run();
+                    // Ordinary operands (`a AND b AND c`) keep the boolean
+                    // run alive — only expression boundaries end it, so a
+                    // homogeneous chain costs one cognitive sequence, not
+                    // one per operator (Codex P2). Every control keyword has
+                    // an explicit arm above that breaks the run; here only
+                    // clause starters and argument separators do.
+                    if matches!(
+                        t.word.as_str(),
+                        "," | "WHERE"
+                            | "HAVING"
+                            | "ON"
+                            | "SET"
+                            | "SELECT"
+                            | "FROM"
+                            | "GROUP"
+                            | "ORDER"
+                            | "VALUES"
+                            | "INTO"
+                            | "UNION"
+                            | "JOIN"
+                            | "QUALIFY"
+                    ) {
+                        self.break_bool_run();
+                    }
                 }
             }
             i += 1;
