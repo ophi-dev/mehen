@@ -92,7 +92,7 @@ async function main() {
   let baseCoverage = await resolveBaseCoverage(context);
   const cli = prepareMehen();
   const version = detectMehenVersion(cli);
-  const diffArgs = buildDiffArgs(baseCoverage.args);
+  let diffArgs = buildDiffArgs(baseCoverage.args);
   let diff;
   try {
     diff = runMehen(cli, diffArgs, { acceptGateOutput: isGateFailureReport });
@@ -114,7 +114,11 @@ async function main() {
       args: [],
       disclosure: `Base coverage: a retrieved report for \`${context.baseSha.slice(0, 7)}\` was unusable — coverage values are shown without a base to compare against, not as trends.`,
     };
-    diff = runMehen(cli, buildDiffArgs(), {
+    // Rebuild — not just rerun — so every later consumer of the
+    // argument list (the Markdown docs rerun) also sees the degraded
+    // arguments instead of re-tripping over the rejected report.
+    diffArgs = buildDiffArgs();
+    diff = runMehen(cli, diffArgs, {
       acceptGateOutput: isGateFailureReport,
     });
   }
@@ -749,14 +753,19 @@ function extractZip(buffer, destDir, maxTotalBytes = Infinity) {
     } else if (method === 8) {
       // The declared sizes above are metadata a hostile archive can
       // understate; the inflate budget is the enforcement on actual
-      // output. zlib raises when the budget is exceeded.
-      const budget = Math.min(
-        Number.MAX_SAFE_INTEGER,
-        maxTotalBytes === Infinity
-          ? Number.MAX_SAFE_INTEGER
-          : maxTotalBytes - writtenTotal,
-      );
-      content = zlib.inflateRawSync(data, { maxOutputLength: budget });
+      // output. zlib validates maxOutputLength against
+      // buffer.kMaxLength — 4 GiB on Node 24 — so the unbounded case
+      // omits the option entirely and finite budgets are clamped
+      // below that floor (clamping down only tightens enforcement).
+      if (maxTotalBytes === Infinity) {
+        content = zlib.inflateRawSync(data);
+      } else {
+        const budget = Math.min(
+          0xffffffff,
+          Math.max(1, maxTotalBytes - writtenTotal),
+        );
+        content = zlib.inflateRawSync(data, { maxOutputLength: budget });
+      }
     } else {
       throw new Error(`unsupported zip compression method ${method}: ${name}`);
     }
