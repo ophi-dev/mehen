@@ -61,7 +61,15 @@ const CODECOV_PENDING_RETRIES = 3;
 const CODECOV_RETRY_DELAY_MS = 5000;
 // Mirrors mehen's own per-report ingestion cap (256 MiB): a base
 // artifact bigger than that could never be fed to the CLI anyway.
+// Enforced in three layers — artifact metadata, downloaded bytes, and
+// declared/actual decompressed size — so a hostile or corrupt archive
+// degrades instead of exhausting the runner.
 const ARTIFACT_MAX_BYTES = 256 * 1024 * 1024;
+// Artifact listings are newest-first; a base SHA older than ~1000
+// same-named uploads is better served by the lower rungs than by an
+// unbounded listing walk.
+const ARTIFACT_MAX_PAGES = 10;
+const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 60_000;
 
 if (isEntrypoint()) {
   main().catch((error) => {
@@ -556,13 +564,27 @@ async function fetchArtifactBaseReports(context, artifactName) {
   if (!owner || !repo || !token) {
     return null;
   }
-  let listing;
+  // Listings are newest-first across all runs, so the base SHA's
+  // artifact can sit past the first page in a busy repository; the
+  // first page containing a match holds the newest match overall.
+  // The page budget keeps a pathological history from stalling the
+  // rung — beyond it, the lower rungs serve better than a long walk.
+  let artifact = null;
   try {
-    listing = await githubRequest(
-      "GET",
-      `/repos/${owner}/${repo}/actions/artifacts?name=${encodeURIComponent(artifactName)}&per_page=100`,
-      token,
-    );
+    for (let page = 1; page <= ARTIFACT_MAX_PAGES; page += 1) {
+      const listing = await githubRequest(
+        "GET",
+        `/repos/${owner}/${repo}/actions/artifacts?name=${encodeURIComponent(artifactName)}&per_page=100&page=${page}`,
+        token,
+      );
+      const artifacts = Array.isArray(listing?.artifacts)
+        ? listing.artifacts
+        : [];
+      artifact = pickBaseArtifact(artifacts, context.baseSha);
+      if (artifact || artifacts.length < 100) {
+        break;
+      }
+    }
   } catch (error) {
     const hint = String(error.message).includes(" 403 ")
       ? " (does the job grant `actions: read`?)"
@@ -572,7 +594,6 @@ async function fetchArtifactBaseReports(context, artifactName) {
     );
     return null;
   }
-  const artifact = pickBaseArtifact(listing?.artifacts, context.baseSha);
   if (!artifact) {
     console.log(
       `no '${artifactName}' artifact found for base ${context.baseSha}; trying the next base-coverage source.`,
@@ -589,7 +610,9 @@ async function fetchArtifactBaseReports(context, artifactName) {
   try {
     // fetch follows the 302 to blob storage automatically; undici
     // drops the Authorization header on the cross-origin redirect,
-    // which is exactly what the signed blob URL expects.
+    // which is exactly what the signed blob URL expects. The abort
+    // signal turns a stalled blob transfer into a ladder degradation
+    // instead of a job-timeout hang.
     const response = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifact.id}/zip`,
       {
@@ -599,6 +622,7 @@ async function fetchArtifactBaseReports(context, artifactName) {
           "User-Agent": "mehen-action",
           "X-GitHub-Api-Version": "2022-11-28",
         },
+        signal: AbortSignal.timeout(ARTIFACT_DOWNLOAD_TIMEOUT_MS),
       },
     );
     if (!response.ok) {
@@ -607,13 +631,29 @@ async function fetchArtifactBaseReports(context, artifactName) {
       );
       return null;
     }
+    // The metadata check above trusts the API; these two enforce the
+    // cap on what actually arrives (a missing size_in_bytes field or
+    // a chunked response must not become an unbounded read).
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > ARTIFACT_MAX_BYTES) {
+      console.warn(
+        `artifact '${artifactName}' download declares ${declared} bytes (cap ${ARTIFACT_MAX_BYTES}); trying the next base-coverage source.`,
+      );
+      return null;
+    }
     const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > ARTIFACT_MAX_BYTES) {
+      console.warn(
+        `artifact '${artifactName}' download is ${buffer.length} bytes (cap ${ARTIFACT_MAX_BYTES}); trying the next base-coverage source.`,
+      );
+      return null;
+    }
     const dir = path.join(
       process.env.RUNNER_TEMP || os.tmpdir(),
       "mehen-artifact-base",
     );
     fs.mkdirSync(dir, { recursive: true });
-    const extracted = extractZip(buffer, dir);
+    const extracted = extractZip(buffer, dir, ARTIFACT_MAX_BYTES);
     if (extracted.length === 0) {
       console.log(
         `artifact '${artifactName}' for base ${context.baseSha} contained no files; trying the next base-coverage source.`,
@@ -638,10 +678,14 @@ async function fetchArtifactBaseReports(context, artifactName) {
  * node:zlib. Supports the two methods artifact zips use — stored (0)
  * and deflate (8); no zip64 (the artifact size cap is far below 4
  * GiB). Entries that would escape `destDir` (zip-slip) are rejected
- * loudly rather than skipped: a hostile archive is not a degradation
- * case but an integrity failure.
+ * loudly rather than skipped, and `maxTotalBytes` bounds the
+ * *decompressed* output — checked against the declared sizes up
+ * front and enforced per entry via zlib's maxOutputLength, so an
+ * archive whose metadata lies (a zip bomb) aborts mid-inflate
+ * instead of exhausting the runner. A hostile archive is not a
+ * degradation case but an integrity failure.
  */
-function extractZip(buffer, destDir) {
+function extractZip(buffer, destDir, maxTotalBytes = Infinity) {
   const EOCD_SIG = 0x06054b50;
   const CENTRAL_SIG = 0x02014b50;
   const LOCAL_SIG = 0x04034b50;
@@ -659,12 +703,15 @@ function extractZip(buffer, destDir) {
   const entryCount = buffer.readUInt16LE(eocd + 10);
   let cursor = buffer.readUInt32LE(eocd + 16);
   const extracted = [];
+  let declaredTotal = 0;
+  let writtenTotal = 0;
   for (let i = 0; i < entryCount; i += 1) {
     if (buffer.readUInt32LE(cursor) !== CENTRAL_SIG) {
       throw new Error("corrupt zip archive (central directory signature)");
     }
     const method = buffer.readUInt16LE(cursor + 10);
     const compressedSize = buffer.readUInt32LE(cursor + 20);
+    const uncompressedSize = buffer.readUInt32LE(cursor + 24);
     const nameLength = buffer.readUInt16LE(cursor + 28);
     const extraLength = buffer.readUInt16LE(cursor + 30);
     const commentLength = buffer.readUInt16LE(cursor + 32);
@@ -673,6 +720,12 @@ function extractZip(buffer, destDir) {
     cursor = cursor + 46 + nameLength + extraLength + commentLength;
     if (name.endsWith("/")) {
       continue; // directory entry
+    }
+    declaredTotal += uncompressedSize;
+    if (declaredTotal > maxTotalBytes) {
+      throw new Error(
+        `zip archive declares more than ${maxTotalBytes} decompressed bytes`,
+      );
     }
     const destPath = path.join(destDir, name);
     const relative = path.relative(destDir, destPath);
@@ -694,9 +747,24 @@ function extractZip(buffer, destDir) {
     if (method === 0) {
       content = data;
     } else if (method === 8) {
-      content = zlib.inflateRawSync(data);
+      // The declared sizes above are metadata a hostile archive can
+      // understate; the inflate budget is the enforcement on actual
+      // output. zlib raises when the budget is exceeded.
+      const budget = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        maxTotalBytes === Infinity
+          ? Number.MAX_SAFE_INTEGER
+          : maxTotalBytes - writtenTotal,
+      );
+      content = zlib.inflateRawSync(data, { maxOutputLength: budget });
     } else {
       throw new Error(`unsupported zip compression method ${method}: ${name}`);
+    }
+    writtenTotal += content.length;
+    if (writtenTotal > maxTotalBytes) {
+      throw new Error(
+        `zip archive expands past ${maxTotalBytes} decompressed bytes`,
+      );
     }
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
     fs.writeFileSync(destPath, content);

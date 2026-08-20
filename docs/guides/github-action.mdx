@@ -203,20 +203,28 @@ step), so trigger the workflow with both `on: pull_request` and `on: push: branc
 **Cobertura XML** report uploaded via
 [`actions/upload-code-coverage`](https://github.com/actions/upload-code-coverage). Cobertura is one
 of mehen's six ingestion formats, so **the same report feeds both consumers** — one test run, no
-extra tooling:
+extra tooling. GitHub's upload needs the `code-quality: write` permission on the job, on top of the
+[permissions the mehen action needs](#permissions):
 
 ```yaml
-- run: pytest --cov=. --cov-report=xml          # one Cobertura report...
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  code-quality: write   # actions/upload-code-coverage
 
-- uses: actions/upload-code-coverage@v1          # ...GitHub: aggregate % + ruleset blocking
-  with:
-    file: coverage.xml
-    language: Python
-    label: code-coverage/pytest
+steps:
+  - run: pytest --cov=. --cov-report=xml         # one Cobertura report...
 
-- uses: ophi-dev/mehen@v1                        # ...mehen: per-file trend columns,
-  with:                                          #    per-function attribution, thresholds
-    coverage-files: coverage.xml
+  - uses: actions/upload-code-coverage@v1         # ...GitHub: aggregate % + ruleset blocking
+    with:
+      file: coverage.xml
+      language: Python
+      label: code-coverage/pytest
+
+  - uses: ophi-dev/mehen@v1                       # ...mehen: per-file trend columns,
+    with:                                         #    per-function attribution, thresholds
+      coverage-files: coverage.xml
 ```
 
 The two are complementary: GitHub gives the aggregate percentage and merge-blocking rulesets on its
@@ -228,7 +236,7 @@ Notes for shared setups:
 
 - Both consumers need the report to describe the **head revision**: GitHub's docs mandate checking
   out `pull_request.head.sha` (not the merge commit) "so coverage line numbers map correctly to the
-  diff" — the same same-revision rule mehen's diff relies on.
+  diff" — the same-revision rule mehen's diff relies on as well.
 - If GitHub's generated upload job stores the Cobertura file as a workflow artifact (its default
   pattern), point `coverage-artifact-name` at that artifact and the base-coverage ladder reuses it —
   no extra uploads.

@@ -762,3 +762,46 @@ test("pickBaseArtifact picks the newest non-expired artifact for the base SHA", 
   assert.equal(pickBaseArtifact(undefined, baseSha), null);
   assert.equal(pickBaseArtifact(artifacts, ""), null);
 });
+
+
+test("extractZip enforces the decompressed-size budget", () => {
+  // Honest metadata over budget: rejected up front from the declared
+  // central-directory sizes, before any inflation.
+  const big = buildZip([{ name: "big.info", content: "x".repeat(4096) }]);
+  const dir = tempExtractDir();
+  try {
+    assert.throws(
+      () => extractZip(big, dir, 1024),
+      /declares more than 1024 decompressed bytes/,
+    );
+    assert.deepEqual(fs.readdirSync(dir), [], "nothing may be written");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // Lying metadata (the zip-bomb shape): declared sizes pass, but the
+  // actual inflate output exceeds the budget — zlib's maxOutputLength
+  // aborts mid-inflate instead of allocating the full expansion.
+  const bomb = buildZip([{ name: "bomb.info", content: "y".repeat(64 * 1024) }]);
+  // Corrupt the declared uncompressed sizes down to 1 byte (central
+  // directory offset 24, local header offset 22).
+  const cdStart = bomb.readUInt32LE(bomb.length - 22 + 16);
+  bomb.writeUInt32LE(1, cdStart + 24);
+  bomb.writeUInt32LE(1, 22);
+  const dir2 = tempExtractDir();
+  try {
+    assert.throws(() => extractZip(bomb, dir2, 1024));
+    assert.deepEqual(fs.readdirSync(dir2), [], "nothing may be written");
+  } finally {
+    fs.rmSync(dir2, { recursive: true, force: true });
+  }
+
+  // Within budget: extraction is unaffected.
+  const fine = buildZip([{ name: "ok.info", content: "SF:a\nDA:1,1\nend_of_record\n" }]);
+  const dir3 = tempExtractDir();
+  try {
+    assert.equal(extractZip(fine, dir3, 1024).length, 1);
+  } finally {
+    fs.rmSync(dir3, { recursive: true, force: true });
+  }
+});
