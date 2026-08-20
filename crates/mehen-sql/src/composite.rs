@@ -80,8 +80,10 @@ pub(crate) fn compute(
     }
 }
 
-/// SQL Structural Complexity (research foundation §8.1).
-fn structural(f: &SqlFileFacts) -> f64 {
+/// SQL Structural Complexity (research foundation §8.1). Also reused by the
+/// procedural module to score the query constructs embedded in one routine
+/// (`sql.structural_complexity.max_embedded_query`, §9.3).
+pub(crate) fn structural(f: &SqlFileFacts) -> f64 {
     1.00 * f.query_block_count as f64
         + 0.80 * f.ctes.count as f64
         + 1.20 * f.ctes.max_dependency_depth as f64
@@ -175,11 +177,9 @@ fn modularization_credit(f: &SqlFileFacts) -> f64 {
 
 /// SQL Change Risk Score (research foundation §8.4).
 ///
-/// Phase-1 deviation: the spec's `+ 5 * dynamic_sql_count` term is omitted
-/// because dynamic SQL (`EXECUTE IMMEDIATE`, `sp_executesql`, …) is a
-/// procedural-dialect construct not yet tracked (Phase 3). Every other term
-/// matches the spec weights exactly. When dynamic-SQL detection lands, add the
-/// `+ 5 * dynamic_sql_count` term here.
+/// Every term matches the spec weights exactly, including the
+/// `+ 5 × dynamic_sql_count` term (Phase 3 — `EXECUTE IMMEDIATE`,
+/// `sp_executesql`, `EXEC('…')`, `DBMS_SQL`).
 fn change_risk(f: &SqlFileFacts) -> f64 {
     let o = &f.objects;
     ChangeRiskFactor::Drop.amount() * o.drop_count as f64
@@ -188,6 +188,7 @@ fn change_risk(f: &SqlFileFacts) -> f64 {
         + ChangeRiskFactor::DeleteWithoutWhere.amount() * o.delete_without_where_count as f64
         + ChangeRiskFactor::UpdateWithoutWhere.amount() * o.update_without_where_count as f64
         + ChangeRiskFactor::GrantRevoke.amount() * o.grant_revoke_count as f64
+        + ChangeRiskFactor::DynamicSql.amount() * f.procedural.dynamic_sql_count as f64
         + ChangeRiskFactor::Merge.amount() * o.merge_count as f64
         + ChangeRiskFactor::CreateOrReplace.amount() * o.create_or_replace_count as f64
         + ChangeRiskFactor::TransactionControl.amount() * o.transaction_control_count as f64

@@ -69,3 +69,5 @@ fixture_snapshot!(migration_destructive, "migration_destructive");
 fixture_snapshot!(correlated_subquery, "correlated_subquery");
 fixture_snapshot!(set_ops_unions, "set_ops_unions");
 fixture_snapshot!(dialect_directive, "dialect_directive");
+fixture_snapshot!(plsql_procedure_control_flow, "plsql_procedure_control_flow");
+fixture_snapshot!(tsql_procedure_control_flow, "tsql_procedure_control_flow");

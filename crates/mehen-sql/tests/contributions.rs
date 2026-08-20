@@ -143,3 +143,84 @@ fn every_implemented_change_risk_term_has_a_stable_reason() {
         assert_risk_sum(&analysis);
     }
 }
+
+// ── procedural evidence (Phase 3) ───────────────────────────────────────
+
+/// The procedural composites are evidence-backed: the published value equals
+/// the sum of contribution amounts by construction, for both the typed-CST
+/// path (PL/SQL) and the token-fallback path (T-SQL with unparsable spills).
+#[test]
+fn procedural_complexity_evidence_sums_to_the_metric() {
+    for fixture in [
+        include_str!("fixtures/plsql_procedure_control_flow.sql"),
+        include_str!("fixtures/tsql_procedure_control_flow.sql"),
+    ] {
+        let analysis = analyze(fixture, &AnalysisConfig::production());
+        for key in [
+            "sql.procedural.cyclomatic_complexity",
+            "sql.procedural.cognitive_complexity",
+        ] {
+            let sum: f64 = analysis
+                .contributions
+                .iter()
+                .filter(|item| item.metric.as_str() == key)
+                .map(|item| item.amount)
+                .sum();
+            assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+        }
+        // Spans are well-formed and inside the file.
+        assert!(
+            analysis
+                .contributions
+                .iter()
+                .filter(|item| item.metric.as_str().starts_with("sql.procedural."))
+                .all(|item| {
+                    item.span.start_byte <= item.span.end_byte
+                        && item.span.end_byte as usize <= fixture.len()
+                        && item.span.start_line >= 1
+                }),
+        );
+    }
+}
+
+/// Dynamic SQL (`EXECUTE IMMEDIATE`, `sp_executesql`) is a change-risk term
+/// with its own stable reason code, and the risk-sum invariant holds with it.
+#[test]
+fn dynamic_sql_contributes_to_change_risk() {
+    let analysis = analyze(
+        include_str!("fixtures/plsql_procedure_control_flow.sql"),
+        &AnalysisConfig::production(),
+    );
+    let dynamic: Vec<_> = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.reason.as_str() == "sql.change_risk.dynamic_sql")
+        .collect();
+    assert_eq!(dynamic.len(), 1);
+    assert_eq!(dynamic[0].amount, 5.0);
+    assert_risk_sum(&analysis);
+}
+
+/// The benchmark profile skips procedural evidence without changing the
+/// procedural metrics (counts are always exact; evidence is opt-in).
+#[test]
+fn benchmark_profile_skips_procedural_evidence_without_changing_metrics() {
+    let sql = include_str!("fixtures/plsql_procedure_control_flow.sql");
+    let production = analyze(sql, &AnalysisConfig::production());
+    let benchmark = analyze(sql, &AnalysisConfig::benchmark());
+
+    assert!(
+        production
+            .contributions
+            .iter()
+            .any(|item| item.metric.as_str().starts_with("sql.procedural."))
+    );
+    assert!(benchmark.contributions.is_empty());
+    for key in [
+        "sql.procedural.cyclomatic_complexity",
+        "sql.procedural.cognitive_complexity",
+        "sql.change_risk_score",
+    ] {
+        assert_eq!(metric(&production, key), metric(&benchmark, key), "{key}");
+    }
+}

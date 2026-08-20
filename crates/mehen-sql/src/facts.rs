@@ -18,7 +18,6 @@
 //! (see [`extract_cte_graph`]).
 
 use mehen_core::SourceSpan;
-use sqruff_lib_core::dialects::Dialect;
 use sqruff_lib_core::dialects::syntax::{SyntaxKind, SyntaxSet};
 use sqruff_lib_core::parser::segments::ErasedSegment;
 
@@ -45,6 +44,12 @@ pub(crate) enum StatementKind {
     TransactionControl,
     Explain,
     Procedural,
+    /// `DECLARE … BEGIN … END` anonymous blocks and top-level procedural
+    /// scripting statements (T-SQL `IF`/`WHILE`/`BEGIN` batch statements,
+    /// BigQuery scripting). Unlike a routine definition, these *execute when
+    /// the file is applied*, so their body DML/TCL feeds the object-touch
+    /// and change-risk scans (research foundation §5.2 `anonymous_block`).
+    AnonymousBlock,
     SetOperation,
     Unknown,
 }
@@ -71,6 +76,7 @@ impl StatementKind {
         StatementKind::TransactionControl,
         StatementKind::Explain,
         StatementKind::Procedural,
+        StatementKind::AnonymousBlock,
         StatementKind::SetOperation,
         StatementKind::Unknown,
     ];
@@ -96,6 +102,7 @@ impl StatementKind {
             StatementKind::TransactionControl => "transaction_control",
             StatementKind::Explain => "explain",
             StatementKind::Procedural => "procedural",
+            StatementKind::AnonymousBlock => "anonymous_block",
             StatementKind::SetOperation => "set_operation",
             StatementKind::Unknown => "unknown",
         }
@@ -119,14 +126,15 @@ pub(crate) struct JoinFacts {
     pub total: u32,
 }
 
-/// Predicate / boolean-logic facts (research foundation §6.7).
+/// Predicate / boolean-logic facts (research foundation §6.7). `IN`/`LIKE`/
+/// `BETWEEN` predicates fold into `comparison_count` per §6.7; IN-subqueries
+/// are counted separately as `sql.subquery.in_count`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PredicateFacts {
     pub boolean_operator_count: u32,
     pub max_boolean_depth: u32,
     pub not_count: u32,
     pub comparison_count: u32,
-    pub in_count: u32,
     /// `NOT IN`, `= NULL`, `<> NULL` and similar dialect-risky NULL logic.
     pub null_semantics_risk_count: u32,
 }
@@ -268,6 +276,7 @@ pub(crate) enum ChangeRiskFactor {
     DeleteWithoutWhere,
     UpdateWithoutWhere,
     GrantRevoke,
+    DynamicSql,
     Merge,
     CreateOrReplace,
     TransactionControl,
@@ -280,7 +289,7 @@ impl ChangeRiskFactor {
         match self {
             Self::Drop | Self::Truncate => 8.0,
             Self::Alter | Self::DeleteWithoutWhere | Self::UpdateWithoutWhere => 6.0,
-            Self::GrantRevoke => 5.0,
+            Self::GrantRevoke | Self::DynamicSql => 5.0,
             Self::Merge | Self::CreateOrReplace => 4.0,
             Self::TransactionControl => 3.0,
             Self::WriteObject => 2.0,
@@ -296,6 +305,7 @@ impl ChangeRiskFactor {
             Self::DeleteWithoutWhere => "sql.change_risk.delete_without_where",
             Self::UpdateWithoutWhere => "sql.change_risk.update_without_where",
             Self::GrantRevoke => "sql.change_risk.grant_revoke",
+            Self::DynamicSql => "sql.change_risk.dynamic_sql",
             Self::Merge => "sql.change_risk.merge",
             Self::CreateOrReplace => "sql.change_risk.create_or_replace",
             Self::TransactionControl => "sql.change_risk.transaction_control",
@@ -341,6 +351,16 @@ pub(crate) struct ProceduralUnitFacts {
     pub end_line: u32,
     pub start_byte: u32,
     pub end_byte: u32,
+    /// Per-unit procedural composite tallies (Phase 3): the share of the
+    /// file's cyclomatic/cognitive increments whose source position falls
+    /// inside this unit (innermost-unit attribution), plus this unit's own
+    /// entry path. Zero for units whose bodies the parser lost to a sibling
+    /// `Unparsable` run — those increments stay file-level.
+    pub cyclomatic_complexity: f64,
+    pub cognitive_complexity: f64,
+    /// `sql.structural_complexity` of the query constructs embedded in this
+    /// unit's subtree (§9.3 `max_embedded_query` feeds from these).
+    pub embedded_query_structural: f64,
 }
 
 /// Halstead operator/operand tallies (research foundation §7). Operators and
@@ -360,6 +380,8 @@ pub(crate) struct SqlFileFacts {
     pub statements: Vec<StatementFacts>,
     /// Procedural units in pre-order (see [`ProceduralUnitFacts`]).
     pub procedural_units: Vec<ProceduralUnitFacts>,
+    /// Procedural control-flow facts (research foundation §6.17, Phase 3).
+    pub procedural: crate::procedural::ProceduralFacts,
     pub query_block_count: u32,
     pub query_block_max_depth: u32,
     pub select_item_total: u32,
@@ -398,10 +420,75 @@ pub(crate) struct SqlFileFacts {
 
 const SELECT_STATEMENT: SyntaxSet = SyntaxSet::single(SyntaxKind::SelectStatement);
 
-/// Build facts for `root` (the parsed `File` segment) under `dialect`.
+// ── dialect-folding kind sets ──────────────────────────────────────────
+//
+// sqruff's Oracle dialect emits its own parallel statement/reference kinds
+// (`OracleUpdateStatement`, `OracleTableReference`, …) instead of the ANSI
+// ones, and T-SQL adds `BulkInsertStatement`. Every scan that matched only
+// the ANSI kind silently skipped Oracle DML — top-level `UPDATE`/`INSERT`/
+// `DELETE`/`COMMIT` in an Oracle file classified as `unknown` and appeared
+// in no `sql.dml.*`, object-touch, or change-risk metric. These sets fold
+// the dialect variants so every consumer sees one vocabulary (verified
+// against the sqruff v0.40.0 `SyntaxKind` inventory: Oracle is the only
+// dialect with parallel DML kinds).
+
+/// `table_reference` in any dialect spelling.
+const TABLE_REFERENCES: SyntaxSet =
+    SyntaxSet::new(&[SyntaxKind::TableReference, SyntaxKind::OracleTableReference]);
+
+const INSERT_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::InsertStatement,
+    SyntaxKind::OracleInsertStatement,
+    SyntaxKind::BulkInsertStatement,
+]);
+
+const UPDATE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::UpdateStatement,
+    SyntaxKind::OracleUpdateStatement,
+]);
+
+const DELETE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::DeleteStatement,
+    SyntaxKind::OracleDeleteStatement,
+]);
+
+const TRANSACTION_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::TransactionStatement,
+    SyntaxKind::OracleTransactionStatement,
+]);
+
+const CREATE_TABLE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::CreateTableStatement,
+    SyntaxKind::OracleCreateTableStatement,
+]);
+
+const CREATE_VIEW_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::CreateViewStatement,
+    SyntaxKind::CreateMaterializedViewStatement,
+    SyntaxKind::OracleCreateViewStatement,
+]);
+
+const ALTER_TABLE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::AlterTableStatement,
+    SyntaxKind::OracleAlterTableStatement,
+]);
+
+const DROP_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::DropTableStatement,
+    SyntaxKind::DropViewStatement,
+    SyntaxKind::DropIndexStatement,
+    SyntaxKind::DropStatement,
+    SyntaxKind::DropFunctionStatement,
+    SyntaxKind::DropSchemaStatement,
+    SyntaxKind::OracleDropPackageStatement,
+    SyntaxKind::OracleDropProcedureStatement,
+    SyntaxKind::OracleDropSynonymStatement,
+    SyntaxKind::OracleDropDatabaseLinkStatement,
+]);
+
+/// Build facts for `root` (the parsed `File` segment).
 pub(crate) fn extract(
     root: &ErasedSegment,
-    dialect: &Dialect,
     line_at: impl Fn(u32) -> u32,
     emit_contributions: bool,
 ) -> SqlFileFacts {
@@ -412,6 +499,11 @@ pub(crate) fn extract(
 
     // ── procedural units (function-shaped scopes) ───────────────────
     extract_procedural_units(root, &line_at, &mut facts);
+
+    // ── procedural control flow (research foundation §6.17) ─────────
+    // Needs statement classification and units; contributes dynamic-SQL
+    // change-risk evidence alongside `extract_objects`' below.
+    crate::procedural::extract(root, &line_at, emit_contributions, &mut facts);
 
     // ── unparsable / parser health ──────────────────────────────────
     let unparsables = root.recursive_crawl(
@@ -481,10 +573,10 @@ pub(crate) fn extract(
 
     // ── relation references ─────────────────────────────────────────
     facts.relation_ref_count =
-        count_anywhere(root, SyntaxKind::TableReference) + facts.subqueries.derived_table_count;
+        count_any(root, &TABLE_REFERENCES) + facts.subqueries.derived_table_count;
 
     // ── CTE graph (via sqruff Query analysis) ───────────────────────
-    extract_cte_graph(root, dialect, &mut facts.ctes);
+    extract_cte_graph(root, &mut facts.ctes);
 
     // ── object-touch / DML-DDL risk ─────────────────────────────────
     extract_objects(root, &line_at, &mut facts, emit_contributions);
@@ -528,14 +620,16 @@ fn classify_statements(
 }
 
 /// Classify a `Statement` node by inspecting which statement-body kind it
-/// contains. sqruff produces dialect-specific `Drop*`/`Create*` variants, so
-/// we probe with a broad `SyntaxSet` and map by the first match.
+/// contains. sqruff produces dialect-specific `Drop*`/`Create*`/Oracle DML
+/// variants, so we probe with the dialect-folding `SyntaxSet`s above and map
+/// by the first match.
 fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
-    let has = |k: SyntaxKind| {
+    let has_any = |set: &SyntaxSet| {
         !stmt
-            .recursive_crawl(&SyntaxSet::single(k), false, &SyntaxSet::EMPTY, true)
+            .recursive_crawl(set, false, &SyntaxSet::EMPTY, true)
             .is_empty()
     };
+    let has = |k: SyntaxKind| has_any(&SyntaxSet::single(k));
 
     // Procedural definitions are classified *first*: a `CREATE PROCEDURE` /
     // `FUNCTION` / `TRIGGER` body commonly contains `INSERT`/`UPDATE`/…, but
@@ -544,6 +638,15 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
     // DML/no-WHERE risk metrics (Codex P2).
     if stmt_is_procedural(stmt) {
         return StatementKind::Procedural;
+    }
+
+    // Anonymous blocks and top-level scripting statements come *before* the
+    // DML sniffing for the same reason: `BEGIN UPDATE t SET …; END;` contains
+    // an UpdateStatement, but the statement is the block. Unlike routine
+    // bodies, these run when the file is applied — extract_objects therefore
+    // scans their bodies (node-based) for DML/TCL risk.
+    if stmt_is_anonymous_block(stmt) {
+        return StatementKind::AnonymousBlock;
     }
 
     // Order matters: more specific kinds first. The `WithCompoundStatement`
@@ -555,42 +658,36 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
     if has(SyntaxKind::MergeStatement) {
         return StatementKind::Merge;
     }
-    if has(SyntaxKind::InsertStatement) {
+    if has_any(&INSERT_STATEMENTS) {
         return StatementKind::Insert;
     }
-    if has(SyntaxKind::UpdateStatement) {
+    if has_any(&UPDATE_STATEMENTS) {
         return StatementKind::Update;
     }
-    if has(SyntaxKind::DeleteStatement) {
+    if has_any(&DELETE_STATEMENTS) {
         return StatementKind::Delete;
     }
     if has(SyntaxKind::TruncateStatement) {
         return StatementKind::Truncate;
     }
-    if has(SyntaxKind::AlterTableStatement) {
+    if has_any(&ALTER_TABLE_STATEMENTS) {
         return StatementKind::AlterTable;
     }
     // CREATE family: distinguish CTAS, view, table, other.
-    if has(SyntaxKind::CreateTableStatement) {
+    if has_any(&CREATE_TABLE_STATEMENTS) {
         // CTAS = CREATE TABLE … AS SELECT — the statement embeds a select.
         if has(SyntaxKind::SelectStatement) || has(SyntaxKind::WithCompoundStatement) {
             return StatementKind::CreateTableAsSelect;
         }
         return StatementKind::CreateTable;
     }
-    if has(SyntaxKind::CreateViewStatement) || has(SyntaxKind::CreateMaterializedViewStatement) {
+    if has_any(&CREATE_VIEW_STATEMENTS) {
         return StatementKind::CreateView;
     }
     if stmt_contains_create(stmt) {
         return StatementKind::CreateOther;
     }
-    if has(SyntaxKind::DropTableStatement)
-        || has(SyntaxKind::DropViewStatement)
-        || has(SyntaxKind::DropIndexStatement)
-        || has(SyntaxKind::DropStatement)
-        || has(SyntaxKind::DropFunctionStatement)
-        || has(SyntaxKind::DropSchemaStatement)
-    {
+    if has_any(&DROP_STATEMENTS) {
         return StatementKind::Drop;
     }
     if has(SyntaxKind::AccessStatement) {
@@ -601,7 +698,7 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
         }
         return StatementKind::Grant;
     }
-    if has(SyntaxKind::TransactionStatement) {
+    if has_any(&TRANSACTION_STATEMENTS) {
         return StatementKind::TransactionControl;
     }
     if has(SyntaxKind::ExplainStatement) {
@@ -662,6 +759,79 @@ fn stmt_is_procedural(stmt: &ErasedSegment) -> bool {
         .is_empty()
 }
 
+/// Node kinds whose presence as a statement's top-level construct marks it as
+/// an anonymous block or scripting statement. Typed begin/end blocks cover
+/// Oracle (`DECLARE … BEGIN … END`) and T-SQL/ANSI; the scripting statement
+/// kinds cover BigQuery/MySQL top-level control flow (`IF … THEN … END IF;`
+/// at file level).
+const ANONYMOUS_BLOCK_KINDS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::OracleBeginEndBlock,
+    SyntaxKind::BeginEndBlock,
+    SyntaxKind::AtomicBeginEndBlock,
+    SyntaxKind::IfStatements,
+    SyntaxKind::IfStatement,
+    SyntaxKind::WhileStatements,
+    SyntaxKind::WhileStatement,
+    SyntaxKind::LoopStatements,
+    SyntaxKind::LoopStatement,
+    SyntaxKind::ForInStatement,
+]);
+
+/// Whether a (non-routine) statement is an anonymous block / top-level
+/// scripting statement.
+///
+/// Two shapes, per the CST probes (parser comparison §9):
+/// - a typed block/scripting node reached without crossing a `Bracketed`
+///   group (a parenthesized subquery is not the statement's body) — Oracle,
+///   BigQuery, MySQL;
+/// - a T-SQL keyword-led statement: the first substantive child is the bare
+///   keyword `IF`/`WHILE`/`BEGIN` (sqruff's tsql dialect nests the controlled
+///   statements under it without a dedicated node kind). `BEGIN` is checked
+///   against `TRANSACTION`/`TRAN`/`WORK`/`DIALOG` so T-SQL transaction
+///   control (which also parses keyword-led in fragments) stays TCL.
+fn stmt_is_anonymous_block(stmt: &ErasedSegment) -> bool {
+    fn contains_block(node: &ErasedSegment) -> bool {
+        for child in node.segments() {
+            if ANONYMOUS_BLOCK_KINDS.contains(child.get_type()) {
+                return true;
+            }
+            if child.is_type(SyntaxKind::Bracketed) {
+                continue;
+            }
+            if contains_block(child) {
+                return true;
+            }
+        }
+        false
+    }
+    if contains_block(stmt) {
+        return true;
+    }
+    // T-SQL keyword-led shape: first two substantive children.
+    let mut lead = stmt
+        .segments()
+        .iter()
+        .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment());
+    let Some(first) = lead.next() else {
+        return false;
+    };
+    if !first.is_type(SyntaxKind::Keyword) {
+        return false;
+    }
+    let word = first.raw().to_ascii_uppercase();
+    match word.as_str() {
+        "IF" | "WHILE" => true,
+        "BEGIN" => {
+            let next = lead
+                .next()
+                .map(|s| s.raw().to_ascii_uppercase())
+                .unwrap_or_default();
+            !matches!(next.as_str(), "TRANSACTION" | "TRAN" | "WORK" | "DIALOG")
+        }
+        _ => false,
+    }
+}
+
 // ── joins ──────────────────────────────────────────────────────────────
 
 /// Count and classify explicit `JOIN` clauses.
@@ -672,7 +842,7 @@ fn stmt_is_procedural(stmt: &ErasedSegment) -> bool {
 /// separation risks false positives (e.g. `FROM a, LATERAL f(a.x)`). Explicit
 /// `CROSS JOIN` is counted; implicit cross-join detection is deferred (research
 /// foundation §6.5 lists it as a derive-later item).
-fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
+pub(crate) fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
     let clauses = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::JoinClause),
         true,
@@ -875,7 +1045,7 @@ fn operand_is_column_reference(seg: &ErasedSegment) -> bool {
 
 // ── set operations ───────────────────────────────────────────────────
 
-fn extract_set_ops(root: &ErasedSegment, set_ops: &mut SetOpFacts) {
+pub(crate) fn extract_set_ops(root: &ErasedSegment, set_ops: &mut SetOpFacts) {
     let ops = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::SetOperator),
         true,
@@ -901,7 +1071,7 @@ fn extract_set_ops(root: &ErasedSegment, set_ops: &mut SetOpFacts) {
 
 // ── CASE ────────────────────────────────────────────────────────────────
 
-fn extract_cases(root: &ErasedSegment, cases: &mut CaseFacts) {
+pub(crate) fn extract_cases(root: &ErasedSegment, cases: &mut CaseFacts) {
     let all = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::CaseExpression),
         true,
@@ -956,7 +1126,7 @@ fn count_anywhere_within_case(case: &ErasedSegment, kind: SyntaxKind) -> u32 {
 
 // ── window functions ─────────────────────────────────────────────────
 
-fn extract_windows(root: &ErasedSegment, windows: &mut WindowFacts) {
+pub(crate) fn extract_windows(root: &ErasedSegment, windows: &mut WindowFacts) {
     let overs = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::OverClause),
         true,
@@ -1019,7 +1189,7 @@ const AGGREGATE_NAMES: &[&str] = &[
     "COUNT_BIG",
 ];
 
-fn extract_aggregates(root: &ErasedSegment, agg: &mut AggregateFacts) {
+pub(crate) fn extract_aggregates(root: &ErasedSegment, agg: &mut AggregateFacts) {
     let functions = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::Function),
         true,
@@ -1077,7 +1247,7 @@ const PREDICATE_PARENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::JoinOnCondition,
 ]);
 
-fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
+pub(crate) fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
     // Boolean operators are `BinaryOperator` nodes whose raw text is AND/OR
     // (the CST does not distinguish boolean from arithmetic binary operators
     // by kind — empirically verified from a parse dump).
@@ -1093,10 +1263,8 @@ fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
             pred.boolean_operator_count += 1;
         }
     }
-    pred.not_count = count_keyword(root, "NOT");
+    pred.not_count = count_predicate_nots(root);
     pred.comparison_count = count_anywhere(root, SyntaxKind::ComparisonOperator);
-    // `IN (...)` predicates.
-    pred.in_count = count_keyword(root, "IN");
 
     // Max boolean nesting depth within predicate-bearing clauses.
     let parents = root.recursive_crawl(&PREDICATE_PARENTS, true, &SyntaxSet::EMPTY, true);
@@ -1110,6 +1278,51 @@ fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
     // and adjacent `NOT`+`IN` keyword tokens — so text inside comments or
     // string literals (`-- avoid x = NULL`, `'NOT IN list'`) is never counted.
     pred.null_semantics_risk_count = count_null_semantics_risk(root);
+}
+
+/// Count `NOT` keyword tokens that act as predicate/boolean operators
+/// (§6.7), excluding the two non-predicate contexts a raw keyword count
+/// picks up:
+///
+/// - `NOT NULL` column constraints in DDL (`id INT NOT NULL`) — but a
+///   genuine `IS NOT NULL` predicate still counts (the `IS` before the `NOT`
+///   distinguishes them);
+/// - `IF NOT EXISTS` / `… OR REPLACE`-style DDL guards (`CREATE TABLE IF NOT
+///   EXISTS`, `DROP INDEX IF NOT EXISTS`) — but a `WHERE NOT EXISTS (…)`
+///   predicate still counts (no `IF` before the `NOT`).
+///
+/// Works over sibling code tokens, mirroring `count_null_semantics_risk`.
+fn count_predicate_nots(root: &ErasedSegment) -> u32 {
+    fn walk(node: &ErasedSegment, count: &mut u32) {
+        let code: Vec<&ErasedSegment> = node
+            .segments()
+            .iter()
+            .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment())
+            .collect();
+        for (i, seg) in code.iter().enumerate() {
+            if !seg.is_type(SyntaxKind::Keyword) || !seg.raw().eq_ignore_ascii_case("NOT") {
+                continue;
+            }
+            let neighbor = |j: Option<usize>| {
+                j.and_then(|k| code.get(k))
+                    .map(|s| s.raw().to_ascii_uppercase())
+                    .unwrap_or_default()
+            };
+            let prev = neighbor(i.checked_sub(1));
+            let next = neighbor(Some(i + 1));
+            let null_constraint = next == "NULL" && prev != "IS";
+            let ddl_guard = next == "EXISTS" && prev == "IF";
+            if !null_constraint && !ddl_guard {
+                *count += 1;
+            }
+        }
+        for child in node.segments() {
+            walk(child, count);
+        }
+    }
+    let mut count = 0u32;
+    walk(root, &mut count);
+    count
 }
 
 /// Count NULL-semantics risks from parsed tokens (comments/literals excluded):
@@ -1244,7 +1457,11 @@ fn redundant_outer_bracket(node: &ErasedSegment) -> u32 {
 
 // ── subqueries / derived tables ───────────────────────────────────────
 
-fn extract_subqueries(root: &ErasedSegment, selects: &[ErasedSegment], sub: &mut SubqueryFacts) {
+pub(crate) fn extract_subqueries(
+    root: &ErasedSegment,
+    selects: &[ErasedSegment],
+    sub: &mut SubqueryFacts,
+) {
     // A subquery is any SELECT that is nested inside another query construct.
     // The outermost SELECT(s) of each top-level statement are not subqueries.
     for sel in selects {
@@ -1403,12 +1620,7 @@ fn relation_names(node: &ErasedSegment) -> Vec<String> {
     for elem in &from_elems {
         // Table reference(s) of this FROM element (again, not those inside a
         // derived-table subquery nested in the element).
-        for tr in elem.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
-            true,
-            &SELECT_STATEMENT,
-            true,
-        ) {
+        for tr in elem.recursive_crawl(&TABLE_REFERENCES, true, &SELECT_STATEMENT, true) {
             names.push(last_identifier(&tr));
         }
         // The element's own (table) alias, if any.
@@ -1498,7 +1710,7 @@ fn count_scalar_subqueries(root: &ErasedSegment) -> u32 {
 
 // ── expressions / functions ───────────────────────────────────────────
 
-fn extract_expressions(root: &ErasedSegment, expr: &mut ExpressionFacts) {
+pub(crate) fn extract_expressions(root: &ErasedSegment, expr: &mut ExpressionFacts) {
     // Max expression AST depth across all Expression nodes.
     let expressions = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::Expression),
@@ -1720,7 +1932,7 @@ fn nearest_select_depth(root: &ErasedSegment, target: &ErasedSegment) -> u32 {
 
 // ── CTE graph (via sqruff Query analysis) ─────────────────────────────
 
-fn extract_cte_graph(root: &ErasedSegment, _dialect: &Dialect, ctes: &mut CteFacts) {
+pub(crate) fn extract_cte_graph(root: &ErasedSegment, ctes: &mut CteFacts) {
     // The CTE dependency graph is derived directly from `CommonTableExpression`
     // CST nodes: each carries a name identifier and a body whose
     // `TableReference`s name its dependencies. We deliberately avoid sqruff's
@@ -1806,7 +2018,7 @@ fn extract_cte_graph(root: &ErasedSegment, _dialect: &Dialect, ctes: &mut CteFac
         // appears as a table reference *within this WITH block* and *outside*
         // its own definition body.
         let block_refs = with.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
+            &TABLE_REFERENCES,
             true,
             &SyntaxSet::single(SyntaxKind::WithCompoundStatement),
             false,
@@ -1869,12 +2081,7 @@ fn is_trivial_cte(cte: &ErasedSegment) -> bool {
     // The CTE body is the bracketed SELECT after `AS`. A trivial body has
     // exactly one table reference and none of the structure-adding clauses.
     let table_refs = cte
-        .recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        )
+        .recursive_crawl(&TABLE_REFERENCES, true, &SyntaxSet::EMPTY, true)
         .len();
     if table_refs != 1 {
         return false;
@@ -1924,12 +2131,7 @@ fn cte_body_dependencies(
     cte: &ErasedSegment,
     cte_names: &[String],
 ) -> std::collections::BTreeSet<String> {
-    let refs = cte.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::TableReference),
-        true,
-        &SyntaxSet::EMPTY,
-        true,
-    );
+    let refs = cte.recursive_crawl(&TABLE_REFERENCES, true, &SyntaxSet::EMPTY, true);
     // Nested `WITH` blocks inside this body. A reference is *shadowed* when it
     // sits inside a nested block that defines the same name — it then resolves
     // to that inner CTE, not the enclosing block's. The shadowing scope is the
@@ -2090,6 +2292,31 @@ fn extract_objects(
         }
     }
 
+    // Anonymous blocks *execute when the file is applied* (unlike routine
+    // definitions, whose bodies only run when called), so DML/TCL inside
+    // them is real migration risk. The per-statement-kind loop above cannot
+    // see it — the statement classifies as `anonymous_block` — so the block
+    // bodies are scanned node-based here. Nested routine definitions
+    // (subprograms declared in a block's DECLARE section) stay excluded via
+    // the `PROCEDURAL_DEFINITIONS` crawl boundary, mirroring every other
+    // object scan.
+    let anon_ranges: Vec<(u32, u32)> = facts
+        .statements
+        .iter()
+        .filter(|s| s.kind == StatementKind::AnonymousBlock)
+        .map(|s| (s.start_byte, s.end_byte))
+        .collect();
+    if !anon_ranges.is_empty() {
+        let statements = top_level_statements(root);
+        for node in statements.iter().filter(|node| {
+            node.get_position_marker().is_some_and(|pm| {
+                anon_ranges.contains(&(pm.source_slice.start as u32, pm.source_slice.end as u32))
+            })
+        }) {
+            scan_block_body_dml(node, line_at, obj, evidence, emit_contributions);
+        }
+    }
+
     // Distinct read/write/touch object counts (research foundation §6.14:
     // "distinct objects read/written/touched"). Counting objects rather than
     // statements means a 10-table SELECT contributes 10 reads, and an object
@@ -2129,12 +2356,7 @@ fn extract_objects(
     // recursive crawl would find the subquery's WHERE and wrongly clear the
     // no-WHERE flag (Codex P1). Passing `SELECT_STATEMENT` as the
     // no-recurse set confines the search to the statement's own clauses.
-    let updates = root.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::UpdateStatement),
-        true,
-        &PROCEDURAL_DEFINITIONS,
-        true,
-    );
+    let updates = root.recursive_crawl(&UPDATE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
     for u in &updates {
         if !has_own_where_clause(u) {
             obj.update_without_where_count += 1;
@@ -2148,12 +2370,7 @@ fn extract_objects(
             }
         }
     }
-    let deletes = root.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::DeleteStatement),
-        true,
-        &PROCEDURAL_DEFINITIONS,
-        true,
-    );
+    let deletes = root.recursive_crawl(&DELETE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
     for d in &deletes {
         if !has_own_where_clause(d) {
             obj.delete_without_where_count += 1;
@@ -2203,8 +2420,12 @@ fn extract_objects(
     // `UPDATE t SET output = 1` or `INSERT INTO output (…)`.
     const DML_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
         SyntaxKind::InsertStatement,
+        SyntaxKind::OracleInsertStatement,
+        SyntaxKind::BulkInsertStatement,
         SyntaxKind::UpdateStatement,
+        SyntaxKind::OracleUpdateStatement,
         SyntaxKind::DeleteStatement,
+        SyntaxKind::OracleDeleteStatement,
         SyntaxKind::MergeStatement,
     ]);
     let dml_stmts = root.recursive_crawl(&DML_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
@@ -2212,6 +2433,60 @@ fn extract_objects(
         .iter()
         .map(|s| count_keyword(s, "RETURNING") + count_keyword(s, "OUTPUT"))
         .sum();
+}
+
+/// Node-based DML/TCL tally for one anonymous block's body — the statement-
+/// kind counters (`sql.dml.*`, `sql.transaction.control_count`) and their
+/// change-risk terms, mirroring the per-statement loop in `extract_objects`.
+/// Only statement kinds are counted here; object touches and the
+/// without-WHERE risks are covered by the file-wide node scans, which do not
+/// stop at anonymous blocks.
+fn scan_block_body_dml(
+    block: &ErasedSegment,
+    line_at: &impl Fn(u32) -> u32,
+    obj: &mut ObjectFacts,
+    evidence: &mut Vec<ChangeRiskEvidence>,
+    emit_contributions: bool,
+) {
+    let span_of =
+        |seg: &ErasedSegment| segment_span(seg, line_at).unwrap_or_else(SourceSpan::empty);
+    obj.insert_count += block
+        .recursive_crawl(&INSERT_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, false)
+        .len() as u32;
+    obj.update_count += block
+        .recursive_crawl(&UPDATE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, false)
+        .len() as u32;
+    obj.delete_count += block
+        .recursive_crawl(&DELETE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, false)
+        .len() as u32;
+    for seg in block.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::MergeStatement),
+        true,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        obj.merge_count += 1;
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::Merge,
+        );
+    }
+    for seg in block.recursive_crawl(
+        &TRANSACTION_STATEMENTS,
+        true,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        obj.transaction_control_count += 1;
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::TransactionControl,
+        );
+    }
 }
 
 /// The uppercased text of every *code* leaf token in `node` (comments,
@@ -2276,16 +2551,24 @@ fn has_own_where_clause(stmt: &ErasedSegment) -> bool {
 }
 
 /// Write-statement kinds whose statement-level `table_reference` targets are
-/// the objects they mutate.
+/// the objects they mutate. Includes the Oracle parallel kinds (see the
+/// dialect-folding sets above).
 const WRITE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::InsertStatement,
+    SyntaxKind::OracleInsertStatement,
+    SyntaxKind::BulkInsertStatement,
     SyntaxKind::UpdateStatement,
+    SyntaxKind::OracleUpdateStatement,
     SyntaxKind::DeleteStatement,
+    SyntaxKind::OracleDeleteStatement,
     SyntaxKind::MergeStatement,
     SyntaxKind::TruncateStatement,
     SyntaxKind::AlterTableStatement,
+    SyntaxKind::OracleAlterTableStatement,
     SyntaxKind::CreateTableStatement,
+    SyntaxKind::OracleCreateTableStatement,
     SyntaxKind::CreateViewStatement,
+    SyntaxKind::OracleCreateViewStatement,
     SyntaxKind::CreateMaterializedViewStatement,
     SyntaxKind::CreateIndexStatement,
     SyntaxKind::DropTableStatement,
@@ -2294,6 +2577,10 @@ const WRITE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::DropFunctionStatement,
     SyntaxKind::DropSchemaStatement,
     SyntaxKind::DropStatement,
+    SyntaxKind::OracleDropPackageStatement,
+    SyntaxKind::OracleDropProcedureStatement,
+    SyntaxKind::OracleDropSynonymStatement,
+    SyntaxKind::OracleDropDatabaseLinkStatement,
 ]);
 
 /// Procedural-definition statement kinds. DML/object scans pass this as their
@@ -2346,6 +2633,13 @@ const UNIT_NAME_KINDS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::TriggerReference,
 ]);
 
+/// The routine-definition CST nodes in the same pre-order as
+/// [`extract_procedural_units`] collects `ProceduralUnitFacts` — callers zip
+/// the two by index (e.g. for per-unit embedded-query scoring).
+pub(crate) fn procedural_unit_nodes(root: &ErasedSegment) -> Vec<ErasedSegment> {
+    root.recursive_crawl(&PROCEDURAL_UNITS, true, &SyntaxSet::EMPTY, false)
+}
+
 /// Collect procedural units (routine definitions) in pre-order.
 ///
 /// `recurse_into = true` descends into matched definitions, so routines
@@ -2357,7 +2651,7 @@ fn extract_procedural_units(
     line_at: &impl Fn(u32) -> u32,
     facts: &mut SqlFileFacts,
 ) {
-    let units = root.recursive_crawl(&PROCEDURAL_UNITS, true, &SyntaxSet::EMPTY, false);
+    let units = procedural_unit_nodes(root);
     for unit in &units {
         let Some(pm) = unit.get_position_marker() else {
             continue;
@@ -2375,6 +2669,9 @@ fn extract_procedural_units(
             end_line: line_at(end_byte.saturating_sub(1)),
             start_byte,
             end_byte,
+            cyclomatic_complexity: 0.0,
+            cognitive_complexity: 0.0,
+            embedded_query_structural: 0.0,
         });
     }
 }
@@ -2465,12 +2762,7 @@ fn cte_local_refs(stmt: &ErasedSegment) -> Vec<ErasedSegment> {
         // Every table reference in this WITH's subtree (the CTE bodies and the
         // main query) is in-scope for these names; mark the ones whose name
         // matches as CTE-local.
-        for tr in w.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        ) {
+        for tr in w.recursive_crawl(&TABLE_REFERENCES, true, &SyntaxSet::EMPTY, true) {
             if names.contains(&tr.raw().to_ascii_uppercase()) {
                 local.push(tr);
             }
@@ -2500,6 +2792,7 @@ fn collect_statement_objects(
     // `recurse_into = false` returns the outermost match on each path.
     const TARGET_REFS: SyntaxSet = SyntaxSet::new(&[
         SyntaxKind::TableReference,
+        SyntaxKind::OracleTableReference,
         SyntaxKind::FunctionName,
         SyntaxKind::DatabaseReference,
     ]);
@@ -2532,8 +2825,12 @@ fn collect_statement_objects(
         let first_target_only = matches!(
             ws.get_type(),
             SyntaxKind::InsertStatement
+                | SyntaxKind::OracleInsertStatement
+                | SyntaxKind::BulkInsertStatement
                 | SyntaxKind::UpdateStatement
+                | SyntaxKind::OracleUpdateStatement
                 | SyntaxKind::DeleteStatement
+                | SyntaxKind::OracleDeleteStatement
                 | SyntaxKind::MergeStatement
                 | SyntaxKind::CreateIndexStatement
                 | SyntaxKind::DropIndexStatement
@@ -2568,12 +2865,7 @@ fn collect_statement_objects(
         true,
     );
     for elem in &from_elems {
-        for tr in elem.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        ) {
+        for tr in elem.recursive_crawl(&TABLE_REFERENCES, true, &SyntaxSet::EMPTY, true) {
             let is_write_target = write_target_nodes.iter().any(|w| w.is(&tr));
             if !is_cte_local(&tr) && !is_write_target {
                 record_object_occurrence(
@@ -2612,7 +2904,7 @@ fn record_object_occurrence(
         .or_insert(candidate);
 }
 
-fn statement_span(statement: &StatementFacts) -> SourceSpan {
+pub(crate) fn statement_span(statement: &StatementFacts) -> SourceSpan {
     SourceSpan::new(
         statement.start_byte,
         statement.end_byte,
@@ -2733,6 +3025,12 @@ fn count_direct(node: &ErasedSegment, kind: SyntaxKind) -> u32 {
 /// Count occurrences of `kind` anywhere in the subtree (including `node`).
 fn count_anywhere(node: &ErasedSegment, kind: SyntaxKind) -> u32 {
     node.recursive_crawl(&SyntaxSet::single(kind), true, &SyntaxSet::EMPTY, true)
+        .len() as u32
+}
+
+/// Count occurrences of any kind in `set` anywhere in the subtree.
+fn count_any(node: &ErasedSegment, set: &SyntaxSet) -> u32 {
+    node.recursive_crawl(set, true, &SyntaxSet::EMPTY, true)
         .len() as u32
 }
 

@@ -1097,3 +1097,155 @@ fn directive_surfaces_on_comment_only_file() {
     assert!(diag_codes(&a).contains(&"sql.dialect.unknown".to_string()));
     assert_eq!(get(&a.root.metrics, "sql.dialect.directive_present"), 1.0);
 }
+
+// ── procedural SQL (research foundation §6.17, Phase 3) ───────────────
+
+/// PL/SQL routine with the full §6.17 construct set — every count below is
+/// hand-traced against the fixture (see the cyclomatic/cognitive breakdowns
+/// inline). The fixture parses fully under the Oracle dialect, so this
+/// exercises the typed-CST token path.
+#[test]
+fn plsql_procedural_family_counts() {
+    let m = metrics(include_str!("fixtures/plsql_procedure_control_flow.sql"));
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.block_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 1.0);
+    // IF + one ELSIF.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // WHILE … LOOP + numeric FOR … LOOP (each counted once, not twice for
+    // their body-opening LOOP keyword).
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.case_statement_count"), 0.0);
+    // EXCEPTION WHEN no_data_found / WHEN others.
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.return_count"), 1.0);
+    // raise_application_error + two bare RAISE.
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 3.0);
+    // EXECUTE IMMEDIATE.
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    // Cyclomatic (Sonar PL/SQL model): entry 1 + IF 1 + ELSIF 1 + AND 1
+    // + RAISE×3 + loops×2 + EXIT WHEN 1 + handlers×2 = 12.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 12.0);
+    // Cognitive: IF 1 + ELSIF 1 + ELSE 1 + boolean sequence 1 + WHILE 1
+    // + EXIT WHEN 1 + FOR 1 + handlers×2 = 9 (flat: nothing is nested).
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 9.0);
+    // Change risk: CREATE OR REPLACE (4) + dynamic SQL (5). The routine
+    // body's UPDATE is *not* file-level risk (it runs when called, not when
+    // the file is applied).
+    assert_eq!(get(&m, "sql.change_risk_score"), 9.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 0.0);
+    // The embedded UPDATE…WHERE gives the routine a small query-structural
+    // score, surfaced file-level as the max over routines.
+    assert!(get(&m, "sql.structural_complexity.max_embedded_query") > 0.0);
+}
+
+/// T-SQL routine exercising the token fallback path: sqruff parses the
+/// header and keyword-led IF statements but spills the WHILE/TRY-CATCH tail
+/// into top-level `Unparsable` runs (parser comparison §9). The procedural
+/// counts must survive that degradation.
+#[test]
+fn tsql_procedural_family_counts_through_unparsable_spill() {
+    let m = metrics(include_str!("fixtures/tsql_procedure_control_flow.sql"));
+    // The parse loses statement structure but not the token stream.
+    assert!(get(&m, "sql.parser.unparsable_segment_count") > 0.0);
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // IF @batch, IF @count = 5, IF error_number() = 208.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 3.0);
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 1.0);
+    // BEGIN CATCH.
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 1.0);
+    // THROW.
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // EXEC sp_executesql.
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.return_count"), 2.0);
+    // Proc body BEGIN + IF/ELSE blocks + WHILE block + TRY + CATCH.
+    assert_eq!(get(&m, "sql.procedural.block_count"), 6.0);
+    // Entries: the routine + the keyword-led IF statement that sqruff splits
+    // into its own (anonymous-block) statement; + 3 IF + 1 WHILE + 1 CATCH
+    // + 1 THROW = 8.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 8.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+}
+
+/// An Oracle anonymous block *executes when the file is applied*, so its
+/// body DML/TCL feeds the DML counters, object touches, and change risk —
+/// unlike a routine definition's body (probed: `Statement >
+/// OracleBeginEndBlock`).
+#[test]
+fn anonymous_block_body_dml_counts_as_migration_risk() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               begin\n\
+                 update accounts set bal = 0;\n\
+                 commit;\n\
+               end;\n\
+               /\n";
+    let m = metrics(sql);
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_without_where_count"), 1.0);
+    assert_eq!(get(&m, "sql.transaction.control_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 1.0);
+    // Procedural entry for the block itself.
+    assert_eq!(get(&m, "sql.procedural.block_count"), 1.0);
+    assert!(get(&m, "sql.procedural.cyclomatic_complexity") >= 1.0);
+}
+
+/// Regression (dialect folding): sqruff's Oracle dialect emits its own
+/// `OracleUpdateStatement`/`OracleTableReference`/… kinds. Before the folding
+/// sets, top-level Oracle DML classified as `unknown` and appeared in no
+/// `sql.dml.*` / object-touch / change-risk metric.
+#[test]
+fn oracle_dml_classifies_and_feeds_object_touch() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               update orders set status = 'X' where id = 1;\n\
+               insert into audit_log (id) values (1);\n\
+               delete from stale_rows;\n\
+               commit;\n";
+    let m = metrics(sql);
+    assert_eq!(get(&m, "sql.statement.kind_count.update"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.insert"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.delete"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.transaction_control"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.unknown"), 0.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.delete_without_where_count"), 1.0);
+    // orders + audit_log + stale_rows are written objects.
+    assert_eq!(get(&m, "sql.object.write_count"), 3.0);
+}
+
+// ── predicate keyword fixes ─────────────────────────────────────────────
+
+/// `NOT NULL` column constraints and `IF NOT EXISTS` guards are DDL, not
+/// predicate logic; `IS NOT NULL`, `NOT IN`, and `NOT EXISTS` predicates
+/// still count.
+#[test]
+fn not_count_excludes_ddl_contexts() {
+    let ddl = metrics("CREATE TABLE t (id INT NOT NULL, name TEXT NOT NULL)");
+    assert_eq!(get(&ddl, "sql.predicate.not_count"), 0.0);
+
+    let guard = metrics("-- sqlfluff:dialect:postgres\nCREATE TABLE IF NOT EXISTS t (id INT)");
+    assert_eq!(get(&guard, "sql.predicate.not_count"), 0.0);
+
+    let is_not_null = metrics("SELECT a FROM t WHERE a IS NOT NULL");
+    assert_eq!(get(&is_not_null, "sql.predicate.not_count"), 1.0);
+
+    let not_in = metrics("SELECT a FROM t WHERE a NOT IN (1, 2)");
+    assert_eq!(get(&not_in, "sql.predicate.not_count"), 1.0);
+
+    let not_exists = metrics("SELECT a FROM t WHERE NOT EXISTS (SELECT 1 FROM u)");
+    assert_eq!(get(&not_exists, "sql.predicate.not_count"), 1.0);
+}
+
+/// `sql.subquery.in_count` counts IN-subqueries, not raw `IN` keywords —
+/// a `FOR i IN 1..10 LOOP` header or a parameter direction never counts
+/// (only `IN` followed by a bracketed SELECT does).
+#[test]
+fn in_subquery_count_ignores_procedural_in_keywords() {
+    let m = metrics(include_str!("fixtures/plsql_procedure_control_flow.sql"));
+    // The fixture has a FOR … IN loop and no IN-subqueries.
+    assert_eq!(get(&m, "sql.subquery.in_count"), 0.0);
+
+    let predicate = metrics("SELECT a FROM t WHERE a IN (SELECT id FROM u)");
+    assert_eq!(get(&predicate, "sql.subquery.in_count"), 1.0);
+}

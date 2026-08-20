@@ -167,3 +167,85 @@ fn space_ids_are_unique_across_statements_and_units() {
     sorted.dedup();
     assert_eq!(sorted.len(), ids.len(), "duplicate SpaceId: {ids:?}");
 }
+
+/// Per-routine procedural composites land on the unit's Function space
+/// (Phase 3): the file-level aggregates attribute to the innermost unit
+/// containing each increment, plus the unit's own entry path.
+#[test]
+fn function_spaces_carry_per_unit_procedural_metrics() {
+    let analysis = analyze(include_str!("fixtures/plsql_procedure_control_flow.sql"));
+    let statement = &analysis.root.spaces[0];
+    let unit = &statement.spaces[0];
+    assert_eq!(unit.kind, SpaceKind::Function);
+    let get = |key: &str| {
+        unit.metrics
+            .get(&MetricKey::new(key))
+            .map(|v| v.as_f64())
+            .unwrap_or_else(|| panic!("missing unit metric {key}"))
+    };
+    // The single routine owns every increment (hand trace in
+    // tests/metrics.rs::plsql_procedural_family_counts).
+    assert_eq!(get("sql.procedural.cyclomatic_complexity"), 12.0);
+    assert_eq!(get("sql.procedural.cognitive_complexity"), 9.0);
+    // The embedded UPDATE…WHERE gives a small query-structural score, and the
+    // file-level max is exactly this unit's score.
+    let embedded = get("sql.structural_complexity");
+    assert!(embedded > 0.0);
+    assert_eq!(
+        analysis
+            .root
+            .metrics
+            .get(&MetricKey::new(
+                "sql.structural_complexity.max_embedded_query"
+            ))
+            .map(|v| v.as_f64()),
+        Some(embedded)
+    );
+}
+
+/// Subprograms nested in a container split the attribution: each unit gets
+/// its own entry, and increments land in the *innermost* enclosing unit.
+#[test]
+fn nested_subprogram_attribution_is_innermost() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               create or replace function outer_fn return number is\n\
+                 v number;\n\
+                 function inner_fn return number is\n\
+                 begin\n\
+                   if v > 0 then\n\
+                     return 2;\n\
+                   end if;\n\
+                   return 3;\n\
+                 end inner_fn;\n\
+               begin\n\
+                 v := inner_fn();\n\
+                 return v;\n\
+               end outer_fn;\n\
+               /\n";
+    let analysis = analyze(sql);
+    let statement = &analysis.root.spaces[0];
+    let outer = &statement.spaces[0];
+    let inner = &outer.spaces[0];
+    let get = |space: &mehen_core::MetricSpace, key: &str| {
+        space
+            .metrics
+            .get(&MetricKey::new(key))
+            .map(|v| v.as_f64())
+            .unwrap_or_else(|| panic!("missing {key}"))
+    };
+    // Inner: entry 1 + IF 1 = 2. Its RETURNs and the IF belong to it, not
+    // to outer_fn.
+    assert_eq!(get(inner, "sql.procedural.cyclomatic_complexity"), 2.0);
+    // Outer: its own entry only (the machine increments inside inner_fn's
+    // byte range attribute to inner_fn).
+    assert_eq!(get(outer, "sql.procedural.cyclomatic_complexity"), 1.0);
+    // File-level = 3 = both entries + the IF.
+    assert_eq!(
+        analysis
+            .root
+            .metrics
+            .get(&MetricKey::new("sql.procedural.cyclomatic_complexity"))
+            .map(|v| v.as_f64()),
+        Some(3.0)
+    );
+}
