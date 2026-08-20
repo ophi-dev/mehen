@@ -86,10 +86,20 @@ inputs:
   coverage-base-source:
     description: >-
       Where base-revision coverage comes from on pull requests: auto (exact cache hit, then
-      codecov.io, then nearest default-branch cache, then absent), cache, codecov, or off.
-      Every fallback level is disclosed in the PR comment.
+      workflow artifact, then codecov.io, then nearest default-branch cache, then absent),
+      cache, artifact, codecov, or off. Every fallback level is disclosed in the PR comment.
     required: false
     default: "auto"
+  coverage-artifact-name:
+    description: >-
+      Name of a workflow artifact holding coverage report(s), used as a base-coverage source
+      on pull requests: the artifact uploaded by the run for the PR's base SHA is downloaded
+      and its files are passed as --base-coverage. Artifacts persist ~90 days (the Actions
+      cache evicts after 7 unused days), and many repositories already upload coverage
+      artifacts — including for GitHub Code Quality's upload job. The artifact should contain
+      only coverage report files. Requires `actions: read` permission on the job.
+    required: false
+    default: ""
   codecov-token:
     description: >-
       Codecov API access token for coverage-base-source auto/codecov: a personal API access
@@ -199,6 +209,7 @@ runs:
         GHA_MEHEN_COMMENT_TITLE: ${{ inputs.comment-title }}
         GHA_MEHEN_COVERAGE_FILES: ${{ inputs.coverage-files }}
         GHA_MEHEN_COVERAGE_BASE_SOURCE: ${{ inputs.coverage-base-source }}
+        GHA_MEHEN_COVERAGE_ARTIFACT_NAME: ${{ inputs.coverage-artifact-name }}
         GHA_MEHEN_CODECOV_TOKEN: ${{ inputs.codecov-token }}
         GHA_MEHEN_COVERAGE_BASE_DIR: ${{ runner.temp }}/mehen-base-coverage
         GHA_MEHEN_COVERAGE_CACHE_HIT: ${{ steps.coverage-restore.outputs.cache-hit }}

@@ -82,7 +82,8 @@ trees:
 | `fail-on-threshold` | `true` | Fail the action when any configured threshold is exceeded. |
 | `comment-title` | `## 📊 Source Code Metrics` | Markdown heading used for the sticky comment. |
 | `coverage-files` | `""` | Coverage report paths produced by an earlier test step (newline, comma, or semicolon separated; literal paths). Enables the [coverage trend columns](#coverage-trends). |
-| `coverage-base-source` | `auto` | Where base-revision coverage comes from on PRs: `auto`, `cache`, `codecov`, or `off`. |
+| `coverage-base-source` | `auto` | Where base-revision coverage comes from on PRs: `auto`, `cache`, `artifact`, `codecov`, or `off`. |
+| `coverage-artifact-name` | `""` | Workflow artifact holding coverage reports, used as a base source by exact base SHA. Requires `actions: read`. |
 | `codecov-token` | `""` | Codecov **API access token** for the `codecov` source. Optional for public repositories. |
 
 ## Outputs
@@ -165,18 +166,25 @@ disclosed in the PR comment, never silently:
 
 1. **Exact cache hit** — on every push to the default branch the action saves your `coverage-files`
    to the Actions cache under `mehen-coverage-<sha>`; a PR restores the entry for its exact base SHA.
-2. **codecov.io by base SHA** — the commit report is fetched from the codecov API and converted to
+2. **Workflow artifact by base SHA** — opt-in via `coverage-artifact-name`: if your workflow already
+   uploads coverage reports as an artifact (many do — including the upload job GitHub Code Quality's
+   setup generates), the artifact from the base SHA's run is downloaded and its files handed to
+   `--base-coverage`. Artifacts persist ~90 days where cache entries evict after 7 unused days, so
+   this rung survives long-lived PRs. Requires `actions: read` on the job.
+3. **codecov.io by base SHA** — the commit report is fetched from the codecov API and converted to
    LCOV (line dimension only: codecov's merged view has no original branch arms, and fabricated ones
-   would poison `coverage.branch` gates). This is the durable source — Actions cache entries evict
-   after 7 days unused or under repository size pressure.
-3. **Nearest default-branch cache** — a prefix-key fallback that is recency-based, not
+   would poison `coverage.branch` gates). This is the durable source of last resort for exact-SHA
+   data.
+4. **Nearest default-branch cache** — a prefix-key fallback that is recency-based, not
    ancestor-aware; the comment discloses that trends may compare against an older commit, and mehen
    itself warns when the restored report predates the base commit.
-4. **Absent** — head values are shown without a base to compare against (`85 (main: n/a)` on
-   changed files, `85 🆕` on new ones), never fabricated regressions.
+5. **Absent** — coverage cells show head values without a base to compare against
+   (`85 (main: n/a)` on changed files, `85 🆕` on new ones), never fabricated regressions.
 
-`coverage-base-source` pins the ladder to one source: `cache` (rungs 1 → 3 → 4), `codecov`
-(2 → 4), or `off` (head-side coverage only).
+`coverage-base-source` pins the ladder to one source: `cache` (rungs 1 → 4 → 5), `artifact`
+(2 → 5), `codecov` (3 → 5), or `off` (head-side coverage only). A retrieved report that mehen
+cannot parse (a truncated cache entry, an artifact with unexpected content) degrades to absent with
+a disclosure instead of failing the action.
 
 <Warning>
 `codecov-token` must be a **personal API access token** — generate one under *Settings → Access* on
@@ -187,6 +195,57 @@ token can be omitted entirely.
 
 The cache-save rung requires the action to run on default-branch pushes too (after the same test
 step), so trigger the workflow with both `on: pull_request` and `on: push: branches: [main]`.
+
+## Works with GitHub Code Quality
+
+[GitHub Code Quality](https://docs.github.com/en/code-security/concepts/code-quality/code-quality)
+(Team/Enterprise Cloud) checks an aggregate line-coverage percentage on pull requests from a
+**Cobertura XML** report uploaded via
+[`actions/upload-code-coverage`](https://github.com/actions/upload-code-coverage). Cobertura is one
+of mehen's six ingestion formats, so **the same report feeds both consumers** — one test run, no
+extra tooling. GitHub's upload needs the `code-quality: write` permission on the job, on top of the
+[permissions the mehen action needs](#permissions):
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  code-quality: write   # actions/upload-code-coverage
+  actions: read         # mehen's artifact base-coverage rung (coverage-artifact-name)
+
+steps:
+  - run: pytest --cov=. --cov-report=xml         # one Cobertura report...
+
+  - uses: actions/upload-code-coverage@v1         # ...GitHub: aggregate % + ruleset blocking
+    with:
+      file: coverage.xml
+      language: Python
+      label: code-coverage/pytest
+
+  - uses: ophi-dev/mehen@v1                       # ...mehen: per-file trend columns,
+    with:                                         #    per-function attribution, thresholds
+      coverage-files: coverage.xml
+```
+
+The two are complementary: GitHub gives the aggregate percentage and merge-blocking rulesets on its
+own plans; mehen gives per-file trend columns, per-function coverage attribution, branch/function
+dimensions where the format carries them, and works on any plan — including GHES — with no network
+access in the binary.
+
+Notes for shared setups:
+
+- Both consumers need the report to describe the **head revision**: GitHub's docs mandate checking
+  out `pull_request.head.sha` (not the merge commit) "so coverage line numbers map correctly to the
+  diff" — the same-revision rule mehen's diff relies on as well.
+- If GitHub's generated upload job stores the Cobertura file as a workflow artifact (its default
+  pattern), point `coverage-artifact-name` at that artifact and the base-coverage ladder reuses it —
+  no extra uploads.
+- Prefer a format with branch records (e.g. LCOV) for `coverage-files` when your tooling offers
+  both; GitHub needs the Cobertura serialization, but mehen's `coverage.branch` dimension can only
+  be measured from reports that carry branch data. This repository does exactly that: one
+  `llvm-cov` collection, serialized twice
+  ([coverage.yml](https://github.com/ophi-dev/mehen/blob/main/.github/workflows/coverage.yml)).
 
 ## Examples
 

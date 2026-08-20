@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -58,6 +59,17 @@ const METRIC_ALIASES = new Map([
 // 'CODECOV_PENDING_RETRIES' before initialization").
 const CODECOV_PENDING_RETRIES = 3;
 const CODECOV_RETRY_DELAY_MS = 5000;
+// Mirrors mehen's own per-report ingestion cap (256 MiB): a base
+// artifact bigger than that could never be fed to the CLI anyway.
+// Enforced in three layers — artifact metadata, downloaded bytes, and
+// declared/actual decompressed size — so a hostile or corrupt archive
+// degrades instead of exhausting the runner.
+const ARTIFACT_MAX_BYTES = 256 * 1024 * 1024;
+// Artifact listings are newest-first; a base SHA older than ~1000
+// same-named uploads is better served by the lower rungs than by an
+// unbounded listing walk.
+const ARTIFACT_MAX_PAGES = 10;
+const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 60_000;
 
 if (isEntrypoint()) {
   main().catch((error) => {
@@ -80,7 +92,7 @@ async function main() {
   let baseCoverage = await resolveBaseCoverage(context);
   const cli = prepareMehen();
   const version = detectMehenVersion(cli);
-  const diffArgs = buildDiffArgs(baseCoverage.args);
+  let diffArgs = buildDiffArgs(baseCoverage.args);
   let diff;
   try {
     diff = runMehen(cli, diffArgs, { acceptGateOutput: isGateFailureReport });
@@ -102,7 +114,11 @@ async function main() {
       args: [],
       disclosure: `Base coverage: a retrieved report for \`${context.baseSha.slice(0, 7)}\` was unusable — coverage values are shown without a base to compare against, not as trends.`,
     };
-    diff = runMehen(cli, buildDiffArgs(), {
+    // Rebuild — not just rerun — so every later consumer of the
+    // argument list (the Markdown docs rerun) also sees the degraded
+    // arguments instead of re-tripping over the rejected report.
+    diffArgs = buildDiffArgs();
+    diff = runMehen(cli, diffArgs, {
       acceptGateOutput: isGateFailureReport,
     });
   }
@@ -261,14 +277,14 @@ function buildDiffArgs(extraArgs = []) {
   return args;
 }
 
-// ── Base coverage retrieval (issue #248) ─────────────────────────────
+// ── Base coverage retrieval (issue #248, artifact rung: #254) ────────
 //
 // The action, not the mehen binary, owns base-revision coverage: mehen
 // stays network-free and receives plain report paths. Degradation
-// ladder: exact cache hit → codecov by SHA → nearest default-branch
-// cache (recency-based, so explicitly disclosed) → absent (columns
-// render as new measurements). Every level is stated in the sticky PR
-// comment — never silently.
+// ladder: exact cache hit → workflow artifact by base SHA → codecov by
+// SHA → nearest default-branch cache (recency-based, so explicitly
+// disclosed) → absent (columns render as new measurements). Every
+// level is stated in the sticky PR comment — never silently.
 
 /**
  * Resolve base-revision coverage into `--base-coverage=` CLI arguments
@@ -284,9 +300,15 @@ async function resolveBaseCoverage(context) {
   if (files.length === 0 || source === "off") {
     return none;
   }
-  if (!["auto", "cache", "codecov"].includes(source)) {
+  if (!["auto", "cache", "artifact", "codecov"].includes(source)) {
     throw new Error(
-      `Unsupported coverage-base-source '${source}'. Use auto, cache, codecov, or off.`,
+      `Unsupported coverage-base-source '${source}'. Use auto, cache, artifact, codecov, or off.`,
+    );
+  }
+  const artifactName = input("COVERAGE_ARTIFACT_NAME").trim();
+  if (source === "artifact" && !artifactName) {
+    throw new Error(
+      "coverage-base-source: artifact requires the coverage-artifact-name input.",
     );
   }
   // Base trends are a pull-request concept: pushes and manual runs
@@ -302,17 +324,38 @@ async function resolveBaseCoverage(context) {
   const cachedReports = listFilesRecursively(cacheDir);
 
   // Rung 1 — exact cache hit: the base SHA's own reports.
-  if (source !== "codecov" && exactHit && cachedReports.length > 0) {
-    return {
-      args: cachedReports.map((file) => `--base-coverage=${file}`),
-      disclosure: `Base coverage: restored from the Actions cache for \`${shortBase}\`.`,
-    };
+  if (source !== "codecov" && source !== "artifact") {
+    if (exactHit && cachedReports.length > 0) {
+      return {
+        args: cachedReports.map((file) => `--base-coverage=${file}`),
+        disclosure: `Base coverage: restored from the Actions cache for \`${shortBase}\`.`,
+      };
+    }
   }
 
-  // Rung 2 — codecov by exact SHA. Line dimension only: codecov's
+  // Rung 2 — workflow artifact by exact base SHA. Artifacts persist
+  // ~90 days (the Actions cache evicts after 7 unused days or under
+  // repository size pressure), and many repositories already upload
+  // their coverage reports as artifacts — including for GitHub Code
+  // Quality's own upload job. Requires `actions: read` on the job's
+  // token; opt-in via the coverage-artifact-name input.
+  if ((source === "auto" || source === "artifact") && artifactName) {
+    const artifactFiles = await fetchArtifactBaseReports(
+      context,
+      artifactName,
+    );
+    if (artifactFiles) {
+      return {
+        args: artifactFiles.map((file) => `--base-coverage=${file}`),
+        disclosure: `Base coverage: restored from the \`${artifactName}\` workflow artifact for \`${shortBase}\`.`,
+      };
+    }
+  }
+
+  // Rung 3 — codecov by exact SHA. Line dimension only: codecov's
   // merged view has no original branch arms, and fabricating BRDA
   // records would poison branch-coverage gates.
-  if (source !== "cache") {
+  if (source === "auto" || source === "codecov") {
     const lcov = await fetchCodecovBaseReport(context);
     if (lcov) {
       const dir = path.join(
@@ -329,19 +372,21 @@ async function resolveBaseCoverage(context) {
     }
   }
 
-  // Rung 3 — nearest default-branch cache via the prefix restore-key:
+  // Rung 4 — nearest default-branch cache via the prefix restore-key:
   // recency-based, not ancestor-aware, so the staleness is disclosed
   // (mehen itself also warns when the report predates the base
   // commit).
-  if (source !== "codecov" && cachedReports.length > 0) {
-    const label = matchedKey ? ` (\`${matchedKey}\`)` : "";
-    return {
-      args: cachedReports.map((file) => `--base-coverage=${file}`),
-      disclosure: `Base coverage: nearest default-branch cache${label} — no saved report for \`${shortBase}\` itself, so coverage trends may compare against an older commit.`,
-    };
+  if (source !== "codecov" && source !== "artifact") {
+    if (cachedReports.length > 0) {
+      const label = matchedKey ? ` (\`${matchedKey}\`)` : "";
+      return {
+        args: cachedReports.map((file) => `--base-coverage=${file}`),
+        disclosure: `Base coverage: nearest default-branch cache${label} — no saved report for \`${shortBase}\` itself, so coverage trends may compare against an older commit.`,
+      };
+    }
   }
 
-  // Rung 4 — absent. Coverage cells show head values without a base
+  // Rung 5 — absent. Coverage cells show head values without a base
   // to compare against (`85 (main: n/a)` on changed files, `85 🆕` on
   // new ones), never fabricated regressions.
   return {
@@ -482,6 +527,261 @@ function isBaseCoverageFailure(error, baseArgs) {
     const reportPath = String(arg).replace(/^--base-coverage=/, "");
     return reportPath.length > 0 && stderr.includes(reportPath);
   });
+}
+
+/**
+ * Pick the workflow artifact holding the base revision's coverage
+ * reports: non-expired, produced by a run whose head SHA is exactly
+ * the PR base SHA. Several runs can produce the same-named artifact
+ * for one SHA (re-runs, multiple workflows) — the newest upload wins.
+ */
+function pickBaseArtifact(artifacts, baseSha) {
+  if (!Array.isArray(artifacts) || !baseSha) {
+    return null;
+  }
+  const candidates = artifacts.filter(
+    (artifact) =>
+      artifact &&
+      artifact.expired !== true &&
+      artifact.workflow_run?.head_sha === baseSha,
+  );
+  if (candidates.length === 0) {
+    return null;
+  }
+  candidates.sort(
+    (a, b) => new Date(b.created_at ?? 0) - new Date(a.created_at ?? 0),
+  );
+  return candidates[0];
+}
+
+/**
+ * Fetch base-revision coverage reports from a workflow artifact
+ * (rung 2). Returns the extracted file paths, or null (never throws)
+ * so the ladder degrades: missing artifact, expired entry, oversized
+ * archive, download or extraction failure all fall through to the
+ * next source. Needs `actions: read` on the token; a 403 therefore
+ * degrades with a permission hint rather than failing the action.
+ */
+async function fetchArtifactBaseReports(context, artifactName) {
+  const token = input("GITHUB_TOKEN").trim() || process.env.GITHUB_TOKEN || "";
+  const [owner, repo] = context.repository.split("/");
+  if (!owner || !repo || !token) {
+    return null;
+  }
+  // Listings are newest-first across all runs, so the base SHA's
+  // artifact can sit past the first page in a busy repository; the
+  // first page containing a match holds the newest match overall.
+  // The page budget keeps a pathological history from stalling the
+  // rung — beyond it, the lower rungs serve better than a long walk.
+  let artifact = null;
+  try {
+    for (let page = 1; page <= ARTIFACT_MAX_PAGES; page += 1) {
+      const listing = await githubRequest(
+        "GET",
+        `/repos/${owner}/${repo}/actions/artifacts?name=${encodeURIComponent(artifactName)}&per_page=100&page=${page}`,
+        token,
+        undefined,
+        { timeoutMs: ARTIFACT_DOWNLOAD_TIMEOUT_MS },
+      );
+      const artifacts = Array.isArray(listing?.artifacts)
+        ? listing.artifacts
+        : [];
+      artifact = pickBaseArtifact(artifacts, context.baseSha);
+      if (artifact || artifacts.length < 100) {
+        break;
+      }
+    }
+  } catch (error) {
+    const hint = String(error.message).includes(" 403 ")
+      ? " (does the job grant `actions: read`?)"
+      : "";
+    console.warn(
+      `artifact lookup for '${artifactName}' failed${hint}: ${error.message}; trying the next base-coverage source.`,
+    );
+    return null;
+  }
+  if (!artifact) {
+    console.log(
+      `no '${artifactName}' artifact found for base ${context.baseSha}; trying the next base-coverage source.`,
+    );
+    return null;
+  }
+  const size = Number(artifact.size_in_bytes);
+  if (Number.isFinite(size) && size > ARTIFACT_MAX_BYTES) {
+    console.warn(
+      `artifact '${artifactName}' for base ${context.baseSha} is ${size} bytes (cap ${ARTIFACT_MAX_BYTES}); trying the next base-coverage source.`,
+    );
+    return null;
+  }
+  try {
+    // fetch follows the 302 to blob storage automatically; undici
+    // drops the Authorization header on the cross-origin redirect,
+    // which is exactly what the signed blob URL expects. The abort
+    // signal turns a stalled blob transfer into a ladder degradation
+    // instead of a job-timeout hang.
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifact.id}/zip`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "mehen-action",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        signal: AbortSignal.timeout(ARTIFACT_DOWNLOAD_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) {
+      console.warn(
+        `artifact download for '${artifactName}' responded ${response.status}; trying the next base-coverage source.`,
+      );
+      return null;
+    }
+    // The metadata check above trusts the API; these two enforce the
+    // cap on what actually arrives (a missing size_in_bytes field or
+    // a chunked response must not become an unbounded read).
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > ARTIFACT_MAX_BYTES) {
+      console.warn(
+        `artifact '${artifactName}' download declares ${declared} bytes (cap ${ARTIFACT_MAX_BYTES}); trying the next base-coverage source.`,
+      );
+      return null;
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > ARTIFACT_MAX_BYTES) {
+      console.warn(
+        `artifact '${artifactName}' download is ${buffer.length} bytes (cap ${ARTIFACT_MAX_BYTES}); trying the next base-coverage source.`,
+      );
+      return null;
+    }
+    const dir = path.join(
+      process.env.RUNNER_TEMP || os.tmpdir(),
+      "mehen-artifact-base",
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const extracted = extractZip(buffer, dir, ARTIFACT_MAX_BYTES);
+    if (extracted.length === 0) {
+      console.log(
+        `artifact '${artifactName}' for base ${context.baseSha} contained no files; trying the next base-coverage source.`,
+      );
+      return null;
+    }
+    return extracted;
+  } catch (error) {
+    console.warn(
+      `artifact retrieval for '${artifactName}' failed (${error.message}); trying the next base-coverage source.`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Extract a standard ZIP archive (the format GitHub serves for
+ * workflow artifacts) into `destDir`, returning the extracted file
+ * paths sorted. Zero-dependency by design: entries are read from the
+ * central directory (whose sizes are authoritative even when a local
+ * header deferred them to a data descriptor) and inflated with
+ * node:zlib. Supports the two methods artifact zips use — stored (0)
+ * and deflate (8); no zip64 (the artifact size cap is far below 4
+ * GiB). Entries that would escape `destDir` (zip-slip) are rejected
+ * loudly rather than skipped, and `maxTotalBytes` bounds the
+ * *decompressed* output — checked against the declared sizes up
+ * front and enforced per entry via zlib's maxOutputLength, so an
+ * archive whose metadata lies (a zip bomb) aborts mid-inflate
+ * instead of exhausting the runner. A hostile archive is not a
+ * degradation case but an integrity failure.
+ */
+function extractZip(buffer, destDir, maxTotalBytes = Infinity) {
+  const EOCD_SIG = 0x06054b50;
+  const CENTRAL_SIG = 0x02014b50;
+  const LOCAL_SIG = 0x04034b50;
+  const eocdFloor = Math.max(0, buffer.length - 22 - 0xffff);
+  let eocd = -1;
+  for (let i = buffer.length - 22; i >= eocdFloor; i -= 1) {
+    if (buffer.readUInt32LE(i) === EOCD_SIG) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) {
+    throw new Error("not a zip archive (no end-of-central-directory record)");
+  }
+  const entryCount = buffer.readUInt16LE(eocd + 10);
+  let cursor = buffer.readUInt32LE(eocd + 16);
+  const extracted = [];
+  let declaredTotal = 0;
+  let writtenTotal = 0;
+  for (let i = 0; i < entryCount; i += 1) {
+    if (buffer.readUInt32LE(cursor) !== CENTRAL_SIG) {
+      throw new Error("corrupt zip archive (central directory signature)");
+    }
+    const method = buffer.readUInt16LE(cursor + 10);
+    const compressedSize = buffer.readUInt32LE(cursor + 20);
+    const uncompressedSize = buffer.readUInt32LE(cursor + 24);
+    const nameLength = buffer.readUInt16LE(cursor + 28);
+    const extraLength = buffer.readUInt16LE(cursor + 30);
+    const commentLength = buffer.readUInt16LE(cursor + 32);
+    const localOffset = buffer.readUInt32LE(cursor + 42);
+    const name = buffer.toString("utf8", cursor + 46, cursor + 46 + nameLength);
+    cursor = cursor + 46 + nameLength + extraLength + commentLength;
+    if (name.endsWith("/")) {
+      continue; // directory entry
+    }
+    declaredTotal += uncompressedSize;
+    if (declaredTotal > maxTotalBytes) {
+      throw new Error(
+        `zip archive declares more than ${maxTotalBytes} decompressed bytes`,
+      );
+    }
+    const destPath = path.join(destDir, name);
+    const relative = path.relative(destDir, destPath);
+    if (
+      name.startsWith("/") ||
+      relative.startsWith("..") ||
+      path.isAbsolute(relative)
+    ) {
+      throw new Error(`zip entry escapes the extraction directory: ${name}`);
+    }
+    if (buffer.readUInt32LE(localOffset) !== LOCAL_SIG) {
+      throw new Error("corrupt zip archive (local header signature)");
+    }
+    const localNameLength = buffer.readUInt16LE(localOffset + 26);
+    const localExtraLength = buffer.readUInt16LE(localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const data = buffer.subarray(dataStart, dataStart + compressedSize);
+    let content;
+    if (method === 0) {
+      content = data;
+    } else if (method === 8) {
+      // The declared sizes above are metadata a hostile archive can
+      // understate; the inflate budget is the enforcement on actual
+      // output. zlib validates maxOutputLength against
+      // buffer.kMaxLength — 4 GiB on Node 24 — so the unbounded case
+      // omits the option entirely and finite budgets are clamped
+      // below that floor (clamping down only tightens enforcement).
+      if (maxTotalBytes === Infinity) {
+        content = zlib.inflateRawSync(data);
+      } else {
+        const budget = Math.min(
+          0xffffffff,
+          Math.max(1, maxTotalBytes - writtenTotal),
+        );
+        content = zlib.inflateRawSync(data, { maxOutputLength: budget });
+      }
+    } else {
+      throw new Error(`unsupported zip compression method ${method}: ${name}`);
+    }
+    writtenTotal += content.length;
+    if (writtenTotal > maxTotalBytes) {
+      throw new Error(
+        `zip archive expands past ${maxTotalBytes} decompressed bytes`,
+      );
+    }
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    fs.writeFileSync(destPath, content);
+    extracted.push(destPath);
+  }
+  return extracted.sort();
 }
 
 /** Every file under `dir`, recursively, sorted for determinism. */
@@ -1223,7 +1523,7 @@ async function listComments(owner, repo, issueNumber, token) {
   }
 }
 
-async function githubRequest(method, apiPath, token, body = undefined) {
+async function githubRequest(method, apiPath, token, body = undefined, options = {}) {
   const response = await fetch(`https://api.github.com${apiPath}`, {
     method,
     headers: {
@@ -1233,6 +1533,9 @@ async function githubRequest(method, apiPath, token, body = undefined) {
       "X-GitHub-Api-Version": "2022-11-28",
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+    // Callers on a degradation path (the artifact rung) bound their
+    // requests so a stalled API call becomes a fallback, not a hang.
+    signal: options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined,
   });
 
   if (!response.ok) {
@@ -1265,6 +1568,7 @@ export {
   collectThresholdViolations,
   diffJsonHasDocs,
   extractMarkdownDocsSection,
+  extractZip,
   formatMetricCell,
   inferPolarity,
   isBaseCoverageFailure,
@@ -1275,6 +1579,7 @@ export {
   parseList,
   parseThresholds,
   parseVersionOutput,
+  pickBaseArtifact,
   renderFooter,
   unionMetricColumns,
 };

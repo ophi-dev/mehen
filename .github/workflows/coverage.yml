@@ -14,6 +14,9 @@ permissions:
   # The mehen action posts/updates the sticky PR metrics comment.
   pull-requests: write
   issues: write
+  # The mehen action's artifact base-coverage rung lists and downloads
+  # the base SHA's coverage-report artifact via the REST API.
+  actions: read
 
 jobs:
   coverage:
@@ -136,22 +139,36 @@ jobs:
           exclude: |
             xtask/templates/**
           coverage-files: target/llvm-cov/lcov-branch.info
+          # Base rung 2 (issue #254): the same job uploads this
+          # artifact on every run, so base SHAs stay retrievable for
+          # ~90 days after the cache's 7-day eviction.
+          coverage-artifact-name: coverage-report
           codecov-token: ${{ secrets.CODECOV_API_TOKEN }}
 
+  # GitHub Code Quality upload (issue #254 / originally generated in
+  # #253): permission isolation — `code-quality: write` lives only in
+  # this minimal job. Gated on `!cancelled()` rather than the coverage
+  # job's overall result: a red main push (failed gate, codecov error)
+  # must not silently skip the baseline upload GitHub compares PRs
+  # against. The artifact download is the real precondition — when the
+  # Cobertura report was never produced, the upload step is skipped.
   upload-coverage-rust:
     needs: coverage
-    if: ${{ !cancelled() && needs.coverage.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       code-quality: write
     steps:
       - name: Download Cobertura coverage artifact
+        id: download
+        continue-on-error: true
         uses: actions/download-artifact@v8
         with:
           name: coverage-report-rust
-      - uses: actions/upload-code-coverage@v1
+      - if: ${{ steps.download.outcome == 'success' }}
+        uses: actions/upload-code-coverage@v1
         with:
           file: cobertura.xml
           language: Rust
-          label: code-coverage-agent
+          label: code-coverage/llvm-cov
