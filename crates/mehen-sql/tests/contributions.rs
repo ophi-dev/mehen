@@ -226,3 +226,26 @@ fn benchmark_profile_skips_procedural_evidence_without_changing_metrics() {
         assert_eq!(metric(&production, key), metric(&benchmark, key), "{key}");
     }
 }
+
+/// `sql.structural_complexity.max_embedded_query` is evidence-backed: one
+/// entry naming the winning routine, whose amount equals the published value
+/// (Codex P1, PR #257 round 2).
+#[test]
+fn embedded_query_max_has_evidence_for_the_winning_routine() {
+    let analysis = analyze(
+        include_str!("fixtures/plsql_procedure_control_flow.sql"),
+        &AnalysisConfig::production(),
+    );
+    let entries: Vec<_> = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.metric.as_str() == "sql.structural_complexity.max_embedded_query")
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].reason.as_str(), "sql.procedural.embedded_query");
+    assert_eq!(
+        entries[0].amount,
+        metric(&analysis, "sql.structural_complexity.max_embedded_query")
+    );
+    assert!(entries[0].amount > 0.0);
+}

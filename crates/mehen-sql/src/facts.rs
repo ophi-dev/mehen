@@ -621,6 +621,11 @@ fn classify_statements(
         }
         prev_procedural = match kind {
             StatementKind::Procedural => true,
+            // A T-SQL `GO` batch separator *ends* the routine body by
+            // definition — whatever follows is a new, independently
+            // executing batch (Codex P1). Other unknown statements (parse
+            // debris between body spills) keep the chain alive.
+            StatementKind::Unknown if is_go_separator(stmt) => false,
             StatementKind::Unknown => prev_procedural,
             _ => false,
         };
@@ -871,7 +876,10 @@ fn anonymous_block_shape(stmt: &ErasedSegment) -> Option<AnonymousBlockShape> {
                 .next()
                 .map(|s| s.raw().to_ascii_uppercase())
                 .unwrap_or_default();
-            if matches!(next.as_str(), "TRANSACTION" | "TRAN" | "WORK" | "DIALOG") {
+            if matches!(
+                next.as_str(),
+                "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED"
+            ) {
                 None
             } else {
                 Some(AnonymousBlockShape::KeywordLed)
@@ -883,6 +891,21 @@ fn anonymous_block_shape(stmt: &ErasedSegment) -> Option<AnonymousBlockShape> {
 
 fn stmt_is_anonymous_block(stmt: &ErasedSegment) -> bool {
     anonymous_block_shape(stmt).is_some()
+}
+
+/// Whether a statement is a bare T-SQL `GO` batch separator (its only code
+/// token is the keyword `GO`).
+fn is_go_separator(stmt: &ErasedSegment) -> bool {
+    let mut code = stmt
+        .segments()
+        .iter()
+        .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment());
+    let Some(first) = code.next() else {
+        return false;
+    };
+    code.next().is_none()
+        && first.is_type(SyntaxKind::Keyword)
+        && first.raw().eq_ignore_ascii_case("GO")
 }
 
 // ── joins ──────────────────────────────────────────────────────────────
@@ -2952,6 +2975,17 @@ fn collect_statement_objects(
         SyntaxKind::FunctionName,
         SyntaxKind::DatabaseReference,
     ]);
+    // Oracle routine/package/synonym drops name their target through kinds
+    // that are far too generic to scan on every write statement (a
+    // `seq.nextval` in an INSERT is an `ObjectReference` too): `DROP
+    // PROCEDURE p` → `OracleFunctionName`, `DROP PACKAGE`/`DROP SYNONYM` →
+    // `ObjectReference`. Without them the statement counts in
+    // `sql.ddl.drop_count` but its target is missing from the write objects
+    // (Codex P2), so the extended set applies to the drop family only.
+    const DROP_TARGET_REFS: SyntaxSet = TARGET_REFS.union(&SyntaxSet::new(&[
+        SyntaxKind::ObjectReference,
+        SyntaxKind::OracleFunctionName,
+    ]));
 
     // Writes: the mutated target of each write statement is its *first*
     // statement-level reference in document order (not inside a nested SELECT).
@@ -2970,7 +3004,21 @@ fn collect_statement_objects(
     // no-op and only the read pass below runs).
     let write_stmts = stmt.recursive_crawl(&WRITE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
     for ws in &write_stmts {
-        let stmt_tables = ws.recursive_crawl(&TARGET_REFS, false, &SELECT_STATEMENT, true);
+        // The Oracle drop family names its target through generic reference
+        // kinds; every other write statement uses the narrow set (see
+        // `DROP_TARGET_REFS`).
+        let refs = if matches!(
+            ws.get_type(),
+            SyntaxKind::OracleDropPackageStatement
+                | SyntaxKind::OracleDropProcedureStatement
+                | SyntaxKind::OracleDropSynonymStatement
+                | SyntaxKind::OracleDropDatabaseLinkStatement
+        ) {
+            &DROP_TARGET_REFS
+        } else {
+            &TARGET_REFS
+        };
+        let stmt_tables = ws.recursive_crawl(refs, false, &SELECT_STATEMENT, true);
         // Multi-target DDL mutates *every* statement-level reference (`DROP
         // TABLE a, b`, `TRUNCATE a, b`), and so do INSERT statements — a plain
         // `INSERT INTO t SELECT … FROM s` keeps `s` inside the SELECT (the
@@ -2982,6 +3030,10 @@ fn collect_statement_objects(
         //     is written, sources are read.
         //   - `CREATE INDEX idx ON t` / `DROP INDEX idx ON t` — `idx` is the
         //     written object, the host table `t` is only a read.
+        //   - `CREATE TABLE child (… REFERENCES parent(id))` and
+        //     `ALTER TABLE … ADD CONSTRAINT … REFERENCES parent` mutate only
+        //     their subject; the referenced table is read, not written
+        //     (Codex P2).
         let first_target_only = matches!(
             ws.get_type(),
             SyntaxKind::UpdateStatement
@@ -2991,6 +3043,10 @@ fn collect_statement_objects(
                 | SyntaxKind::MergeStatement
                 | SyntaxKind::CreateIndexStatement
                 | SyntaxKind::DropIndexStatement
+                | SyntaxKind::CreateTableStatement
+                | SyntaxKind::OracleCreateTableStatement
+                | SyntaxKind::AlterTableStatement
+                | SyntaxKind::OracleAlterTableStatement
         );
         let all_targets = !first_target_only;
         for (i, tr) in stmt_tables.iter().enumerate() {

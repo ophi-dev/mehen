@@ -165,6 +165,9 @@ impl LanguageAnalyzer for SqlAnalyzer {
             let metric = match item.metric {
                 procedural::ProceduralMetric::Cyclomatic => "sql.procedural.cyclomatic_complexity",
                 procedural::ProceduralMetric::Cognitive => "sql.procedural.cognitive_complexity",
+                procedural::ProceduralMetric::EmbeddedQueryMax => {
+                    "sql.structural_complexity.max_embedded_query"
+                }
             };
             contribution_collector.record(metric, item.span, item.amount, item.reason);
         }

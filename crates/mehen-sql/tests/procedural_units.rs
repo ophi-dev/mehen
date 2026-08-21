@@ -249,3 +249,30 @@ fn nested_subprogram_attribution_is_innermost() {
         Some(3.0)
     );
 }
+
+/// Body increments that sqruff spills outside the routine's parsed range
+/// (split sibling statements, top-level `Unparsable` runs) attribute to the
+/// routine they continue — the T-SQL fixture's function space carries the
+/// file's whole cyclomatic score, not just its entry (Codex P2, PR #257
+/// round 2).
+#[test]
+fn tsql_spilled_body_attributes_to_its_routine() {
+    let analysis = analyze(include_str!("fixtures/tsql_procedure_control_flow.sql"));
+    let statement = &analysis.root.spaces[0];
+    let unit = &statement.spaces[0];
+    assert_eq!(unit.kind, SpaceKind::Function);
+    let unit_cyclo = unit
+        .metrics
+        .get(&MetricKey::new("sql.procedural.cyclomatic_complexity"))
+        .map(|v| v.as_f64())
+        .expect("unit cyclomatic");
+    let file_cyclo = analysis
+        .root
+        .metrics
+        .get(&MetricKey::new("sql.procedural.cyclomatic_complexity"))
+        .map(|v| v.as_f64())
+        .expect("file cyclomatic");
+    // Everything in the file belongs to the single routine.
+    assert_eq!(unit_cyclo, file_cyclo);
+    assert_eq!(unit_cyclo, 7.0);
+}

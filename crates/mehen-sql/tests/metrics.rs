@@ -1513,3 +1513,129 @@ fn bigquery_scripting_family_counts() {
     // Top-level scripting DML executes on apply.
     assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
 }
+
+// ── PR #257 round-2 review regressions ──────────────────────────────────
+
+/// A T-SQL `GO` batch separator ends the routine body by definition —
+/// whatever follows is a new, independently executing batch whose DDL is
+/// migration risk (Codex P1, PR #257 round 2).
+#[test]
+fn go_separator_resets_routine_continuation() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p @x int as\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         go\n\
+         if @cleanup = 1\n\
+         begin\n\
+           update stale set c = 1 where id = 1;\n\
+         end\n",
+    );
+    // The IF after GO is an anonymous batch, not a routine continuation.
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 1.0);
+}
+
+/// `DBMS_SQL.EXECUTE(c)` is one dynamic-SQL occurrence (counted at the
+/// package qualifier), not two — the qualified method must not also match
+/// the T-SQL `EXEC(…)` form (Codex P2, PR #257 round 2).
+#[test]
+fn qualified_dbms_sql_execute_counts_once() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           dbms_sql.parse(c, 'drop table t', 1);\n\
+           dbms_sql.execute(c);\n\
+         end;\n\
+         /\n",
+    );
+    // One per DBMS_SQL package usage: parse + execute.
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 2.0);
+}
+
+/// A control structure in a T-SQL ELSE body keeps the IF's nesting: the
+/// outer decision is still open there (Codex P2, PR #257 round 2).
+#[test]
+fn tsql_else_body_keeps_if_nesting() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         else\n\
+         begin\n\
+           if @b > 0 select 2;\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // Outer IF 1 + ELSE 1 + inner IF (1 + 1 nesting) = 4.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// A single-statement T-SQL loop body (no BEGIN/END) still nests its
+/// controlled statement (Codex P2, PR #257 round 2).
+#[test]
+fn tsql_single_statement_while_nests_its_body() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         while @x > 0 if @y > 0 set @x = @x - 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    // WHILE 1 + IF (1 + 1 nesting) = 3.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// `BEGIN DISTRIBUTED TRANSACTION` is transaction control, not a procedural
+/// block (Codex P2, PR #257 round 2).
+#[test]
+fn begin_distributed_transaction_is_not_a_block() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         begin distributed transaction;\n\
+         commit;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.block_count"), 0.0);
+}
+
+/// A top-level `EXEC('…')` batch is dynamic SQL even when sqruff leaves it
+/// wholly unparsable (Codex P1, PR #257 round 2).
+#[test]
+fn top_level_exec_string_batch_counts_as_dynamic_sql() {
+    let m = metrics("-- sqlfluff:dialect:tsql\nexec('drop table t');\n");
+    assert!(get(&m, "sql.parser.unparsable_segment_count") > 0.0);
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    assert!(get(&m, "sql.change_risk_score") >= 5.0);
+}
+
+/// Oracle `CREATE TABLE … REFERENCES parent` / `ALTER TABLE … REFERENCES`
+/// mutate only their subject; the referenced table is read, not written
+/// (Codex P2, PR #257 round 2).
+#[test]
+fn referenced_tables_in_ddl_are_reads_not_writes() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create table child (id number, parent_id number references parent(id));\n",
+    );
+    assert_eq!(get(&m, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.read_count"), 1.0);
+}
+
+/// Oracle drop statements name their targets through `OracleFunctionName` /
+/// `ObjectReference` — those targets are written objects (Codex P2, PR #257
+/// round 2).
+#[test]
+fn oracle_drop_targets_are_written_objects() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         drop procedure my_proc;\n\
+         drop package my_pkg;\n\
+         drop synonym my_syn;\n",
+    );
+    assert_eq!(get(&m, "sql.ddl.drop_count"), 3.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 3.0);
+}

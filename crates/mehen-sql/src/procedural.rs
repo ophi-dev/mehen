@@ -67,6 +67,9 @@ use crate::facts::{ChangeRiskEvidence, ChangeRiskFactor, SqlFileFacts, Statement
 pub(crate) enum ProceduralMetric {
     Cyclomatic,
     Cognitive,
+    /// `sql.structural_complexity.max_embedded_query` — one entry, for the
+    /// winning routine.
+    EmbeddedQueryMax,
 }
 
 /// One source-resolved increment of a procedural composite. `amount` is the
@@ -130,6 +133,7 @@ mod reason {
     pub(crate) const GOTO: &str = "sql.procedural.goto";
     pub(crate) const BOOLEAN_SEQUENCE: &str = "sql.procedural.boolean_sequence";
     pub(crate) const BOOLEAN_OPERATOR: &str = "sql.procedural.boolean_operator";
+    pub(crate) const EMBEDDED_QUERY: &str = "sql.procedural.embedded_query";
 }
 
 // ── token model ────────────────────────────────────────────────────────
@@ -210,7 +214,12 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
     for (i, t) in tokens.iter().enumerate() {
         match t.word.as_str() {
             // `BEGIN` (block, not `BEGIN TRANSACTION`) is procedural context.
-            "BEGIN" if !matches!(word(i + 1), "TRANSACTION" | "TRAN" | "WORK" | ";") => {
+            "BEGIN"
+                if !matches!(
+                    word(i + 1),
+                    "TRANSACTION" | "TRAN" | "WORK" | "DISTRIBUTED" | ";"
+                ) =>
+            {
                 return true;
             }
             // Construct closers that only procedural dialects produce.
@@ -220,6 +229,10 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
             "ELSIF" | "ELSEIF" => return true,
             "SP_EXECUTESQL" => return true,
             "EXECUTE" if word(i + 1) == "IMMEDIATE" => return true,
+            // T-SQL `EXEC('…')` — an immediately executed dynamic string
+            // batch (Codex P1). Plain `EXEC procname` is deliberately not a
+            // marker: a static call proves nothing procedural by itself.
+            "EXEC" | "EXECUTE" if word(i + 1) == "(" => return true,
             // An exception-handler section (PL/SQL, BigQuery scripting).
             "EXCEPTION" if word(i + 1) == "WHEN" => return true,
             "WHILE" => return true,
@@ -239,10 +252,6 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
 enum Ctx {
     Block {
         exception_section: bool,
-        /// This block is the `BEGIN … END` body of a T-SQL `WHILE` — it
-        /// carries the loop's nesting so an `IF` inside `WHILE … BEGIN … END`
-        /// costs `1 + 1` like its PL/SQL `WHILE … LOOP` equivalent.
-        loop_body: bool,
     },
     Try,
     Catch,
@@ -252,7 +261,15 @@ enum Ctx {
         with_then: bool,
         bound: bool,
     },
-    Loop,
+    /// Pushed at the loop *header* (`WHILE`/`FOR`) or at a bare `LOOP`, so
+    /// the body carries the loop's nesting regardless of body shape:
+    /// `block_bound` loops (T-SQL `WHILE … BEGIN … END`) pop with their
+    /// block; header loops whose body opener was `LOOP`/`DO` pop at
+    /// `END LOOP/WHILE/REPEAT/FOR`; a loop still pending a body opener at
+    /// `;` was single-statement (`WHILE @x > 0 SET …;`) and pops there.
+    Loop {
+        block_bound: bool,
+    },
     Case {
         whens: Vec<SourceSpan>,
         nesting: u32,
@@ -277,6 +294,12 @@ struct Machine<'a> {
     /// will read them (same gating as the change-risk evidence in
     /// `extract_objects`).
     emit: bool,
+    /// Unit index increments fall back to when no unit range *contains*
+    /// their span: the routine whose body sqruff split into sibling
+    /// statements or top-level `Unparsable` spills (the continuation
+    /// regions). `None` for standalone regions (anonymous blocks, top-level
+    /// scripting) — their increments are file-level only (Codex P2).
+    fallback_unit: Option<usize>,
     stack: Vec<Ctx>,
     /// Set once the region enters a body (`BEGIN`/`IS`/`AS` seen). Gates the
     /// text-only patterns (`RETURN`, raise family, booleans, dynamic SQL) so
@@ -302,14 +325,10 @@ impl Machine<'_> {
                 matches!(
                     c,
                     Ctx::If { .. }
-                        | Ctx::Loop
+                        | Ctx::Loop { .. }
                         | Ctx::Case { .. }
                         | Ctx::Catch
                         | Ctx::Handler
-                        | Ctx::Block {
-                            loop_body: true,
-                            ..
-                        }
                 )
             })
             .count() as u32
@@ -332,17 +351,24 @@ impl Machine<'_> {
         match metric {
             ProceduralMetric::Cyclomatic => self.facts.cyclomatic_complexity += amount,
             ProceduralMetric::Cognitive => self.facts.cognitive_complexity += amount,
+            ProceduralMetric::EmbeddedQueryMax => {}
         }
         // Innermost containing unit: units are pre-order, so among containing
-        // ranges the *last* is the deepest.
-        if let Some(&(_, _, idx)) = self
+        // ranges the *last* is the deepest. Increments in continuation
+        // regions (split bodies, unparsable spills) lie *outside* every unit
+        // range and attribute to the owning routine via the region's
+        // fallback (Codex P2).
+        let unit = self
             .unit_ranges
             .iter()
             .rfind(|(s, e, _)| *s <= span.start_byte && span.end_byte <= *e)
-        {
+            .map(|&(_, _, idx)| idx)
+            .or(self.fallback_unit);
+        if let Some(idx) = unit {
             match metric {
                 ProceduralMetric::Cyclomatic => self.unit_tallies[idx].0 += amount,
                 ProceduralMetric::Cognitive => self.unit_tallies[idx].1 += amount,
+                ProceduralMetric::EmbeddedQueryMax => {}
             }
         }
         if self.emit {
@@ -402,7 +428,13 @@ impl Machine<'_> {
             match t.word.as_str() {
                 ";" => {
                     self.close_unbound_ifs();
-                    self.pending_loop_header = false;
+                    // A loop header still pending a body opener at the
+                    // terminator was a single-statement loop (`WHILE @x > 0
+                    // SET …;`) — its Loop context closes here (Codex P2).
+                    if self.pending_loop_header {
+                        self.pending_loop_header = false;
+                        self.pop_matching(|c| matches!(c, Ctx::Loop { block_bound: false }));
+                    }
                     self.pending_between = false;
                     self.break_bool_run();
                 }
@@ -414,7 +446,7 @@ impl Machine<'_> {
                     self.break_bool_run();
                     match word(i + 1) {
                         // Transaction control, not a block.
-                        "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | ";" => {}
+                        "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED" | ";" => {}
                         "TRY" => {
                             self.in_body = true;
                             self.facts.block_count += 1;
@@ -438,24 +470,26 @@ impl Machine<'_> {
                         _ => {
                             self.in_body = true;
                             self.facts.block_count += 1;
-                            // The block is a T-SQL `WHILE … BEGIN` loop body
-                            // when a loop header is pending — it then carries
-                            // the loop's nesting (Codex P2). Otherwise a
-                            // block opening directly under a fresh T-SQL IF
-                            // binds to it: the IF closes with the block.
-                            let loop_body = self.pending_loop_header;
-                            self.pending_loop_header = false;
-                            if !loop_body
-                                && let Some(Ctx::If {
-                                    with_then: false,
-                                    bound,
-                                }) = self.stack.last_mut()
+                            // The block is a loop body when a loop header is
+                            // pending (T-SQL `WHILE … BEGIN`): the Loop
+                            // context pushed at the header stays open and
+                            // binds to this block, closing with it. Otherwise
+                            // a block opening directly under a fresh T-SQL IF
+                            // binds to that IF: it closes with the block.
+                            if self.pending_loop_header {
+                                self.pending_loop_header = false;
+                                if let Some(Ctx::Loop { block_bound }) = self.stack.last_mut() {
+                                    *block_bound = true;
+                                }
+                            } else if let Some(Ctx::If {
+                                with_then: false,
+                                bound,
+                            }) = self.stack.last_mut()
                             {
                                 *bound = true;
                             }
                             self.stack.push(Ctx::Block {
                                 exception_section: false,
-                                loop_body,
                             });
                             self.facts.max_block_depth =
                                 self.facts.max_block_depth.max(self.block_depth());
@@ -478,7 +512,7 @@ impl Machine<'_> {
                             i += 1;
                         }
                         "LOOP" | "WHILE" | "REPEAT" | "FOR" => {
-                            self.pop_matching(|c| matches!(c, Ctx::Loop));
+                            self.pop_matching(|c| matches!(c, Ctx::Loop { .. }));
                             i += 1;
                         }
                         "CASE" => {
@@ -520,15 +554,28 @@ impl Machine<'_> {
                                     Ctx::Block { .. } | Ctx::Case { .. } | Ctx::Try | Ctx::Catch
                                 )
                             }) {
-                                // A T-SQL IF bound to this block closes too.
+                                // A loop whose body was this block closes
+                                // with it.
                                 while matches!(
                                     self.stack.last(),
-                                    Some(Ctx::If {
-                                        with_then: false,
-                                        bound: true
-                                    })
+                                    Some(Ctx::Loop { block_bound: true })
                                 ) {
                                     self.stack.pop();
+                                }
+                                // A T-SQL IF bound to this block closes too —
+                                // unless an ELSE follows: the IF's decision
+                                // continues through the else branch, keeping
+                                // its nesting for the else body (Codex P2).
+                                if word(i + 1) != "ELSE" {
+                                    while matches!(
+                                        self.stack.last(),
+                                        Some(Ctx::If {
+                                            with_then: false,
+                                            bound: true
+                                        })
+                                    ) {
+                                        self.stack.pop();
+                                    }
                                 }
                             }
                         }
@@ -667,7 +714,6 @@ impl Machine<'_> {
                         }) => *exception_section = true,
                         _ => self.stack.push(Ctx::Block {
                             exception_section: true,
-                            loop_body: false,
                         }),
                     }
                 }
@@ -686,28 +732,32 @@ impl Machine<'_> {
                 "LOOP" if kw => {
                     self.break_bool_run();
                     if self.pending_loop_header {
-                        // Body opener of an already-counted WHILE/FOR.
+                        // Body opener of a WHILE/FOR header — its Loop
+                        // context is already on the stack.
                         self.pending_loop_header = false;
                     } else {
                         self.count_loop(t.span);
+                        self.stack.push(Ctx::Loop { block_bound: false });
                     }
-                    self.stack.push(Ctx::Loop);
                 }
                 "DO" if kw => {
                     self.break_bool_run();
-                    // MySQL/BigQuery `WHILE … DO` / `FOR … DO` body opener.
+                    // MySQL/BigQuery `WHILE … DO` / `FOR … DO` body opener —
+                    // the header's Loop context is already on the stack.
                     if self.pending_loop_header {
                         self.pending_loop_header = false;
-                        self.stack.push(Ctx::Loop);
                     }
                 }
                 "WHILE" if kw => {
                     self.break_bool_run();
                     self.count_loop(t.span);
-                    // PL/SQL `WHILE … LOOP` and MySQL `WHILE … DO` open their
-                    // body later; T-SQL `WHILE … BEGIN`/single-statement has
-                    // no body opener — the pending flag is cleared by `;` or
-                    // `BEGIN`, and the loop context is pushed by LOOP/DO only.
+                    // The Loop context opens at the *header*, so the body
+                    // carries the loop's nesting in every shape: PL/SQL
+                    // `WHILE … LOOP … END LOOP`, MySQL `WHILE … DO … END
+                    // WHILE`, T-SQL `WHILE … BEGIN … END` (the block binds
+                    // to it), and T-SQL single-statement `WHILE … IF …;`
+                    // (closed by the terminator) (Codex P2).
+                    self.stack.push(Ctx::Loop { block_bound: false });
                     self.pending_loop_header = true;
                 }
                 "REPEAT" if kw => {
@@ -716,7 +766,7 @@ impl Machine<'_> {
                     // string function.
                     if word(i + 1) != "(" {
                         self.count_loop(t.span);
-                        self.stack.push(Ctx::Loop);
+                        self.stack.push(Ctx::Loop { block_bound: false });
                     }
                 }
                 "FOR" if kw => {
@@ -745,6 +795,7 @@ impl Machine<'_> {
                     ) && word(i + 2) == "IN"
                     {
                         self.count_loop(t.span);
+                        self.stack.push(Ctx::Loop { block_bound: false });
                         self.pending_loop_header = true;
                     }
                 }
@@ -778,7 +829,14 @@ impl Machine<'_> {
                 }
                 "EXECUTE" | "EXEC" if kw => {
                     self.break_bool_run();
-                    if self.in_body {
+                    // A qualified method call (`DBMS_SQL.EXECUTE(c)`) is not
+                    // the T-SQL `EXEC(…)` string form — the package
+                    // qualifier already counted it (Codex P2).
+                    let qualified = i
+                        .checked_sub(1)
+                        .map(|j| tokens[j].word.as_str() == ".")
+                        .unwrap_or(false);
+                    if self.in_body && !qualified {
                         if word(i + 1) == "IMMEDIATE" {
                             self.count_dynamic_sql(t.span);
                             i += 1;
@@ -946,21 +1004,38 @@ pub(crate) fn extract(
         }
         region_ranges.push((stmt_facts.start_byte, stmt_facts.end_byte));
         let tokens = tokens_of(node, line_at);
+        // A `procedural` statement that contains no routine-definition node
+        // is a *continuation* — a body fragment sqruff split off its routine
+        // (T-SQL/MySQL). Its increments attribute to the routine it follows
+        // (Codex P2). Routine-definition statements attribute by containment;
+        // anonymous blocks stay file-level.
+        let contains_unit = unit_ranges
+            .iter()
+            .any(|(s, e, _)| stmt_facts.start_byte <= *s && *e <= stmt_facts.end_byte);
+        let fallback_unit = if stmt_facts.kind == StatementKind::Procedural && !contains_unit {
+            last_unit_before(&unit_ranges, stmt_facts.start_byte)
+        } else {
+            None
+        };
         let mut machine = Machine {
             facts: &mut procedural,
             unit_ranges: &unit_ranges,
             unit_tallies: &mut unit_tallies,
             change_risk: &mut change_risk,
             emit: emit_contributions,
+            fallback_unit,
             stack: Vec::new(),
             in_body: false,
             pending_loop_header: false,
             pending_between: false,
             last_bool: None,
         };
-        // Anonymous blocks and scripting statements *are* body; routine
-        // definitions enter their body at IS/AS/BEGIN.
-        machine.scan(&tokens, stmt_facts.kind == StatementKind::AnonymousBlock);
+        // Anonymous blocks, scripting statements, and body continuations
+        // *are* body; routine definitions enter their body at IS/AS/BEGIN.
+        machine.scan(
+            &tokens,
+            stmt_facts.kind == StatementKind::AnonymousBlock || fallback_unit.is_some(),
+        );
         // Entry path: +1 for an anonymous block itself (a routine-definition
         // statement's entries come from its units below).
         if stmt_facts.kind == StatementKind::AnonymousBlock {
@@ -993,6 +1068,7 @@ pub(crate) fn extract(
             unit_tallies: &mut unit_tallies,
             change_risk: &mut change_risk,
             emit: emit_contributions,
+            fallback_unit: None,
             stack: Vec::new(),
             in_body: false,
             pending_loop_header: false,
@@ -1042,6 +1118,10 @@ pub(crate) fn extract(
             unit_tallies: &mut unit_tallies,
             change_risk: &mut change_risk,
             emit: emit_contributions,
+            // A top-level spill is the body of the routine it follows —
+            // attribute its increments to the last unit ending before it
+            // (Codex P2). No preceding unit → file-level only.
+            fallback_unit: last_unit_before(&unit_ranges, start),
             stack: Vec::new(),
             in_body: false,
             pending_loop_header: false,
@@ -1059,13 +1139,34 @@ pub(crate) fn extract(
     // unit as the crawl root so subquery depths are unit-relative.
     let unit_nodes = crate::facts::procedural_unit_nodes(root);
     debug_assert_eq!(unit_nodes.len(), facts.procedural_units.len());
+    let mut max_unit: Option<(usize, f64)> = None;
     for (idx, node) in unit_nodes.iter().enumerate() {
         let score = embedded_query_structural(node);
         if let Some(unit) = facts.procedural_units.get_mut(idx) {
             unit.embedded_query_structural = score;
         }
-        procedural.max_embedded_query_structural =
-            procedural.max_embedded_query_structural.max(score);
+        if score > procedural.max_embedded_query_structural {
+            procedural.max_embedded_query_structural = score;
+            max_unit = Some((idx, score));
+        }
+    }
+    // The published maximum is evidence-backed like every other composite:
+    // one entry naming the winning routine (§4.7, Codex P1).
+    if emit_contributions
+        && let Some((idx, score)) = max_unit
+        && let Some(unit) = facts.procedural_units.get(idx)
+    {
+        procedural.evidence.push(ProceduralEvidence {
+            span: SourceSpan::new(
+                unit.start_byte,
+                unit.end_byte,
+                unit.start_line,
+                unit.end_line,
+            ),
+            metric: ProceduralMetric::EmbeddedQueryMax,
+            amount: score,
+            reason: reason::EMBEDDED_QUERY,
+        });
     }
 
     for (idx, (cyclo, cognitive)) in unit_tallies.into_iter().enumerate() {
@@ -1076,6 +1177,17 @@ pub(crate) fn extract(
     }
     facts.change_risk_evidence.extend(change_risk);
     facts.procedural = procedural;
+}
+
+/// The index of the last routine unit whose range ends at or before `byte` —
+/// the routine a body continuation (split statement or unparsable spill)
+/// belongs to.
+fn last_unit_before(unit_ranges: &[(u32, u32, usize)], byte: u32) -> Option<usize> {
+    unit_ranges
+        .iter()
+        .filter(|(_, e, _)| *e <= byte)
+        .max_by_key(|(_, e, _)| *e)
+        .map(|&(_, _, idx)| idx)
 }
 
 /// `sql.structural_complexity` (§8.1) of the query constructs embedded in
