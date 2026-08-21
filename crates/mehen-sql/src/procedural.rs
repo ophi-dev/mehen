@@ -233,6 +233,9 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
             // batch (Codex P1). Plain `EXEC procname` is deliberately not a
             // marker: a static call proves nothing procedural by itself.
             "EXEC" | "EXECUTE" if word(i + 1) == "(" => return true,
+            // MySQL `PREPARE stmt FROM @sql` — dynamic SQL at any level
+            // (Codex P1).
+            "PREPARE" if word(i + 2) == "FROM" => return true,
             // An exception-handler section (PL/SQL, BigQuery scripting).
             "EXCEPTION" if word(i + 1) == "WHEN" => return true,
             "WHILE" => return true,
@@ -306,9 +309,13 @@ struct Machine<'a> {
     /// routine headers (`RETURN number IS`, `CREATE OR REPLACE`) and
     /// identifier-shaped words in non-body positions never count.
     in_body: bool,
-    /// A `WHILE`/`FOR` header was seen; the next `LOOP`/`DO` opens its body
-    /// rather than a separate loop.
-    pending_loop_header: bool,
+    /// Loop headers (`WHILE`/`FOR`) whose body opener has not arrived yet —
+    /// a *count*, because single-statement T-SQL loops nest
+    /// (`WHILE @a > 0 WHILE @b > 0 SET …;` completes both at one
+    /// terminator, Codex P2). `LOOP`/`DO` consume one; a `BEGIN` block
+    /// binds all pending loops (they close with it); a terminator closes
+    /// every loop still pending.
+    pending_loop_headers: u32,
     /// Inside `BETWEEN … AND …`: the next `AND` is not a boolean operator.
     pending_between: bool,
     /// A nested routine header (`function inner_f return number is`) is
@@ -433,11 +440,12 @@ impl Machine<'_> {
             match t.word.as_str() {
                 ";" => {
                     self.close_unbound_ifs();
-                    // A loop header still pending a body opener at the
-                    // terminator was a single-statement loop (`WHILE @x > 0
-                    // SET …;`) — its Loop context closes here (Codex P2).
-                    if self.pending_loop_header {
-                        self.pending_loop_header = false;
+                    // Loop headers still pending a body opener at the
+                    // terminator were single-statement loops (`WHILE @a > 0
+                    // WHILE @b > 0 SET …;`) — every one of them completes
+                    // here (Codex P2).
+                    while self.pending_loop_headers > 0 {
+                        self.pending_loop_headers -= 1;
                         self.pop_matching(|c| matches!(c, Ctx::Loop { block_bound: false }));
                     }
                     self.pending_between = false;
@@ -486,16 +494,24 @@ impl Machine<'_> {
                         _ => {
                             self.in_body = true;
                             self.facts.block_count += 1;
-                            // The block is a loop body when a loop header is
-                            // pending (T-SQL `WHILE … BEGIN`): the Loop
-                            // context pushed at the header stays open and
-                            // binds to this block, closing with it. Otherwise
-                            // a block opening directly under a fresh T-SQL IF
-                            // binds to that IF: it closes with the block.
-                            if self.pending_loop_header {
-                                self.pending_loop_header = false;
-                                if let Some(Ctx::Loop { block_bound }) = self.stack.last_mut() {
-                                    *block_bound = true;
+                            // The block is a loop body when loop headers are
+                            // pending (T-SQL `WHILE … BEGIN`): every pending
+                            // Loop context binds to this block — nested
+                            // single-statement headers all complete when the
+                            // block ends (Codex P2). Otherwise a block
+                            // opening directly under a fresh T-SQL IF binds
+                            // to that IF: it closes with the block.
+                            if self.pending_loop_headers > 0 {
+                                let mut pending = self.pending_loop_headers as usize;
+                                self.pending_loop_headers = 0;
+                                for ctx in self.stack.iter_mut().rev() {
+                                    if pending == 0 {
+                                        break;
+                                    }
+                                    if let Ctx::Loop { block_bound: false } = ctx {
+                                        *ctx = Ctx::Loop { block_bound: true };
+                                        pending -= 1;
+                                    }
                                 }
                             } else if let Some(Ctx::If {
                                 with_then: false,
@@ -660,11 +676,22 @@ impl Machine<'_> {
                     // ELSE of a CASE (expression or statement) is not a
                     // control-flow branch here. Any other ELSE in a
                     // procedural region is an IF-else — including the T-SQL
-                    // `IF … BEGIN … END ELSE …` shape, where the IF context
-                    // was already closed together with its bound block — and
-                    // costs 1 cognitive (flat, per the cognitive model).
+                    // `IF … BEGIN … END ELSE …` shape, where the block kept
+                    // its IF open for this branch — and costs 1 cognitive
+                    // (flat, per the cognitive model).
                     if !matches!(self.stack.last(), Some(Ctx::Case { .. })) {
                         self.cognitive(t.span, 1.0, reason::ELSE);
+                    }
+                    // A block-bound IF entering its ELSE branch becomes
+                    // terminator-bound again: a single-statement else-body
+                    // (`… END ELSE SELECT 2;`) closes it at the `;`, while a
+                    // block else-body re-binds it at its `BEGIN` (Codex P2).
+                    if let Some(Ctx::If {
+                        with_then: false,
+                        bound: bound @ true,
+                    }) = self.stack.last_mut()
+                    {
+                        *bound = false;
                     }
                 }
                 "CASE" if kw => {
@@ -747,10 +774,10 @@ impl Machine<'_> {
                 }
                 "LOOP" if kw => {
                     self.break_bool_run();
-                    if self.pending_loop_header {
+                    if self.pending_loop_headers > 0 {
                         // Body opener of a WHILE/FOR header — its Loop
                         // context is already on the stack.
-                        self.pending_loop_header = false;
+                        self.pending_loop_headers -= 1;
                     } else {
                         self.count_loop(t.span);
                         self.stack.push(Ctx::Loop { block_bound: false });
@@ -760,9 +787,7 @@ impl Machine<'_> {
                     self.break_bool_run();
                     // MySQL/BigQuery `WHILE … DO` / `FOR … DO` body opener —
                     // the header's Loop context is already on the stack.
-                    if self.pending_loop_header {
-                        self.pending_loop_header = false;
-                    }
+                    self.pending_loop_headers = self.pending_loop_headers.saturating_sub(1);
                 }
                 "WHILE" if kw => {
                     self.break_bool_run();
@@ -774,7 +799,7 @@ impl Machine<'_> {
                     // to it), and T-SQL single-statement `WHILE … IF …;`
                     // (closed by the terminator) (Codex P2).
                     self.stack.push(Ctx::Loop { block_bound: false });
-                    self.pending_loop_header = true;
+                    self.pending_loop_headers += 1;
                 }
                 "REPEAT" if kw => {
                     self.break_bool_run();
@@ -812,7 +837,7 @@ impl Machine<'_> {
                     {
                         self.count_loop(t.span);
                         self.stack.push(Ctx::Loop { block_bound: false });
-                        self.pending_loop_header = true;
+                        self.pending_loop_headers += 1;
                     }
                 }
                 "GOTO" if kw => {
@@ -887,11 +912,13 @@ impl Machine<'_> {
                         self.count_dynamic_sql(t.span);
                     }
                 }
-                "DBMS_SQL" => {
-                    // The Oracle dynamic-SQL package. In a parsed call
-                    // (`DBMS_SQL.PARSE(…)`) the package qualifier lexes as a
-                    // `NakedIdentifier` — not keyword-like — so this arm
-                    // deliberately has no `kw` guard (Codex P2).
+                "DBMS_SQL" if word(i + 1) == "." => {
+                    // The Oracle dynamic-SQL package, recognized only as a
+                    // qualified call (`DBMS_SQL.PARSE(…)`): the parsed
+                    // package qualifier lexes as a `NakedIdentifier` — not
+                    // keyword-like — so there is no `kw` guard, and the `.`
+                    // requirement keeps a column that happens to be named
+                    // `dbms_sql` from counting (Codex P2).
                     self.break_bool_run();
                     if self.in_body {
                         self.count_dynamic_sql(t.span);
@@ -952,8 +979,8 @@ impl Machine<'_> {
         // the caller carries them into the routine's next continuation
         // region (split bodies keep their open blocks/decisions, Codex P2)
         // or drops them for standalone regions.
-        if self.pending_loop_header {
-            self.pending_loop_header = false;
+        while self.pending_loop_headers > 0 {
+            self.pending_loop_headers -= 1;
             self.pop_matching(|c| matches!(c, Ctx::Loop { block_bound: false }));
         }
         self.pending_between = false;
@@ -1046,7 +1073,16 @@ pub(crate) fn extract(
             stmt_facts.kind,
             StatementKind::Procedural | StatementKind::AnonymousBlock
         );
-        if !is_procedural_region {
+        // An `unknown` statement can still hold procedural content the
+        // grammar parsed without classifying — a top-level MySQL `PREPARE
+        // stmt FROM @sql` is a plain statement, not an `Unparsable` run
+        // (Codex P1). Reuse the marker gate so ordinary unknowns stay
+        // unscanned.
+        let gated_unknown = stmt_facts.kind == StatementKind::Unknown && {
+            let tokens = tokens_of(node, line_at);
+            unparsable_is_procedural(&tokens)
+        };
+        if !is_procedural_region && !gated_unknown {
             continue;
         }
         region_ranges.push((stmt_facts.start_byte, stmt_facts.end_byte));
@@ -1079,13 +1115,14 @@ pub(crate) fn extract(
             emit: emit_contributions,
             fallback_unit,
             stack,
-            // Anonymous blocks, scripting statements, and body continuations
-            // *are* body; routine definitions enter their body at
-            // IS/AS/BEGIN.
+            // Anonymous blocks, scripting statements, body continuations,
+            // and gated unknown statements *are* body; routine definitions
+            // enter their body at IS/AS/BEGIN.
             in_body: restored_body
                 || stmt_facts.kind == StatementKind::AnonymousBlock
-                || fallback_unit.is_some(),
-            pending_loop_header: false,
+                || fallback_unit.is_some()
+                || gated_unknown,
+            pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
             last_bool: None,
@@ -1140,7 +1177,7 @@ pub(crate) fn extract(
             fallback_unit: None,
             stack: Vec::new(),
             in_body: true,
-            pending_loop_header: false,
+            pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
             last_bool: None,
@@ -1202,7 +1239,7 @@ pub(crate) fn extract(
             // BEGIN to the parsed part), so the body gate is open from the
             // start regardless of any resumed state.
             in_body: true,
-            pending_loop_header: false,
+            pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
             last_bool: None,

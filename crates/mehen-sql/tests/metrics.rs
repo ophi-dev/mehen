@@ -1721,3 +1721,73 @@ fn fragment_facts_merge_before_structural_scoring() {
     let m = metrics(include_str!("fixtures/mysql_procedure_control_flow.sql"));
     assert_eq!(get(&m, "sql.structural_complexity.max_embedded_query"), 0.5);
 }
+
+// ── PR #257 round-5 review regressions ──────────────────────────────────
+
+/// A top-level MySQL `PREPARE stmt FROM @sql` parses as an ordinary unknown
+/// statement (no `Unparsable` run) — the marker gate must still scan it as
+/// dynamic SQL (Codex P1, PR #257 round 5).
+#[test]
+fn top_level_prepare_counts_as_dynamic_sql() {
+    let m = metrics("-- sqlfluff:dialect:mysql\nprepare stmt from @sql;\n");
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    assert!(get(&m, "sql.change_risk_score") >= 5.0);
+}
+
+/// A block-bound IF entering a single-statement ELSE closes at the else
+/// statement's terminator — a sibling IF afterwards is not nested under the
+/// completed decision (Codex P2, PR #257 round 5).
+#[test]
+fn single_statement_else_closes_its_if() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         else select 2;\n\
+         if @b > 0 select 3;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // IF 1 + ELSE 1 + sibling IF 1 (flat, not nested) = 3.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// Nested single-statement loops all complete at one terminator — a sibling
+/// IF afterwards carries no phantom loop nesting (Codex P2, PR #257
+/// round 5).
+#[test]
+fn nested_single_statement_loops_close_at_one_terminator() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         while @a > 0 while @b > 0 set @b = @b - 1;\n\
+         if @c > 0 select 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    // Outer WHILE 1 + inner WHILE (1+1) + sibling IF 1 (flat) = 4.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// A bare identifier named `dbms_sql` is not the package — only a qualified
+/// call counts (Codex P2, PR #257 round 5).
+#[test]
+fn bare_dbms_sql_identifier_is_not_dynamic_sql() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           select dbms_sql into v from t;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
+    // The qualified form still counts.
+    let qualified = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           dbms_sql.parse(c, 'x', 1);\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&qualified, "sql.procedural.dynamic_sql_count"), 1.0);
+}
