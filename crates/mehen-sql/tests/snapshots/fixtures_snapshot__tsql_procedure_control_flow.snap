@@ -108,7 +108,7 @@ expression: "serde_json :: json!\n({\n    \"backend\" : analysis.backend.label()
     "sql.procedural.exception_handler_count": 1,
     "sql.procedural.if_count": 3,
     "sql.procedural.loop_count": 1,
-    "sql.procedural.max_block_depth": 1,
+    "sql.procedural.max_block_depth": 2,
     "sql.procedural.raise_throw_count": 1,
     "sql.procedural.return_count": 2,
     "sql.procedural.routine_count": 1,

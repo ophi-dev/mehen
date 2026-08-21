@@ -1677,3 +1677,47 @@ fn anonymous_block_create_index_counts() {
     // … and inside an executing scripting block the typed node counts too.
     assert_eq!(get(&block, "sql.ddl.create_count"), 1.0);
 }
+
+// ── PR #257 round-4 review regressions ──────────────────────────────────
+
+/// A nested subprogram's signature `RETURN <type>` is not a return
+/// statement, even though the enclosing routine's body gate is already open
+/// (Codex P2, PR #257 round 4).
+#[test]
+fn nested_routine_header_return_type_is_not_a_return_statement() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure outer_p is\n\
+           function inner_f return number is\n\
+           begin\n\
+             return 1;\n\
+           end inner_f;\n\
+         begin\n\
+           null;\n\
+         end outer_p;\n\
+         /\n",
+    );
+    // Only inner_f's actual `return 1;` counts.
+    assert_eq!(get(&m, "sql.procedural.return_count"), 1.0);
+}
+
+/// Scanner state carries across a routine's split regions: the T-SQL
+/// fixture's outer `BEGIN` (first region) and its `IF … BEGIN` body
+/// (continuation) are nested, so the depth is 2 (Codex P2, PR #257
+/// round 4).
+#[test]
+fn carried_state_preserves_block_depth_across_split_regions() {
+    let m = metrics(include_str!("fixtures/tsql_procedure_control_flow.sql"));
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 2.0);
+}
+
+/// Fragment facts merge before scoring: max-shaped structural terms
+/// (expression depth, boolean depth, …) charge once per routine, not once
+/// per parser fragment. The MySQL fixture's four IF fragments and two loop
+/// fragments each carry expression depth 1 — merged, the routine scores
+/// 0.5 (one depth), not 2.5 (five) (Codex P2, PR #257 round 4).
+#[test]
+fn fragment_facts_merge_before_structural_scoring() {
+    let m = metrics(include_str!("fixtures/mysql_procedure_control_flow.sql"));
+    assert_eq!(get(&m, "sql.structural_complexity.max_embedded_query"), 0.5);
+}

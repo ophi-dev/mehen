@@ -311,6 +311,12 @@ struct Machine<'a> {
     pending_loop_header: bool,
     /// Inside `BETWEEN … AND …`: the next `AND` is not a boolean operator.
     pending_between: bool,
+    /// A nested routine header (`function inner_f return number is`) is
+    /// being read: between the `FUNCTION`/`PROCEDURE` keyword and its
+    /// `IS`/`AS`/`BEGIN`, a `RETURN` is the signature's return *type*, not a
+    /// return statement — even though the enclosing routine's body gate is
+    /// already open (Codex P2).
+    pending_routine_header: bool,
     /// Previous code token was a boolean operator with this text (`AND`/
     /// `OR`); any other token breaks the run. Used for sequence-based
     /// cognitive counting (+1 per run of like operators, +1 on alternation).
@@ -417,8 +423,7 @@ impl Machine<'_> {
         self.last_bool = None;
     }
 
-    fn scan(&mut self, tokens: &[PToken], body_from_start: bool) {
-        self.in_body = body_from_start;
+    fn scan(&mut self, tokens: &[PToken]) {
         let word = |i: usize| tokens.get(i).map(|t| t.word.as_str()).unwrap_or("");
 
         let mut i = 0usize;
@@ -440,10 +445,21 @@ impl Machine<'_> {
                 }
                 "IS" | "AS" if kw => {
                     self.in_body = true;
+                    self.pending_routine_header = false;
+                    self.break_bool_run();
+                }
+                "FUNCTION" | "PROCEDURE" if kw => {
+                    // A routine header starts (nested subprogram in a DECLARE
+                    // section, or the outer definition itself); its signature
+                    // runs until IS/AS/BEGIN.
+                    self.pending_routine_header = true;
                     self.break_bool_run();
                 }
                 "BEGIN" if kw => {
                     self.break_bool_run();
+                    // A body opener also ends any routine signature being
+                    // read (MySQL headers have no IS/AS before BEGIN).
+                    self.pending_routine_header = false;
                     match word(i + 1) {
                         // Transaction control, not a block.
                         "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED" | ";" => {}
@@ -807,9 +823,12 @@ impl Machine<'_> {
                 }
                 "RETURN" if kw => {
                     self.break_bool_run();
-                    // Only inside a body: `CREATE FUNCTION … RETURN number IS`
-                    // declares the return *type* before the body starts.
-                    if self.in_body {
+                    // Only inside a body, and never in a routine signature:
+                    // `CREATE FUNCTION … RETURN number IS` (outer, before the
+                    // body gate opens) and `function inner_f return number
+                    // is` (nested, while the enclosing body gate is already
+                    // open) both declare the return *type*.
+                    if self.in_body && !self.pending_routine_header {
                         self.facts.return_count += 1;
                     }
                 }
@@ -927,10 +946,18 @@ impl Machine<'_> {
             }
             i += 1;
         }
-        // Region end: abandon any contexts left open (unparsable gaps).
-        self.stack.clear();
-        self.pending_loop_header = false;
+        // Region end: transient token-adjacent state never crosses regions.
+        // A loop header still pending a body opener closes like at a
+        // terminator. The context *stack* and body gate deliberately stay —
+        // the caller carries them into the routine's next continuation
+        // region (split bodies keep their open blocks/decisions, Codex P2)
+        // or drops them for standalone regions.
+        if self.pending_loop_header {
+            self.pending_loop_header = false;
+            self.pop_matching(|c| matches!(c, Ctx::Loop { block_bound: false }));
+        }
         self.pending_between = false;
+        self.pending_routine_header = false;
         self.break_bool_run();
     }
 
@@ -975,12 +1002,18 @@ pub(crate) fn extract(
         .map(|(idx, u)| (u.start_byte, u.end_byte, idx))
         .collect();
     let mut unit_tallies = vec![(0.0f64, 0.0f64); facts.procedural_units.len()];
-    // Query-structural score of body continuations, accumulated per owning
-    // routine: when sqruff splits a routine body into sibling statements,
-    // the queries in those fragments belong to the routine's embedded score
-    // (Codex P2). Unparsable spills contribute nothing here — they contain
-    // no typed query nodes to extract.
-    let mut continuation_scores = vec![0.0f64; facts.procedural_units.len()];
+    // Query facts of body continuations, accumulated per owning routine:
+    // when sqruff splits a routine body into sibling statements, the queries
+    // in those fragments belong to the routine's embedded score (Codex P2).
+    // Facts are merged (sums for counts, max for depths) and scored once per
+    // routine, so parser fragmentation cannot inflate the max-shaped
+    // structural terms. Unparsable spills contribute nothing here — they
+    // contain no typed query nodes to extract.
+    let mut continuation_facts: Vec<SqlFileFacts> = facts
+        .procedural_units
+        .iter()
+        .map(|_| SqlFileFacts::default())
+        .collect();
     let mut change_risk: Vec<ChangeRiskEvidence> = Vec::new();
 
     let push_entry = |procedural: &mut ProceduralFacts, span: SourceSpan| {
@@ -998,8 +1031,16 @@ pub(crate) fn extract(
     // Statement regions, zipped with their classification (the same
     // `top_level_statements` crawl `classify_statements` consumed, so the
     // zip is aligned by construction).
+    //
+    // `carried` holds scanner state (open context stack + body gate) per
+    // routine whose body sqruff split across regions: the routine's next
+    // continuation resumes where the previous region stopped, so open
+    // blocks/decisions keep their depth and nesting across the split
+    // (Codex P2). Standalone regions never save state.
     let statements = crate::facts::top_level_statements(root);
     let mut region_ranges: Vec<(u32, u32)> = Vec::new();
+    let mut carried: std::collections::BTreeMap<usize, (Vec<Ctx>, bool)> =
+        std::collections::BTreeMap::new();
     for (node, stmt_facts) in statements.iter().zip(facts.statements.iter()) {
         let is_procedural_region = matches!(
             stmt_facts.kind,
@@ -1015,14 +1056,21 @@ pub(crate) fn extract(
         // (T-SQL/MySQL). Its increments attribute to the routine it follows
         // (Codex P2). Routine-definition statements attribute by containment;
         // anonymous blocks stay file-level.
-        let contains_unit = unit_ranges
+        let contained_units: Vec<usize> = unit_ranges
             .iter()
-            .any(|(s, e, _)| stmt_facts.start_byte <= *s && *e <= stmt_facts.end_byte);
-        let fallback_unit = if stmt_facts.kind == StatementKind::Procedural && !contains_unit {
-            last_unit_before(&unit_ranges, stmt_facts.start_byte)
-        } else {
-            None
-        };
+            .filter(|(s, e, _)| stmt_facts.start_byte <= *s && *e <= stmt_facts.end_byte)
+            .map(|&(_, _, idx)| idx)
+            .collect();
+        let fallback_unit =
+            if stmt_facts.kind == StatementKind::Procedural && contained_units.is_empty() {
+                last_unit_before(&unit_ranges, stmt_facts.start_byte)
+            } else {
+                None
+            };
+        // Continuations resume their routine's saved scanner state; the
+        // routine a definition region leaves open is its *last* unit.
+        let resumed = fallback_unit.and_then(|idx| carried.remove(&idx));
+        let (stack, restored_body) = resumed.unwrap_or_default();
         let mut machine = Machine {
             facts: &mut procedural,
             unit_ranges: &unit_ranges,
@@ -1030,22 +1078,32 @@ pub(crate) fn extract(
             change_risk: &mut change_risk,
             emit: emit_contributions,
             fallback_unit,
-            stack: Vec::new(),
-            in_body: false,
+            stack,
+            // Anonymous blocks, scripting statements, and body continuations
+            // *are* body; routine definitions enter their body at
+            // IS/AS/BEGIN.
+            in_body: restored_body
+                || stmt_facts.kind == StatementKind::AnonymousBlock
+                || fallback_unit.is_some(),
             pending_loop_header: false,
             pending_between: false,
+            pending_routine_header: false,
             last_bool: None,
         };
-        // Anonymous blocks, scripting statements, and body continuations
-        // *are* body; routine definitions enter their body at IS/AS/BEGIN.
-        machine.scan(
-            &tokens,
-            stmt_facts.kind == StatementKind::AnonymousBlock || fallback_unit.is_some(),
-        );
+        machine.scan(&tokens);
+        let end_state = (std::mem::take(&mut machine.stack), machine.in_body);
+        drop(machine);
+        // Save the scanner state for the routine this region belongs to so
+        // its next continuation resumes it. Anonymous blocks drop theirs.
+        if let Some(idx) = fallback_unit.or_else(|| contained_units.last().copied()) {
+            carried.insert(idx, end_state);
+        }
         // A continuation's query constructs belong to its routine's embedded
-        // score (Codex P2).
+        // score (Codex P2) — facts are merged (not scores summed) so the
+        // max-shaped structural terms charge once per routine, not once per
+        // parser fragment.
         if let Some(idx) = fallback_unit {
-            continuation_scores[idx] += embedded_query_structural(node);
+            merge_query_facts(&mut continuation_facts[idx], &query_facts_of(node));
         }
         // Entry path: +1 for an anonymous block itself (a routine-definition
         // statement's entries come from its units below).
@@ -1081,12 +1139,13 @@ pub(crate) fn extract(
             emit: emit_contributions,
             fallback_unit: None,
             stack: Vec::new(),
-            in_body: false,
+            in_body: true,
             pending_loop_header: false,
             pending_between: false,
+            pending_routine_header: false,
             last_bool: None,
         };
-        machine.scan(&tokens, true);
+        machine.scan(&tokens);
         push_entry(
             &mut procedural,
             SourceSpan::new(start, end, line_at(start), line_at(end.saturating_sub(1))),
@@ -1123,37 +1182,51 @@ pub(crate) fn extract(
         if !unparsable_is_procedural(&tokens) {
             continue;
         }
+        // A top-level spill is the body of the routine it follows —
+        // attribute its increments to the last unit ending before it and
+        // resume that routine's scanner state (Codex P2). No preceding
+        // unit → file-level only, fresh state.
+        let fallback_unit = last_unit_before(&unit_ranges, start);
+        let resumed = fallback_unit.and_then(|idx| carried.remove(&idx));
+        let (stack, _) = resumed.unwrap_or_default();
         let mut machine = Machine {
             facts: &mut procedural,
             unit_ranges: &unit_ranges,
             unit_tallies: &mut unit_tallies,
             change_risk: &mut change_risk,
             emit: emit_contributions,
-            // A top-level spill is the body of the routine it follows —
-            // attribute its increments to the last unit ending before it
-            // (Codex P2). No preceding unit → file-level only.
-            fallback_unit: last_unit_before(&unit_ranges, start),
-            stack: Vec::new(),
-            in_body: false,
+            fallback_unit,
+            stack,
+            // The marker gate just proved this fragment is procedural body
+            // content (it may start mid-body — T-SQL spills lose the opening
+            // BEGIN to the parsed part), so the body gate is open from the
+            // start regardless of any resumed state.
+            in_body: true,
             pending_loop_header: false,
             pending_between: false,
+            pending_routine_header: false,
             last_bool: None,
         };
-        // The marker gate just proved this fragment is procedural body
-        // content (it may start mid-body — T-SQL spills lose the opening
-        // BEGIN to the parsed part), so the body gate is open from the start.
-        machine.scan(&tokens, true);
+        machine.scan(&tokens);
+        let end_state = (std::mem::take(&mut machine.stack), machine.in_body);
+        drop(machine);
+        if let Some(idx) = fallback_unit {
+            carried.insert(idx, end_state);
+        }
     }
 
     // Embedded query complexity per routine (§9.3): the structural score of
     // the query constructs inside each unit's subtree — computed with the
-    // unit as the crawl root so subquery depths are unit-relative — plus the
-    // scores of body continuations attributed to it above.
+    // unit as the crawl root so subquery depths are unit-relative — merged
+    // with the facts of body continuations attributed to it above (merged as
+    // facts, not summed as scores, so max-shaped terms charge once).
     let unit_nodes = crate::facts::procedural_unit_nodes(root);
     debug_assert_eq!(unit_nodes.len(), facts.procedural_units.len());
     let mut max_unit: Option<(usize, f64)> = None;
     for (idx, node) in unit_nodes.iter().enumerate() {
-        let score = embedded_query_structural(node) + continuation_scores[idx];
+        let mut unit_facts = query_facts_of(node);
+        merge_query_facts(&mut unit_facts, &continuation_facts[idx]);
+        let score = crate::composite::structural(&unit_facts);
         if let Some(unit) = facts.procedural_units.get_mut(idx) {
             unit.embedded_query_structural = score;
         }
@@ -1202,21 +1275,55 @@ fn last_unit_before(unit_ranges: &[(u32, u32, usize)], byte: u32) -> Option<usiz
         .map(|&(_, _, idx)| idx)
 }
 
-/// `sql.structural_complexity` (§8.1) of the query constructs embedded in
-/// one routine, reusing the declarative family extractors with the unit as
-/// the crawl root.
-fn embedded_query_structural(unit: &ErasedSegment) -> f64 {
+/// The declarative query facts of one region's subtree, collected with the
+/// region as the crawl root so subquery depths are region-relative — the
+/// input to `sql.structural_complexity` scoring (§8.1).
+fn query_facts_of(region: &ErasedSegment) -> SqlFileFacts {
     let mut mini = SqlFileFacts::default();
-    let selects = unit.recursive_crawl(&SELECT_STATEMENT, true, &SyntaxSet::EMPTY, true);
+    let selects = region.recursive_crawl(&SELECT_STATEMENT, true, &SyntaxSet::EMPTY, true);
     mini.query_block_count = selects.len() as u32;
-    crate::facts::extract_joins(unit, &mut mini.joins);
-    crate::facts::extract_set_ops(unit, &mut mini.set_ops);
-    crate::facts::extract_cases(unit, &mut mini.cases);
-    crate::facts::extract_windows(unit, &mut mini.windows);
-    crate::facts::extract_aggregates(unit, &mut mini.aggregates);
-    crate::facts::extract_predicates(unit, &mut mini.predicates);
-    crate::facts::extract_subqueries(unit, &selects, &mut mini.subqueries);
-    crate::facts::extract_expressions(unit, &mut mini.expressions);
-    crate::facts::extract_cte_graph(unit, &mut mini.ctes);
-    crate::composite::structural(&mini)
+    crate::facts::extract_joins(region, &mut mini.joins);
+    crate::facts::extract_set_ops(region, &mut mini.set_ops);
+    crate::facts::extract_cases(region, &mut mini.cases);
+    crate::facts::extract_windows(region, &mut mini.windows);
+    crate::facts::extract_aggregates(region, &mut mini.aggregates);
+    crate::facts::extract_predicates(region, &mut mini.predicates);
+    crate::facts::extract_subqueries(region, &selects, &mut mini.subqueries);
+    crate::facts::extract_expressions(region, &mut mini.expressions);
+    crate::facts::extract_cte_graph(region, &mut mini.ctes);
+    mini
+}
+
+/// Merge one region's query facts into a routine's accumulator: additive
+/// fields sum, depth-shaped fields take the maximum. Covers exactly the
+/// fields `composite::structural` reads (§8.1) — a routine split across
+/// parser fragments scores as one routine, not once per fragment
+/// (Codex P2).
+fn merge_query_facts(acc: &mut SqlFileFacts, other: &SqlFileFacts) {
+    acc.query_block_count += other.query_block_count;
+    acc.ctes.count += other.ctes.count;
+    acc.ctes.max_dependency_depth = acc
+        .ctes
+        .max_dependency_depth
+        .max(other.ctes.max_dependency_depth);
+    acc.joins.total += other.joins.total;
+    acc.joins.left += other.joins.left;
+    acc.joins.right += other.joins.right;
+    acc.joins.full += other.joins.full;
+    acc.joins.cross += other.joins.cross;
+    acc.subqueries.count += other.subqueries.count;
+    acc.subqueries.max_depth = acc.subqueries.max_depth.max(other.subqueries.max_depth);
+    acc.subqueries.correlated_count += other.subqueries.correlated_count;
+    acc.subqueries.derived_table_count += other.subqueries.derived_table_count;
+    acc.predicates.boolean_operator_count += other.predicates.boolean_operator_count;
+    acc.predicates.max_boolean_depth = acc
+        .predicates
+        .max_boolean_depth
+        .max(other.predicates.max_boolean_depth);
+    acc.cases.count += other.cases.count;
+    acc.cases.max_depth = acc.cases.max_depth.max(other.cases.max_depth);
+    acc.windows.function_count += other.windows.function_count;
+    acc.aggregates.function_count += other.aggregates.function_count;
+    acc.set_ops.count += other.set_ops.count;
+    acc.expressions.max_depth = acc.expressions.max_depth.max(other.expressions.max_depth);
 }
