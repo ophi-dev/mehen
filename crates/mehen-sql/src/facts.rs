@@ -486,6 +486,26 @@ const DROP_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::OracleDropDatabaseLinkStatement,
 ]);
 
+/// Non-table/view CREATE kinds that the per-statement path classifies as
+/// `create_other` (by its raw-text CREATE fallback). The node-based
+/// anonymous-block scan cannot use raw-text classification, so it mirrors
+/// the family with the typed kinds an executing block can realistically
+/// contain — `IF … BEGIN CREATE INDEX ix ON t(c); END` is real migration DDL
+/// (Codex P2). Routine/trigger definitions are deliberately absent: they are
+/// procedural and the `PROCEDURAL_DEFINITIONS` boundary excludes them.
+const CREATE_OTHER_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::CreateIndexStatement,
+    SyntaxKind::CreateSequenceStatement,
+    SyntaxKind::CreateSchemaStatement,
+    SyntaxKind::CreateSynonymStatement,
+    SyntaxKind::CreateDatabaseStatement,
+    SyntaxKind::CreateDomainStatement,
+    SyntaxKind::CreateExtensionStatement,
+    SyntaxKind::CreateTypeStatement,
+    SyntaxKind::CreateUserStatement,
+    SyntaxKind::CreateRoleStatement,
+]);
+
 /// Build facts for `root` (the parsed `File` segment).
 pub(crate) fn extract(
     root: &ErasedSegment,
@@ -2563,6 +2583,14 @@ fn scan_block_body_dml(
         + block
             .recursive_crawl(
                 &CREATE_VIEW_STATEMENTS,
+                false,
+                &PROCEDURAL_DEFINITIONS,
+                false,
+            )
+            .len() as u32
+        + block
+            .recursive_crawl(
+                &CREATE_OTHER_STATEMENTS,
                 false,
                 &PROCEDURAL_DEFINITIONS,
                 false,

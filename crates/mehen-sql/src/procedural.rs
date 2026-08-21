@@ -975,6 +975,12 @@ pub(crate) fn extract(
         .map(|(idx, u)| (u.start_byte, u.end_byte, idx))
         .collect();
     let mut unit_tallies = vec![(0.0f64, 0.0f64); facts.procedural_units.len()];
+    // Query-structural score of body continuations, accumulated per owning
+    // routine: when sqruff splits a routine body into sibling statements,
+    // the queries in those fragments belong to the routine's embedded score
+    // (Codex P2). Unparsable spills contribute nothing here — they contain
+    // no typed query nodes to extract.
+    let mut continuation_scores = vec![0.0f64; facts.procedural_units.len()];
     let mut change_risk: Vec<ChangeRiskEvidence> = Vec::new();
 
     let push_entry = |procedural: &mut ProceduralFacts, span: SourceSpan| {
@@ -1036,6 +1042,11 @@ pub(crate) fn extract(
             &tokens,
             stmt_facts.kind == StatementKind::AnonymousBlock || fallback_unit.is_some(),
         );
+        // A continuation's query constructs belong to its routine's embedded
+        // score (Codex P2).
+        if let Some(idx) = fallback_unit {
+            continuation_scores[idx] += embedded_query_structural(node);
+        }
         // Entry path: +1 for an anonymous block itself (a routine-definition
         // statement's entries come from its units below).
         if stmt_facts.kind == StatementKind::AnonymousBlock {
@@ -1135,13 +1146,14 @@ pub(crate) fn extract(
     }
 
     // Embedded query complexity per routine (§9.3): the structural score of
-    // the query constructs inside each unit's subtree, computed with the
-    // unit as the crawl root so subquery depths are unit-relative.
+    // the query constructs inside each unit's subtree — computed with the
+    // unit as the crawl root so subquery depths are unit-relative — plus the
+    // scores of body continuations attributed to it above.
     let unit_nodes = crate::facts::procedural_unit_nodes(root);
     debug_assert_eq!(unit_nodes.len(), facts.procedural_units.len());
     let mut max_unit: Option<(usize, f64)> = None;
     for (idx, node) in unit_nodes.iter().enumerate() {
-        let score = embedded_query_structural(node);
+        let score = embedded_query_structural(node) + continuation_scores[idx];
         if let Some(unit) = facts.procedural_units.get_mut(idx) {
             unit.embedded_query_structural = score;
         }

@@ -154,7 +154,7 @@ expression: "serde_json :: json!\n({\n    \"backend\" : analysis.backend.label()
     "sql.statement.kind_entropy": 0.0,
     "sql.statement.unparsed_count": 0,
     "sql.structural_complexity": 0.5,
-    "sql.structural_complexity.max_embedded_query": 0.0,
+    "sql.structural_complexity.max_embedded_query": 0.5,
     "sql.subquery.correlated_count": 0,
     "sql.subquery.count": 0,
     "sql.subquery.exists_count": 0,

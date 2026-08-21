@@ -1639,3 +1639,41 @@ fn oracle_drop_targets_are_written_objects() {
     assert_eq!(get(&m, "sql.ddl.drop_count"), 3.0);
     assert_eq!(get(&m, "sql.object.write_count"), 3.0);
 }
+
+// ── PR #257 round-3 review regressions ──────────────────────────────────
+
+/// Query constructs in body continuations (routine bodies sqruff splits
+/// into sibling statements) feed the routine's embedded-query score — the
+/// T-SQL fixture's UPDATE…WHERE lives in a continuation, so the file
+/// maximum must be nonzero (Codex P2, PR #257 round 3).
+#[test]
+fn continuation_queries_feed_embedded_score() {
+    let m = metrics(include_str!("fixtures/tsql_procedure_control_flow.sql"));
+    assert!(get(&m, "sql.structural_complexity.max_embedded_query") > 0.0);
+}
+
+/// Non-table/view CREATE forms inside an executing block count as creates
+/// (Codex P2, PR #257 round 3): `IF … THEN CREATE INDEX …` is migration
+/// DDL. BigQuery scripting exercises the typed path.
+#[test]
+fn anonymous_block_create_index_counts() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           execute immediate 'noop';\n\
+         end;\n\
+         /\n\
+         create index ix_orders on orders(batch_id);\n",
+    );
+    // The top-level CREATE INDEX classifies per-statement (create_other) …
+    assert_eq!(get(&m, "sql.ddl.create_count"), 1.0);
+
+    let block = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         if cleanup then\n\
+           create index ix on t(c);\n\
+         end if;\n",
+    );
+    // … and inside an executing scripting block the typed node counts too.
+    assert_eq!(get(&block, "sql.ddl.create_count"), 1.0);
+}
