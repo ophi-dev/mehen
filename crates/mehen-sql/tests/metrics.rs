@@ -1142,7 +1142,10 @@ fn plsql_procedural_family_counts() {
 /// T-SQL routine exercising the token fallback path: sqruff parses the
 /// header and keyword-led IF statements but spills the WHILE/TRY-CATCH tail
 /// into top-level `Unparsable` runs (parser comparison §9). The procedural
-/// counts must survive that degradation.
+/// counts must survive that degradation — and the split body must NOT be
+/// reported as independently-executing batch DML (Codex P1): T-SQL batch
+/// semantics say the body extends to the next GO/EOF, so the keyword-led IF
+/// that sqruff splits off is a routine *continuation*, not migration risk.
 #[test]
 fn tsql_procedural_family_counts_through_unparsable_spill() {
     let m = metrics(include_str!("fixtures/tsql_procedure_control_flow.sql"));
@@ -1161,11 +1164,19 @@ fn tsql_procedural_family_counts_through_unparsable_spill() {
     assert_eq!(get(&m, "sql.procedural.return_count"), 2.0);
     // Proc body BEGIN + IF/ELSE blocks + WHILE block + TRY + CATCH.
     assert_eq!(get(&m, "sql.procedural.block_count"), 6.0);
-    // Entries: the routine + the keyword-led IF statement that sqruff splits
-    // into its own (anonymous-block) statement; + 3 IF + 1 WHILE + 1 CATCH
-    // + 1 THROW = 8.
-    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 8.0);
-    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    // Entry: the routine only — the keyword-led IF that sqruff splits into a
+    // sibling statement is reclassified as the routine's continuation, so it
+    // earns no separate anonymous-block entry. 1 entry + 3 IF + 1 WHILE
+    // + 1 CATCH + 1 THROW = 7.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 7.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 0.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.procedural"), 2.0);
+    // The body's UPDATE runs when the procedure is *called*, not when the
+    // file is applied — no file-level DML or object-touch risk (Codex P1).
+    assert_eq!(get(&m, "sql.dml.update_count"), 0.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 0.0);
+    // Change risk: dynamic SQL only.
+    assert_eq!(get(&m, "sql.change_risk_score"), 5.0);
 }
 
 /// An Oracle anonymous block *executes when the file is applied*, so its
@@ -1369,5 +1380,73 @@ fn dbms_sql_package_reference_counts_as_dynamic_sql() {
          /\n",
     );
     assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    assert!(get(&m, "sql.change_risk_score") >= 5.0);
+}
+
+/// A genuinely top-level scripting block (no preceding routine definition)
+/// executes on apply — DDL inside it is migration risk (Codex P1, PR #257):
+/// `IF … THEN DROP TABLE t; END IF` must report the drop and its +8 risk
+/// term. BigQuery scripting parses block DDL into typed nodes; the T-SQL
+/// grammar loses `IF … BEGIN DROP …` bodies to `Unparsable` entirely, so
+/// there this remains parser-bound (flagged by `sql.parser.*`, never
+/// mis-counted).
+#[test]
+fn top_level_batch_block_ddl_counts_as_migration_risk() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         if cleanup then\n\
+           drop table stale_data;\n\
+           truncate table audit_log;\n\
+         end if;\n",
+    );
+    // BigQuery top-level scripting parses as a `MultiStatementSegment` whose
+    // *inner* statements are the file's top-level statements — the DDL
+    // classifies and risk-scores through the normal per-statement path…
+    assert_eq!(get(&m, "sql.ddl.drop_count"), 1.0);
+    assert_eq!(get(&m, "sql.ddl.truncate_count"), 1.0);
+    // Drop 8 + truncate 8, plus write objects.
+    assert!(get(&m, "sql.change_risk_score") >= 16.0);
+    // …while the scripting control flow around them is measured as a
+    // procedural region (entry + IF).
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+}
+
+/// Oracle `INSERT ALL` lists several statement-level `INTO` targets — every
+/// one is written, none is a read (Codex P2, PR #257). A plain
+/// `INSERT INTO … SELECT` keeps its source inside the SELECT, so widening
+/// inserts to all-targets cannot misclassify sources as writes.
+#[test]
+fn insert_all_destinations_are_all_write_targets() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         insert all\n\
+           into orders_archive (id) values (id)\n\
+           into orders_audit (id) values (id)\n\
+         select id from orders;\n",
+    );
+    assert_eq!(get(&m, "sql.object.write_count"), 2.0);
+    assert_eq!(get(&m, "sql.object.read_count"), 1.0);
+
+    let plain = metrics("INSERT INTO dst SELECT id FROM src");
+    assert_eq!(get(&plain, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&plain, "sql.object.read_count"), 1.0);
+}
+
+/// DCL inside a typed anonymous block (Oracle `BEGIN … END`) counts — the
+/// grant parses as an `AccessStatement` node there, unlike inside T-SQL
+/// keyword-led blocks where the tsql grammar loses it to `Unparsable`
+/// (Codex P1, PR #257).
+#[test]
+fn anonymous_block_dcl_counts_as_migration_risk() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           grant select on t to reporting;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.dcl.grant_revoke_count"), 1.0);
     assert!(get(&m, "sql.change_risk_score") >= 5.0);
 }

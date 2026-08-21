@@ -197,8 +197,8 @@ fn tokens_of(region: &ErasedSegment, line_at: &impl Fn(u32) -> u32) -> Vec<PToke
 
 // ── region collection ──────────────────────────────────────────────────
 
-const STATEMENT: SyntaxSet = SyntaxSet::single(SyntaxKind::Statement);
 const UNPARSABLE: SyntaxSet = SyntaxSet::single(SyntaxKind::Unparsable);
+const MULTI_STATEMENT: SyntaxSet = SyntaxSet::single(SyntaxKind::MultiStatementSegment);
 const SELECT_STATEMENT: SyntaxSet = SyntaxSet::single(SyntaxKind::SelectStatement);
 
 /// Whether an `Unparsable` run looks procedural. Gate before scanning so a
@@ -445,14 +445,13 @@ impl Machine<'_> {
                             // binds to it: the IF closes with the block.
                             let loop_body = self.pending_loop_header;
                             self.pending_loop_header = false;
-                            if !loop_body {
-                                if let Some(Ctx::If {
+                            if !loop_body
+                                && let Some(Ctx::If {
                                     with_then: false,
                                     bound,
                                 }) = self.stack.last_mut()
-                                {
-                                    *bound = true;
-                                }
+                            {
+                                *bound = true;
                             }
                             self.stack.push(Ctx::Block {
                                 exception_section: false,
@@ -921,9 +920,10 @@ pub(crate) fn extract(
         }
     };
 
-    // Statement regions, zipped with their classification (same crawl and
-    // order as `classify_statements`).
-    let statements = root.recursive_crawl(&STATEMENT, false, &SyntaxSet::EMPTY, false);
+    // Statement regions, zipped with their classification (the same
+    // `top_level_statements` crawl `classify_statements` consumed, so the
+    // zip is aligned by construction).
+    let statements = crate::facts::top_level_statements(root);
     let mut region_ranges: Vec<(u32, u32)> = Vec::new();
     for (node, stmt_facts) in statements.iter().zip(facts.statements.iter()) {
         let is_procedural_region = matches!(
@@ -955,6 +955,44 @@ pub(crate) fn extract(
         if stmt_facts.kind == StatementKind::AnonymousBlock {
             push_entry(&mut procedural, crate::facts::statement_span(stmt_facts));
         }
+    }
+
+    // BigQuery-style top-level scripting (`IF … THEN DROP TABLE …; END IF;`
+    // at file level) parses as a `MultiStatementSegment` directly under
+    // `File` — *outside* any `Statement` node. Its inner DDL/DML statements
+    // are the file's top-level statements (so object/risk scans see them
+    // normally), but the scripting control flow around them is only visible
+    // here: scan each such segment as an anonymous-block region. Segments
+    // inside already-collected regions (a routine body's scripting) are
+    // skipped by containment.
+    let multi_statements = root.recursive_crawl(&MULTI_STATEMENT, false, &SyntaxSet::EMPTY, true);
+    for seg in &multi_statements {
+        let Some(pm) = seg.get_position_marker() else {
+            continue;
+        };
+        let (start, end) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+        if region_ranges.iter().any(|(s, e)| *s <= start && end <= *e) {
+            continue;
+        }
+        region_ranges.push((start, end));
+        let tokens = tokens_of(seg, line_at);
+        let mut machine = Machine {
+            facts: &mut procedural,
+            unit_ranges: &unit_ranges,
+            unit_tallies: &mut unit_tallies,
+            change_risk: &mut change_risk,
+            emit: emit_contributions,
+            stack: Vec::new(),
+            in_body: false,
+            pending_loop_header: false,
+            pending_between: false,
+            last_bool: None,
+        };
+        machine.scan(&tokens, true);
+        push_entry(
+            &mut procedural,
+            SourceSpan::new(start, end, line_at(start), line_at(end.saturating_sub(1))),
+        );
     }
 
     // Entry paths per routine unit (independent of the region loop so units

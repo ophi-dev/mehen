@@ -597,14 +597,30 @@ fn classify_statements(
     // Top-level `Statement` nodes are direct children of `File`; do not
     // recurse into nested statements (a subquery `SELECT` is a query block,
     // not a top-level statement).
-    let statements = root.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::Statement),
-        false,
-        &SyntaxSet::EMPTY,
-        false,
-    );
+    let statements = top_level_statements(root);
+    // Whether the previous statement was (or continued) a routine
+    // definition. sqruff's tsql grammar splits long procedure bodies into
+    // sibling statements; T-SQL batch semantics say the body extends to the
+    // next `GO`/EOF, so a *keyword-led* control statement that immediately
+    // follows a routine definition is the routine's body, not an
+    // independently-executing batch (Codex P1). Typed blocks (Oracle
+    // `BEGIN…END`, BigQuery scripting) never reclassify — they are genuine
+    // anonymous blocks wherever they appear. `unknown` statements (parse
+    // debris between spills) keep the chain alive rather than breaking it.
+    let mut prev_procedural = false;
     for stmt in &statements {
-        let kind = classify_statement(stmt);
+        let mut kind = classify_statement(stmt);
+        if kind == StatementKind::AnonymousBlock
+            && prev_procedural
+            && anonymous_block_shape(stmt) == Some(AnonymousBlockShape::KeywordLed)
+        {
+            kind = StatementKind::Procedural;
+        }
+        prev_procedural = match kind {
+            StatementKind::Procedural => true,
+            StatementKind::Unknown => prev_procedural,
+            _ => false,
+        };
         let (start_byte, end_byte) = stmt
             .get_position_marker()
             .map(|pm| (pm.source_slice.start as u32, pm.source_slice.end as u32))
@@ -777,8 +793,20 @@ const ANONYMOUS_BLOCK_KINDS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::ForInStatement,
 ]);
 
+/// How a statement qualifies as an anonymous block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnonymousBlockShape {
+    /// A typed block/scripting node (Oracle `BEGIN…END`, BigQuery scripting)
+    /// — a genuine anonymous block wherever it appears.
+    TypedBlock,
+    /// A T-SQL keyword-led control statement (`IF`/`WHILE`/`BEGIN` + nested
+    /// statements without a dedicated node kind) — reclassified as a routine
+    /// continuation when it directly follows a routine definition.
+    KeywordLed,
+}
+
 /// Whether a (non-routine) statement is an anonymous block / top-level
-/// scripting statement.
+/// scripting statement, and which shape it takes.
 ///
 /// Two shapes, per the CST probes (parser comparison §9):
 /// - a typed block/scripting node reached without crossing a `Bracketed`
@@ -789,7 +817,7 @@ const ANONYMOUS_BLOCK_KINDS: SyntaxSet = SyntaxSet::new(&[
 ///   statements under it without a dedicated node kind). `BEGIN` is checked
 ///   against `TRANSACTION`/`TRAN`/`WORK`/`DIALOG` so T-SQL transaction
 ///   control (which also parses keyword-led in fragments) stays TCL.
-fn stmt_is_anonymous_block(stmt: &ErasedSegment) -> bool {
+fn anonymous_block_shape(stmt: &ErasedSegment) -> Option<AnonymousBlockShape> {
     fn contains_block(node: &ErasedSegment) -> bool {
         for child in node.segments() {
             if ANONYMOUS_BLOCK_KINDS.contains(child.get_type()) {
@@ -805,31 +833,37 @@ fn stmt_is_anonymous_block(stmt: &ErasedSegment) -> bool {
         false
     }
     if contains_block(stmt) {
-        return true;
+        return Some(AnonymousBlockShape::TypedBlock);
     }
     // T-SQL keyword-led shape: first two substantive children.
     let mut lead = stmt
         .segments()
         .iter()
         .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment());
-    let Some(first) = lead.next() else {
-        return false;
-    };
+    let first = lead.next()?;
     if !first.is_type(SyntaxKind::Keyword) {
-        return false;
+        return None;
     }
     let word = first.raw().to_ascii_uppercase();
     match word.as_str() {
-        "IF" | "WHILE" => true,
+        "IF" | "WHILE" => Some(AnonymousBlockShape::KeywordLed),
         "BEGIN" => {
             let next = lead
                 .next()
                 .map(|s| s.raw().to_ascii_uppercase())
                 .unwrap_or_default();
-            !matches!(next.as_str(), "TRANSACTION" | "TRAN" | "WORK" | "DIALOG")
+            if matches!(next.as_str(), "TRANSACTION" | "TRAN" | "WORK" | "DIALOG") {
+                None
+            } else {
+                Some(AnonymousBlockShape::KeywordLed)
+            }
         }
-        _ => false,
+        _ => None,
     }
+}
+
+fn stmt_is_anonymous_block(stmt: &ErasedSegment) -> bool {
+    anonymous_block_shape(stmt).is_some()
 }
 
 // ── joins ──────────────────────────────────────────────────────────────
@@ -2293,26 +2327,19 @@ fn extract_objects(
     }
 
     // Anonymous blocks *execute when the file is applied* (unlike routine
-    // definitions, whose bodies only run when called), so DML/TCL inside
-    // them is real migration risk. The per-statement-kind loop above cannot
-    // see it — the statement classifies as `anonymous_block` — so the block
-    // bodies are scanned node-based here. Nested routine definitions
+    // definitions, whose bodies only run when called), so DML/DDL/DCL/TCL
+    // inside them is real migration risk. The per-statement-kind loop above
+    // cannot see it — the statement classifies as `anonymous_block` — so the
+    // block bodies are scanned node-based here. Nested routine definitions
     // (subprograms declared in a block's DECLARE section) stay excluded via
     // the `PROCEDURAL_DEFINITIONS` crawl boundary, mirroring every other
-    // object scan.
-    let anon_ranges: Vec<(u32, u32)> = facts
-        .statements
-        .iter()
-        .filter(|s| s.kind == StatementKind::AnonymousBlock)
-        .map(|s| (s.start_byte, s.end_byte))
-        .collect();
-    if !anon_ranges.is_empty() {
-        let statements = top_level_statements(root);
-        for node in statements.iter().filter(|node| {
-            node.get_position_marker().is_some_and(|pm| {
-                anon_ranges.contains(&(pm.source_slice.start as u32, pm.source_slice.end as u32))
-            })
-        }) {
+    // object scan. Statement nodes are paired with their classification by
+    // index — `top_level_statements` is the same crawl `classify_statements`
+    // consumed (CodeRabbit).
+    let statements = top_level_statements(root);
+    debug_assert_eq!(statements.len(), facts.statements.len());
+    for (node, stmt) in statements.iter().zip(facts.statements.iter()) {
+        if stmt.kind == StatementKind::AnonymousBlock {
             scan_block_body_dml(node, line_at, obj, evidence, emit_contributions);
         }
     }
@@ -2323,7 +2350,8 @@ fn extract_objects(
     // both read and written is touched once. Read objects are table references
     // in FROM/JOIN positions; write objects are the statement-level targets of
     // write statements. Names are uppercased so case variants collapse.
-    let (read_objects, write_objects) = collect_touched_objects(root, line_at, emit_contributions);
+    let (read_objects, write_objects) =
+        collect_touched_objects(&statements, &facts.statements, line_at, emit_contributions);
     obj.read_object_count = read_objects.len() as u32;
     obj.write_object_count = write_objects.len() as u32;
     obj.touch_count = (read_objects.len()
@@ -2350,37 +2378,47 @@ fn extract_objects(
         }
     }
 
-    // UPDATE/DELETE without WHERE. The WHERE crawl must stop at nested
-    // SELECT nodes: `UPDATE t SET v = (SELECT v FROM u WHERE u.id = t.id)` has no
-    // *statement-level* WHERE — it still rewrites every row — but a naive
-    // recursive crawl would find the subquery's WHERE and wrongly clear the
-    // no-WHERE flag (Codex P1). Passing `SELECT_STATEMENT` as the
-    // no-recurse set confines the search to the statement's own clauses.
-    let updates = root.recursive_crawl(&UPDATE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
-    for u in &updates {
-        if !has_own_where_clause(u) {
-            obj.update_without_where_count += 1;
-            if emit_contributions {
-                record_change_risk(
-                    evidence,
-                    true,
-                    segment_span(u, line_at).unwrap_or(fallback_span),
-                    ChangeRiskFactor::UpdateWithoutWhere,
-                );
+    // UPDATE/DELETE without WHERE. Two scoping rules:
+    // - the WHERE crawl stops at nested SELECT nodes: `UPDATE t SET v =
+    //   (SELECT v FROM u WHERE u.id = t.id)` has no *statement-level* WHERE —
+    //   it still rewrites every row — but a naive recursive crawl would find
+    //   the subquery's WHERE and wrongly clear the no-WHERE flag (Codex P1);
+    // - only non-`procedural` statements are scanned: a routine definition's
+    //   body DML runs when called, not when the file is applied. The
+    //   `PROCEDURAL_DEFINITIONS` crawl boundary covers well-formed routine
+    //   nodes; skipping `procedural`-classified statements additionally
+    //   covers T-SQL body fragments that sqruff splits into sibling
+    //   statements (Codex P1).
+    for (node, stmt) in statements.iter().zip(facts.statements.iter()) {
+        if stmt.kind == StatementKind::Procedural {
+            continue;
+        }
+        let updates = node.recursive_crawl(&UPDATE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
+        for u in &updates {
+            if !has_own_where_clause(u) {
+                obj.update_without_where_count += 1;
+                if emit_contributions {
+                    record_change_risk(
+                        evidence,
+                        true,
+                        segment_span(u, line_at).unwrap_or(fallback_span),
+                        ChangeRiskFactor::UpdateWithoutWhere,
+                    );
+                }
             }
         }
-    }
-    let deletes = root.recursive_crawl(&DELETE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
-    for d in &deletes {
-        if !has_own_where_clause(d) {
-            obj.delete_without_where_count += 1;
-            if emit_contributions {
-                record_change_risk(
-                    evidence,
-                    true,
-                    segment_span(d, line_at).unwrap_or(fallback_span),
-                    ChangeRiskFactor::DeleteWithoutWhere,
-                );
+        let deletes = node.recursive_crawl(&DELETE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
+        for d in &deletes {
+            if !has_own_where_clause(d) {
+                obj.delete_without_where_count += 1;
+                if emit_contributions {
+                    record_change_risk(
+                        evidence,
+                        true,
+                        segment_span(d, line_at).unwrap_or(fallback_span),
+                        ChangeRiskFactor::DeleteWithoutWhere,
+                    );
+                }
             }
         }
     }
@@ -2417,7 +2455,9 @@ fn extract_objects(
     // from `Keyword` tokens inside DML statements (INSERT/UPDATE/DELETE/MERGE).
     // The clause word is lexed as a `Keyword`, whereas a column or table named
     // `output`/`returning` is a `NakedIdentifier` — so this never fires on
-    // `UPDATE t SET output = 1` or `INSERT INTO output (…)`.
+    // `UPDATE t SET output = 1` or `INSERT INTO output (…)`. `procedural`
+    // statements (routine definitions and their split body fragments) are
+    // skipped like every other object scan.
     const DML_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
         SyntaxKind::InsertStatement,
         SyntaxKind::OracleInsertStatement,
@@ -2428,19 +2468,30 @@ fn extract_objects(
         SyntaxKind::OracleDeleteStatement,
         SyntaxKind::MergeStatement,
     ]);
-    let dml_stmts = root.recursive_crawl(&DML_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
-    obj.returning_count = dml_stmts
+    obj.returning_count = statements
         .iter()
-        .map(|s| count_keyword(s, "RETURNING") + count_keyword(s, "OUTPUT"))
+        .zip(facts.statements.iter())
+        .filter(|(_, stmt)| stmt.kind != StatementKind::Procedural)
+        .flat_map(|(node, _)| {
+            node.recursive_crawl(&DML_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true)
+        })
+        .map(|s| count_keyword(&s, "RETURNING") + count_keyword(&s, "OUTPUT"))
         .sum();
 }
 
-/// Node-based DML/TCL tally for one anonymous block's body — the statement-
-/// kind counters (`sql.dml.*`, `sql.transaction.control_count`) and their
-/// change-risk terms, mirroring the per-statement loop in `extract_objects`.
-/// Only statement kinds are counted here; object touches and the
-/// without-WHERE risks are covered by the file-wide node scans, which do not
-/// stop at anonymous blocks.
+/// Node-based DML/DDL/DCL/TCL tally for one anonymous block's body — the
+/// statement-kind counters (`sql.dml.*`, `sql.ddl.*`,
+/// `sql.dcl.grant_revoke_count`, `sql.transaction.control_count`) and their
+/// change-risk terms, mirroring the per-statement loop in `extract_objects`
+/// arm for arm (Codex P1: `IF … DROP TABLE t; END IF` executes the drop when
+/// the file is applied). Only statement kinds are counted here; object
+/// touches and the without-WHERE risks are covered by the per-statement node
+/// scans, which do not stop at anonymous blocks.
+///
+/// Every crawl passes `recurse_into = false` so only the *outermost* match
+/// on each path counts — sqruff double-wraps some kinds (an Oracle GRANT
+/// parses as `AccessStatement > AccessStatement`), and a descend-into-match
+/// crawl would count both layers.
 fn scan_block_body_dml(
     block: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
@@ -2451,17 +2502,33 @@ fn scan_block_body_dml(
     let span_of =
         |seg: &ErasedSegment| segment_span(seg, line_at).unwrap_or_else(SourceSpan::empty);
     obj.insert_count += block
-        .recursive_crawl(&INSERT_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, false)
+        .recursive_crawl(&INSERT_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false)
         .len() as u32;
     obj.update_count += block
-        .recursive_crawl(&UPDATE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, false)
+        .recursive_crawl(&UPDATE_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false)
         .len() as u32;
     obj.delete_count += block
-        .recursive_crawl(&DELETE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, false)
+        .recursive_crawl(&DELETE_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false)
         .len() as u32;
+    obj.create_count += block
+        .recursive_crawl(
+            &CREATE_TABLE_STATEMENTS,
+            false,
+            &PROCEDURAL_DEFINITIONS,
+            false,
+        )
+        .len() as u32
+        + block
+            .recursive_crawl(
+                &CREATE_VIEW_STATEMENTS,
+                false,
+                &PROCEDURAL_DEFINITIONS,
+                false,
+            )
+            .len() as u32;
     for seg in block.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::MergeStatement),
-        true,
+        false,
         &PROCEDURAL_DEFINITIONS,
         false,
     ) {
@@ -2473,9 +2540,60 @@ fn scan_block_body_dml(
             ChangeRiskFactor::Merge,
         );
     }
+    for seg in block.recursive_crawl(&DROP_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false) {
+        obj.drop_count += 1;
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::Drop,
+        );
+    }
+    for seg in block.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::TruncateStatement),
+        false,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        obj.truncate_count += 1;
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::Truncate,
+        );
+    }
+    for seg in block.recursive_crawl(
+        &ALTER_TABLE_STATEMENTS,
+        false,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        obj.alter_count += 1;
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::Alter,
+        );
+    }
+    for seg in block.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::AccessStatement),
+        false,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        obj.grant_revoke_count += 1;
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::GrantRevoke,
+        );
+    }
     for seg in block.recursive_crawl(
         &TRANSACTION_STATEMENTS,
-        true,
+        false,
         &PROCEDURAL_DEFINITIONS,
         false,
     ) {
@@ -2635,9 +2753,16 @@ const UNIT_NAME_KINDS: SyntaxSet = SyntaxSet::new(&[
 
 /// The routine-definition CST nodes in the same pre-order as
 /// [`extract_procedural_units`] collects `ProceduralUnitFacts` — callers zip
-/// the two by index (e.g. for per-unit embedded-query scoring).
+/// the two by index (e.g. for per-unit embedded-query scoring). Nodes
+/// without a position marker are filtered *here* so both sequences stay
+/// index-aligned with the facts (which cannot represent a span-less unit) —
+/// otherwise every unit after a skipped node would take its neighbor's
+/// embedded score (CodeRabbit).
 pub(crate) fn procedural_unit_nodes(root: &ErasedSegment) -> Vec<ErasedSegment> {
     root.recursive_crawl(&PROCEDURAL_UNITS, true, &SyntaxSet::EMPTY, false)
+        .into_iter()
+        .filter(|unit| unit.get_position_marker().is_some())
+        .collect()
 }
 
 /// Collect procedural units (routine definitions) in pre-order.
@@ -2684,8 +2809,15 @@ fn extract_procedural_units(
 /// children that are *not* inside a FROM/JOIN element (e.g. the `accounts`
 /// in `UPDATE accounts …`, the `target` in `INSERT INTO target …`). Names are
 /// uppercased so case variants collapse to one object.
+///
+/// `procedural` statements are skipped entirely: a routine body's objects
+/// are touched when the routine is *called*, not when the file is applied.
+/// The skip covers both well-formed definitions (whose bodies the
+/// `PROCEDURAL_DEFINITIONS` crawl boundary would exclude anyway) and T-SQL
+/// body fragments that sqruff splits into sibling statements (Codex P1).
 fn collect_touched_objects(
-    root: &ErasedSegment,
+    statements: &[ErasedSegment],
+    kinds: &[StatementFacts],
     line_at: &impl Fn(u32) -> u32,
     emit_contributions: bool,
 ) -> (
@@ -2706,7 +2838,10 @@ fn collect_touched_objects(
     // So a reference is treated as CTE-local only when an *ancestor*
     // `WithCompoundStatement` defines its name. We resolve that by node
     // identity (`cte_local_refs`), not by a flat name set.
-    for stmt in &top_level_statements(root) {
+    for (stmt, facts) in statements.iter().zip(kinds.iter()) {
+        if facts.kind == StatementKind::Procedural {
+            continue;
+        }
         let cte_local = cte_local_refs(stmt);
         collect_statement_objects(
             stmt,
@@ -2723,8 +2858,10 @@ fn collect_touched_objects(
 
 /// Top-level `Statement` nodes (one per DML/DDL/… statement in the file),
 /// not descending into nested statements (a procedural body or a subquery's
-/// inner statement is handled within its owner's scope).
-fn top_level_statements(root: &ErasedSegment) -> Vec<ErasedSegment> {
+/// inner statement is handled within its owner's scope). The single crawl
+/// definition every statement-indexed consumer shares (`classify_statements`,
+/// `extract_objects`, `procedural::extract`), so their zips stay aligned.
+pub(crate) fn top_level_statements(root: &ErasedSegment) -> Vec<ErasedSegment> {
     root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::Statement),
         false,
@@ -2816,18 +2953,19 @@ fn collect_statement_objects(
     for ws in &write_stmts {
         let stmt_tables = ws.recursive_crawl(&TARGET_REFS, false, &SELECT_STATEMENT, true);
         // Multi-target DDL mutates *every* statement-level reference (`DROP
-        // TABLE a, b`, `TRUNCATE a, b`). Host-object shapes mutate only their
-        // first reference (the target); later references are reads:
+        // TABLE a, b`, `TRUNCATE a, b`), and so do INSERTs — a plain
+        // `INSERT INTO t SELECT … FROM s` keeps `s` inside the SELECT (the
+        // crawl stops there), while Oracle `INSERT ALL INTO a … INTO b …`
+        // legitimately lists several statement-level targets, all of them
+        // written (Codex P2). Host-object shapes mutate only their first
+        // reference (the target); later references are reads:
         //   - DML: `UPDATE dst … FROM src`, `MERGE INTO dst USING src` — `dst`
         //     is written, sources are read.
         //   - `CREATE INDEX idx ON t` / `DROP INDEX idx ON t` — `idx` is the
         //     written object, the host table `t` is only a read.
         let first_target_only = matches!(
             ws.get_type(),
-            SyntaxKind::InsertStatement
-                | SyntaxKind::OracleInsertStatement
-                | SyntaxKind::BulkInsertStatement
-                | SyntaxKind::UpdateStatement
+            SyntaxKind::UpdateStatement
                 | SyntaxKind::OracleUpdateStatement
                 | SyntaxKind::DeleteStatement
                 | SyntaxKind::OracleDeleteStatement
