@@ -29,7 +29,7 @@ closed by `END CASE`) count here.
 | `sql.procedural.exception_handler_count` | int | PL/SQL `EXCEPTION WHEN … THEN` handlers and T-SQL `BEGIN CATCH`. |
 | `sql.procedural.return_count` | int | `RETURN` statements (a PL/SQL header's `RETURN <type>` is not one). |
 | `sql.procedural.raise_throw_count` | int | `RAISE`, `RAISE_APPLICATION_ERROR`, `THROW`, `RAISERROR`, `SIGNAL`, `RESIGNAL`. |
-| `sql.procedural.dynamic_sql_count` | int | `EXECUTE IMMEDIATE`, `sp_executesql`, `EXEC('…')`, `DBMS_SQL`. |
+| `sql.procedural.dynamic_sql_count` | int | `EXECUTE IMMEDIATE`, `sp_executesql`, `EXEC('…')`, `PREPARE … FROM`, `DBMS_SQL`. |
 | `sql.procedural.cyclomatic_complexity` | float | Control-flow paths, Sonar's PL/SQL increments (below). |
 | `sql.procedural.cognitive_complexity` | float | Comprehension burden with nesting penalties (below). |
 | `sql.structural_complexity.max_embedded_query` | float | The worst [structural complexity](/metrics/sql/overview#composite-scores) of the queries embedded in any single routine. |

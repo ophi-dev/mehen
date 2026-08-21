@@ -612,7 +612,10 @@ fn classify_statements(
         let mut kind = classify_statement(stmt);
         if kind == StatementKind::AnonymousBlock
             && prev_procedural
-            && anonymous_block_shape(stmt) == Some(AnonymousBlockShape::KeywordLed)
+            && matches!(
+                anonymous_block_shape(stmt),
+                Some(AnonymousBlockShape::KeywordLed | AnonymousBlockShape::TypedControl)
+            )
         {
             kind = StatementKind::Procedural;
         }
@@ -775,65 +778,81 @@ fn stmt_is_procedural(stmt: &ErasedSegment) -> bool {
         .is_empty()
 }
 
-/// Node kinds whose presence as a statement's top-level construct marks it as
-/// an anonymous block or scripting statement. Typed begin/end blocks cover
-/// Oracle (`DECLARE … BEGIN … END`) and T-SQL/ANSI; the scripting statement
-/// kinds cover BigQuery/MySQL top-level control flow (`IF … THEN … END IF;`
-/// at file level).
-const ANONYMOUS_BLOCK_KINDS: SyntaxSet = SyntaxSet::new(&[
+/// Typed `BEGIN…END` block node kinds — genuine anonymous blocks wherever
+/// they appear (Oracle `DECLARE…BEGIN…END`, T-SQL/ANSI blocks).
+const TYPED_BLOCK_KINDS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::OracleBeginEndBlock,
     SyntaxKind::BeginEndBlock,
     SyntaxKind::AtomicBeginEndBlock,
+]);
+
+/// Typed scripting/control statement node kinds. At top level these are
+/// either genuine scripting (BigQuery) or — far more often — fragments of a
+/// routine body that a dialect grammar split into sibling statements (MySQL
+/// splits *every branch* of an `IF` into its own `IfThenStatement`
+/// statement). The distinction is positional: fragments directly follow a
+/// routine definition.
+const TYPED_CONTROL_KINDS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::IfStatements,
     SyntaxKind::IfStatement,
+    SyntaxKind::IfThenStatement,
     SyntaxKind::WhileStatements,
     SyntaxKind::WhileStatement,
     SyntaxKind::LoopStatements,
     SyntaxKind::LoopStatement,
+    SyntaxKind::RepeatStatement,
     SyntaxKind::ForInStatement,
 ]);
 
 /// How a statement qualifies as an anonymous block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AnonymousBlockShape {
-    /// A typed block/scripting node (Oracle `BEGIN…END`, BigQuery scripting)
-    /// — a genuine anonymous block wherever it appears.
+    /// A typed `BEGIN…END` block node (Oracle, T-SQL/ANSI) — a genuine
+    /// anonymous block wherever it appears.
     TypedBlock,
+    /// A typed scripting/control statement (`IfThenStatement`,
+    /// `WhileStatement`, …) — genuine scripting when standalone, a routine
+    /// body fragment when it directly follows a routine definition.
+    TypedControl,
     /// A T-SQL keyword-led control statement (`IF`/`WHILE`/`BEGIN` + nested
-    /// statements without a dedicated node kind) — reclassified as a routine
-    /// continuation when it directly follows a routine definition.
+    /// statements without a dedicated node kind) — same positional rule as
+    /// `TypedControl`.
     KeywordLed,
 }
 
 /// Whether a (non-routine) statement is an anonymous block / top-level
 /// scripting statement, and which shape it takes.
 ///
-/// Two shapes, per the CST probes (parser comparison §9):
-/// - a typed block/scripting node reached without crossing a `Bracketed`
-///   group (a parenthesized subquery is not the statement's body) — Oracle,
-///   BigQuery, MySQL;
+/// Three shapes, per the CST probes (parser comparison §9):
+/// - a typed block node reached without crossing a `Bracketed` group (a
+///   parenthesized subquery is not the statement's body) — Oracle blocks;
+/// - a typed scripting/control statement — BigQuery scripting, MySQL body
+///   fragments;
 /// - a T-SQL keyword-led statement: the first substantive child is the bare
 ///   keyword `IF`/`WHILE`/`BEGIN` (sqruff's tsql dialect nests the controlled
 ///   statements under it without a dedicated node kind). `BEGIN` is checked
 ///   against `TRANSACTION`/`TRAN`/`WORK`/`DIALOG` so T-SQL transaction
 ///   control (which also parses keyword-led in fragments) stays TCL.
 fn anonymous_block_shape(stmt: &ErasedSegment) -> Option<AnonymousBlockShape> {
-    fn contains_block(node: &ErasedSegment) -> bool {
+    fn contains_kind(node: &ErasedSegment, kinds: &SyntaxSet) -> bool {
         for child in node.segments() {
-            if ANONYMOUS_BLOCK_KINDS.contains(child.get_type()) {
+            if kinds.contains(child.get_type()) {
                 return true;
             }
             if child.is_type(SyntaxKind::Bracketed) {
                 continue;
             }
-            if contains_block(child) {
+            if contains_kind(child, kinds) {
                 return true;
             }
         }
         false
     }
-    if contains_block(stmt) {
+    if contains_kind(stmt, &TYPED_BLOCK_KINDS) {
         return Some(AnonymousBlockShape::TypedBlock);
+    }
+    if contains_kind(stmt, &TYPED_CONTROL_KINDS) {
+        return Some(AnonymousBlockShape::TypedControl);
     }
     // T-SQL keyword-led shape: first two substantive children.
     let mut lead = stmt

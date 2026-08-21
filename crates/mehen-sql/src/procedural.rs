@@ -799,6 +799,16 @@ impl Machine<'_> {
                         self.count_dynamic_sql(t.span);
                     }
                 }
+                "PREPARE" if kw => {
+                    // MySQL dynamic SQL: `PREPARE stmt FROM @sql`. The
+                    // matching `EXECUTE stmt` deliberately does not count —
+                    // the dynamic statement is counted once, at its
+                    // definition site.
+                    self.break_bool_run();
+                    if self.in_body && word(i + 2) == "FROM" {
+                        self.count_dynamic_sql(t.span);
+                    }
+                }
                 "DBMS_SQL" => {
                     // The Oracle dynamic-SQL package. In a parsed call
                     // (`DBMS_SQL.PARSE(…)`) the package qualifier lexes as a

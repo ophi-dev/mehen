@@ -71,3 +71,5 @@ fixture_snapshot!(set_ops_unions, "set_ops_unions");
 fixture_snapshot!(dialect_directive, "dialect_directive");
 fixture_snapshot!(plsql_procedure_control_flow, "plsql_procedure_control_flow");
 fixture_snapshot!(tsql_procedure_control_flow, "tsql_procedure_control_flow");
+fixture_snapshot!(mysql_procedure_control_flow, "mysql_procedure_control_flow");
+fixture_snapshot!(bigquery_scripting, "bigquery_scripting");

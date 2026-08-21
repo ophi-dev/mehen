@@ -154,6 +154,8 @@ fn procedural_complexity_evidence_sums_to_the_metric() {
     for fixture in [
         include_str!("fixtures/plsql_procedure_control_flow.sql"),
         include_str!("fixtures/tsql_procedure_control_flow.sql"),
+        include_str!("fixtures/mysql_procedure_control_flow.sql"),
+        include_str!("fixtures/bigquery_scripting.sql"),
     ] {
         let analysis = analyze(fixture, &AnalysisConfig::production());
         for key in [

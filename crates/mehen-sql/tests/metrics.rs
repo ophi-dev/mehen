@@ -1450,3 +1450,66 @@ fn anonymous_block_dcl_counts_as_migration_risk() {
     assert_eq!(get(&m, "sql.dcl.grant_revoke_count"), 1.0);
     assert!(get(&m, "sql.change_risk_score") >= 5.0);
 }
+
+/// MySQL routine exercising the fragment path: the mysql grammar splits the
+/// body into per-branch typed statements (`IfThenStatement` ×4,
+/// `WhileStatement` ×2, `RepeatStatement` ×2) plus an `Unparsable` CASE run.
+/// All fragments reclassify as routine continuations — body DML is not
+/// migration-time DML — while the token machine counts control flow across
+/// them (CodeRabbit, PR #257).
+#[test]
+fn mysql_procedural_family_counts_across_fragments() {
+    let m = metrics(include_str!("fixtures/mysql_procedure_control_flow.sql"));
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // IF + ELSEIF.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // WHILE … DO + REPEAT … END REPEAT.
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    // CASE … END CASE (from the Unparsable run).
+    assert_eq!(get(&m, "sql.procedural.case_statement_count"), 1.0);
+    // SIGNAL.
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // PREPARE … FROM (the paired EXECUTE stmt does not double-count).
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    // Entry 1 + IF 1 + ELSEIF 1 + WHILE 1 + REPEAT 1 + CASE WHEN 1
+    // + SIGNAL 1 = 7.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 7.0);
+    // IF 1 + ELSEIF 1 + ELSE 1 + WHILE 1 + REPEAT 1 + CASE statement 1 = 6.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 6.0);
+    // Body fragments are routine continuations, not executing batches.
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 0.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 0.0);
+    // Change risk: dynamic SQL only.
+    assert_eq!(get(&m, "sql.change_risk_score"), 5.0);
+}
+
+/// BigQuery top-level scripting: `MultiStatementSegment`s directly under
+/// `File` are procedural regions (each with an entry path), while their
+/// inner statements stay the file's top-level statements — the UPDATE
+/// executes on apply and *does* count as migration DML, unlike a routine
+/// body's (CodeRabbit, PR #257).
+#[test]
+fn bigquery_scripting_family_counts() {
+    let m = metrics(include_str!("fixtures/bigquery_scripting.sql"));
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 0.0);
+    // IF + ELSEIF at top level, plus the IF nested in the WHILE.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 3.0);
+    // WHILE … END WHILE + FOR … IN … DO … END FOR.
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    // EXCEPTION WHEN ERROR THEN (inside the begin/exception block, which the
+    // bigquery grammar partially loses to Unparsable — the handler tokens
+    // survive).
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 1.0);
+    // RAISE USING MESSAGE.
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // EXECUTE IMMEDIATE.
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    // Entries: if/while/for scripting regions = 3; + IF 3 + loops 2
+    // + handler 1 + raise 1 = 10.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 10.0);
+    // IF 1 + ELSEIF 1 + ELSE 1 + WHILE 1 + nested IF 2 + FOR 1
+    // + handler 1 = 8.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 8.0);
+    // Top-level scripting DML executes on apply.
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+}
