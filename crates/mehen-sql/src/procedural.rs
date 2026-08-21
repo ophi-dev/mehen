@@ -512,7 +512,8 @@ impl Machine<'_> {
                         }
                         _ => {
                             // Bare END closes the nearest block or CASE
-                            // *expression* (whose WHENs stay declarative).
+                            // *expression* (whose WHEN arms stay
+                            // declarative).
                             if let Some(Ctx::Block { .. }) = self.pop_matching(|c| {
                                 matches!(
                                     c,

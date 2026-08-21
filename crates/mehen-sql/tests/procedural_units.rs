@@ -233,8 +233,8 @@ fn nested_subprogram_attribution_is_innermost() {
             .map(|v| v.as_f64())
             .unwrap_or_else(|| panic!("missing {key}"))
     };
-    // Inner: entry 1 + IF 1 = 2. Its RETURNs and the IF belong to it, not
-    // to outer_fn.
+    // Inner: entry 1 + IF 1 = 2. Its RETURN statements and the IF belong to
+    // it, not to outer_fn.
     assert_eq!(get(inner, "sql.procedural.cyclomatic_complexity"), 2.0);
     // Outer: its own entry only (the machine increments inside inner_fn's
     // byte range attribute to inner_fn).

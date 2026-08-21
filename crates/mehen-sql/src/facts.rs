@@ -2972,7 +2972,7 @@ fn collect_statement_objects(
     for ws in &write_stmts {
         let stmt_tables = ws.recursive_crawl(&TARGET_REFS, false, &SELECT_STATEMENT, true);
         // Multi-target DDL mutates *every* statement-level reference (`DROP
-        // TABLE a, b`, `TRUNCATE a, b`), and so do INSERTs — a plain
+        // TABLE a, b`, `TRUNCATE a, b`), and so do INSERT statements — a plain
         // `INSERT INTO t SELECT … FROM s` keeps `s` inside the SELECT (the
         // crawl stops there), while Oracle `INSERT ALL INTO a … INTO b …`
         // legitimately lists several statement-level targets, all of them
