@@ -506,16 +506,19 @@ const CREATE_OTHER_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::CreateRoleStatement,
 ]);
 
-/// Build facts for `root` (the parsed `File` segment).
+/// Build facts for `root` (the parsed `File` segment). `tsql` marks the
+/// effective dialect as T-SQL, whose batch model changes statement-ownership
+/// semantics (a routine body extends to the next `GO`).
 pub(crate) fn extract(
     root: &ErasedSegment,
     line_at: impl Fn(u32) -> u32,
     emit_contributions: bool,
+    tsql: bool,
 ) -> SqlFileFacts {
     let mut facts = SqlFileFacts::default();
 
     // ── statements ──────────────────────────────────────────────────
-    classify_statements(root, &line_at, &mut facts);
+    classify_statements(root, &line_at, tsql, &mut facts);
 
     // ── procedural units (function-shaped scopes) ───────────────────
     extract_procedural_units(root, &line_at, &mut facts);
@@ -612,6 +615,7 @@ pub(crate) fn extract(
 fn classify_statements(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
+    tsql: bool,
     facts: &mut SqlFileFacts,
 ) {
     // Top-level `Statement` nodes are direct children of `File`; do not
@@ -621,31 +625,36 @@ fn classify_statements(
     // Whether the previous statement was (or continued) a routine
     // definition. sqruff's tsql grammar splits long procedure bodies into
     // sibling statements; T-SQL batch semantics say the body extends to the
-    // next `GO`/EOF, so a *keyword-led* control statement that immediately
-    // follows a routine definition is the routine's body, not an
-    // independently-executing batch (Codex P1). Typed blocks (Oracle
-    // `BEGIN…END`, BigQuery scripting) never reclassify — they are genuine
-    // anonymous blocks wherever they appear. `unknown` statements (parse
-    // debris between spills) keep the chain alive rather than breaking it.
+    // next `GO`/EOF — `CREATE PROCEDURE` must be alone in its batch — so
+    // under the tsql dialect *every* statement after a routine definition is
+    // the routine's body until a `GO` separator (Codex P1). Other dialects
+    // have real statement terminators, so only *control-shaped* fragments
+    // (keyword-led T-SQL shapes, MySQL's per-branch typed statements)
+    // reclassify there; a plain `UPDATE` after an Oracle routine is
+    // independent. Typed blocks (Oracle `BEGIN…END`) never reclassify —
+    // they are genuine anonymous blocks wherever they appear. `unknown`
+    // statements (parse debris between spills) keep the chain alive.
     let mut prev_procedural = false;
     for stmt in &statements {
         let mut kind = classify_statement(stmt);
-        if kind == StatementKind::AnonymousBlock
-            && prev_procedural
-            && matches!(
-                anonymous_block_shape(stmt),
-                Some(AnonymousBlockShape::KeywordLed | AnonymousBlockShape::TypedControl)
-            )
-        {
-            kind = StatementKind::Procedural;
+        let is_go = kind == StatementKind::Unknown && is_go_separator(stmt);
+        if prev_procedural && !is_go && kind != StatementKind::Procedural {
+            let continuation = if tsql {
+                true
+            } else {
+                kind == StatementKind::AnonymousBlock
+                    && matches!(
+                        anonymous_block_shape(stmt),
+                        Some(AnonymousBlockShape::KeywordLed | AnonymousBlockShape::TypedControl)
+                    )
+            };
+            if continuation {
+                kind = StatementKind::Procedural;
+            }
         }
         prev_procedural = match kind {
+            _ if is_go => false,
             StatementKind::Procedural => true,
-            // A T-SQL `GO` batch separator *ends* the routine body by
-            // definition — whatever follows is a new, independently
-            // executing batch (Codex P1). Other unknown statements (parse
-            // debris between body spills) keep the chain alive.
-            StatementKind::Unknown if is_go_separator(stmt) => false,
             StatementKind::Unknown => prev_procedural,
             _ => false,
         };
@@ -1383,13 +1392,20 @@ pub(crate) fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts
 /// - `NOT NULL` column constraints in DDL (`id INT NOT NULL`) — but a
 ///   genuine `IS NOT NULL` predicate still counts (the `IS` before the `NOT`
 ///   distinguishes them);
-/// - `IF NOT EXISTS` / `… OR REPLACE`-style DDL guards (`CREATE TABLE IF NOT
-///   EXISTS`, `DROP INDEX IF NOT EXISTS`) — but a `WHERE NOT EXISTS (…)`
-///   predicate still counts (no `IF` before the `NOT`).
+/// - `IF NOT EXISTS` guards *inside CREATE/DROP statements* (`CREATE TABLE
+///   IF NOT EXISTS`) — but the same token run as a procedural condition
+///   (T-SQL `IF NOT EXISTS (SELECT …) BEGIN …`) is a genuine negation and
+///   counts, so the exclusion requires DDL ancestry (Codex P2). A `WHERE
+///   NOT EXISTS (…)` predicate has no `IF` and always counts.
 ///
 /// Works over sibling code tokens, mirroring `count_null_semantics_risk`.
 fn count_predicate_nots(root: &ErasedSegment) -> u32 {
-    fn walk(node: &ErasedSegment, count: &mut u32) {
+    /// Statement kinds whose `IF NOT EXISTS` is a DDL guard.
+    const DDL_GUARD_CONTEXTS: SyntaxSet = CREATE_TABLE_STATEMENTS
+        .union(&CREATE_VIEW_STATEMENTS)
+        .union(&CREATE_OTHER_STATEMENTS)
+        .union(&DROP_STATEMENTS);
+    fn walk(node: &ErasedSegment, in_ddl: bool, count: &mut u32) {
         let code: Vec<&ErasedSegment> = node
             .segments()
             .iter()
@@ -1407,17 +1423,18 @@ fn count_predicate_nots(root: &ErasedSegment) -> u32 {
             let prev = neighbor(i.checked_sub(1));
             let next = neighbor(Some(i + 1));
             let null_constraint = next == "NULL" && prev != "IS";
-            let ddl_guard = next == "EXISTS" && prev == "IF";
+            let ddl_guard = in_ddl && next == "EXISTS" && prev == "IF";
             if !null_constraint && !ddl_guard {
                 *count += 1;
             }
         }
         for child in node.segments() {
-            walk(child, count);
+            let child_in_ddl = in_ddl || DDL_GUARD_CONTEXTS.contains(child.get_type());
+            walk(child, child_in_ddl, count);
         }
     }
     let mut count = 0u32;
-    walk(root, &mut count);
+    walk(root, false, &mut count);
     count
 }
 
@@ -2823,15 +2840,38 @@ const UNIT_NAME_KINDS: SyntaxSet = SyntaxSet::new(&[
 
 /// The routine-definition CST nodes in the same pre-order as
 /// [`extract_procedural_units`] collects `ProceduralUnitFacts` — callers zip
-/// the two by index (e.g. for per-unit embedded-query scoring). Nodes
-/// without a position marker are filtered *here* so both sequences stay
-/// index-aligned with the facts (which cannot represent a span-less unit) —
-/// otherwise every unit after a skipped node would take its neighbor's
-/// embedded score (CodeRabbit).
+/// the two by index (e.g. for per-unit embedded-query scoring). Two filters
+/// keep the sequence honest:
+/// - nodes without a position marker are dropped so both sequences stay
+///   index-aligned with the facts (which cannot represent a span-less unit)
+///   — otherwise every unit after a skipped node would take its neighbor's
+///   embedded score (CodeRabbit);
+/// - Oracle member *prototypes* are dropped: a package/type specification
+///   declares `PROCEDURE p;` with the same `OracleCreateProcedureStatement`
+///   kind as an implementation, but has no `BEGIN…END` body — a prototype
+///   is not an executable routine and must not grow an entry path or a
+///   coverage space (Codex P2). Non-Oracle kinds keep body-less shapes:
+///   a PostgreSQL `$$`-quoted body is an opaque literal, not a block node.
 pub(crate) fn procedural_unit_nodes(root: &ErasedSegment) -> Vec<ErasedSegment> {
+    const ORACLE_ROUTINE_KINDS: SyntaxSet = SyntaxSet::new(&[
+        SyntaxKind::OracleCreateProcedureStatement,
+        SyntaxKind::OracleCreateFunctionStatement,
+        SyntaxKind::OracleCreateTriggerStatement,
+    ]);
     root.recursive_crawl(&PROCEDURAL_UNITS, true, &SyntaxSet::EMPTY, false)
         .into_iter()
         .filter(|unit| unit.get_position_marker().is_some())
+        .filter(|unit| {
+            !ORACLE_ROUTINE_KINDS.contains(unit.get_type())
+                || !unit
+                    .recursive_crawl(
+                        &SyntaxSet::single(SyntaxKind::OracleBeginEndBlock),
+                        true,
+                        &SyntaxSet::EMPTY,
+                        true,
+                    )
+                    .is_empty()
+        })
         .collect()
 }
 

@@ -133,7 +133,12 @@ impl LanguageAnalyzer for SqlAnalyzer {
         let line_index = &source.line_index;
         let line_at = |byte: u32| line_index.line_at(byte);
 
-        let mut file_facts = facts::extract(&parsed, line_at, config.emit_contributions);
+        let mut file_facts = facts::extract(
+            &parsed,
+            line_at,
+            config.emit_contributions,
+            resolution.effective == DialectKind::Tsql,
+        );
         // Lexer errors (malformed tokens) are distinct from unparsable parse
         // segments. The current sqruff release never populates this vector, but
         // surface them into parser-health so a future version cannot make

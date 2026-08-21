@@ -227,6 +227,9 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
                 return true;
             }
             "ELSIF" | "ELSEIF" => return true,
+            // An `ELSE`-led fragment is the else branch of a control
+            // statement the grammar split off (T-SQL `IF …; ELSE …`).
+            "ELSE" if i == 0 => return true,
             "SP_EXECUTESQL" => return true,
             "EXECUTE" if word(i + 1) == "IMMEDIATE" => return true,
             // T-SQL `EXEC('…')` — an immediately executed dynamic string
@@ -439,14 +442,21 @@ impl Machine<'_> {
             let kw = t.keyword_like;
             match t.word.as_str() {
                 ";" => {
-                    self.close_unbound_ifs();
                     // Loop headers still pending a body opener at the
                     // terminator were single-statement loops (`WHILE @a > 0
                     // WHILE @b > 0 SET …;`) — every one of them completes
-                    // here (Codex P2).
+                    // here, *before* the IF pass so an `IF … WHILE …;` chain
+                    // exposes its outer IF for closing too (Codex P2).
                     while self.pending_loop_headers > 0 {
                         self.pending_loop_headers -= 1;
                         self.pop_matching(|c| matches!(c, Ctx::Loop { block_bound: false }));
+                    }
+                    // A single-statement then-body followed by ELSE keeps its
+                    // IF open for the else branch (`IF @a > 0 SELECT 1; ELSE
+                    // IF @b > 0 …`), mirroring the `END ELSE` block shape
+                    // (Codex P2).
+                    if word(i + 1) != "ELSE" {
+                        self.close_unbound_ifs();
                     }
                     self.pending_between = false;
                     self.break_bool_run();
@@ -912,13 +922,14 @@ impl Machine<'_> {
                         self.count_dynamic_sql(t.span);
                     }
                 }
-                "DBMS_SQL" if word(i + 1) == "." => {
-                    // The Oracle dynamic-SQL package, recognized only as a
-                    // qualified call (`DBMS_SQL.PARSE(…)`): the parsed
-                    // package qualifier lexes as a `NakedIdentifier` — not
-                    // keyword-like — so there is no `kw` guard, and the `.`
-                    // requirement keeps a column that happens to be named
-                    // `dbms_sql` from counting (Codex P2).
+                "DBMS_SQL" if word(i + 1) == "." && word(i + 3) == "(" => {
+                    // The Oracle dynamic-SQL package, recognized only in the
+                    // qualified *call* shape (`DBMS_SQL.PARSE(…)`): the
+                    // parsed package qualifier lexes as a `NakedIdentifier`
+                    // — not keyword-like — so there is no `kw` guard, while
+                    // the `.method(` requirement keeps a column or relation
+                    // that happens to be named `dbms_sql` from counting
+                    // (`SELECT dbms_sql.foo INTO v FROM dbms_sql`, Codex P2).
                     self.break_bool_run();
                     if self.in_body {
                         self.count_dynamic_sql(t.span);

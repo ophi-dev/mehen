@@ -1791,3 +1791,135 @@ fn bare_dbms_sql_identifier_is_not_dynamic_sql() {
     );
     assert_eq!(get(&qualified, "sql.procedural.dynamic_sql_count"), 1.0);
 }
+
+// ── PR #257 round-6 review regressions ──────────────────────────────────
+
+/// Under the T-SQL batch model, *every* statement after a routine
+/// definition belongs to the routine until `GO` — including ordinary DML
+/// that sqruff splits off the body (Codex P1, PR #257 round 6).
+#[test]
+fn tsql_dml_siblings_stay_procedural_until_go() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p @x int as\n\
+         select 1;\n\
+         update t set c = 1;\n\
+         go\n\
+         update standalone set c = 2 where id = 1;\n",
+    );
+    // The in-body UPDATE is not migration DML; the post-GO one is.
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_without_where_count"), 0.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.update"), 1.0);
+}
+
+/// An Oracle routine followed by plain DML keeps normal semantics — the
+/// until-GO continuation is a T-SQL batch rule only.
+#[test]
+fn oracle_dml_after_routine_stays_independent() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           null;\n\
+         end p;\n\
+         /\n\
+         update t set c = 1;\n",
+    );
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_without_where_count"), 1.0);
+}
+
+/// A single-statement then-body followed by ELSE keeps its IF open at a
+/// *contiguous* terminator (the `;`-before-ELSE lookahead). At top level the
+/// tsql grammar splits `IF …; ELSE IF …;` into an anonymous statement and an
+/// orphan `Unparsable` run, so the regions cannot share nesting state — both
+/// IFs and the ELSE still count, flat (Codex P2, PR #257 round 6; the
+/// nested-through-ELSE case within one region is covered by
+/// `tsql_else_body_keeps_if_nesting`).
+#[test]
+fn single_statement_then_body_keeps_if_open_for_else() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0 select 1;\n\
+         else if @b > 0 select 2;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // IF 1 + ELSE 1 + split else-branch IF 1 (flat — parser-bound) = 3.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// An IF controlling a single-statement loop closes at the shared
+/// terminator — the sibling IF afterwards carries no phantom nesting
+/// (Codex P2, PR #257 round 6).
+#[test]
+fn if_over_single_statement_loop_closes_at_terminator() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0 while @b > 0 set @b = 0;\n\
+         if @c > 0 select 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // IF 1 + WHILE (1+1) + sibling IF 1 (flat) = 4.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// A dotted `dbms_sql.<col>` reference without a call is not dynamic SQL —
+/// only the qualified *call* shape counts (Codex P2, PR #257 round 6).
+#[test]
+fn dotted_dbms_sql_reference_without_call_is_not_dynamic_sql() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           select dbms_sql.foo into v from dbms_sql;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
+}
+
+/// T-SQL `IF NOT EXISTS (SELECT …)` is a genuine boolean negation; only
+/// `IF NOT EXISTS` inside CREATE/DROP statements is a DDL guard (Codex P2,
+/// PR #257 round 6).
+#[test]
+fn procedural_if_not_exists_counts_as_predicate_not() {
+    let procedural = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if not exists (select 1 from t)\n\
+         begin\n\
+           select 1;\n\
+         end\n",
+    );
+    assert_eq!(get(&procedural, "sql.predicate.not_count"), 1.0);
+
+    let guard = metrics("-- sqlfluff:dialect:postgres\nCREATE TABLE IF NOT EXISTS t (id INT)");
+    assert_eq!(get(&guard, "sql.predicate.not_count"), 0.0);
+}
+
+/// Oracle package-specification prototypes (`PROCEDURE p;` without a body)
+/// are declarations, not routines: no unit, no entry path, no coverage
+/// space (Codex P2, PR #257 round 6).
+#[test]
+fn oracle_spec_prototypes_are_not_routine_units() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace package pkg_spec is\n\
+           procedure p(x number);\n\
+           function f return number;\n\
+         end pkg_spec;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 0.0);
+    // A package *body* with implementations still yields units.
+    let body = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace package body pkg_impl is\n\
+           function f return number is\n\
+           begin\n\
+             return 1;\n\
+           end f;\n\
+         end pkg_impl;\n\
+         /\n",
+    );
+    assert_eq!(get(&body, "sql.procedural.routine_count"), 1.0);
+}
