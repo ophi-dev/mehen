@@ -2042,3 +2042,127 @@ fn bare_end_followed_by_sibling_if_keeps_the_if() {
     // Both IFs flat: 1 + 1 = 2 cognitive.
     assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 2.0);
 }
+
+// ── PR #257 round-8 review regressions ──────────────────────────────────
+
+/// BigQuery routine bodies surface as top-level statements (the grammar
+/// wraps `CREATE PROCEDURE` in a segment without a `Statement` node), but
+/// they run when the routine is *called*: no executing DML, touched
+/// objects, or missing-WHERE risk (Codex P1, PR #257 round 8).
+#[test]
+fn bigquery_routine_body_dml_is_not_migration_risk() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         create procedure ds.upd()\n\
+         begin\n\
+           update t set c = 1 where true;\n\
+           delete from u;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 0.0);
+    assert_eq!(get(&m, "sql.dml.delete_count"), 0.0);
+    assert_eq!(get(&m, "sql.dml.delete_without_where_count"), 0.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 0.0);
+}
+
+/// Variable-form `EXEC @sql` in a standalone T-SQL batch reaches through
+/// the unparsable-region marker gate (Codex P1, PR #257 round 8).
+#[test]
+fn variable_exec_reaches_through_the_region_gate() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         declare @sql nvarchar(max) = N'select 1';\n\
+         exec @sql;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+}
+
+/// `EXEC @status = @proc_var` executes a *variable* even though it captures
+/// a return value — only a literal procedure name on the right-hand side is
+/// a static call (CodeRabbit Major, PR #257 round 8). Covers both the
+/// parsed routine-body path and the marker-gated standalone path.
+#[test]
+fn exec_capture_of_a_variable_is_dynamic() {
+    let dynamic = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           exec @status = @proc_var;\n\
+         end\n",
+    );
+    assert_eq!(get(&dynamic, "sql.procedural.dynamic_sql_count"), 1.0);
+
+    let standalone = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         exec @status = @proc_var;\n",
+    );
+    assert_eq!(get(&standalone, "sql.procedural.dynamic_sql_count"), 1.0);
+
+    let static_call = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           exec @ret = dbo.other_proc;\n\
+         end\n",
+    );
+    assert_eq!(get(&static_call, "sql.procedural.dynamic_sql_count"), 0.0);
+}
+
+/// An IF whose single statement is a block-bodied loop closes when the
+/// block does: `IF @a > 0 WHILE @b > 0 BEGIN … END` leaves the IF unbound
+/// (the BEGIN bound the pending loop), and a sibling IF after the END must
+/// not nest under it (Codex P2, PR #257 round 8).
+#[test]
+fn if_over_block_bodied_loop_closes_at_the_block_end() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         while @b > 0\n\
+         begin\n\
+           set @b = @b - 1;\n\
+         end\n\
+         if @c > 0 select 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 1.0);
+    // IF@a +1, WHILE nested +2, sibling IF@c +1 (flat) = 4, not 5.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// The scalar conditional *function* `IF(expr, a, b)` inside an unparsable
+/// MySQL routine body is not control flow: its argument commas at paren
+/// depth 1 distinguish it from a parenthesized control condition
+/// (Codex P2, PR #257 round 8).
+#[test]
+fn scalar_if_call_in_unparsable_run_is_not_a_branch() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter //\n\
+         create procedure set_flag(in flag int, out result int)\n\
+         begin\n\
+           set result = if(flag > 0, 1, 0);\n\
+           if result = 1 then\n\
+             update t set c = 1 where id = 1;\n\
+           end if;\n\
+         end //\n",
+    );
+    // Only the procedural IF…THEN counts — the scalar IF() does not.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+}
+
+/// Oracle call-spec routines (`AS LANGUAGE JAVA …`) have no
+/// `BEGIN…END` block but are executable definitions — they stay routine
+/// units; only bodyless declarations inside a package/type *specification*
+/// are prototypes (Codex P2, PR #257 round 8).
+#[test]
+fn oracle_call_spec_routine_is_still_a_unit() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace function get_balance (acct_id in number) return number\n\
+         as language java\n\
+         name 'Bank.getBalance(int) return float';\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+}

@@ -517,11 +517,21 @@ pub(crate) fn extract(
 ) -> SqlFileFacts {
     let mut facts = SqlFileFacts::default();
 
-    // ── statements ──────────────────────────────────────────────────
-    classify_statements(root, &line_at, tsql, &mut facts);
-
     // ── procedural units (function-shaped scopes) ───────────────────
+    // Extracted *before* statement classification: BigQuery-style grammars
+    // wrap routines in segments without a top-level `Statement` node, so the
+    // routine's body statements surface as top-level statements themselves —
+    // classification needs the unit ranges to recognize them as
+    // routine-owned (Codex P1).
     extract_procedural_units(root, &line_at, &mut facts);
+
+    // ── statements ──────────────────────────────────────────────────
+    let unit_ranges: Vec<(u32, u32)> = facts
+        .procedural_units
+        .iter()
+        .map(|u| (u.start_byte, u.end_byte))
+        .collect();
+    classify_statements(root, &line_at, tsql, &unit_ranges, &mut facts);
 
     // ── procedural control flow (research foundation §6.17) ─────────
     // Needs statement classification and units; contributes dynamic-SQL
@@ -616,6 +626,7 @@ fn classify_statements(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
     tsql: bool,
+    unit_ranges: &[(u32, u32)],
     facts: &mut SqlFileFacts,
 ) {
     // Top-level `Statement` nodes are direct children of `File`; do not
@@ -636,7 +647,26 @@ fn classify_statements(
     // statements (parse debris between spills) keep the chain alive.
     let mut prev_procedural = false;
     for stmt in &statements {
+        let (start_byte, end_byte) = stmt
+            .get_position_marker()
+            .map(|pm| (pm.source_slice.start as u32, pm.source_slice.end as u32))
+            .unwrap_or((0, 0));
         let mut kind = classify_statement(stmt);
+        // A statement whose bytes live *inside* a routine unit is the
+        // routine's body — BigQuery-style grammars wrap `CREATE PROCEDURE`
+        // in a segment without a top-level `Statement` node, so the body's
+        // statements surface as top-level statements themselves. They run
+        // when the routine is *called*, not when the file is applied, so
+        // they must not publish executing DML, touched objects, or
+        // missing-WHERE risk (Codex P1). Strict containment: a definition
+        // statement contains its unit, never the reverse.
+        let routine_owned = kind != StatementKind::Procedural
+            && unit_ranges.iter().any(|&(s, e)| {
+                s <= start_byte && end_byte <= e && (s, e) != (start_byte, end_byte)
+            });
+        if routine_owned {
+            kind = StatementKind::Procedural;
+        }
         let is_go = kind == StatementKind::Unknown && is_go_separator(stmt);
         if prev_procedural && !is_go && kind != StatementKind::Procedural {
             let continuation = if tsql {
@@ -654,14 +684,13 @@ fn classify_statements(
         }
         prev_procedural = match kind {
             _ if is_go => false,
+            // Body statements owned by containment never seed a
+            // continuation chain — attribution is complete without one.
+            StatementKind::Procedural if routine_owned => prev_procedural,
             StatementKind::Procedural => true,
             StatementKind::Unknown => prev_procedural,
             _ => false,
         };
-        let (start_byte, end_byte) = stmt
-            .get_position_marker()
-            .map(|pm| (pm.source_slice.start as u32, pm.source_slice.end as u32))
-            .unwrap_or((0, 0));
         facts.statements.push(StatementFacts {
             kind,
             start_line: line_at(start_byte),
@@ -2862,27 +2891,69 @@ const UNIT_NAME_KINDS: SyntaxSet = SyntaxSet::new(&[
 ///   declares `PROCEDURE p;` with the same `OracleCreateProcedureStatement`
 ///   kind as an implementation, but has no `BEGIN…END` body — a prototype
 ///   is not an executable routine and must not grow an entry path or a
-///   coverage space (Codex P2). Non-Oracle kinds keep body-less shapes:
-///   a PostgreSQL `$$`-quoted body is an opaque literal, not a block node.
+///   coverage space (Codex P2). The prototype test is *contextual*, not a
+///   blanket body requirement: Oracle also has executable definitions
+///   without an `OracleBeginEndBlock` — Java/C call-specs (`AS LANGUAGE
+///   JAVA …`) and triggers whose body is a `CALL` clause — so only bodyless
+///   routines sitting inside a package/type *specification* are dropped
+///   (Codex P2). A bodyless forward declaration inside a package *body* is
+///   kept: it is indistinguishable from a call-spec without deeper clause
+///   parsing, and over-counting a declared routine is the safer error for a
+///   coverage denominator. Non-Oracle kinds keep body-less shapes: a
+///   PostgreSQL `$$`-quoted body is an opaque literal, not a block node.
 pub(crate) fn procedural_unit_nodes(root: &ErasedSegment) -> Vec<ErasedSegment> {
     const ORACLE_ROUTINE_KINDS: SyntaxSet = SyntaxSet::new(&[
         SyntaxKind::OracleCreateProcedureStatement,
         SyntaxKind::OracleCreateFunctionStatement,
         SyntaxKind::OracleCreateTriggerStatement,
     ]);
+    // Package/type *specification* byte ranges. sqruff parses `CREATE
+    // PACKAGE` and `CREATE PACKAGE BODY` as the same node kind with an
+    // optional `BODY` keyword child, so the keyword picks the spec form.
+    const ORACLE_SPEC_CONTAINERS: SyntaxSet = SyntaxSet::new(&[
+        SyntaxKind::OracleCreatePackageStatement,
+        SyntaxKind::OracleCreateTypeStatement,
+    ]);
+    let spec_ranges: Vec<(u32, u32)> = root
+        .recursive_crawl(&ORACLE_SPEC_CONTAINERS, true, &SyntaxSet::EMPTY, false)
+        .into_iter()
+        .filter(|node| {
+            !node.is_type(SyntaxKind::OracleCreatePackageStatement)
+                || !node.segments().iter().any(|child| {
+                    child.is_type(SyntaxKind::Keyword) && child.raw().eq_ignore_ascii_case("body")
+                })
+        })
+        .filter_map(|node| {
+            let pm = node.get_position_marker()?;
+            Some((pm.source_slice.start as u32, pm.source_slice.end as u32))
+        })
+        .collect();
     root.recursive_crawl(&PROCEDURAL_UNITS, true, &SyntaxSet::EMPTY, false)
         .into_iter()
         .filter(|unit| unit.get_position_marker().is_some())
         .filter(|unit| {
-            !ORACLE_ROUTINE_KINDS.contains(unit.get_type())
-                || !unit
-                    .recursive_crawl(
-                        &SyntaxSet::single(SyntaxKind::OracleBeginEndBlock),
-                        true,
-                        &SyntaxSet::EMPTY,
-                        true,
-                    )
-                    .is_empty()
+            if !ORACLE_ROUTINE_KINDS.contains(unit.get_type()) {
+                return true;
+            }
+            let has_body = !unit
+                .recursive_crawl(
+                    &SyntaxSet::single(SyntaxKind::OracleBeginEndBlock),
+                    true,
+                    &SyntaxSet::EMPTY,
+                    true,
+                )
+                .is_empty();
+            if has_body {
+                return true;
+            }
+            // Bodyless: a prototype only in a spec context.
+            let Some(pm) = unit.get_position_marker() else {
+                return false;
+            };
+            let (start, end) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+            !spec_ranges
+                .iter()
+                .any(|&(s, e)| s <= start && end <= e && (s, e) != (start, end))
         })
         .collect()
 }

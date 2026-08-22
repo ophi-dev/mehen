@@ -221,6 +221,12 @@ expression: "serde_json :: json!\n({\n    \"backend\" : analysis.backend.label()
       "kind": "sql.statement",
       "name": "procedural",
       "start_line": 20
+    },
+    {
+      "end_line": 32,
+      "kind": "function",
+      "name": "process_orders",
+      "start_line": 2
     }
   ]
 }

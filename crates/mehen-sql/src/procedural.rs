@@ -236,6 +236,17 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
             // batch (Codex P1). Plain `EXEC procname` is deliberately not a
             // marker: a static call proves nothing procedural by itself.
             "EXEC" | "EXECUTE" if word(i + 1) == "(" => return true,
+            // T-SQL variable-form `EXEC @sql` executes the variable's
+            // contents (Codex P1). Return-value capture is only static when
+            // the right-hand side is a literal procedure name —
+            // `EXEC @status = @proc_var` still executes a variable
+            // (CodeRabbit).
+            "EXEC" | "EXECUTE"
+                if word(i + 1).starts_with('@')
+                    && (word(i + 2) != "=" || word(i + 3).starts_with('@')) =>
+            {
+                return true;
+            }
             // MySQL `PREPARE stmt FROM @sql` — dynamic SQL at any level
             // (Codex P1).
             "PREPARE" if word(i + 2) == "FROM" => return true,
@@ -249,6 +260,36 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
 }
 
 // ── the state machine ──────────────────────────────────────────────────
+
+/// Whether the `IF` at `i` is the scalar conditional *function*
+/// `IF(expr, a, b)` rather than a control statement. Inside `Unparsable`
+/// runs every token is a plain `Word` — no `FunctionNameIdentifier` shape —
+/// so the discriminator is the argument commas: the function form carries
+/// commas at paren depth 1, while a parenthesized control condition
+/// (`IF (@x > 0) BEGIN …`, `IF (ready) THEN`) never does — commas inside
+/// nested calls (`IF (f(a, b) > 0) THEN`) sit deeper (Codex P2). Unclosed
+/// parens err toward keeping control flow visible.
+fn scalar_if_call(tokens: &[PToken], i: usize) -> bool {
+    if tokens.get(i + 1).map(|t| t.word.as_str()) != Some("(") {
+        return false;
+    }
+    let mut depth = 0u32;
+    for t in &tokens[i + 1..] {
+        match t.word.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    // Closed without a top-level comma: a condition.
+                    return false;
+                }
+            }
+            "," if depth == 1 => return true,
+            _ => {}
+        }
+    }
+    false
+}
 
 /// Open construct contexts. Plain `Block` tracks `BEGIN … END` depth and
 /// whether its `EXCEPTION` section has started; `Case` tracks pending `WHEN`
@@ -609,27 +650,32 @@ impl Machine<'_> {
                                     Ctx::Block { .. } | Ctx::Case { .. } | Ctx::Try | Ctx::Catch
                                 )
                             }) {
-                                // A loop whose body was this block closes
-                                // with it.
-                                while matches!(
-                                    self.stack.last(),
-                                    Some(Ctx::Loop { block_bound: true })
-                                ) {
-                                    self.stack.pop();
-                                }
-                                // A T-SQL IF bound to this block closes too —
-                                // unless an ELSE follows: the IF's decision
-                                // continues through the else branch, keeping
-                                // its nesting for the else body (Codex P2).
-                                if word(i + 1) != "ELSE" {
-                                    while matches!(
-                                        self.stack.last(),
+                                // The block's completion also completes the
+                                // T-SQL single-statement contexts it was the
+                                // body of: loops whose body was this block,
+                                // and THEN-less IFs — both those bound
+                                // directly to the block and those whose
+                                // single statement was a just-popped loop or
+                                // IF (`IF @a > 0 WHILE @b > 0 BEGIN … END`
+                                // leaves the IF unbound because the BEGIN
+                                // bound the pending loop — Codex P2). The
+                                // pops interleave because the contexts nest
+                                // in any order. An ELSE stops the IF pops:
+                                // the decision continues through the else
+                                // branch, keeping its nesting for the else
+                                // body (Codex P2) — loops still pop, their
+                                // bodies are done either way.
+                                loop {
+                                    match self.stack.last() {
+                                        Some(Ctx::Loop { block_bound: true }) => {
+                                            self.stack.pop();
+                                        }
                                         Some(Ctx::If {
-                                            with_then: false,
-                                            bound: true
-                                        })
-                                    ) {
-                                        self.stack.pop();
+                                            with_then: false, ..
+                                        }) if word(i + 1) != "ELSE" => {
+                                            self.stack.pop();
+                                        }
+                                        _ => break,
                                     }
                                 }
                             }
@@ -644,14 +690,15 @@ impl Machine<'_> {
                         .unwrap_or("");
                     // `DROP TABLE IF EXISTS` / `CREATE TABLE IF NOT EXISTS`
                     // guards and the `IF(…)` conditional *function* are not
-                    // control flow. The function is recognized by its parse
-                    // shape (`FunctionNameIdentifier`), not by a following
-                    // `(` — `IF (@count > 0) BEGIN … END` / `IF (ready)
-                    // THEN` are ordinary statements with parenthesized
-                    // conditions and must count (Codex P2). In unparsable
-                    // runs everything is a `Word`, so a scalar `IF(…)` there
-                    // counts as a branch — erring toward keeping control
-                    // flow visible.
+                    // control flow. In parsed contexts the function is
+                    // recognized by its parse shape
+                    // (`FunctionNameIdentifier`), not by a following `(` —
+                    // `IF (@count > 0) BEGIN … END` / `IF (ready) THEN` are
+                    // ordinary statements with parenthesized conditions and
+                    // must count (Codex P2). In unparsable runs everything
+                    // is a `Word`, so the scalar form is recognized by its
+                    // argument commas instead (`SET x = IF(flag, 1, 0)` —
+                    // Codex P2).
                     let ddl_guard = matches!(
                         prev,
                         "TABLE"
@@ -671,7 +718,7 @@ impl Machine<'_> {
                             | "USER"
                             | "EXISTS"
                     );
-                    if !ddl_guard && !t.is_function_name {
+                    if !ddl_guard && !t.is_function_name && !scalar_if_call(tokens, i) {
                         self.facts.if_count += 1;
                         let nesting = self.nesting();
                         self.cyclo(t.span, reason::IF);
@@ -913,11 +960,16 @@ impl Machine<'_> {
                         } else if word(i + 1) == "SP_EXECUTESQL" {
                             self.count_dynamic_sql(t.span);
                             i += 1;
-                        } else if word(i + 1).starts_with('@') && word(i + 2) != "=" {
+                        } else if word(i + 1).starts_with('@')
+                            && (word(i + 2) != "=" || word(i + 3).starts_with('@'))
+                        {
                             // T-SQL `EXEC @sql` executes the *contents* of a
-                            // variable — dynamic SQL (Codex P1). A literal
-                            // procedure name stays a static call, and so does
-                            // return-value capture (`EXEC @ret = dbo.proc`).
+                            // variable — dynamic SQL (Codex P1). Return-value
+                            // capture stays static only when the right-hand
+                            // side is a literal procedure name:
+                            // `EXEC @ret = dbo.proc` is a static call, but
+                            // `EXEC @status = @proc_var` executes a variable
+                            // (CodeRabbit).
                             self.count_dynamic_sql(t.span);
                         }
                         // Plain `EXEC procname` is a static call — no count.
@@ -1115,6 +1167,17 @@ pub(crate) fn extract(
         if !is_procedural_region && !gated_unknown {
             continue;
         }
+        // Statements *contained* in a unit are BigQuery-style routine
+        // bodies reclassified by `classify_statements`: their tokens are
+        // scanned by the routine's `MultiStatementSegment` region below, so
+        // the statement itself is not a region (double-scan guard).
+        if unit_ranges.iter().any(|&(s, e, _)| {
+            s <= stmt_facts.start_byte
+                && stmt_facts.end_byte <= e
+                && (s, e) != (stmt_facts.start_byte, stmt_facts.end_byte)
+        }) {
+            continue;
+        }
         region_ranges.push((stmt_facts.start_byte, stmt_facts.end_byte));
         let tokens = tokens_of(node, line_at);
         // A `procedural` statement that contains no routine-definition node
@@ -1171,6 +1234,20 @@ pub(crate) fn extract(
         // parser fragment.
         if let Some(idx) = fallback_unit {
             merge_query_facts(&mut continuation_facts[idx], &query_facts_of(node));
+            // The continuation is part of the routine's source extent:
+            // extend the unit's span so the emitted `Function` space covers
+            // the full body, not just the header fragment sqruff kept
+            // inside the definition node — per-function coverage enrichment
+            // and location-based consumers see the real scope (Codex P1).
+            // Attribution buckets (`unit_ranges`) deliberately keep the
+            // original ranges: continuation increments already reach this
+            // unit via `fallback_unit`, and re-bucketing mid-scan would
+            // change innermost-containment answers.
+            let unit = &mut facts.procedural_units[idx];
+            if stmt_facts.end_byte > unit.end_byte {
+                unit.end_byte = stmt_facts.end_byte;
+                unit.end_line = unit.end_line.max(stmt_facts.end_line);
+            }
         }
         // Entry path: +1 for an anonymous block itself (a routine-definition
         // statement's entries come from its units below).
@@ -1286,6 +1363,13 @@ pub(crate) fn extract(
         drop(machine);
         if let Some(idx) = fallback_unit {
             carried.insert(idx, end_state);
+            // The spill is part of the routine's source extent too — same
+            // span extension as statement continuations above (Codex P1).
+            let unit = &mut facts.procedural_units[idx];
+            if end > unit.end_byte {
+                unit.end_byte = end;
+                unit.end_line = unit.end_line.max(line_at(end.saturating_sub(1)));
+            }
         }
     }
 

@@ -258,9 +258,17 @@ fn nested_subprogram_attribution_is_innermost() {
 #[test]
 fn tsql_spilled_body_attributes_to_its_routine() {
     let analysis = analyze(include_str!("fixtures/tsql_procedure_control_flow.sql"));
-    let statement = &analysis.root.spaces[0];
-    let unit = &statement.spaces[0];
-    assert_eq!(unit.kind, SpaceKind::Function);
+    // The routine's span extends through its spilled body regions (PR #257
+    // round 8), outgrowing the header fragment's statement space — the
+    // Function space sits at root level with the full-body span.
+    let unit = analysis
+        .root
+        .spaces
+        .iter()
+        .find(|s| s.kind == SpaceKind::Function)
+        .expect("routine Function space");
+    assert_eq!(unit.name.as_deref(), Some("dbo.process_orders"));
+    assert!(unit.span.end_line >= 31, "span covers the spilled body");
     let unit_cyclo = unit
         .metrics
         .get(&MetricKey::new("sql.procedural.cyclomatic_complexity"))
@@ -275,4 +283,38 @@ fn tsql_spilled_body_attributes_to_its_routine() {
     // Everything in the file belongs to the single routine.
     assert_eq!(unit_cyclo, file_cyclo);
     assert_eq!(unit_cyclo, 7.0);
+}
+
+/// A T-SQL routine whose body sqruff splits into sibling statements keeps a
+/// `Function` space covering the *whole* body: continuation regions
+/// attributed to the routine extend its span past the header fragment the
+/// parser kept inside the definition node (Codex P1, PR #257 round 8).
+/// When the extended span outgrows its host statement space the Function
+/// space surfaces at the root instead — a full-scope space beats a nested
+/// but truncated one for location-based consumers.
+#[test]
+fn tsql_split_body_extends_the_function_space() {
+    let sql = "-- sqlfluff:dialect:tsql\n\
+               create procedure dbo.split_me @x int as\n\
+               begin\n\
+                 declare @c int = 0;\n\
+               \n\
+                 if @x > 0\n\
+                 begin\n\
+                   set @c = 1;\n\
+                 end\n\
+               end\n";
+    let spaces = tree(sql);
+    let function = spaces
+        .iter()
+        .find(|(_, kind, _, _, _)| kind == "function")
+        .expect("routine yields a Function space");
+    assert_eq!(function.2.as_deref(), Some("dbo.split_me"));
+    // Header fragment ends at line 4; the body continuation runs to the
+    // trailing END. The space must cover the continuation.
+    assert!(
+        function.4 >= 9,
+        "Function space ends at line {}, expected the full body",
+        function.4
+    );
 }
