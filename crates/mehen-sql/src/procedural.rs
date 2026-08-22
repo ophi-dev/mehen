@@ -264,31 +264,102 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
 /// Whether the `IF` at `i` is the scalar conditional *function*
 /// `IF(expr, a, b)` rather than a control statement. Inside `Unparsable`
 /// runs every token is a plain `Word` — no `FunctionNameIdentifier` shape —
-/// so the discriminator is the argument commas: the function form carries
-/// commas at paren depth 1, while a parenthesized control condition
-/// (`IF (@x > 0) BEGIN …`, `IF (ready) THEN`) never does — commas inside
-/// nested calls (`IF (f(a, b) > 0) THEN`) sit deeper (Codex P2). Unclosed
-/// parens err toward keeping control flow visible.
+/// so two signals decide (Codex P2 ×2):
+/// - argument commas: the function form carries commas at paren depth 1;
+///   a comma-free parenthesized condition (`IF (@x > 0) BEGIN …`,
+///   `IF (ready) THEN`) is control flow. Commas inside nested calls
+///   (`IF (f(a, b) > 0) THEN`) sit deeper.
+/// - a depth-1 comma alone is not proof: MySQL row constructors put commas
+///   in real conditions (`IF (a, b) = (1, 2) THEN`). The preceding token
+///   settles clear expression positions (`SET x = IF(…)`, `WHEN IF(…)`);
+///   otherwise the statement shape decides — a control IF finds its own
+///   `THEN` at paren depth 0 before the statement ends, a scalar call never
+///   does.
+///
+/// Unclosed parens err toward keeping control flow visible.
 fn scalar_if_call(tokens: &[PToken], i: usize) -> bool {
-    if tokens.get(i + 1).map(|t| t.word.as_str()) != Some("(") {
+    let word = |j: usize| tokens.get(j).map(|t| t.word.as_str()).unwrap_or("");
+    if word(i + 1) != "(" {
         return false;
     }
+    // Phase 1: scan the IF's parens for a depth-1 comma.
     let mut depth = 0u32;
-    for t in &tokens[i + 1..] {
+    let mut top_level_comma = false;
+    let mut after_close = usize::MAX;
+    for (j, t) in tokens.iter().enumerate().skip(i + 1) {
         match t.word.as_str() {
             "(" => depth += 1,
             ")" => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    // Closed without a top-level comma: a condition.
-                    return false;
+                    after_close = j + 1;
+                    break;
                 }
             }
-            "," if depth == 1 => return true,
+            "," if depth == 1 => top_level_comma = true,
             _ => {}
         }
     }
-    false
+    if after_close == usize::MAX || !top_level_comma {
+        // Unclosed, or a comma-free condition: control.
+        return false;
+    }
+    // A token that can only precede an *operand* proves expression
+    // position. `THEN`/`ELSE`/`;`/run-start stay ambiguous — a nested
+    // control IF starts there too.
+    let expression_position = matches!(
+        i.checked_sub(1)
+            .map(|j| tokens[j].word.as_str())
+            .unwrap_or(""),
+        "=" | ","
+            | "("
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "||"
+            | ">"
+            | "<"
+            | ">="
+            | "<="
+            | "<>"
+            | "!="
+            | "SELECT"
+            | "RETURN"
+            | "AND"
+            | "OR"
+            | "NOT"
+            | "WHEN"
+            | "IF"
+            | "ELSIF"
+            | "ELSEIF"
+            | "WHILE"
+            | "UNTIL"
+    );
+    if expression_position {
+        return true;
+    }
+    // Phase 2: statement shape. A control IF's condition continues to a
+    // depth-0 `THEN` (`IF (a, b) = (1, 2) THEN`); a scalar call reaches a
+    // terminator, the end of the run, or the closer of an enclosing
+    // expression first.
+    let mut depth = 0i32;
+    for t in &tokens[after_close..] {
+        match t.word.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth < 0 {
+                    return true; // operand of an enclosing expression
+                }
+            }
+            "THEN" if depth == 0 && t.keyword_like => return false,
+            ";" if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Open construct contexts. Plain `Block` tracks `BEGIN … END` depth and
@@ -299,6 +370,11 @@ fn scalar_if_call(tokens: &[PToken], i: usize) -> bool {
 enum Ctx {
     Block {
         exception_section: bool,
+        /// This block is a routine's *body* — opened for a pending
+        /// `FUNCTION`/`PROCEDURE` header. Cognitive nesting resets at the
+        /// topmost such block, so a nested subprogram's decisions don't
+        /// inherit the outer routine's lexical depth (Codex P2).
+        routine_body: bool,
     },
     Try,
     Catch,
@@ -368,6 +444,12 @@ struct Machine<'a> {
     /// return statement — even though the enclosing routine's body gate is
     /// already open (Codex P2).
     pending_routine_header: bool,
+    /// Definition headers whose body block hasn't opened yet — the next
+    /// plain `BEGIN`s consume these and tag their blocks `routine_body`
+    /// (nesting baselines, Codex P2). Counter, not flag: an Oracle DECLARE
+    /// section can stack several nested subprogram headers before their
+    /// bodies open.
+    pending_routine_bodies: u32,
     /// Previous code token was a boolean operator with this text (`AND`/
     /// `OR`); any other token breaks the run. Used for sequence-based
     /// cognitive counting (+1 per run of like operators, +1 on alternation).
@@ -376,7 +458,23 @@ struct Machine<'a> {
 
 impl Machine<'_> {
     fn nesting(&self) -> u32 {
-        self.stack
+        // Nesting is routine-local: count above the topmost routine-body
+        // block, so decisions inside a nested subprogram don't inherit the
+        // outer routine's open contexts (Codex P2).
+        let base = self
+            .stack
+            .iter()
+            .rposition(|c| {
+                matches!(
+                    c,
+                    Ctx::Block {
+                        routine_body: true,
+                        ..
+                    }
+                )
+            })
+            .map_or(0, |i| i + 1);
+        self.stack[base..]
             .iter()
             .filter(|c| {
                 matches!(
@@ -508,9 +606,21 @@ impl Machine<'_> {
                     self.break_bool_run();
                 }
                 "FUNCTION" | "PROCEDURE" if kw => {
-                    // A routine header starts (nested subprogram in a DECLARE
-                    // section, or the outer definition itself); its signature
-                    // runs until IS/AS/BEGIN.
+                    // A definition header arms a routine-body marker for the
+                    // block that will open it — reference positions (`DROP
+                    // PROCEDURE`, `ALTER FUNCTION`, `GRANT … ON PROCEDURE`,
+                    // `END FUNCTION`, `COMMENT ON …`) name a routine without
+                    // defining one (Codex P2).
+                    let prev = i
+                        .checked_sub(1)
+                        .map(|j| tokens[j].word.as_str())
+                        .unwrap_or("");
+                    if !matches!(prev, "DROP" | "ALTER" | "ON" | "END" | "EXISTS") {
+                        self.pending_routine_bodies += 1;
+                    }
+                    // The signature (nested subprogram in a DECLARE section,
+                    // or the outer definition itself) runs until
+                    // IS/AS/BEGIN.
                     self.pending_routine_header = true;
                     self.break_bool_run();
                 }
@@ -573,6 +683,15 @@ impl Machine<'_> {
                             }
                             self.stack.push(Ctx::Block {
                                 exception_section: false,
+                                // Consume one armed header: this block is
+                                // that routine's body (Codex P2).
+                                routine_body: {
+                                    let armed = self.pending_routine_bodies > 0;
+                                    if armed {
+                                        self.pending_routine_bodies -= 1;
+                                    }
+                                    armed
+                                },
                             });
                             self.facts.max_block_depth =
                                 self.facts.max_block_depth.max(self.block_depth());
@@ -604,10 +723,19 @@ impl Machine<'_> {
                             i += 1;
                         }
                         "LOOP" | "WHILE" | "REPEAT" | "FOR"
-                            if self
-                                .pop_matching(|c| matches!(c, Ctx::Loop { .. }))
-                                .is_some() =>
+                            if matches!(
+                                self.stack.last(),
+                                Some(Ctx::Loop { block_bound: false })
+                            ) =>
                         {
+                            // A dialect compound closer (`END LOOP`,
+                            // `END WHILE`, …) only when the innermost open
+                            // construct is a header-opened loop. A
+                            // block-bound loop (T-SQL `WHILE … BEGIN … END`)
+                            // closes through the bare-END path instead, so
+                            // `… END WHILE @b > 0 …` keeps the sibling WHILE
+                            // as its own statement (Codex P2).
+                            self.stack.pop();
                             i += 1;
                         }
                         "CASE" => {
@@ -827,6 +955,7 @@ impl Machine<'_> {
                         }) => *exception_section = true,
                         _ => self.stack.push(Ctx::Block {
                             exception_section: true,
+                            routine_body: false,
                         }),
                     }
                 }
@@ -1218,6 +1347,7 @@ pub(crate) fn extract(
             pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
+            pending_routine_bodies: 0,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1287,6 +1417,7 @@ pub(crate) fn extract(
             pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
+            pending_routine_bodies: 0,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1356,6 +1487,7 @@ pub(crate) fn extract(
             pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
+            pending_routine_bodies: 0,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1433,10 +1565,45 @@ fn last_unit_before(unit_ranges: &[(u32, u32, usize)], byte: u32) -> Option<usiz
         .map(|&(_, _, idx)| idx)
 }
 
-/// The declarative query facts of one region's subtree, collected with the
-/// region as the crawl root so subquery depths are region-relative — the
-/// input to `sql.structural_complexity` scoring (§8.1).
+/// The declarative query facts of one region's subtree — the input to
+/// `sql.structural_complexity` scoring (§8.1).
+///
+/// Nested routine definitions are *excluded*: a subprogram declared inside
+/// the region scores its own queries when it is scored as its own unit, so
+/// embedded complexity follows the same innermost-ownership contract as the
+/// control-flow increments — an outer routine with no query of its own
+/// cannot outrank its child on the child's query (Codex P2). The walk
+/// descends past containers that hold nested definitions and runs the
+/// extractors on each maximal definition-free subtree, merging with
+/// [`merge_query_facts`] (sums for counts, max for depths — the same merge
+/// continuations use, so depth semantics stay piece-relative either way).
 fn query_facts_of(region: &ErasedSegment) -> SqlFileFacts {
+    let mut acc = SqlFileFacts::default();
+    let mut pending: Vec<ErasedSegment> = region.segments().to_vec();
+    while let Some(node) = pending.pop() {
+        if crate::facts::PROCEDURAL_UNITS.contains(node.get_type()) {
+            continue; // a nested unit: scored separately
+        }
+        let holds_nested = !node
+            .recursive_crawl(
+                &crate::facts::PROCEDURAL_UNITS,
+                true,
+                &SyntaxSet::EMPTY,
+                false,
+            )
+            .is_empty();
+        if holds_nested {
+            pending.extend(node.segments().iter().cloned());
+        } else {
+            merge_query_facts(&mut acc, &subtree_query_facts(&node));
+        }
+    }
+    acc
+}
+
+/// The query facts of one definition-free subtree, collected with the node
+/// as the crawl root so subquery depths are node-relative.
+fn subtree_query_facts(region: &ErasedSegment) -> SqlFileFacts {
     let mut mini = SqlFileFacts::default();
     let selects = region.recursive_crawl(&SELECT_STATEMENT, true, &SyntaxSet::EMPTY, true);
     mini.query_block_count = selects.len() as u32;

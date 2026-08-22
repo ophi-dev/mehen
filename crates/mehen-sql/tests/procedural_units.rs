@@ -318,3 +318,40 @@ fn tsql_split_body_extends_the_function_space() {
         function.4
     );
 }
+
+/// Embedded-query scores follow innermost ownership: a nested subprogram's
+/// query belongs to the nested unit alone, so an outer routine with no
+/// query of its own scores 0 and cannot outrank its child (Codex P2,
+/// PR #257 round 9).
+#[test]
+fn nested_routine_owns_its_embedded_queries() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               create or replace procedure outer_p is\n\
+               \x20 function inner_f return number is\n\
+               \x20   v number;\n\
+               \x20 begin\n\
+               \x20   select count(*) into v from orders o join lines l on l.oid = o.id;\n\
+               \x20   return v;\n\
+               \x20 end inner_f;\n\
+               begin\n\
+               \x20 null;\n\
+               end outer_p;\n\
+               /\n";
+    let analysis = analyze(sql);
+    let get = |space: &mehen_core::MetricSpace, key: &str| {
+        space
+            .metrics
+            .get(&MetricKey::new(key))
+            .map(|v| v.as_f64())
+            .unwrap_or_else(|| panic!("missing {key}"))
+    };
+    let statement = &analysis.root.spaces[0];
+    let outer = &statement.spaces[0];
+    assert_eq!(outer.name.as_deref(), Some("outer_p"));
+    let inner = &outer.spaces[0];
+    assert_eq!(inner.name.as_deref(), Some("inner_f"));
+    // The join-bearing SELECT scores on the inner unit…
+    assert!(get(inner, "sql.structural_complexity") > 0.0);
+    // …and not on the outer routine, which has no query of its own.
+    assert_eq!(get(outer, "sql.structural_complexity"), 0.0);
+}

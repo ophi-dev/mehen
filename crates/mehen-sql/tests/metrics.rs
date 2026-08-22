@@ -2166,3 +2166,85 @@ fn oracle_call_spec_routine_is_still_a_unit() {
     );
     assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
 }
+
+// ── PR #257 round-9 review regressions ──────────────────────────────────
+
+/// A bare `END` closing a T-SQL block-bound loop directly followed by a
+/// sibling `WHILE` is not the compound `END WHILE` closer — the sibling
+/// loop counts (Codex P2, PR #257 round 9).
+#[test]
+fn bare_end_followed_by_sibling_while_keeps_the_loop() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         while @a > 0\n\
+         begin\n\
+           set @a = @a - 1;\n\
+         end\n\
+         while @b > 0 set @b = @b - 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    // Two sibling loops, both flat: 1 + 1.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 2.0);
+}
+
+/// MySQL row-constructor conditions carry depth-1 commas —
+/// `IF (a, b) = (1, 2) THEN` is control flow, not the scalar `IF()`
+/// function: the statement shape (its own depth-0 `THEN`) decides
+/// (Codex P2, PR #257 round 9). A scalar call in condition position
+/// (`IF IF(x, 1, 0) = 1 THEN`) still stays an operand.
+#[test]
+fn row_comparison_if_condition_is_control_flow() {
+    let row = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter //\n\
+         create procedure check_pair(in a int, in b int)\n\
+         begin\n\
+           if (a, b) = (1, 2) then\n\
+             update t set c = 1 where id = a;\n\
+           end if;\n\
+         end //\n",
+    );
+    assert_eq!(get(&row, "sql.procedural.if_count"), 1.0);
+
+    let operand = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter //\n\
+         create procedure check_flag(in x int)\n\
+         begin\n\
+           if if(x > 0, 1, 0) = 1 then\n\
+             update t set c = 1 where id = x;\n\
+           end if;\n\
+         end //\n",
+    );
+    // The outer control IF counts once; the scalar IF() operand does not.
+    assert_eq!(get(&operand, "sql.procedural.if_count"), 1.0);
+}
+
+/// A nested subprogram declared under an outer routine's control flow gets
+/// a fresh cognitive-nesting baseline: its decisions don't inherit the
+/// caller's lexical depth (Codex P2, PR #257 round 9). File cognitive here
+/// is 2 (outer IF 1 + inner IF 1), not 3.
+#[test]
+fn nested_routine_resets_cognitive_nesting() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure outer_p is\n\
+         begin\n\
+           if 1 = 1 then\n\
+             declare\n\
+               procedure inner_p is\n\
+               begin\n\
+                 if 2 = 2 then\n\
+                   null;\n\
+                 end if;\n\
+               end inner_p;\n\
+             begin\n\
+               inner_p;\n\
+             end;\n\
+           end if;\n\
+         end outer_p;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 2.0);
+}

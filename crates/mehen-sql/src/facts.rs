@@ -2857,7 +2857,7 @@ const PROCEDURAL_DEFINITIONS: SyntaxSet = SyntaxSet::new(&[
 /// `SpaceKind::Function` space. Deliberately *excludes* the package/type-body
 /// containers in [`PROCEDURAL_DEFINITIONS`]: a package body is a module, and
 /// its routines are the function-shaped units inside it.
-const PROCEDURAL_UNITS: SyntaxSet = SyntaxSet::new(&[
+pub(crate) const PROCEDURAL_UNITS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::CreateProcedureStatement,
     SyntaxKind::CreateFunctionStatement,
     SyntaxKind::CreateTriggerStatement,
