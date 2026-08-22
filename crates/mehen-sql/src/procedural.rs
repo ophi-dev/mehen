@@ -62,7 +62,7 @@ use sqruff_lib_core::parser::segments::ErasedSegment;
 
 use crate::facts::{ChangeRiskEvidence, ChangeRiskFactor, SqlFileFacts, StatementKind};
 
-/// Which composite a piece of procedural evidence contributes to.
+/// Which published metric a piece of procedural evidence contributes to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProceduralMetric {
     Cyclomatic,
@@ -70,6 +70,19 @@ pub(crate) enum ProceduralMetric {
     /// `sql.structural_complexity.max_embedded_query` — one entry, for the
     /// winning routine.
     EmbeddedQueryMax,
+    // Raw counts (Codex P1): every published `sql.procedural.*_count` is
+    // evidence-backed under its own key, so output can answer *why* a value
+    // moved. `max_block_depth` is deliberately absent — a high-water mark
+    // has no meaningful sum decomposition.
+    BlockCount,
+    RoutineCount,
+    LoopCount,
+    IfCount,
+    CaseStatementCount,
+    ExceptionHandlerCount,
+    ReturnCount,
+    RaiseThrowCount,
+    DynamicSqlCount,
 }
 
 /// One source-resolved increment of a procedural composite. `amount` is the
@@ -134,6 +147,10 @@ mod reason {
     pub(crate) const BOOLEAN_SEQUENCE: &str = "sql.procedural.boolean_sequence";
     pub(crate) const BOOLEAN_OPERATOR: &str = "sql.procedural.boolean_operator";
     pub(crate) const EMBEDDED_QUERY: &str = "sql.procedural.embedded_query";
+    pub(crate) const BLOCK: &str = "sql.procedural.block";
+    pub(crate) const ROUTINE: &str = "sql.procedural.routine";
+    pub(crate) const RETURN: &str = "sql.procedural.return";
+    pub(crate) const DYNAMIC_SQL: &str = "sql.procedural.dynamic_sql";
 }
 
 // ── token model ────────────────────────────────────────────────────────
@@ -204,6 +221,25 @@ fn tokens_of(region: &ErasedSegment, line_at: &impl Fn(u32) -> u32) -> Vec<PToke
 const UNPARSABLE: SyntaxSet = SyntaxSet::single(SyntaxKind::Unparsable);
 const MULTI_STATEMENT: SyntaxSet = SyntaxSet::single(SyntaxKind::MultiStatementSegment);
 const SELECT_STATEMENT: SyntaxSet = SyntaxSet::single(SyntaxKind::SelectStatement);
+
+/// The nodes that *are* embedded queries — the crawl roots for
+/// [`query_facts_of`]. Procedural assignment/condition expressions outside
+/// these do not feed `sql.structural_complexity`: `x := ((1 + 2) * 3);`
+/// embeds no query and must not score one (Codex P2). Mirrors the
+/// dialect-folded DML statement sets in `facts.rs`.
+const QUERY_ROOTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::WithCompoundStatement,
+    SyntaxKind::SetExpression,
+    SyntaxKind::SelectStatement,
+    SyntaxKind::InsertStatement,
+    SyntaxKind::OracleInsertStatement,
+    SyntaxKind::BulkInsertStatement,
+    SyntaxKind::UpdateStatement,
+    SyntaxKind::OracleUpdateStatement,
+    SyntaxKind::DeleteStatement,
+    SyntaxKind::OracleDeleteStatement,
+    SyntaxKind::MergeStatement,
+]);
 
 /// Whether an `Unparsable` run looks procedural. Gate before scanning so a
 /// broken `SELECT` (or any non-procedural parse failure) never grows
@@ -506,7 +542,7 @@ impl Machine<'_> {
         match metric {
             ProceduralMetric::Cyclomatic => self.facts.cyclomatic_complexity += amount,
             ProceduralMetric::Cognitive => self.facts.cognitive_complexity += amount,
-            ProceduralMetric::EmbeddedQueryMax => {}
+            _ => {}
         }
         // Innermost containing unit: units are pre-order, so among containing
         // ranges the *last* is the deepest. Increments in continuation
@@ -523,7 +559,7 @@ impl Machine<'_> {
             match metric {
                 ProceduralMetric::Cyclomatic => self.unit_tallies[idx].0 += amount,
                 ProceduralMetric::Cognitive => self.unit_tallies[idx].1 += amount,
-                ProceduralMetric::EmbeddedQueryMax => {}
+                _ => {}
             }
         }
         if self.emit {
@@ -542,6 +578,40 @@ impl Machine<'_> {
 
     fn cognitive(&mut self, span: SourceSpan, amount: f64, reason: &'static str) {
         self.add(ProceduralMetric::Cognitive, span, amount, reason);
+    }
+
+    /// Increment a raw `sql.procedural.*_count` and emit its evidence: raw
+    /// counts are evidence-backed under their own keys, so `metric == Σ
+    /// contributions` holds for every published count (Codex P1). Raw
+    /// increments are file-level only — per-unit tallies exist for the
+    /// composites alone.
+    fn raw_count(&mut self, metric: ProceduralMetric, span: SourceSpan, reason: &'static str) {
+        match metric {
+            ProceduralMetric::BlockCount => self.facts.block_count += 1,
+            ProceduralMetric::LoopCount => self.facts.loop_count += 1,
+            ProceduralMetric::IfCount => self.facts.if_count += 1,
+            ProceduralMetric::CaseStatementCount => self.facts.case_statement_count += 1,
+            ProceduralMetric::ExceptionHandlerCount => self.facts.exception_handler_count += 1,
+            ProceduralMetric::ReturnCount => self.facts.return_count += 1,
+            ProceduralMetric::RaiseThrowCount => self.facts.raise_throw_count += 1,
+            ProceduralMetric::DynamicSqlCount => self.facts.dynamic_sql_count += 1,
+            // Composites route through `add`; routine_count is emitted by
+            // `extract` per unit.
+            ProceduralMetric::Cyclomatic
+            | ProceduralMetric::Cognitive
+            | ProceduralMetric::EmbeddedQueryMax
+            | ProceduralMetric::RoutineCount => {
+                debug_assert!(false, "not a machine-raised raw count: {metric:?}");
+            }
+        }
+        if self.emit {
+            self.facts.evidence.push(ProceduralEvidence {
+                span,
+                metric,
+                amount: 1.0,
+                reason,
+            });
+        }
     }
 
     /// Pop the topmost context matching `pred` and everything above it
@@ -581,6 +651,17 @@ impl Machine<'_> {
             let kw = t.keyword_like;
             match t.word.as_str() {
                 ";" => {
+                    // A routine header ending at the terminator without
+                    // IS/AS/BEGIN is a *forward declaration* / prototype
+                    // (`PROCEDURE helper;` in a spec or DECLARE section):
+                    // no body block will open, so its pending body marker
+                    // retires here — otherwise a later ordinary `BEGIN`
+                    // would be mislabeled a routine body and reset cognitive
+                    // nesting (Codex P2).
+                    if self.pending_routine_header {
+                        self.pending_routine_header = false;
+                        self.pending_routine_bodies = self.pending_routine_bodies.saturating_sub(1);
+                    }
                     // Loop headers still pending a body opener at the
                     // terminator were single-statement loops (`WHILE @a > 0
                     // WHILE @b > 0 SET …;`) — every one of them completes
@@ -603,6 +684,12 @@ impl Machine<'_> {
                 "IS" | "AS" if kw => {
                     self.in_body = true;
                     self.pending_routine_header = false;
+                    // A call-spec body (`AS LANGUAGE JAVA …`, T-SQL CLR
+                    // `AS EXTERNAL NAME …`) never opens a `BEGIN` block:
+                    // retire the header's pending body marker (Codex P2).
+                    if matches!(word(i + 1), "LANGUAGE" | "EXTERNAL") {
+                        self.pending_routine_bodies = self.pending_routine_bodies.saturating_sub(1);
+                    }
                     self.break_bool_run();
                 }
                 "FUNCTION" | "PROCEDURE" if kw => {
@@ -634,7 +721,7 @@ impl Machine<'_> {
                         "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED" | ";" => {}
                         "TRY" => {
                             self.in_body = true;
-                            self.facts.block_count += 1;
+                            self.raw_count(ProceduralMetric::BlockCount, t.span, reason::BLOCK);
                             self.stack.push(Ctx::Try);
                             self.facts.max_block_depth =
                                 self.facts.max_block_depth.max(self.block_depth());
@@ -642,8 +729,12 @@ impl Machine<'_> {
                         }
                         "CATCH" => {
                             self.in_body = true;
-                            self.facts.block_count += 1;
-                            self.facts.exception_handler_count += 1;
+                            self.raw_count(ProceduralMetric::BlockCount, t.span, reason::BLOCK);
+                            self.raw_count(
+                                ProceduralMetric::ExceptionHandlerCount,
+                                t.span,
+                                reason::EXCEPTION_HANDLER,
+                            );
                             let nesting = self.nesting();
                             self.cyclo(t.span, reason::EXCEPTION_HANDLER);
                             self.cognitive(t.span, 1.0 + nesting as f64, reason::EXCEPTION_HANDLER);
@@ -654,7 +745,7 @@ impl Machine<'_> {
                         }
                         _ => {
                             self.in_body = true;
-                            self.facts.block_count += 1;
+                            self.raw_count(ProceduralMetric::BlockCount, t.span, reason::BLOCK);
                             // The block is a loop body when loop headers are
                             // pending (T-SQL `WHILE … BEGIN`): every pending
                             // Loop context binds to this block — nested
@@ -750,7 +841,11 @@ impl Machine<'_> {
                                 open_span,
                             }) = self.pop_matching(|c| matches!(c, Ctx::Case { .. }))
                             {
-                                self.facts.case_statement_count += 1;
+                                self.raw_count(
+                                    ProceduralMetric::CaseStatementCount,
+                                    open_span,
+                                    reason::CASE_STATEMENT,
+                                );
                                 self.cognitive(
                                     open_span,
                                     1.0 + nesting as f64,
@@ -847,7 +942,7 @@ impl Machine<'_> {
                             | "EXISTS"
                     );
                     if !ddl_guard && !t.is_function_name && !scalar_if_call(tokens, i) {
-                        self.facts.if_count += 1;
+                        self.raw_count(ProceduralMetric::IfCount, t.span, reason::IF);
                         let nesting = self.nesting();
                         self.cyclo(t.span, reason::IF);
                         self.cognitive(t.span, 1.0 + nesting as f64, reason::IF);
@@ -865,7 +960,7 @@ impl Machine<'_> {
                 }
                 "ELSIF" | "ELSEIF" if kw => {
                     self.break_bool_run();
-                    self.facts.if_count += 1;
+                    self.raw_count(ProceduralMetric::IfCount, t.span, reason::ELSIF);
                     self.cyclo(t.span, reason::ELSIF);
                     self.cognitive(t.span, 1.0, reason::ELSIF);
                 }
@@ -919,7 +1014,11 @@ impl Machine<'_> {
                             exception_section: true,
                             ..
                         }) => {
-                            self.facts.exception_handler_count += 1;
+                            self.raw_count(
+                                ProceduralMetric::ExceptionHandlerCount,
+                                t.span,
+                                reason::EXCEPTION_HANDLER,
+                            );
                             let nesting = self.nesting();
                             self.cyclo(t.span, reason::EXCEPTION_HANDLER);
                             self.cognitive(t.span, 1.0 + nesting as f64, reason::EXCEPTION_HANDLER);
@@ -928,7 +1027,11 @@ impl Machine<'_> {
                         Some(Ctx::Handler) => {
                             // Next handler of the same exception section.
                             self.stack.pop();
-                            self.facts.exception_handler_count += 1;
+                            self.raw_count(
+                                ProceduralMetric::ExceptionHandlerCount,
+                                t.span,
+                                reason::EXCEPTION_HANDLER,
+                            );
                             let nesting = self.nesting();
                             self.cyclo(t.span, reason::EXCEPTION_HANDLER);
                             self.cognitive(t.span, 1.0 + nesting as f64, reason::EXCEPTION_HANDLER);
@@ -1053,7 +1156,7 @@ impl Machine<'_> {
                     // is` (nested, while the enclosing body gate is already
                     // open) both declare the return *type*.
                     if self.in_body && !self.pending_routine_header {
-                        self.facts.return_count += 1;
+                        self.raw_count(ProceduralMetric::ReturnCount, t.span, reason::RETURN);
                     }
                 }
                 "RAISE"
@@ -1066,7 +1169,11 @@ impl Machine<'_> {
                 {
                     self.break_bool_run();
                     if self.in_body {
-                        self.facts.raise_throw_count += 1;
+                        self.raw_count(
+                            ProceduralMetric::RaiseThrowCount,
+                            t.span,
+                            reason::RAISE_THROW,
+                        );
                         self.cyclo(t.span, reason::RAISE_THROW);
                     }
                 }
@@ -1142,10 +1249,13 @@ impl Machine<'_> {
                 "AND" | "OR" => {
                     // Booleans count in bodies only (kw check is implicit:
                     // AND/OR lex as Keyword/BinaryOperator/Word — never as
-                    // identifiers). `BETWEEN x AND y` is range syntax.
+                    // identifiers). `BETWEEN x AND y` is range syntax, and a
+                    // routine *signature* being read is declaration, not a
+                    // path: `PROCEDURE p(flag BOOLEAN := TRUE AND FALSE);`
+                    // in a package spec creates no branch (Codex P2).
                     if t.word == "AND" && self.pending_between {
                         self.pending_between = false;
-                    } else if self.in_body {
+                    } else if self.in_body && !self.pending_routine_header {
                         let op: &'static str = if t.word == "AND" { "AND" } else { "OR" };
                         self.cyclo(t.span, reason::BOOLEAN_OPERATOR);
                         // Cognitive: +1 per *sequence* of same-operator runs.
@@ -1200,14 +1310,14 @@ impl Machine<'_> {
     }
 
     fn count_loop(&mut self, span: SourceSpan) {
-        self.facts.loop_count += 1;
+        self.raw_count(ProceduralMetric::LoopCount, span, reason::LOOP);
         let nesting = self.nesting();
         self.cyclo(span, reason::LOOP);
         self.cognitive(span, 1.0 + nesting as f64, reason::LOOP);
     }
 
     fn count_dynamic_sql(&mut self, span: SourceSpan) {
-        self.facts.dynamic_sql_count += 1;
+        self.raw_count(ProceduralMetric::DynamicSqlCount, span, reason::DYNAMIC_SQL);
         if self.emit {
             self.change_risk.push(ChangeRiskEvidence {
                 span,
@@ -1469,6 +1579,27 @@ pub(crate) fn extract(
         // resume that routine's scanner state (Codex P2). No preceding
         // unit → file-level only, fresh state.
         let fallback_unit = last_unit_before(&unit_ranges, start);
+        // A *standalone* control-led run is an anonymous block the parser
+        // lost (`BEGIN TRY … END CATCH` at file level): one entry path,
+        // like its statement-backed equivalent (Codex P2). Fragment shapes
+        // (`ELSE …`-led continuations) and isolated dynamic-SQL runs
+        // (`EXEC @sql`) open no scope and stay entry-free.
+        if fallback_unit.is_none() {
+            let control_led = tokens.first().is_some_and(|t| {
+                matches!(t.word.as_str(), "IF" | "WHILE" | "FOR" | "LOOP" | "DECLARE")
+                    || (t.word == "BEGIN"
+                        && !matches!(
+                            tokens.get(1).map(|t| t.word.as_str()).unwrap_or(""),
+                            "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED" | ";"
+                        ))
+            });
+            if control_led {
+                push_entry(
+                    &mut procedural,
+                    SourceSpan::new(start, end, line_at(start), line_at(end.saturating_sub(1))),
+                );
+            }
+        }
         let resumed = fallback_unit.and_then(|idx| carried.remove(&idx));
         let (stack, _) = resumed.unwrap_or_default();
         let mut machine = Machine {
@@ -1502,6 +1633,24 @@ pub(crate) fn extract(
                 unit.end_byte = end;
                 unit.end_line = unit.end_line.max(line_at(end.saturating_sub(1)));
             }
+        }
+    }
+
+    // Every routine unit is one evidence-backed `routine_count` increment,
+    // spanning its (continuation-extended) definition (Codex P1).
+    if emit_contributions {
+        for unit in &facts.procedural_units {
+            procedural.evidence.push(ProceduralEvidence {
+                span: SourceSpan::new(
+                    unit.start_byte,
+                    unit.end_byte,
+                    unit.start_line,
+                    unit.end_line,
+                ),
+                metric: ProceduralMetric::RoutineCount,
+                amount: 1.0,
+                reason: reason::ROUTINE,
+            });
         }
     }
 
@@ -1595,14 +1744,19 @@ fn query_facts_of(region: &ErasedSegment) -> SqlFileFacts {
         if holds_nested {
             pending.extend(node.segments().iter().cloned());
         } else {
-            merge_query_facts(&mut acc, &subtree_query_facts(&node));
+            // Only *query* nodes feed embedded facts (Codex P2): crawl the
+            // maximal query roots (recurse_into=false keeps a WITH's inner
+            // SELECTs from double-extracting) and extract within each.
+            for query in node.recursive_crawl(&QUERY_ROOTS, false, &SyntaxSet::EMPTY, true) {
+                merge_query_facts(&mut acc, &subtree_query_facts(&query));
+            }
         }
     }
     acc
 }
 
-/// The query facts of one definition-free subtree, collected with the node
-/// as the crawl root so subquery depths are node-relative.
+/// The query facts of one query-root subtree, collected with the node as
+/// the crawl root so subquery depths are query-relative.
 fn subtree_query_facts(region: &ErasedSegment) -> SqlFileFacts {
     let mut mini = SqlFileFacts::default();
     let selects = region.recursive_crawl(&SELECT_STATEMENT, true, &SyntaxSet::EMPTY, true);

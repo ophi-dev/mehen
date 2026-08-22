@@ -146,9 +146,12 @@ fn every_implemented_change_risk_term_has_a_stable_reason() {
 
 // ── procedural evidence (Phase 3) ───────────────────────────────────────
 
-/// The procedural composites are evidence-backed: the published value equals
-/// the sum of contribution amounts by construction, for both the typed-CST
-/// path (PL/SQL) and the token-fallback path (T-SQL with unparsable spills).
+/// Procedural metrics are evidence-backed: the published value equals the
+/// sum of contribution amounts by construction — the composites *and* every
+/// raw `*_count` under its own key (Codex P1, PR #257 round 10) — for both
+/// the typed-CST path (PL/SQL) and the token-fallback path (T-SQL with
+/// unparsable spills). `max_block_depth` is exempt: a high-water mark has
+/// no sum decomposition.
 #[test]
 fn procedural_complexity_evidence_sums_to_the_metric() {
     for fixture in [
@@ -161,6 +164,15 @@ fn procedural_complexity_evidence_sums_to_the_metric() {
         for key in [
             "sql.procedural.cyclomatic_complexity",
             "sql.procedural.cognitive_complexity",
+            "sql.procedural.block_count",
+            "sql.procedural.routine_count",
+            "sql.procedural.loop_count",
+            "sql.procedural.if_count",
+            "sql.procedural.case_statement_count",
+            "sql.procedural.exception_handler_count",
+            "sql.procedural.return_count",
+            "sql.procedural.raise_throw_count",
+            "sql.procedural.dynamic_sql_count",
         ] {
             let sum: f64 = analysis
                 .contributions

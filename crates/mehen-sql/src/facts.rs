@@ -18,6 +18,7 @@
 //! (see [`extract_cte_graph`]).
 
 use mehen_core::SourceSpan;
+use sqruff_lib_core::dialects::init::DialectKind;
 use sqruff_lib_core::dialects::syntax::{SyntaxKind, SyntaxSet};
 use sqruff_lib_core::parser::segments::ErasedSegment;
 
@@ -506,15 +507,19 @@ const CREATE_OTHER_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::CreateRoleStatement,
 ]);
 
-/// Build facts for `root` (the parsed `File` segment). `tsql` marks the
-/// effective dialect as T-SQL, whose batch model changes statement-ownership
-/// semantics (a routine body extends to the next `GO`).
+/// Build facts for `root` (the parsed `File` segment). `dialect` is the
+/// effective dialect: T-SQL's batch model changes statement-ownership
+/// semantics (a routine body extends to the next `GO`), and BigQuery's bare
+/// scripting `BEGIN`/`END` statements parse as transaction-statement
+/// wrappers that must not classify as TCL (Codex P1).
 pub(crate) fn extract(
     root: &ErasedSegment,
     line_at: impl Fn(u32) -> u32,
     emit_contributions: bool,
-    tsql: bool,
+    dialect: DialectKind,
 ) -> SqlFileFacts {
+    let tsql = dialect == DialectKind::Tsql;
+    let bigquery = dialect == DialectKind::Bigquery;
     let mut facts = SqlFileFacts::default();
 
     // ── procedural units (function-shaped scopes) ───────────────────
@@ -531,7 +536,7 @@ pub(crate) fn extract(
         .iter()
         .map(|u| (u.start_byte, u.end_byte))
         .collect();
-    classify_statements(root, &line_at, tsql, &unit_ranges, &mut facts);
+    classify_statements(root, &line_at, tsql, bigquery, &unit_ranges, &mut facts);
 
     // ── procedural control flow (research foundation §6.17) ─────────
     // Needs statement classification and units; contributes dynamic-SQL
@@ -626,6 +631,7 @@ fn classify_statements(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
     tsql: bool,
+    bigquery: bool,
     unit_ranges: &[(u32, u32)],
     facts: &mut SqlFileFacts,
 ) {
@@ -651,7 +657,7 @@ fn classify_statements(
             .get_position_marker()
             .map(|pm| (pm.source_slice.start as u32, pm.source_slice.end as u32))
             .unwrap_or((0, 0));
-        let mut kind = classify_statement(stmt);
+        let mut kind = classify_statement(stmt, bigquery);
         // A statement whose bytes live *inside* a routine unit is the
         // routine's body — BigQuery-style grammars wrap `CREATE PROCEDURE`
         // in a segment without a top-level `Statement` node, so the body's
@@ -705,7 +711,7 @@ fn classify_statements(
 /// contains. sqruff produces dialect-specific `Drop*`/`Create*`/Oracle DML
 /// variants, so we probe with the dialect-folding `SyntaxSet`s above and map
 /// by the first match.
-fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
+fn classify_statement(stmt: &ErasedSegment, bigquery: bool) -> StatementKind {
     let has_any = |set: &SyntaxSet| {
         !stmt
             .recursive_crawl(set, false, &SyntaxSet::EMPTY, true)
@@ -722,7 +728,7 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
     // never marks the routine statement as an anonymous block, and the DML
     // sniffing below stays unreachable for blocks (`BEGIN UPDATE t …; END;`
     // contains an UpdateStatement, but the statement is the block).
-    if stmt_is_anonymous_block(stmt) {
+    if stmt_is_anonymous_block(stmt, bigquery) {
         return StatementKind::AnonymousBlock;
     }
 
@@ -785,7 +791,14 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
         return StatementKind::Grant;
     }
     if has_any(&TRANSACTION_STATEMENTS) {
-        return StatementKind::TransactionControl;
+        // BigQuery's bare scripting `END;` also parses as a transaction
+        // statement — it is the closer of a scripting block, not TCL, so it
+        // must not add transaction-control risk (Codex P1). The matching
+        // bare `BEGIN;` never reaches here (classified anonymous above).
+        // Falls through to `unknown`: a closer is no statement of its own.
+        if !(bigquery && bare_scripting_bracket(stmt).is_some()) {
+            return StatementKind::TransactionControl;
+        }
     }
     if has(SyntaxKind::ExplainStatement) {
         return StatementKind::Explain;
@@ -958,8 +971,48 @@ fn anonymous_block_shape(stmt: &ErasedSegment) -> Option<AnonymousBlockShape> {
     }
 }
 
-fn stmt_is_anonymous_block(stmt: &ErasedSegment) -> bool {
+fn stmt_is_anonymous_block(stmt: &ErasedSegment, bigquery: bool) -> bool {
     anonymous_block_shape(stmt).is_some()
+        || (bigquery && bare_scripting_bracket(stmt) == Some(ScriptingBracket::Begin))
+}
+
+/// Which bare scripting bracket a BigQuery `TransactionStatement`-wrapped
+/// statement is, if any. BigQuery's grammar parses the scripting block
+/// openers/closers `BEGIN;`/`END;` as transaction statements whose *sole*
+/// keyword is the bracket — real transaction control (`BEGIN TRANSACTION`)
+/// carries more keywords and stays TCL (Codex P1). Only meaningful under
+/// the BigQuery dialect: a bare `BEGIN;`/`END;` in PostgreSQL *is*
+/// transaction control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScriptingBracket {
+    Begin,
+    End,
+}
+
+fn bare_scripting_bracket(stmt: &ErasedSegment) -> Option<ScriptingBracket> {
+    let wrapper = stmt
+        .segments()
+        .iter()
+        .find(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment())?;
+    if !TRANSACTION_STATEMENTS.contains(wrapper.get_type()) {
+        return None;
+    }
+    transaction_node_bracket(wrapper)
+}
+
+/// The sole-keyword bracket shape of a transaction-statement *node*, if any.
+fn transaction_node_bracket(node: &ErasedSegment) -> Option<ScriptingBracket> {
+    let keywords: Vec<String> = node
+        .segments()
+        .iter()
+        .filter(|s| s.is_type(SyntaxKind::Keyword))
+        .map(|s| s.raw().to_ascii_uppercase())
+        .collect();
+    match keywords.as_slice() {
+        [word] if word == "BEGIN" => Some(ScriptingBracket::Begin),
+        [word] if word == "END" => Some(ScriptingBracket::End),
+        _ => None,
+    }
 }
 
 /// Whether a statement is a bare T-SQL `GO` batch separator (its only code
@@ -2725,6 +2778,16 @@ fn scan_block_body_dml(
         &PROCEDURAL_DEFINITIONS,
         false,
     ) {
+        // Sole-keyword `BEGIN`/`END` wrappers are scripting-block brackets,
+        // not TCL (BigQuery — Codex P1). Real transaction control inside a
+        // block (`BEGIN TRANSACTION`, `COMMIT`, `ROLLBACK`) carries other
+        // keywords; the only dialects lexing bare-`BEGIN` TCL (PostgreSQL,
+        // MySQL) never surface it inside a typed block statement — MySQL
+        // blocks live in routines and PostgreSQL DO bodies are opaque
+        // dollar-quoted literals.
+        if transaction_node_bracket(&seg).is_some() {
+            continue;
+        }
         obj.transaction_control_count += 1;
         record_change_risk(
             evidence,

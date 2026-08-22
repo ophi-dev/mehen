@@ -137,7 +137,7 @@ impl LanguageAnalyzer for SqlAnalyzer {
             &parsed,
             line_at,
             config.emit_contributions,
-            resolution.effective == DialectKind::Tsql,
+            resolution.effective,
         );
         // Lexer errors (malformed tokens) are distinct from unparsable parse
         // segments. The current sqruff release never populates this vector, but
@@ -173,6 +173,19 @@ impl LanguageAnalyzer for SqlAnalyzer {
                 procedural::ProceduralMetric::EmbeddedQueryMax => {
                     "sql.structural_complexity.max_embedded_query"
                 }
+                procedural::ProceduralMetric::BlockCount => "sql.procedural.block_count",
+                procedural::ProceduralMetric::RoutineCount => "sql.procedural.routine_count",
+                procedural::ProceduralMetric::LoopCount => "sql.procedural.loop_count",
+                procedural::ProceduralMetric::IfCount => "sql.procedural.if_count",
+                procedural::ProceduralMetric::CaseStatementCount => {
+                    "sql.procedural.case_statement_count"
+                }
+                procedural::ProceduralMetric::ExceptionHandlerCount => {
+                    "sql.procedural.exception_handler_count"
+                }
+                procedural::ProceduralMetric::ReturnCount => "sql.procedural.return_count",
+                procedural::ProceduralMetric::RaiseThrowCount => "sql.procedural.raise_throw_count",
+                procedural::ProceduralMetric::DynamicSqlCount => "sql.procedural.dynamic_sql_count",
             };
             contribution_collector.record(metric, item.span, item.amount, item.reason);
         }

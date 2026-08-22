@@ -1315,11 +1315,12 @@ fn case_when_not_condition_still_counts() {
          /\n",
     );
     assert_eq!(get(&m, "sql.procedural.case_statement_count"), 1.0);
-    // Cyclomatic: two WHEN arms. The Oracle grammar cannot parse procedural
-    // CASE, so the whole block degrades to an Unparsable fragment — no typed
-    // block node forms, the statement is not classified `anonymous_block`,
-    // and no entry path is credited (only classified regions earn entries).
-    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+    // Cyclomatic: entry + two WHEN arms. The Oracle grammar cannot parse
+    // procedural CASE, so the whole block degrades to a root `Unparsable`
+    // run — the `begin`-led run is a block-shaped standalone region and
+    // earns one anonymous entry, like its statement-backed equivalent
+    // (Codex P2, round 10).
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
     // MERGE keeps its clauses out of the procedural family.
     let merge = metrics(
         "MERGE INTO t USING s ON t.id = s.id \
@@ -1504,14 +1505,20 @@ fn bigquery_scripting_family_counts() {
     assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
     // EXECUTE IMMEDIATE.
     assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
-    // Entries: if/while/for scripting regions = 3; + IF 3 + loops 2
-    // + handler 1 + raise 1 = 10.
-    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 10.0);
+    // Entries: if/while/for scripting regions = 3, + the bare BEGIN…END
+    // scripting block (round 10) = 4; + IF 3 + loops 2 + handler 1
+    // + raise 1 = 11.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 11.0);
     // IF 1 + ELSEIF 1 + ELSE 1 + WHILE 1 + nested IF 2 + FOR 1
     // + handler 1 = 8.
     assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 8.0);
     // Top-level scripting DML executes on apply.
     assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    // The bare `BEGIN;`/`END;` scripting brackets are a block, not
+    // transaction control (Codex P1, round 10).
+    assert_eq!(get(&m, "sql.procedural.block_count"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.transaction.control_count"), 0.0);
 }
 
 // ── PR #257 round-2 review regressions ──────────────────────────────────
@@ -2247,4 +2254,110 @@ fn nested_routine_resets_cognitive_nesting() {
     );
     assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
     assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 2.0);
+}
+
+// ── PR #257 round-10 review regressions ─────────────────────────────────
+
+/// A forward declaration (`PROCEDURE helper;`) never opens a body: its
+/// pending routine-body marker retires at the terminator, so a later
+/// ordinary nested `BEGIN` is not mislabeled a routine body and the outer
+/// decision's nesting still applies (Codex P2, PR #257 round 10).
+#[test]
+fn forward_declaration_does_not_leak_a_body_marker() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           procedure helper;\n\
+           procedure helper is begin null; end;\n\
+         begin\n\
+           if 1 = 1 then\n\
+             begin\n\
+               if 2 = 2 then\n\
+                 null;\n\
+               end if;\n\
+             end;\n\
+           end if;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // Outer IF 1 + inner IF (nested under the outer decision) 2 = 3 — the
+    // plain block under the IF is not a routine-body nesting baseline.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// BigQuery's bare scripting `BEGIN;`/`END;` statements are a block, not
+/// transaction control: no TCL risk, one anonymous entry, one block, and
+/// the DML between them executes on apply (Codex P1, PR #257 round 10).
+#[test]
+fn bigquery_bare_begin_is_a_scripting_block() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         begin\n\
+           update t set c = 1 where true;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.transaction_control"), 0.0);
+    assert_eq!(get(&m, "sql.transaction.control_count"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.block_count"), 1.0);
+    // Entry only: 1.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+    // Top-level scripting DML executes on apply.
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+}
+
+/// Boolean operators inside a routine *signature* (a package-spec prototype
+/// default such as `flag BOOLEAN := TRUE AND FALSE`) are declaration, not
+/// control flow (Codex P2, PR #257 round 10).
+#[test]
+fn signature_boolean_defaults_are_not_paths() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace package pkg_spec is\n\
+           procedure p(flag boolean := true and false);\n\
+         end pkg_spec;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// Procedural assignment expressions embed no query: a routine whose body
+/// is only `x := ((1 + 2) * 3);` publishes zero embedded-query structural
+/// complexity (Codex P2, PR #257 round 10).
+#[test]
+fn expression_only_routine_embeds_no_query() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure calc is\n\
+           x number;\n\
+         begin\n\
+           x := ((1 + 2) * 3);\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.structural_complexity.max_embedded_query"), 0.0);
+}
+
+/// A standalone block-shaped `Unparsable` run (T-SQL `BEGIN TRY … END
+/// CATCH` at file level) earns one anonymous entry, like its
+/// statement-backed equivalent (Codex P2, PR #257 round 10).
+#[test]
+fn standalone_try_catch_run_earns_an_entry() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         begin try\n\
+           select 1;\n\
+         end try\n\
+         begin catch\n\
+           throw;\n\
+         end catch\n",
+    );
+    // Entry 1 + catch handler 1 + throw 1 = 3.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
 }
