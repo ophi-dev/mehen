@@ -2305,6 +2305,12 @@ fn bigquery_bare_begin_is_a_scripting_block() {
     assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
     // Top-level scripting DML executes on apply.
     assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    // The `END;` closer is a syntactic bracket, not a statement: it joins
+    // no statement count, no `unknown` kind, and no entropy (Codex P2,
+    // round 11). Two statements: the block opener and the UPDATE.
+    assert_eq!(get(&m, "sql.statement.count"), 2.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.unknown"), 0.0);
+    assert_eq!(get(&m, "sql.statement.unparsed_count"), 0.0);
 }
 
 /// Boolean operators inside a routine *signature* (a package-spec prototype
@@ -2360,4 +2366,54 @@ fn standalone_try_catch_run_earns_an_entry() {
     assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
     assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 1.0);
     assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+}
+
+// ── PR #257 round-11 review regressions ─────────────────────────────────
+
+/// A T-SQL control bound at `BEGIN TRY` closes at `END CATCH`, not at the
+/// first terminator inside the try body — the catch handler keeps the
+/// decision's nesting penalty and a sibling decision stays flat (Codex P2,
+/// PR #257 round 11).
+#[test]
+fn try_catch_binds_its_controlling_if() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         begin try\n\
+           select 1;\n\
+         end try\n\
+         begin catch\n\
+           select 2;\n\
+         end catch\n\
+         if @b > 0 select 3;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 1.0);
+    // IF@a 1 + catch under it 2 + sibling IF@b 1 = 4 (not 3: the `;` inside
+    // the try body must not close the bound IF).
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// A `GO` separator severs fallback attribution: a standalone control block
+/// in the next batch keeps its own anonymous entry and does not attach to
+/// the routine defined before the separator (Codex P2, PR #257 round 11).
+#[test]
+fn go_boundary_severs_fallback_attribution() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         go\n\
+         begin try\n\
+           select 2;\n\
+         end try\n\
+         begin catch\n\
+           throw;\n\
+         end catch\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // Routine entry 1 + standalone run: entry 1 + catch 1 + throw 1 = 4.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 4.0);
 }

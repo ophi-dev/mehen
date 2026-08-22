@@ -186,6 +186,7 @@ impl LanguageAnalyzer for SqlAnalyzer {
                 procedural::ProceduralMetric::ReturnCount => "sql.procedural.return_count",
                 procedural::ProceduralMetric::RaiseThrowCount => "sql.procedural.raise_throw_count",
                 procedural::ProceduralMetric::DynamicSqlCount => "sql.procedural.dynamic_sql_count",
+                procedural::ProceduralMetric::MaxBlockDepth => "sql.procedural.max_block_depth",
             };
             contribution_collector.record(metric, item.span, item.amount, item.reason);
         }

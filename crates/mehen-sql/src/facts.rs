@@ -541,7 +541,7 @@ pub(crate) fn extract(
     // ── procedural control flow (research foundation §6.17) ─────────
     // Needs statement classification and units; contributes dynamic-SQL
     // change-risk evidence alongside `extract_objects`' below.
-    crate::procedural::extract(root, &line_at, emit_contributions, &mut facts);
+    crate::procedural::extract(root, &line_at, emit_contributions, bigquery, &mut facts);
 
     // ── unparsable / parser health ──────────────────────────────────
     let unparsables = root.recursive_crawl(
@@ -617,7 +617,7 @@ pub(crate) fn extract(
     extract_cte_graph(root, &mut facts.ctes);
 
     // ── object-touch / DML-DDL risk ─────────────────────────────────
-    extract_objects(root, &line_at, &mut facts, emit_contributions);
+    extract_objects(root, &line_at, bigquery, &mut facts, emit_contributions);
 
     // ── Halstead ────────────────────────────────────────────────────
     extract_halstead(root, &mut facts.halstead);
@@ -638,7 +638,7 @@ fn classify_statements(
     // Top-level `Statement` nodes are direct children of `File`; do not
     // recurse into nested statements (a subquery `SELECT` is a query block,
     // not a top-level statement).
-    let statements = top_level_statements(root);
+    let statements = top_level_statements(root, bigquery);
     // Whether the previous statement was (or continued) a routine
     // definition. sqruff's tsql grammar splits long procedure bodies into
     // sibling statements; T-SQL batch semantics say the body extends to the
@@ -1017,7 +1017,7 @@ fn transaction_node_bracket(node: &ErasedSegment) -> Option<ScriptingBracket> {
 
 /// Whether a statement is a bare T-SQL `GO` batch separator (its only code
 /// token is the keyword `GO`).
-fn is_go_separator(stmt: &ErasedSegment) -> bool {
+pub(crate) fn is_go_separator(stmt: &ErasedSegment) -> bool {
     let mut code = stmt
         .segments()
         .iter()
@@ -2421,6 +2421,7 @@ fn longest_chain(edges: &std::collections::BTreeMap<String, Vec<String>>, nodes:
 fn extract_objects(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
+    bigquery: bool,
     facts: &mut SqlFileFacts,
     emit_contributions: bool,
 ) {
@@ -2509,7 +2510,7 @@ fn extract_objects(
     // object scan. Statement nodes are paired with their classification by
     // index — `top_level_statements` is the same crawl `classify_statements`
     // consumed (CodeRabbit).
-    let statements = top_level_statements(root);
+    let statements = top_level_statements(root, bigquery);
     debug_assert_eq!(statements.len(), facts.statements.len());
     for (node, stmt) in statements.iter().zip(facts.statements.iter()) {
         if stmt.kind == StatementKind::AnonymousBlock {
@@ -3117,13 +3118,23 @@ fn collect_touched_objects(
 /// inner statement is handled within its owner's scope). The single crawl
 /// definition every statement-indexed consumer shares (`classify_statements`,
 /// `extract_objects`, `procedural::extract`), so their zips stay aligned.
-pub(crate) fn top_level_statements(root: &ErasedSegment) -> Vec<ErasedSegment> {
+///
+/// Under BigQuery, the bare `END;` scripting bracket is filtered out here —
+/// it is a syntactic closer, not a statement, and counting it would inflate
+/// `sql.statement.count`, the `unknown` kind, and statement-kind entropy
+/// (Codex P2). Filtering at the shared crawl keeps every consumer's
+/// index-zip aligned. The matching `BEGIN;` stays: it *is* the anonymous
+/// scripting block.
+pub(crate) fn top_level_statements(root: &ErasedSegment, bigquery: bool) -> Vec<ErasedSegment> {
     root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::Statement),
         false,
         &SyntaxSet::EMPTY,
         true,
     )
+    .into_iter()
+    .filter(|stmt| !bigquery || bare_scripting_bracket(stmt) != Some(ScriptingBracket::End))
+    .collect()
 }
 
 /// The `TableReference` nodes within `stmt` that resolve to a CTE alias visible

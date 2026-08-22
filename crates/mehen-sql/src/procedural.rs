@@ -72,8 +72,9 @@ pub(crate) enum ProceduralMetric {
     EmbeddedQueryMax,
     // Raw counts (Codex P1): every published `sql.procedural.*_count` is
     // evidence-backed under its own key, so output can answer *why* a value
-    // moved. `max_block_depth` is deliberately absent — a high-water mark
-    // has no meaningful sum decomposition.
+    // moved. `max_block_depth` keeps the invariant with a single
+    // contribution at the deepest opener whose amount is the observed
+    // depth (Codex P1).
     BlockCount,
     RoutineCount,
     LoopCount,
@@ -83,6 +84,7 @@ pub(crate) enum ProceduralMetric {
     ReturnCount,
     RaiseThrowCount,
     DynamicSqlCount,
+    MaxBlockDepth,
 }
 
 /// One source-resolved increment of a procedural composite. `amount` is the
@@ -108,6 +110,9 @@ pub(crate) struct ProceduralFacts {
     pub cognitive_complexity: f64,
     /// Deepest `BEGIN … END` nesting observed.
     pub max_block_depth: u32,
+    /// The opener where that deepest nesting was first observed — the span
+    /// of `max_block_depth`'s single evidence entry (Codex P1).
+    pub max_block_depth_span: Option<SourceSpan>,
     /// Loops of any flavor: `LOOP`, `WHILE`, `FOR … LOOP/DO`, `REPEAT`.
     pub loop_count: u32,
     /// `IF` statements plus `ELSIF`/`ELSEIF` branches.
@@ -148,6 +153,7 @@ mod reason {
     pub(crate) const BOOLEAN_OPERATOR: &str = "sql.procedural.boolean_operator";
     pub(crate) const EMBEDDED_QUERY: &str = "sql.procedural.embedded_query";
     pub(crate) const BLOCK: &str = "sql.procedural.block";
+    pub(crate) const DEEPEST_BLOCK: &str = "sql.procedural.deepest_block";
     pub(crate) const ROUTINE: &str = "sql.procedural.routine";
     pub(crate) const RETURN: &str = "sql.procedural.return";
     pub(crate) const DYNAMIC_SQL: &str = "sql.procedural.dynamic_sql";
@@ -580,6 +586,67 @@ impl Machine<'_> {
         self.add(ProceduralMetric::Cognitive, span, amount, reason);
     }
 
+    /// A body opener binds the pending T-SQL single-statement controls:
+    /// pending loop headers become block-bound, otherwise a THEN-less IF on
+    /// top of the stack binds to the opener — the control closes when the
+    /// construct does, not at the first terminator inside it (Codex P2 ×2:
+    /// plain `BEGIN` blocks and `BEGIN TRY … END CATCH` constructs alike).
+    fn bind_pending_owner(&mut self) {
+        if self.pending_loop_headers > 0 {
+            let mut pending = self.pending_loop_headers as usize;
+            self.pending_loop_headers = 0;
+            for ctx in self.stack.iter_mut().rev() {
+                if pending == 0 {
+                    break;
+                }
+                if let Ctx::Loop { block_bound: false } = ctx {
+                    *ctx = Ctx::Loop { block_bound: true };
+                    pending -= 1;
+                }
+            }
+        } else if let Some(Ctx::If {
+            with_then: false,
+            bound,
+        }) = self.stack.last_mut()
+        {
+            *bound = true;
+        }
+    }
+
+    /// A completed construct (bare `END` of a block, `END CATCH` of a
+    /// paired TRY/CATCH) also completes the T-SQL single-statement contexts
+    /// it was the body of: loops bound to it, and THEN-less IFs — both
+    /// those bound directly and those whose single statement was a
+    /// just-popped loop or IF. The pops interleave because the contexts
+    /// nest in any order. An ELSE stops the IF pops: the decision continues
+    /// through the else branch, keeping its nesting for the else body
+    /// (Codex P2) — loops still pop, their bodies are done either way.
+    fn close_completed_owners(&mut self, next_word: &str) {
+        loop {
+            match self.stack.last() {
+                Some(Ctx::Loop { block_bound: true }) => {
+                    self.stack.pop();
+                }
+                Some(Ctx::If {
+                    with_then: false, ..
+                }) if next_word != "ELSE" => {
+                    self.stack.pop();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Track the deepest block nesting and remember its opener: the span
+    /// of `max_block_depth`'s single evidence entry (Codex P1).
+    fn note_block_depth(&mut self, span: SourceSpan) {
+        let depth = self.block_depth();
+        if depth > self.facts.max_block_depth {
+            self.facts.max_block_depth = depth;
+            self.facts.max_block_depth_span = Some(span);
+        }
+    }
+
     /// Increment a raw `sql.procedural.*_count` and emit its evidence: raw
     /// counts are evidence-backed under their own keys, so `metric == Σ
     /// contributions` holds for every published count (Codex P1). Raw
@@ -600,7 +667,8 @@ impl Machine<'_> {
             ProceduralMetric::Cyclomatic
             | ProceduralMetric::Cognitive
             | ProceduralMetric::EmbeddedQueryMax
-            | ProceduralMetric::RoutineCount => {
+            | ProceduralMetric::RoutineCount
+            | ProceduralMetric::MaxBlockDepth => {
                 debug_assert!(false, "not a machine-raised raw count: {metric:?}");
             }
         }
@@ -722,9 +790,13 @@ impl Machine<'_> {
                         "TRY" => {
                             self.in_body = true;
                             self.raw_count(ProceduralMetric::BlockCount, t.span, reason::BLOCK);
+                            // The construct is the pending control's body:
+                            // `IF @a > 0 BEGIN TRY …` closes the IF at
+                            // `END CATCH`, not at the first `;` inside the
+                            // try body (Codex P2).
+                            self.bind_pending_owner();
                             self.stack.push(Ctx::Try);
-                            self.facts.max_block_depth =
-                                self.facts.max_block_depth.max(self.block_depth());
+                            self.note_block_depth(t.span);
                             i += 1; // consume TRY
                         }
                         "CATCH" => {
@@ -739,39 +811,17 @@ impl Machine<'_> {
                             self.cyclo(t.span, reason::EXCEPTION_HANDLER);
                             self.cognitive(t.span, 1.0 + nesting as f64, reason::EXCEPTION_HANDLER);
                             self.stack.push(Ctx::Catch);
-                            self.facts.max_block_depth =
-                                self.facts.max_block_depth.max(self.block_depth());
+                            self.note_block_depth(t.span);
                             i += 1; // consume CATCH
                         }
                         _ => {
                             self.in_body = true;
                             self.raw_count(ProceduralMetric::BlockCount, t.span, reason::BLOCK);
-                            // The block is a loop body when loop headers are
-                            // pending (T-SQL `WHILE … BEGIN`): every pending
-                            // Loop context binds to this block — nested
-                            // single-statement headers all complete when the
-                            // block ends (Codex P2). Otherwise a block
-                            // opening directly under a fresh T-SQL IF binds
-                            // to that IF: it closes with the block.
-                            if self.pending_loop_headers > 0 {
-                                let mut pending = self.pending_loop_headers as usize;
-                                self.pending_loop_headers = 0;
-                                for ctx in self.stack.iter_mut().rev() {
-                                    if pending == 0 {
-                                        break;
-                                    }
-                                    if let Ctx::Loop { block_bound: false } = ctx {
-                                        *ctx = Ctx::Loop { block_bound: true };
-                                        pending -= 1;
-                                    }
-                                }
-                            } else if let Some(Ctx::If {
-                                with_then: false,
-                                bound,
-                            }) = self.stack.last_mut()
-                            {
-                                *bound = true;
-                            }
+                            // The block is a loop body when loop headers
+                            // are pending (T-SQL `WHILE … BEGIN`), otherwise
+                            // it binds a fresh T-SQL IF on top: the control
+                            // closes with the block (Codex P2).
+                            self.bind_pending_owner();
                             self.stack.push(Ctx::Block {
                                 exception_section: false,
                                 // Consume one armed header: this block is
@@ -784,8 +834,7 @@ impl Machine<'_> {
                                     armed
                                 },
                             });
-                            self.facts.max_block_depth =
-                                self.facts.max_block_depth.max(self.block_depth());
+                            self.note_block_depth(t.span);
                         }
                     }
                 }
@@ -861,6 +910,11 @@ impl Machine<'_> {
                             i += 1;
                         }
                         "CATCH" if self.pop_matching(|c| matches!(c, Ctx::Catch)).is_some() => {
+                            // `END CATCH` completes the whole paired
+                            // TRY/CATCH construct: controls bound at
+                            // `BEGIN TRY` close now (Codex P2). The ELSE
+                            // lookahead is past the consumed CATCH.
+                            self.close_completed_owners(word(i + 2));
                             i += 1;
                         }
                         _ => {
@@ -873,34 +927,10 @@ impl Machine<'_> {
                                     Ctx::Block { .. } | Ctx::Case { .. } | Ctx::Try | Ctx::Catch
                                 )
                             }) {
-                                // The block's completion also completes the
-                                // T-SQL single-statement contexts it was the
-                                // body of: loops whose body was this block,
-                                // and THEN-less IFs — both those bound
-                                // directly to the block and those whose
-                                // single statement was a just-popped loop or
-                                // IF (`IF @a > 0 WHILE @b > 0 BEGIN … END`
+                                // (`IF @a > 0 WHILE @b > 0 BEGIN … END`
                                 // leaves the IF unbound because the BEGIN
-                                // bound the pending loop — Codex P2). The
-                                // pops interleave because the contexts nest
-                                // in any order. An ELSE stops the IF pops:
-                                // the decision continues through the else
-                                // branch, keeping its nesting for the else
-                                // body (Codex P2) — loops still pop, their
-                                // bodies are done either way.
-                                loop {
-                                    match self.stack.last() {
-                                        Some(Ctx::Loop { block_bound: true }) => {
-                                            self.stack.pop();
-                                        }
-                                        Some(Ctx::If {
-                                            with_then: false, ..
-                                        }) if word(i + 1) != "ELSE" => {
-                                            self.stack.pop();
-                                        }
-                                        _ => break,
-                                    }
-                                }
+                                // bound the pending loop — Codex P2.)
+                                self.close_completed_owners(word(i + 1));
                             }
                         }
                     }
@@ -1337,6 +1367,7 @@ pub(crate) fn extract(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
     emit_contributions: bool,
+    bigquery: bool,
     facts: &mut SqlFileFacts,
 ) {
     let mut procedural = ProceduralFacts {
@@ -1385,7 +1416,18 @@ pub(crate) fn extract(
     // continuation resumes where the previous region stopped, so open
     // blocks/decisions keep their depth and nesting across the split
     // (Codex P2). Standalone regions never save state.
-    let statements = crate::facts::top_level_statements(root);
+    let statements = crate::facts::top_level_statements(root, bigquery);
+    // T-SQL `GO` batch separators are hard attribution boundaries: a region
+    // after a `GO` starts a new, independent batch and can never be the
+    // body of a routine defined before the separator (Codex P2).
+    let go_boundaries: Vec<u32> = statements
+        .iter()
+        .zip(facts.statements.iter())
+        .filter(|(node, sf)| {
+            sf.kind == StatementKind::Unknown && crate::facts::is_go_separator(node)
+        })
+        .map(|(_, sf)| sf.start_byte)
+        .collect();
     let mut region_ranges: Vec<(u32, u32)> = Vec::new();
     let mut carried: std::collections::BTreeMap<usize, (Vec<Ctx>, bool)> =
         std::collections::BTreeMap::new();
@@ -1576,9 +1618,16 @@ pub(crate) fn extract(
         }
         // A top-level spill is the body of the routine it follows —
         // attribute its increments to the last unit ending before it and
-        // resume that routine's scanner state (Codex P2). No preceding
-        // unit → file-level only, fresh state.
-        let fallback_unit = last_unit_before(&unit_ranges, start);
+        // resume that routine's scanner state (Codex P2). A `GO` between
+        // the unit and the run severs the tie: the run is a new batch, so
+        // it stays file-level and keeps its own anonymous entry (Codex P2).
+        // No preceding unit → file-level only, fresh state.
+        let fallback_unit = last_unit_before(&unit_ranges, start).filter(|&idx| {
+            let unit_end = facts.procedural_units[idx].end_byte;
+            !go_boundaries
+                .iter()
+                .any(|&go| unit_end <= go && go <= start)
+        });
         // A *standalone* control-led run is an anonymous block the parser
         // lost (`BEGIN TRY … END CATCH` at file level): one entry path,
         // like its statement-backed equivalent (Codex P2). Fragment shapes
@@ -1650,6 +1699,17 @@ pub(crate) fn extract(
                 metric: ProceduralMetric::RoutineCount,
                 amount: 1.0,
                 reason: reason::ROUTINE,
+            });
+        }
+        // The high-water mark keeps the evidence-sum invariant with a
+        // single contribution at the deepest opener whose amount is the
+        // observed depth (Codex P1).
+        if let Some(span) = procedural.max_block_depth_span {
+            procedural.evidence.push(ProceduralEvidence {
+                span,
+                metric: ProceduralMetric::MaxBlockDepth,
+                amount: procedural.max_block_depth as f64,
+                reason: reason::DEEPEST_BLOCK,
             });
         }
     }

@@ -150,8 +150,9 @@ fn every_implemented_change_risk_term_has_a_stable_reason() {
 /// sum of contribution amounts by construction — the composites *and* every
 /// raw `*_count` under its own key (Codex P1, PR #257 round 10) — for both
 /// the typed-CST path (PL/SQL) and the token-fallback path (T-SQL with
-/// unparsable spills). `max_block_depth` is exempt: a high-water mark has
-/// no sum decomposition.
+/// unparsable spills). `max_block_depth`, a high-water mark, keeps the
+/// invariant with a single contribution at the deepest opener (Codex P1,
+/// round 11).
 #[test]
 fn procedural_complexity_evidence_sums_to_the_metric() {
     for fixture in [
@@ -173,6 +174,7 @@ fn procedural_complexity_evidence_sums_to_the_metric() {
             "sql.procedural.return_count",
             "sql.procedural.raise_throw_count",
             "sql.procedural.dynamic_sql_count",
+            "sql.procedural.max_block_depth",
         ] {
             let sum: f64 = analysis
                 .contributions
