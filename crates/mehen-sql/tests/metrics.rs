@@ -1923,3 +1923,122 @@ fn oracle_spec_prototypes_are_not_routine_units() {
     );
     assert_eq!(get(&body, "sql.procedural.routine_count"), 1.0);
 }
+
+// ── PR #257 round-7 review regressions ──────────────────────────────────
+
+/// An anonymous block that *declares* a nested procedure is still an
+/// executing block: its own DML is migration risk, and the nested
+/// definition's body stays excluded (Codex P1, PR #257 round 7).
+#[test]
+fn anonymous_block_with_nested_procedure_still_executes() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           procedure log_it is\n\
+           begin\n\
+             insert into audit_log (id) values (1);\n\
+           end log_it;\n\
+         begin\n\
+           update t set c = 0;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.procedural"), 0.0);
+    // The block's own UPDATE executes on apply…
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_without_where_count"), 1.0);
+    // …while the nested procedure's INSERT does not.
+    assert_eq!(get(&m, "sql.dml.insert_count"), 0.0);
+    // The nested procedure is still a routine unit.
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+}
+
+/// A routine's own body block never makes the definition look like an
+/// anonymous block (the shape walk skips routine-definition subtrees).
+#[test]
+fn routine_definition_is_not_an_anonymous_block() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           null;\n\
+         end p;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.statement.kind_count.procedural"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 0.0);
+}
+
+/// A BigQuery routine (`MultiStatementSegment` wrapping `CREATE PROCEDURE`
+/// without a top-level `Statement` node) earns exactly one entry — from the
+/// unit loop, not an extra anonymous-region entry (Codex P2, PR #257
+/// round 7).
+#[test]
+fn bigquery_routine_earns_a_single_entry() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         create procedure ds.p()\n\
+         begin\n\
+           if x > 0 then\n\
+             select 1;\n\
+           end if;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // Entry 1 + IF 1 = 2 (not 3).
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+}
+
+/// PostgreSQL idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` is a DDL
+/// guard, not a boolean negation (Codex P2, PR #257 round 7).
+#[test]
+fn alter_table_if_not_exists_guard_is_not_a_predicate_not() {
+    let m = metrics(
+        "-- sqlfluff:dialect:postgres\n\
+         ALTER TABLE t ADD COLUMN IF NOT EXISTS c INT;\n",
+    );
+    assert_eq!(get(&m, "sql.predicate.not_count"), 0.0);
+}
+
+/// T-SQL variable-form `EXEC @sql` executes dynamic SQL; a literal procedure
+/// call and return-value capture stay static (Codex P1, PR #257 round 7).
+#[test]
+fn variable_form_exec_counts_as_dynamic_sql() {
+    let dynamic = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           exec @sql;\n\
+         end\n",
+    );
+    assert_eq!(get(&dynamic, "sql.procedural.dynamic_sql_count"), 1.0);
+
+    let static_call = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           exec dbo.other_proc;\n\
+           exec @ret = dbo.third_proc;\n\
+         end\n",
+    );
+    assert_eq!(get(&static_call, "sql.procedural.dynamic_sql_count"), 0.0);
+}
+
+/// A bare `END` directly followed by a sibling `IF` is not the PL/SQL
+/// `END IF` closer — the block closes and the sibling IF counts (Codex P2,
+/// PR #257 round 7).
+#[test]
+fn bare_end_followed_by_sibling_if_keeps_the_if() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         if @b > 0 select 2;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // Both IFs flat: 1 + 1 = 2 cognitive.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 2.0);
+}

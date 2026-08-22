@@ -540,9 +540,16 @@ impl Machine<'_> {
                 }
                 "END" if kw => {
                     self.break_bool_run();
+                    // Compound closers consume their keyword only when a
+                    // matching context actually pops — T-SQL puts a sibling
+                    // statement right after a bare `END`, so the adjacent
+                    // tokens of `… END IF @b > 0 …` or `… END WHILE @b … `
+                    // are *not* the PL/SQL closers: the block closes bare and
+                    // the sibling keyword processes as its own statement
+                    // (Codex P2).
                     match word(i + 1) {
-                        "IF" => {
-                            self.pop_matching(|c| {
+                        "IF" if self
+                            .pop_matching(|c| {
                                 matches!(
                                     c,
                                     Ctx::If {
@@ -550,16 +557,24 @@ impl Machine<'_> {
                                         ..
                                     }
                                 )
-                            });
+                            })
+                            .is_some() =>
+                        {
                             i += 1;
                         }
-                        "LOOP" | "WHILE" | "REPEAT" | "FOR" => {
-                            self.pop_matching(|c| matches!(c, Ctx::Loop { .. }));
+                        "LOOP" | "WHILE" | "REPEAT" | "FOR"
+                            if self
+                                .pop_matching(|c| matches!(c, Ctx::Loop { .. }))
+                                .is_some() =>
+                        {
                             i += 1;
                         }
                         "CASE" => {
                             // `END CASE` proves the CASE was a *statement*:
-                            // count it and its WHEN arms.
+                            // count it and its WHEN arms. (T-SQL has no CASE
+                            // statement, so no sibling-adjacency variant
+                            // exists: a CASE context is always open here or
+                            // the tokens are malformed.)
                             if let Some(Ctx::Case {
                                 whens,
                                 nesting,
@@ -578,12 +593,10 @@ impl Machine<'_> {
                             }
                             i += 1;
                         }
-                        "TRY" => {
-                            self.pop_matching(|c| matches!(c, Ctx::Try));
+                        "TRY" if self.pop_matching(|c| matches!(c, Ctx::Try)).is_some() => {
                             i += 1;
                         }
-                        "CATCH" => {
-                            self.pop_matching(|c| matches!(c, Ctx::Catch));
+                        "CATCH" if self.pop_matching(|c| matches!(c, Ctx::Catch)).is_some() => {
                             i += 1;
                         }
                         _ => {
@@ -900,6 +913,12 @@ impl Machine<'_> {
                         } else if word(i + 1) == "SP_EXECUTESQL" {
                             self.count_dynamic_sql(t.span);
                             i += 1;
+                        } else if word(i + 1).starts_with('@') && word(i + 2) != "=" {
+                            // T-SQL `EXEC @sql` executes the *contents* of a
+                            // variable — dynamic SQL (Codex P1). A literal
+                            // procedure name stays a static call, and so does
+                            // return-value capture (`EXEC @ret = dbo.proc`).
+                            self.count_dynamic_sql(t.span);
                         }
                         // Plain `EXEC procname` is a static call — no count.
                     }
@@ -1194,10 +1213,17 @@ pub(crate) fn extract(
             last_bool: None,
         };
         machine.scan(&tokens);
-        push_entry(
-            &mut procedural,
-            SourceSpan::new(start, end, line_at(start), line_at(end.saturating_sub(1))),
-        );
+        // The segment is an *anonymous* scripting region only when no
+        // routine lives in it — BigQuery wraps `CREATE PROCEDURE` bodies in
+        // a `MultiStatementSegment` too, and those already earn their entry
+        // through the unit loop below (Codex P2).
+        let overlaps_unit = unit_ranges.iter().any(|(s, e, _)| *s < end && start < *e);
+        if !overlaps_unit {
+            push_entry(
+                &mut procedural,
+                SourceSpan::new(start, end, line_at(start), line_at(end.saturating_sub(1))),
+            );
+        }
     }
 
     // Entry paths per routine unit (independent of the region loop so units

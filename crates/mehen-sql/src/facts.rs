@@ -684,22 +684,26 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
     };
     let has = |k: SyntaxKind| has_any(&SyntaxSet::single(k));
 
-    // Procedural definitions are classified *first*: a `CREATE PROCEDURE` /
-    // `FUNCTION` / `TRIGGER` body commonly contains `INSERT`/`UPDATE`/…, but
-    // the top-level statement is the routine definition, not the nested DML —
-    // classifying it as DML would also wrongly feed `extract_objects`'
-    // DML/no-WHERE risk metrics (Codex P2).
-    if stmt_is_procedural(stmt) {
-        return StatementKind::Procedural;
-    }
-
     // Anonymous blocks and top-level scripting statements come *before* the
-    // DML sniffing for the same reason: `BEGIN UPDATE t SET …; END;` contains
-    // an UpdateStatement, but the statement is the block. Unlike routine
-    // bodies, these run when the file is applied — extract_objects therefore
-    // scans their bodies (node-based) for DML/TCL risk.
+    // routine-definition check: an anonymous block may *declare* a nested
+    // procedure in its DECLARE section, and the nested definition must not
+    // make the executing outer block look like a routine definition (its
+    // UPDATE runs on apply! — Codex P1). The shape walk skips
+    // `PROCEDURAL_DEFINITIONS` subtrees, so a routine's *own* body block
+    // never marks the routine statement as an anonymous block, and the DML
+    // sniffing below stays unreachable for blocks (`BEGIN UPDATE t …; END;`
+    // contains an UpdateStatement, but the statement is the block).
     if stmt_is_anonymous_block(stmt) {
         return StatementKind::AnonymousBlock;
+    }
+
+    // Routine definitions: `CREATE PROCEDURE` / `FUNCTION` / `TRIGGER`
+    // bodies commonly contain `INSERT`/`UPDATE`/…, but the top-level
+    // statement is the routine definition, not the nested DML — classifying
+    // it as DML would also wrongly feed `extract_objects`' DML/no-WHERE risk
+    // metrics (Codex P2).
+    if stmt_is_procedural(stmt) {
+        return StatementKind::Procedural;
     }
 
     // Order matters: more specific kinds first. The `WithCompoundStatement`
@@ -873,7 +877,14 @@ fn anonymous_block_shape(stmt: &ErasedSegment) -> Option<AnonymousBlockShape> {
             if kinds.contains(child.get_type()) {
                 return true;
             }
-            if child.is_type(SyntaxKind::Bracketed) {
+            // A parenthesized subquery is not the statement's body, and a
+            // routine definition's own body block belongs to the routine —
+            // a `CREATE PROCEDURE` must never look like an anonymous block
+            // because of the `BEGIN…END`/scripting nodes inside it
+            // (Codex P1).
+            if child.is_type(SyntaxKind::Bracketed)
+                || PROCEDURAL_DEFINITIONS.contains(child.get_type())
+            {
                 continue;
             }
             if contains_kind(child, kinds) {
@@ -1404,6 +1415,7 @@ fn count_predicate_nots(root: &ErasedSegment) -> u32 {
     const DDL_GUARD_CONTEXTS: SyntaxSet = CREATE_TABLE_STATEMENTS
         .union(&CREATE_VIEW_STATEMENTS)
         .union(&CREATE_OTHER_STATEMENTS)
+        .union(&ALTER_TABLE_STATEMENTS)
         .union(&DROP_STATEMENTS);
     fn walk(node: &ErasedSegment, in_ddl: bool, count: &mut u32) {
         let code: Vec<&ErasedSegment> = node
