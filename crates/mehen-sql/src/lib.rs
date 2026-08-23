@@ -190,6 +190,22 @@ impl LanguageAnalyzer for SqlAnalyzer {
             };
             contribution_collector.record(metric, item.span, item.amount, item.reason);
         }
+        // Predicate NOTs are evidence-backed too — the improved
+        // `sql.predicate.not_count` explains each counted negation with its
+        // token span (Codex P1).
+        for &(start, end) in &file_facts.predicates.not_spans {
+            contribution_collector.record(
+                "sql.predicate.not_count",
+                SourceSpan {
+                    start_byte: start,
+                    end_byte: end,
+                    start_line: line_at(start),
+                    end_line: line_at(end.saturating_sub(1)),
+                },
+                1.0,
+                "sql.predicate.not",
+            );
+        }
 
         // Per-statement spaces so top-offenders / nested reporting can attribute
         // metrics to a statement's line range (research foundation §4.4).

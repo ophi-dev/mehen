@@ -135,6 +135,10 @@ pub(crate) struct PredicateFacts {
     pub boolean_operator_count: u32,
     pub max_boolean_depth: u32,
     pub not_count: u32,
+    /// Byte ranges of the counted `NOT` tokens — one `MetricEvidence` entry
+    /// each under `sql.predicate.not_count` (Codex P1). Lines are resolved
+    /// at collection time in `lib.rs`.
+    pub not_spans: Vec<(u32, u32)>,
     pub comparison_count: u32,
     /// `NOT IN`, `= NULL`, `<> NULL` and similar dialect-risky NULL logic.
     pub null_semantics_risk_count: u32,
@@ -984,12 +988,12 @@ fn stmt_is_anonymous_block(stmt: &ErasedSegment, bigquery: bool) -> bool {
 /// the BigQuery dialect: a bare `BEGIN;`/`END;` in PostgreSQL *is*
 /// transaction control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScriptingBracket {
+pub(crate) enum ScriptingBracket {
     Begin,
     End,
 }
 
-fn bare_scripting_bracket(stmt: &ErasedSegment) -> Option<ScriptingBracket> {
+pub(crate) fn bare_scripting_bracket(stmt: &ErasedSegment) -> Option<ScriptingBracket> {
     let wrapper = stmt
         .segments()
         .iter()
@@ -1001,7 +1005,7 @@ fn bare_scripting_bracket(stmt: &ErasedSegment) -> Option<ScriptingBracket> {
 }
 
 /// The sole-keyword bracket shape of a transaction-statement *node*, if any.
-fn transaction_node_bracket(node: &ErasedSegment) -> Option<ScriptingBracket> {
+pub(crate) fn transaction_node_bracket(node: &ErasedSegment) -> Option<ScriptingBracket> {
     let keywords: Vec<String> = node
         .segments()
         .iter()
@@ -1461,7 +1465,8 @@ pub(crate) fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts
             pred.boolean_operator_count += 1;
         }
     }
-    pred.not_count = count_predicate_nots(root);
+    pred.not_spans = collect_predicate_nots(root);
+    pred.not_count = pred.not_spans.len() as u32;
     pred.comparison_count = count_anywhere(root, SyntaxKind::ComparisonOperator);
 
     // Max boolean nesting depth within predicate-bearing clauses.
@@ -1478,13 +1483,17 @@ pub(crate) fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts
     pred.null_semantics_risk_count = count_null_semantics_risk(root);
 }
 
-/// Count `NOT` keyword tokens that act as predicate/boolean operators
-/// (§6.7), excluding the two non-predicate contexts a raw keyword count
-/// picks up:
+/// Collect the source ranges of `NOT` keyword tokens that act as
+/// predicate/boolean operators (§6.7) — `not_count` is their count and each
+/// range becomes one `MetricEvidence` entry under the metric's own key
+/// (Codex P1). Two non-predicate contexts a raw keyword count picks up are
+/// excluded:
 ///
-/// - `NOT NULL` column constraints in DDL (`id INT NOT NULL`) — but a
-///   genuine `IS NOT NULL` predicate still counts (the `IS` before the `NOT`
-///   distinguishes them);
+/// - `NOT NULL` column constraints in DDL (`id INT NOT NULL`) — but only
+///   with column-definition/constraint ancestry: a boolean `WHERE NOT NULL`
+///   predicate is a genuine unary negation and counts (Codex P2). A
+///   genuine `IS NOT NULL` predicate always counts (the `IS` before the
+///   `NOT` distinguishes it).
 /// - `IF NOT EXISTS` guards *inside CREATE/DROP statements* (`CREATE TABLE
 ///   IF NOT EXISTS`) — but the same token run as a procedural condition
 ///   (T-SQL `IF NOT EXISTS (SELECT …) BEGIN …`) is a genuine negation and
@@ -1492,14 +1501,19 @@ pub(crate) fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts
 ///   NOT EXISTS (…)` predicate has no `IF` and always counts.
 ///
 /// Works over sibling code tokens, mirroring `count_null_semantics_risk`.
-fn count_predicate_nots(root: &ErasedSegment) -> u32 {
+fn collect_predicate_nots(root: &ErasedSegment) -> Vec<(u32, u32)> {
     /// Statement kinds whose `IF NOT EXISTS` is a DDL guard.
     const DDL_GUARD_CONTEXTS: SyntaxSet = CREATE_TABLE_STATEMENTS
         .union(&CREATE_VIEW_STATEMENTS)
         .union(&CREATE_OTHER_STATEMENTS)
         .union(&ALTER_TABLE_STATEMENTS)
         .union(&DROP_STATEMENTS);
-    fn walk(node: &ErasedSegment, in_ddl: bool, count: &mut u32) {
+    /// Contexts whose `NOT NULL` is a column constraint, not a predicate.
+    const CONSTRAINT_CONTEXTS: SyntaxSet = SyntaxSet::new(&[
+        SyntaxKind::ColumnDefinition,
+        SyntaxKind::ColumnConstraintSegment,
+    ]);
+    fn walk(node: &ErasedSegment, in_ddl: bool, in_constraint: bool, spans: &mut Vec<(u32, u32)>) {
         let code: Vec<&ErasedSegment> = node
             .segments()
             .iter()
@@ -1516,20 +1530,25 @@ fn count_predicate_nots(root: &ErasedSegment) -> u32 {
             };
             let prev = neighbor(i.checked_sub(1));
             let next = neighbor(Some(i + 1));
-            let null_constraint = next == "NULL" && prev != "IS";
+            let null_constraint = in_constraint && next == "NULL" && prev != "IS";
             let ddl_guard = in_ddl && next == "EXISTS" && prev == "IF";
-            if !null_constraint && !ddl_guard {
-                *count += 1;
+            if !null_constraint
+                && !ddl_guard
+                && let Some(pm) = seg.get_position_marker()
+            {
+                spans.push((pm.source_slice.start as u32, pm.source_slice.end as u32));
             }
         }
         for child in node.segments() {
             let child_in_ddl = in_ddl || DDL_GUARD_CONTEXTS.contains(child.get_type());
-            walk(child, child_in_ddl, count);
+            let child_in_constraint =
+                in_constraint || CONSTRAINT_CONTEXTS.contains(child.get_type());
+            walk(child, child_in_ddl, child_in_constraint, spans);
         }
     }
-    let mut count = 0u32;
-    walk(root, false, &mut count);
-    count
+    let mut spans = Vec::new();
+    walk(root, false, false, &mut spans);
+    spans
 }
 
 /// Count NULL-semantics risks from parsed tokens (comments/literals excluded):

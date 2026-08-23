@@ -504,6 +504,12 @@ struct Machine<'a> {
     /// return statement — even though the enclosing routine's body gate is
     /// already open (Codex P2).
     pending_routine_header: bool,
+    /// A `CREATE [OR REPLACE] PACKAGE [BODY]` / `CREATE TYPE` header is
+    /// being read: its `IS`/`AS` introduces *declarations*, not an
+    /// executable body — the body gate stays closed until a real `BEGIN`
+    /// (a package initialization block or a member routine's body), so
+    /// package-level declaration initializers create no paths (Codex P2).
+    pending_spec_header: bool,
     /// Definition headers whose body block hasn't opened yet — the next
     /// plain `BEGIN`s consume these and tag their blocks `routine_body`
     /// (nesting baselines, Codex P2). Counter, not flag: an Oracle DECLARE
@@ -784,7 +790,13 @@ impl Machine<'_> {
                     self.break_bool_run();
                 }
                 "IS" | "AS" if kw => {
-                    self.in_body = true;
+                    // A package/type header's IS/AS introduces declarations
+                    // — not a body (Codex P2).
+                    if self.pending_spec_header {
+                        self.pending_spec_header = false;
+                    } else {
+                        self.in_body = true;
+                    }
                     self.pending_routine_header = false;
                     // A call-spec body (`AS LANGUAGE JAVA …`, T-SQL CLR
                     // `AS EXTERNAL NAME …`) never opens a `BEGIN` block:
@@ -813,11 +825,29 @@ impl Machine<'_> {
                     self.pending_routine_header = true;
                     self.break_bool_run();
                 }
+                "PACKAGE" | "TYPE"
+                    if kw
+                        && matches!(
+                            i.checked_sub(1)
+                                .map(|j| tokens[j].word.as_str())
+                                .unwrap_or(""),
+                            "CREATE" | "REPLACE"
+                        ) =>
+                {
+                    // `CREATE [OR REPLACE] PACKAGE [BODY]` / `CREATE TYPE`:
+                    // the upcoming IS/AS introduces declarations (Codex P2).
+                    // The prev-token guard keeps `%TYPE` attributes and
+                    // `DROP PACKAGE` out.
+                    self.pending_spec_header = true;
+                    self.break_bool_run();
+                }
                 "BEGIN" if kw => {
                     self.break_bool_run();
                     // A body opener also ends any routine signature being
-                    // read (MySQL headers have no IS/AS before BEGIN).
+                    // read (MySQL headers have no IS/AS before BEGIN) and
+                    // any spec header still pending.
                     self.pending_routine_header = false;
+                    self.pending_spec_header = false;
                     match word(i + 1) {
                         // Transaction control, not a block.
                         "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED" | ";" => {}
@@ -1472,6 +1502,43 @@ pub(crate) fn extract(
         })
         .map(|(_, sf)| sf.start_byte)
         .collect();
+    // BigQuery bare scripting brackets are *sibling* statements (`BEGIN
+    // BEGIN SELECT 1; END; END;`), so no single region scan sees their
+    // nesting — a source-ordered depth walk over the bracket statements
+    // computes the true block depth (Codex P2). Counts stay with the
+    // region scans (one `block_count` per opener); only the high-water
+    // mark and its evidence span come from here.
+    if bigquery {
+        let mut depth = 0u32;
+        for stmt in root.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::Statement),
+            false,
+            &SyntaxSet::EMPTY,
+            true,
+        ) {
+            match crate::facts::bare_scripting_bracket(&stmt) {
+                Some(crate::facts::ScriptingBracket::Begin) => {
+                    depth += 1;
+                    if depth > procedural.max_block_depth {
+                        procedural.max_block_depth = depth;
+                        if let Some(pm) = stmt.get_position_marker() {
+                            let (s, e) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+                            procedural.max_block_depth_span = Some(SourceSpan::new(
+                                s,
+                                e,
+                                line_at(s),
+                                line_at(e.saturating_sub(1)),
+                            ));
+                        }
+                    }
+                }
+                Some(crate::facts::ScriptingBracket::End) => {
+                    depth = depth.saturating_sub(1);
+                }
+                None => {}
+            }
+        }
+    }
     let mut region_ranges: Vec<(u32, u32)> = Vec::new();
     let mut carried: std::collections::BTreeMap<usize, CarriedState> =
         std::collections::BTreeMap::new();
@@ -1553,6 +1620,7 @@ pub(crate) fn extract(
             pending_between: false,
             pending_routine_header: false,
             pending_routine_bodies: 0,
+            pending_spec_header: false,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1629,6 +1697,7 @@ pub(crate) fn extract(
             pending_between: false,
             pending_routine_header: false,
             pending_routine_bodies: 0,
+            pending_spec_header: false,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1765,6 +1834,7 @@ pub(crate) fn extract(
             pending_between: false,
             pending_routine_header: false,
             pending_routine_bodies: 0,
+            pending_spec_header: false,
             last_bool: None,
         };
         machine.scan(&tokens);

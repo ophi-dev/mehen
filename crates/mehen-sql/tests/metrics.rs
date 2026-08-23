@@ -2497,3 +2497,50 @@ fn anonymous_declare_section_is_not_a_path() {
     assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
     assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
 }
+
+// ── PR #257 round-13 review regressions ─────────────────────────────────
+
+/// A package specification's IS introduces declarations, not an executable
+/// body: package-level initializers (`flag CONSTANT BOOLEAN := TRUE AND
+/// FALSE`) create no paths (Codex P2, PR #257 round 13).
+#[test]
+fn package_level_declarations_are_not_paths() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace package pkg_consts is\n\
+           flag constant boolean := true and false;\n\
+         end pkg_consts;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// `WHERE NOT NULL` is a genuine unary negation — the NOT-NULL suppression
+/// requires column-definition/constraint ancestry (Codex P2, PR #257
+/// round 13).
+#[test]
+fn where_not_null_is_a_predicate_negation() {
+    let predicate = metrics("SELECT * FROM t WHERE NOT NULL;\n");
+    assert_eq!(get(&predicate, "sql.predicate.not_count"), 1.0);
+
+    let constraint = metrics("CREATE TABLE t (id INT NOT NULL);\n");
+    assert_eq!(get(&constraint, "sql.predicate.not_count"), 0.0);
+}
+
+/// Nested bare BigQuery scripting blocks nest even though sqruff emits the
+/// brackets as sibling statements: the depth walk over the bracket stream
+/// reports the true maximum (Codex P2, PR #257 round 13).
+#[test]
+fn bigquery_nested_bare_blocks_report_their_depth() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         begin\n\
+           begin\n\
+             select 1;\n\
+           end;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.block_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 2.0);
+}

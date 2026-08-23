@@ -263,3 +263,27 @@ fn embedded_query_max_has_evidence_for_the_winning_routine() {
     );
     assert!(entries[0].amount > 0.0);
 }
+
+/// `sql.predicate.not_count` is evidence-backed: each counted negation
+/// carries its token span and reason, and the sum equals the metric
+/// (Codex P1, PR #257 round 13).
+#[test]
+fn predicate_not_evidence_sums_to_the_metric() {
+    let sql = "SELECT * FROM t WHERE NOT active AND flag IS NOT NULL;\n\
+               CREATE TABLE u (id INT NOT NULL);\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    let nots: Vec<_> = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.metric.as_str() == "sql.predicate.not_count")
+        .collect();
+    // `NOT active` + `IS NOT NULL` count; the column constraint does not.
+    assert_eq!(nots.len(), 2);
+    assert!(nots.iter().all(|item| {
+        item.reason.as_str() == "sql.predicate.not"
+            && item.amount == 1.0
+            && (item.span.end_byte as usize) <= sql.len()
+    }));
+    let sum: f64 = nots.iter().map(|item| item.amount).sum();
+    assert_eq!(sum, metric(&analysis, "sql.predicate.not_count"));
+}
