@@ -57,6 +57,7 @@
 //! invariant, `tests/contributions.rs`).
 
 use mehen_core::SourceSpan;
+use sqruff_lib_core::dialects::init::DialectKind;
 use sqruff_lib_core::dialects::syntax::{SyntaxKind, SyntaxSet};
 use sqruff_lib_core::parser::segments::ErasedSegment;
 
@@ -272,6 +273,15 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
             // An `ELSE`-led fragment is the else branch of a control
             // statement the grammar split off (T-SQL `IF …; ELSE …`).
             "ELSE" if i == 0 => return true,
+            // A *leading* control-position `IF` is a decision the grammar
+            // lost whole (T-SQL `IF @a = 1 THROW …` at file level —
+            // Codex P2). Mid-run `IF`s stay unadmitted (ambiguous with DDL
+            // guards, `DROP TABLE IF EXISTS`), and so do condition-less
+            // fragments (`if; end;` — debris of a partially parsed
+            // `END IF`). The scalar `IF(…)` carve-out still applies.
+            "IF" if i == 0 && !matches!(word(1), ";" | "") && !scalar_if_call(tokens, 0) => {
+                return true;
+            }
             "SP_EXECUTESQL" => return true,
             "EXECUTE" if word(i + 1) == "IMMEDIATE" => return true,
             // T-SQL `EXEC('…')` — an immediately executed dynamic string
@@ -302,6 +312,10 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
 }
 
 // ── the state machine ──────────────────────────────────────────────────
+
+/// Scanner state a region hands to its continuation: the open context
+/// stack and whether the body gate was open.
+type CarriedState = (Vec<Ctx>, bool);
 
 /// Whether the `IF` at `i` is the scalar conditional *function*
 /// `IF(expr, a, b)` rather than a control statement. Inside `Unparsable`
@@ -422,9 +436,13 @@ enum Ctx {
     Catch,
     /// `bound` = a `BEGIN` block opened directly under this (T-SQL) `IF`, so
     /// the `IF` closes when that block closes, not at the next terminator.
+    /// `else_taken` = an `ELSE` already bound to this IF: the next `; ELSE`
+    /// belongs to an outer IF, and this one completes at that terminator
+    /// (Codex P2).
     If {
         with_then: bool,
         bound: bool,
+        else_taken: bool,
     },
     /// Pushed at the loop *header* (`WHILE`/`FOR`) or at a bare `LOOP`, so
     /// the body carries the loop's nesting regardless of body shape:
@@ -607,6 +625,7 @@ impl Machine<'_> {
         } else if let Some(Ctx::If {
             with_then: false,
             bound,
+            ..
         }) = self.stack.last_mut()
         {
             *bound = true;
@@ -699,7 +718,8 @@ impl Machine<'_> {
             self.stack.last(),
             Some(Ctx::If {
                 with_then: false,
-                bound: false
+                bound: false,
+                ..
             })
         ) {
             self.stack.pop();
@@ -742,9 +762,23 @@ impl Machine<'_> {
                     // A single-statement then-body followed by ELSE keeps its
                     // IF open for the else branch (`IF @a > 0 SELECT 1; ELSE
                     // IF @b > 0 …`), mirroring the `END ELSE` block shape
-                    // (Codex P2).
+                    // (Codex P2). But the upcoming ELSE binds the innermost
+                    // IF still *without* an else branch: deeper IFs whose
+                    // else just completed close here (`IF @a IF @b …; ELSE
+                    // …; ELSE …` — the second ELSE is @a's, Codex P2).
                     if word(i + 1) != "ELSE" {
                         self.close_unbound_ifs();
+                    } else {
+                        while matches!(
+                            self.stack.last(),
+                            Some(Ctx::If {
+                                with_then: false,
+                                bound: false,
+                                else_taken: true
+                            })
+                        ) {
+                            self.stack.pop();
+                        }
                     }
                     self.pending_between = false;
                     self.break_bool_run();
@@ -979,6 +1013,7 @@ impl Machine<'_> {
                         self.stack.push(Ctx::If {
                             with_then: false,
                             bound: false,
+                            else_taken: false,
                         });
                     }
                 }
@@ -1009,12 +1044,16 @@ impl Machine<'_> {
                     // terminator-bound again: a single-statement else-body
                     // (`… END ELSE SELECT 2;`) closes it at the `;`, while a
                     // block else-body re-binds it at its `BEGIN` (Codex P2).
+                    // Either way the IF has its else now — the next `; ELSE`
+                    // belongs to an outer IF (Codex P2).
                     if let Some(Ctx::If {
                         with_then: false,
-                        bound: bound @ true,
+                        bound,
+                        else_taken,
                     }) = self.stack.last_mut()
                     {
                         *bound = false;
+                        *else_taken = true;
                     }
                 }
                 "CASE" if kw => {
@@ -1367,9 +1406,14 @@ pub(crate) fn extract(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
     emit_contributions: bool,
-    bigquery: bool,
+    dialect: DialectKind,
     facts: &mut SqlFileFacts,
 ) {
+    let bigquery = dialect == DialectKind::Bigquery;
+    // The dialects whose grammars split routine bodies into *root*
+    // unparsable spills — the only ones where a top-level run can be a
+    // routine continuation (T-SQL batch bodies, MySQL delimiter bodies).
+    let spills_routine_bodies = matches!(dialect, DialectKind::Tsql | DialectKind::Mysql);
     let mut procedural = ProceduralFacts {
         routine_count: facts.procedural_units.len() as u32,
         ..ProceduralFacts::default()
@@ -1429,8 +1473,12 @@ pub(crate) fn extract(
         .map(|(_, sf)| sf.start_byte)
         .collect();
     let mut region_ranges: Vec<(u32, u32)> = Vec::new();
-    let mut carried: std::collections::BTreeMap<usize, (Vec<Ctx>, bool)> =
+    let mut carried: std::collections::BTreeMap<usize, CarriedState> =
         std::collections::BTreeMap::new();
+    // Leftover scanner state of anonymous regions, keyed by end byte — an
+    // immediately following `ELSE`-led unparsable run resumes it without
+    // attributing to any routine (Codex P2).
+    let mut anon_states: Vec<(u32, Option<CarriedState>)> = Vec::new();
     for (node, stmt_facts) in statements.iter().zip(facts.statements.iter()) {
         let is_procedural_region = matches!(
             stmt_facts.kind,
@@ -1491,9 +1539,14 @@ pub(crate) fn extract(
             stack,
             // Anonymous blocks, scripting statements, body continuations,
             // and gated unknown statements *are* body; routine definitions
-            // enter their body at IS/AS/BEGIN.
+            // enter their body at IS/AS/BEGIN — and so does a DECLARE-led
+            // anonymous block: its declaration section is not a path, so an
+            // initializer like `flag BOOLEAN := TRUE AND FALSE` counts
+            // nothing (Codex P2). IF/WHILE/BEGIN-led scripting stays
+            // immediate body.
             in_body: restored_body
-                || stmt_facts.kind == StatementKind::AnonymousBlock
+                || (stmt_facts.kind == StatementKind::AnonymousBlock
+                    && tokens.first().is_none_or(|t| t.word != "DECLARE"))
                 || fallback_unit.is_some()
                 || gated_unknown,
             pending_loop_headers: 0,
@@ -1506,9 +1559,15 @@ pub(crate) fn extract(
         let end_state = (std::mem::take(&mut machine.stack), machine.in_body);
         drop(machine);
         // Save the scanner state for the routine this region belongs to so
-        // its next continuation resumes it. Anonymous blocks drop theirs.
+        // its next continuation resumes it. An anonymous region's leftover
+        // state is kept too (keyed by its end byte): sqruff can split a
+        // standalone T-SQL decision between a parsed statement and an
+        // `ELSE`-led root run, and the else branch needs the open IF stack
+        // to keep its nesting (Codex P2).
         if let Some(idx) = fallback_unit.or_else(|| contained_units.last().copied()) {
             carried.insert(idx, end_state);
+        } else if stmt_facts.kind == StatementKind::AnonymousBlock && !end_state.0.is_empty() {
+            anon_states.push((stmt_facts.end_byte, Some(end_state)));
         }
         // A continuation's query constructs belong to its routine's embedded
         // score (Codex P2) — facts are merged (not scores summed) so the
@@ -1616,18 +1675,27 @@ pub(crate) fn extract(
         if !unparsable_is_procedural(&tokens) {
             continue;
         }
-        // A top-level spill is the body of the routine it follows —
-        // attribute its increments to the last unit ending before it and
-        // resume that routine's scanner state (Codex P2). A `GO` between
-        // the unit and the run severs the tie: the run is a new batch, so
-        // it stays file-level and keeps its own anonymous entry (Codex P2).
-        // No preceding unit → file-level only, fresh state.
-        let fallback_unit = last_unit_before(&unit_ranges, start).filter(|&idx| {
-            let unit_end = facts.procedural_units[idx].end_byte;
-            !go_boundaries
-                .iter()
-                .any(|&go| unit_end <= go && go <= start)
-        });
+        // A top-level spill is the body of the routine it follows — but
+        // only the spill dialects (T-SQL batches, MySQL delimiter bodies)
+        // actually put routine continuations in *root* runs, so the
+        // fallback is dialect-gated: an Oracle routine followed by an
+        // unparsable anonymous block is two independent things, and
+        // attaching the block would suppress its entry, extend the
+        // function space, and misattribute its paths (Codex P2). Under a
+        // spill dialect, attribute to the last unit ending before the run
+        // and resume that routine's scanner state (Codex P2) — unless a
+        // `GO` between them severs the tie: the run is a new batch
+        // (Codex P2). No unit → file-level only, fresh state.
+        let fallback_unit = if spills_routine_bodies {
+            last_unit_before(&unit_ranges, start).filter(|&idx| {
+                let unit_end = facts.procedural_units[idx].end_byte;
+                !go_boundaries
+                    .iter()
+                    .any(|&go| unit_end <= go && go <= start)
+            })
+        } else {
+            None
+        };
         // A *standalone* control-led run is an anonymous block the parser
         // lost (`BEGIN TRY … END CATCH` at file level): one entry path,
         // like its statement-backed equivalent (Codex P2). Fragment shapes
@@ -1650,7 +1718,36 @@ pub(crate) fn extract(
             }
         }
         let resumed = fallback_unit.and_then(|idx| carried.remove(&idx));
-        let (stack, _) = resumed.unwrap_or_default();
+        // A standalone `ELSE`-led run continues the anonymous region right
+        // before it: resume that region's open IF stack so the else branch
+        // keeps its nesting — without attributing to any routine (Codex P2).
+        let resumed_anon = if resumed.is_none() && fallback_unit.is_none() {
+            let else_led = tokens.first().is_some_and(|t| t.word == "ELSE");
+            if else_led {
+                anon_states
+                    .iter_mut()
+                    .rev()
+                    .find(|(anon_end, slot)| *anon_end <= start && slot.is_some())
+                    .filter(|(anon_end, _)| {
+                        // Adjacency: no other scanned region between.
+                        !region_ranges
+                            .iter()
+                            .any(|&(s2, _)| *anon_end < s2 && s2 < start)
+                    })
+                    .and_then(|(_, slot)| slot.take())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // Standalone runs delay the body gate when DECLARE-led (their
+        // declaration section is not a path — the `BEGIN` opens the body,
+        // Codex P2); attributed or resumed runs are proven body content
+        // (a T-SQL body statement can itself start with `DECLARE @v …`).
+        let standalone = fallback_unit.is_none() && resumed.is_none() && resumed_anon.is_none();
+        let declare_led = tokens.first().is_some_and(|t| t.word == "DECLARE");
+        let (stack, restored_body) = resumed.or(resumed_anon).unwrap_or_default();
         let mut machine = Machine {
             facts: &mut procedural,
             unit_ranges: &unit_ranges,
@@ -1662,8 +1759,8 @@ pub(crate) fn extract(
             // The marker gate just proved this fragment is procedural body
             // content (it may start mid-body — T-SQL spills lose the opening
             // BEGIN to the parsed part), so the body gate is open from the
-            // start regardless of any resumed state.
-            in_body: true,
+            // start — except standalone DECLARE-led runs (Codex P2).
+            in_body: restored_body || !(standalone && declare_led),
             pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,

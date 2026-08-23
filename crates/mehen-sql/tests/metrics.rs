@@ -1852,8 +1852,12 @@ fn single_statement_then_body_keeps_if_open_for_else() {
          else if @b > 0 select 2;\n",
     );
     assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
-    // IF 1 + ELSE 1 + split else-branch IF 1 (flat — parser-bound) = 3.
-    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+    // IF 1 + ELSE 1 + else-branch IF 2 (nested under @a — T-SQL `ELSE IF`
+    // is `else { if }`, and the split run resumes the parsed region's open
+    // IF stack, so the split shape now matches the parsed
+    // `… END ELSE IF …` shape instead of losing the nesting to the parser
+    // boundary; PR #257 round 12) = 4.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
 }
 
 /// An IF controlling a single-statement loop closes at the shared
@@ -2416,4 +2420,80 @@ fn go_boundary_severs_fallback_attribution() {
     assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
     // Routine entry 1 + standalone run: entry 1 + catch 1 + throw 1 = 4.
     assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 4.0);
+}
+
+// ── PR #257 round-12 review regressions ─────────────────────────────────
+
+/// A whole T-SQL decision lost to a root `Unparsable` run still counts:
+/// leading control-position `IF` passes the marker gate (Codex P2, PR #257
+/// round 12), while `end if` debris (`if;`) and scalar `IF(…)` stay out.
+#[test]
+fn if_led_unparsable_run_is_admitted() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a = 1 throw 51000, 'oops', 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // Entry 1 + IF 1 + THROW 1 = 3.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
+}
+
+/// An `ELSE`-led spill resumes the anonymous region's open IF stack: the
+/// outer else's decision keeps one nesting level, and a deeper IF whose
+/// else already completed closes at the terminator so the second ELSE
+/// binds the outer IF (Codex P2, PR #257 round 12).
+#[test]
+fn else_spill_resumes_anonymous_state() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0 if @b > 0 select 1; else select 2; else if @c > 0 select 3;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 3.0);
+    // IF@a 1 + IF@b 2 + ELSE 1 + ELSE 1 + IF@c 2 (under @a's else) = 7.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 7.0);
+}
+
+/// An Oracle routine followed by an independent anonymous block that
+/// degrades to a root `Unparsable` run: the block keeps its own entry and
+/// paths — fallback attribution is reserved for the dialects whose
+/// grammars actually spill routine bodies into root runs (Codex P2,
+/// PR #257 round 12).
+#[test]
+fn oracle_block_after_routine_stays_independent() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           null;\n\
+         end;\n\
+         /\n\
+         begin\n\
+           case when 1 = 1 then null; end case;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // p's entry 1 + the block's entry 1 + CASE WHEN 1 = 3, with the block's
+    // paths staying file-level instead of attaching to p.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
+}
+
+/// A DECLARE-led anonymous block starts outside the body gate: declaration
+/// initializers (`flag BOOLEAN := TRUE AND FALSE`) are not paths — the
+/// block's `BEGIN` opens the body (Codex P2, PR #257 round 12).
+#[test]
+fn anonymous_declare_section_is_not_a_path() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           flag boolean := true and false;\n\
+         begin\n\
+           null;\n\
+         end;\n\
+         /\n",
+    );
+    // Entry only — the initializer's AND counts nothing.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
 }

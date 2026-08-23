@@ -541,7 +541,7 @@ pub(crate) fn extract(
     // ── procedural control flow (research foundation §6.17) ─────────
     // Needs statement classification and units; contributes dynamic-SQL
     // change-risk evidence alongside `extract_objects`' below.
-    crate::procedural::extract(root, &line_at, emit_contributions, bigquery, &mut facts);
+    crate::procedural::extract(root, &line_at, emit_contributions, dialect, &mut facts);
 
     // ── unparsable / parser health ──────────────────────────────────
     let unparsables = root.recursive_crawl(
