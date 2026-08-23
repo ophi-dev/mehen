@@ -1962,7 +1962,7 @@ fn diff_reports_history_only_for_unparsable_files() {
     // A malformed head file has no trustworthy static metrics: the
     // row must show zeros for statics (not partial values blended
     // into history composites) while history reads real values. The
-    // run still exits non-zero for the blocking diagnostics.
+    // diagnostic is advisory unless strict analysis gating is requested.
     let dir = tempfile::tempdir().expect("tempdir");
     init_git_repo(dir.path());
 
@@ -1994,8 +1994,9 @@ fn diff_reports_history_only_for_unparsable_files() {
         .output()
         .expect("failed to run mehen diff");
     assert!(
-        !output.status.success(),
-        "blocking diagnostics must fail the run"
+        output.status.success(),
+        "per-file diagnostics are advisory by default: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
     let value: serde_json::Value =
@@ -2027,6 +2028,64 @@ fn diff_reports_history_only_for_unparsable_files() {
     assert_eq!(
         metric("history.churn.relative")["current"].as_f64(),
         Some(0.0)
+    );
+    assert_eq!(
+        metric("cognitive")["current_unavailable"].as_bool(),
+        Some(true)
+    );
+    let analysis_errors = value["analysis_errors"]
+        .as_array()
+        .expect("analysis_errors must be an array");
+    assert_eq!(analysis_errors.len(), 1, "{analysis_errors:?}");
+    assert_eq!(analysis_errors[0]["path"].as_str(), Some("broken.py"));
+    assert_eq!(analysis_errors[0]["side"].as_str(), Some("head"));
+    assert!(
+        analysis_errors[0]["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .iter()
+            .any(|diagnostic| {
+                matches!(diagnostic["severity"].as_str(), Some("error" | "fatal"))
+                    && diagnostic["code"]
+                        .as_str()
+                        .is_some_and(|code| code.contains("syntax") || code.contains("parse"))
+            }),
+        "{analysis_errors:?}"
+    );
+
+    let strict = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "broken-cli-base",
+            "--to",
+            "broken-cli-head",
+            "--metrics",
+            "cognitive",
+            "--output-format",
+            "json",
+            "--fail-on-analysis-error",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run strict mehen diff");
+    assert_eq!(
+        strict.status.code(),
+        Some(1),
+        "strict analysis gating must fail after emitting the report"
+    );
+    let strict_value: serde_json::Value =
+        serde_json::from_slice(&strict.stdout).expect("strict diff output must be JSON");
+    assert!(
+        strict_value["analysis_errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty()),
+        "{strict_value}"
     );
 }
 

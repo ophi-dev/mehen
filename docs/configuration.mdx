@@ -102,10 +102,10 @@ Two consequences worth knowing:
   [`--fail-on` gates](/commands/diff#fail-on-thresholds).
 
 Files whose parse produces a blocking diagnostic are never threshold-gated on partial metrics:
-`mehen metrics` and `mehen diff` fail with exit `1` through their existing analysis-error
-contract, while `mehen top-offenders` keeps its contract of skipping unparsable files from the
-ranking (so a broken file cannot fabricate a passing measurement — but it does not fail the run
-by itself either).
+`mehen metrics` still exits `1` because its only requested file is unavailable; `mehen diff`
+records the affected side under `analysis_errors`, keeps evaluating parseable files, and is
+advisory unless `--fail-on-analysis-error` is set. `mehen top-offenders` keeps its contract of
+skipping unparsable files from static ranking while preserving parser-independent history values.
 
 ## The violation report
 
@@ -128,8 +128,8 @@ Each line names the measured value, the crossed limit, and the configuration pat
 Violations are sorted by path, then metric, for deterministic CI logs. Colors engage only on a
 terminal with `NO_COLOR` unset. With
 `--output-format json`, `mehen diff` additionally embeds the violations as a top-level
-`threshold_violations` array (present only when the gate fired), so machine consumers can tell a
-quality-gate exit from an analysis failure.
+`threshold_violations` array (present only when the gate fired). Per-file analyzer diagnostics use
+the separate, always-present `analysis_errors` array.
 
 ## Validation
 
@@ -203,6 +203,7 @@ instrumented-but-uncovered code can.
 | Gate | Where it runs | What it checks | Exit code |
 |---|---|---|---|
 | `mehen.toml` thresholds | Inside the binary, every command | Absolute values at head | 1 |
+| `mehen diff --fail-on-analysis-error` | Inside the binary, diff only | Error/fatal diagnostics on either analyzed side | 1 |
 | [`mehen diff --fail-on`](/commands/diff#fail-on-thresholds) | Inside the binary, diff only | Markdown documentation band crossings | 2 |
 | [GitHub Action `thresholds`](/guides/github-action) | Action post-processing | Adverse per-file **deltas** | Action failure |
 

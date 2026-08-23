@@ -70,6 +70,10 @@ inputs:
     description: "Fail the action when any configured threshold is exceeded."
     required: false
     default: "true"
+  fail-on-analysis-error:
+    description: "Fail the action after publishing the report when any file has an error- or fatal-severity analysis diagnostic."
+    required: false
+    default: "false"
   comment-title:
     description: "Markdown heading used for the sticky pull request comment."
     required: false
@@ -113,6 +117,9 @@ outputs:
   violations:
     description: "Number of threshold violations (delta thresholds from the `thresholds` input plus repository `mehen.toml` breaches)."
     value: ${{ steps.run.outputs.violations }}
+  analysis_errors:
+    description: "Number of unique error- or fatal-severity analysis diagnostics."
+    value: ${{ steps.run.outputs.analysis_errors }}
   report_json:
     description: "Path to the JSON diff report produced by mehen."
     value: ${{ steps.run.outputs.report_json }}
@@ -206,6 +213,7 @@ runs:
         GHA_MEHEN_GITHUB_TOKEN: ${{ inputs.github-token || github.token }}
         GHA_MEHEN_THRESHOLDS: ${{ inputs.thresholds }}
         GHA_MEHEN_FAIL_ON_THRESHOLD: ${{ inputs.fail-on-threshold }}
+        GHA_MEHEN_FAIL_ON_ANALYSIS_ERROR: ${{ inputs.fail-on-analysis-error }}
         GHA_MEHEN_COMMENT_TITLE: ${{ inputs.comment-title }}
         GHA_MEHEN_COVERAGE_FILES: ${{ inputs.coverage-files }}
         GHA_MEHEN_COVERAGE_BASE_SOURCE: ${{ inputs.coverage-base-source }}

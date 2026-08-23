@@ -488,11 +488,10 @@ fn diff_passes_when_head_within_thresholds() {
 }
 
 #[test]
-fn diff_analysis_failure_outranks_the_threshold_gate() {
+fn diff_analysis_errors_do_not_suppress_the_threshold_gate() {
     // One file crosses the threshold, another has a hard syntax error:
-    // the run must fail as an analysis failure — JSON without the
-    // machine-readable gate signal — so CI consumers do not publish a
-    // partial report as an ordinary gate failure.
+    // the parseable file's gate remains authoritative, while the broken
+    // file is disclosed separately and contributes no partial statics.
     let dir = tempfile::tempdir().expect("tempdir");
     git_ok(dir.path(), &["init", "-q", "-b", "main"]);
     git_ok(dir.path(), &["config", "commit.gpgsign", "false"]);
@@ -525,10 +524,16 @@ fn diff_analysis_failure_outranks_the_threshold_gate() {
     assert_eq!(output.status.code(), Some(1));
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("JSON still emitted");
-    assert!(
-        value.get("threshold_violations").is_none(),
-        "an analysis failure must withhold the gate signal: {value}"
-    );
+    let violations = value["threshold_violations"]
+        .as_array()
+        .expect("parseable threshold breaches must remain visible");
+    assert_eq!(violations.len(), 1, "{value}");
+    assert_eq!(violations[0]["path"].as_str(), Some("sample.py"));
+    let errors = value["analysis_errors"]
+        .as_array()
+        .expect("analysis_errors must be present");
+    assert_eq!(errors.len(), 1, "{value}");
+    assert_eq!(errors[0]["path"].as_str(), Some("broken.py"));
 }
 
 #[test]
@@ -565,8 +570,7 @@ fn diff_json_output_still_emitted_before_threshold_failure() {
         .expect("machine output must stay parseable when the gate fails");
     assert!(value["source_code"].is_array());
     // The explicit gate signal machine consumers (e.g. the GitHub
-    // Action) use to distinguish a quality-gate exit from an analysis
-    // failure, which also exits 1 but without this key.
+    // Action) use to identify a configured quality-gate exit.
     let violations = value["threshold_violations"]
         .as_array()
         .expect("gate failures must carry threshold_violations");
