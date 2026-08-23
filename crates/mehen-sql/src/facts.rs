@@ -532,7 +532,7 @@ pub(crate) fn extract(
     // routine's body statements surface as top-level statements themselves —
     // classification needs the unit ranges to recognize them as
     // routine-owned (Codex P1).
-    extract_procedural_units(root, &line_at, &mut facts);
+    extract_procedural_units(root, &line_at, tsql, &mut facts);
 
     // ── statements ──────────────────────────────────────────────────
     let unit_ranges: Vec<(u32, u32)> = facts
@@ -3050,6 +3050,7 @@ pub(crate) fn procedural_unit_nodes(root: &ErasedSegment) -> Vec<ErasedSegment> 
 fn extract_procedural_units(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
+    tsql: bool,
     facts: &mut SqlFileFacts,
 ) {
     let units = procedural_unit_nodes(root);
@@ -3075,6 +3076,121 @@ fn extract_procedural_units(
             embedded_query_structural: 0.0,
         });
     }
+    // sqruff 0.40's overridden T-SQL statement grammar leaves whole valid
+    // definitions (`CREATE FUNCTION dbo.f(@x int) RETURNS int AS BEGIN …`,
+    // `CREATE TRIGGER trg ON t FOR INSERT AS …`) in root `Unparsable`
+    // nodes — no `PROCEDURAL_UNITS` kind ever forms. Recover units from the
+    // unambiguous header token shape at the start of a root run: `CREATE
+    // [OR ALTER] FUNCTION|PROC[EDURE]|TRIGGER <name>` (Codex P1). Scoped
+    // to the T-SQL dialect and to *leading* headers so broken declarative
+    // SQL in other dialects stays unrecognized; the unit spans the whole
+    // run — the batch semantics that already govern T-SQL body ownership.
+    if tsql {
+        for run in root.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::Unparsable),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        ) {
+            let Some(pm) = run.get_position_marker() else {
+                continue;
+            };
+            let (start_byte, end_byte) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+            // Runs inside an already-recognized unit belong to it.
+            if facts
+                .procedural_units
+                .iter()
+                .any(|u| u.start_byte <= start_byte && end_byte <= u.end_byte)
+            {
+                continue;
+            }
+            let Some(name) = tsql_definition_header_name(&run) else {
+                continue;
+            };
+            facts.procedural_units.push(ProceduralUnitFacts {
+                name: Some(name),
+                start_line: line_at(start_byte),
+                end_line: line_at(end_byte.saturating_sub(1)),
+                start_byte,
+                end_byte,
+                cyclomatic_complexity: 0.0,
+                cognitive_complexity: 0.0,
+                embedded_query_structural: 0.0,
+            });
+        }
+        // Keep the pre-order contract (parents before children, source
+        // order): synthetic units interleave with typed ones by position.
+        facts
+            .procedural_units
+            .sort_by_key(|u| (u.start_byte, std::cmp::Reverse(u.end_byte)));
+    }
+}
+
+/// The declared name when a token run *leads* with a T-SQL definition
+/// header (`CREATE [OR ALTER] FUNCTION|PROC[EDURE]|TRIGGER <name>`), else
+/// `None`. Works over the run's leaf code tokens; the name keeps its
+/// original case and re-joins dotted parts split by the lexer.
+fn tsql_definition_header_name(run: &ErasedSegment) -> Option<String> {
+    fn leaf_words(node: &ErasedSegment, out: &mut Vec<String>) {
+        if out.len() >= 8 {
+            return;
+        }
+        let children = node.segments();
+        if children.is_empty() {
+            if !(node.is_comment() || node.is_whitespace() || node.is_meta()) {
+                let raw = node.raw().trim();
+                if !raw.is_empty() {
+                    out.push(raw.to_string());
+                }
+            }
+            return;
+        }
+        for child in children {
+            leaf_words(child, out);
+        }
+    }
+    let mut words = Vec::new();
+    leaf_words(run, &mut words);
+    let mut i = 0usize;
+    if !words.first()?.eq_ignore_ascii_case("CREATE") {
+        return None;
+    }
+    i += 1;
+    if words.get(i).is_some_and(|w| w.eq_ignore_ascii_case("OR"))
+        && words
+            .get(i + 1)
+            .is_some_and(|w| w.eq_ignore_ascii_case("ALTER"))
+    {
+        i += 2;
+    }
+    let kind = words.get(i)?;
+    if !(kind.eq_ignore_ascii_case("FUNCTION")
+        || kind.eq_ignore_ascii_case("PROCEDURE")
+        || kind.eq_ignore_ascii_case("PROC")
+        || kind.eq_ignore_ascii_case("TRIGGER"))
+    {
+        return None;
+    }
+    i += 1;
+    let mut name = words.get(i)?.clone();
+    // Identifier sanity: a name never starts with punctuation.
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '[' || c == '"')
+    {
+        return None;
+    }
+    // Re-join dotted qualification the lexer split (`dbo` `.` `f`).
+    while words.get(i + 1).is_some_and(|w| w == ".") {
+        if let Some(part) = words.get(i + 2) {
+            name = format!("{name}.{part}");
+            i += 2;
+        } else {
+            break;
+        }
+    }
+    Some(name)
 }
 
 /// Collect the distinct read and write object names touched by the file.

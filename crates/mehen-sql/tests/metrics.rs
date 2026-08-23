@@ -2684,3 +2684,118 @@ fn embedded_query_score_is_a_maximum_not_a_sum() {
         single
     );
 }
+
+// ── PR #257 round-16 review regressions ─────────────────────────────────
+
+/// T-SQL definitions that sqruff 0.40 leaves wholly unparsable (`CREATE
+/// FUNCTION … RETURNS int AS BEGIN … END`, `CREATE TRIGGER … AS SELECT`)
+/// still become routine units — recovered from the leading header token
+/// shape of the root run (Codex P1, PR #257 round 16).
+#[test]
+fn tsql_function_and_trigger_units_recover_from_parse_gaps() {
+    let function = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create function dbo.f(@x int) returns int\n\
+         as\n\
+         begin\n\
+           return @x;\n\
+         end\n",
+    );
+    assert_eq!(get(&function, "sql.procedural.routine_count"), 1.0);
+    // Entry + nothing else (the RETURN is a count, not a path).
+    assert_eq!(get(&function, "sql.procedural.cyclomatic_complexity"), 1.0);
+    assert_eq!(get(&function, "sql.procedural.return_count"), 1.0);
+
+    let trigger = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create trigger trg on t for insert\n\
+         as select 1;\n",
+    );
+    assert_eq!(get(&trigger, "sql.procedural.routine_count"), 1.0);
+}
+
+/// T-SQL `AS` opening the body retires the pending routine-body marker: a
+/// later `BEGIN` inside the body belongs to its control flow, not to the
+/// routine baseline — nested decisions keep their nesting (Codex P2,
+/// PR #257 round 16).
+#[test]
+fn tsql_as_body_does_not_leak_a_marker_to_inner_blocks() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure p as\n\
+         if @a = 1\n\
+         begin\n\
+           if @b = 1 select 1;\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // Entry 1 is cyclomatic; cognitive: IF@a 1 + IF@b 2 (nested) = 3.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// Nested bare BigQuery brackets are lexical blocks, not new entries: one
+/// connected scripting region earns one entry (Codex P2, PR #257
+/// round 16).
+#[test]
+fn nested_bigquery_bracket_is_not_a_second_entry() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         begin\n\
+           begin\n\
+             select 1;\n\
+           end;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.block_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 2.0);
+    // One entry for the connected region.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+}
+
+/// An Oracle nested DECLARE section closes the body gate until its BEGIN:
+/// mid-body declaration initializers create no paths (Codex P2, PR #257
+/// round 16).
+#[test]
+fn nested_declare_section_closes_the_body_gate() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           declare\n\
+             flag boolean := true and false;\n\
+           begin\n\
+             null;\n\
+           end;\n\
+         end;\n\
+         /\n",
+    );
+    // Entry only — the nested declaration's AND is no path.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// A user function named `signal` is a call, not a raise statement — the
+/// raise family requires real keyword shape; Oracle's
+/// `RAISE_APPLICATION_ERROR` stays the deliberate call-shaped exception
+/// (Codex P2, PR #257 round 16).
+#[test]
+fn signal_named_function_call_is_not_a_raise() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           signal(1);\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 0.0);
+
+    let real = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           raise_application_error(-20001, 'boom');\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&real, "sql.procedural.raise_throw_count"), 1.0);
+}

@@ -532,6 +532,11 @@ struct Machine<'a> {
     /// Oracle's `IS`/`AS` introduce a declaration section that is not a
     /// path (Codex P2).
     tsql: bool,
+    /// Effective dialect is Oracle: a mid-body `DECLARE` opens a nested
+    /// block's declaration section (gate closes until its `BEGIN`), while
+    /// T-SQL/MySQL/BigQuery `DECLARE`s are ordinary body statements
+    /// (Codex P2).
+    oracle: bool,
     /// Definition headers whose body block hasn't opened yet — the next
     /// plain `BEGIN`s consume these and tag their blocks `routine_body`
     /// (nesting baselines, Codex P2). A stack, not a flag: an Oracle
@@ -825,6 +830,11 @@ impl Machine<'_> {
                         self.pending_spec_header = false;
                     } else if self.pending_routine_header && self.tsql && t.word == "AS" {
                         self.in_body = true;
+                        // AS *is* the T-SQL body opener: retire the pending
+                        // marker so a later BEGIN inside the body is not
+                        // mistagged as the routine-body nesting baseline
+                        // (Codex P2).
+                        self.pending_routine_bodies.pop();
                     }
                     self.pending_routine_header = false;
                     // A call-spec body (`AS LANGUAGE JAVA …`, T-SQL CLR
@@ -868,6 +878,17 @@ impl Machine<'_> {
                     // declarations (Codex P2 ×2). The prev-token guard
                     // keeps `%TYPE` attributes and `DROP PACKAGE` out.
                     self.pending_spec_header = true;
+                    self.break_bool_run();
+                }
+                "DECLARE" if kw && self.oracle => {
+                    // An Oracle `DECLARE` opens a nested block's declaration
+                    // section: not a path until its `BEGIN` reopens the gate
+                    // (`BEGIN DECLARE flag := TRUE AND FALSE; BEGIN … END;
+                    // END;` — Codex P2). Region-leading `DECLARE` heads are
+                    // handled at region init; this closes the gate for
+                    // mid-body ones too, idempotently. Other dialects'
+                    // `DECLARE` statements are ordinary body statements.
+                    self.in_body = false;
                     self.break_bool_run();
                 }
                 "BEGIN" if kw => {
@@ -1295,14 +1316,25 @@ impl Machine<'_> {
                         self.raw_count(ProceduralMetric::ReturnCount, t.span, reason::RETURN);
                     }
                 }
-                "RAISE"
-                | "RAISE_APPLICATION_ERROR"
-                | "THROW"
-                | "RAISERROR"
-                | "SIGNAL"
-                | "RESIGNAL"
-                    if kw =>
+                "RAISE" | "THROW" | "RAISERROR" | "SIGNAL" | "RESIGNAL"
+                    if kw && !t.is_function_name =>
                 {
+                    // Real keyword shape required: a user function named
+                    // `signal(…)` parses as a `FunctionNameIdentifier` and
+                    // is a call, not a raise statement (Codex P2). Oracle's
+                    // `RAISE_APPLICATION_ERROR` below is the deliberate
+                    // exception — it always parses as a call.
+                    self.break_bool_run();
+                    if self.in_body {
+                        self.raw_count(
+                            ProceduralMetric::RaiseThrowCount,
+                            t.span,
+                            reason::RAISE_THROW,
+                        );
+                        self.cyclo(t.span, reason::RAISE_THROW);
+                    }
+                }
+                "RAISE_APPLICATION_ERROR" if kw => {
                     self.break_bool_run();
                     if self.in_body {
                         self.raw_count(
@@ -1478,6 +1510,7 @@ pub(crate) fn extract(
 ) {
     let bigquery = dialect == DialectKind::Bigquery;
     let tsql = dialect == DialectKind::Tsql;
+    let oracle = dialect == DialectKind::Oracle;
     // The dialects whose grammars split routine bodies into *root*
     // unparsable spills — the only ones where a top-level run can be a
     // routine continuation (T-SQL batch bodies, MySQL delimiter bodies).
@@ -1543,7 +1576,12 @@ pub(crate) fn extract(
     // nesting — a source-ordered depth walk over the bracket statements
     // computes the true block depth (Codex P2). Counts stay with the
     // region scans (one `block_count` per opener); only the high-water
-    // mark and its evidence span come from here.
+    // mark and its evidence span come from here. Openers at depth ≥ 2 are
+    // *nested* lexical blocks: one connected scripting region has one
+    // control-flow entry, so their statements skip the entry below
+    // (Codex P2).
+    let mut nested_bracket_begins: std::collections::BTreeSet<u32> =
+        std::collections::BTreeSet::new();
     if bigquery {
         let mut depth = 0u32;
         for stmt in root.recursive_crawl(
@@ -1555,17 +1593,21 @@ pub(crate) fn extract(
             match crate::facts::bare_scripting_bracket(&stmt) {
                 Some(crate::facts::ScriptingBracket::Begin) => {
                     depth += 1;
+                    let Some(pm) = stmt.get_position_marker() else {
+                        continue;
+                    };
+                    let (s, e) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+                    if depth >= 2 {
+                        nested_bracket_begins.insert(s);
+                    }
                     if depth > procedural.max_block_depth {
                         procedural.max_block_depth = depth;
-                        if let Some(pm) = stmt.get_position_marker() {
-                            let (s, e) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
-                            procedural.max_block_depth_span = Some(SourceSpan::new(
-                                s,
-                                e,
-                                line_at(s),
-                                line_at(e.saturating_sub(1)),
-                            ));
-                        }
+                        procedural.max_block_depth_span = Some(SourceSpan::new(
+                            s,
+                            e,
+                            line_at(s),
+                            line_at(e.saturating_sub(1)),
+                        ));
                     }
                 }
                 Some(crate::facts::ScriptingBracket::End) => {
@@ -1658,6 +1700,7 @@ pub(crate) fn extract(
             pending_routine_bodies: Vec::new(),
             pending_spec_header: false,
             tsql,
+            oracle,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1696,8 +1739,12 @@ pub(crate) fn extract(
             }
         }
         // Entry path: +1 for an anonymous block itself (a routine-definition
-        // statement's entries come from its units below).
-        if stmt_facts.kind == StatementKind::AnonymousBlock {
+        // statement's entries come from its units below). Nested BigQuery
+        // brackets are lexical blocks inside an already-entered scripting
+        // region — no second entry (Codex P2).
+        if stmt_facts.kind == StatementKind::AnonymousBlock
+            && !nested_bracket_begins.contains(&stmt_facts.start_byte)
+        {
             push_entry(&mut procedural, crate::facts::statement_span(stmt_facts));
         }
     }
@@ -1736,6 +1783,7 @@ pub(crate) fn extract(
             pending_routine_bodies: Vec::new(),
             pending_spec_header: false,
             tsql,
+            oracle,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1880,6 +1928,7 @@ pub(crate) fn extract(
             pending_routine_bodies: Vec::new(),
             pending_spec_header: false,
             tsql,
+            oracle,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1930,22 +1979,50 @@ pub(crate) fn extract(
     // query inside any single routine"): each maximal query root in the
     // unit's subtree (and its attributed continuations) scores separately,
     // and the routine takes the *maximum* — two trivial SELECTs score like
-    // one, not like their sum (Codex P2).
+    // one, not like their sum (Codex P2). Typed nodes match their unit by
+    // start byte: synthetic T-SQL units recovered from unparsable runs
+    // (Codex P1) have no node — and no typed query constructs — so they
+    // keep score 0 unless continuations attribute queries to them.
     let unit_nodes = crate::facts::procedural_unit_nodes(root);
-    debug_assert_eq!(unit_nodes.len(), facts.procedural_units.len());
+    debug_assert!(unit_nodes.len() <= facts.procedural_units.len());
     let mut max_unit: Option<(usize, f64)> = None;
-    for (idx, node) in unit_nodes.iter().enumerate() {
+    for node in unit_nodes.iter() {
+        let Some(pm) = node.get_position_marker() else {
+            continue;
+        };
+        let start = pm.source_slice.start as u32;
+        let Some(idx) = facts
+            .procedural_units
+            .iter()
+            .position(|u| u.start_byte == start)
+        else {
+            continue;
+        };
         let score = query_root_facts(node)
             .iter()
             .chain(continuation_facts[idx].iter())
             .map(crate::composite::structural)
             .fold(0.0f64, f64::max);
-        if let Some(unit) = facts.procedural_units.get_mut(idx) {
-            unit.embedded_query_structural = score;
-        }
+        facts.procedural_units[idx].embedded_query_structural = score;
         if score > procedural.max_embedded_query_structural {
             procedural.max_embedded_query_structural = score;
             max_unit = Some((idx, score));
+        }
+    }
+    // Synthetic units score their attributed continuations alone.
+    for idx in 0..facts.procedural_units.len() {
+        if facts.procedural_units[idx].embedded_query_structural == 0.0
+            && !continuation_facts[idx].is_empty()
+        {
+            let score = continuation_facts[idx]
+                .iter()
+                .map(crate::composite::structural)
+                .fold(0.0f64, f64::max);
+            facts.procedural_units[idx].embedded_query_structural = score;
+            if score > procedural.max_embedded_query_structural {
+                procedural.max_embedded_query_structural = score;
+                max_unit = Some((idx, score));
+            }
         }
     }
     // The published maximum is evidence-backed like every other composite:
