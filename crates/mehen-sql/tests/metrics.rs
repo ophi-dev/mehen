@@ -2544,3 +2544,76 @@ fn bigquery_nested_bare_blocks_report_their_depth() {
     assert_eq!(get(&m, "sql.procedural.block_count"), 2.0);
     assert_eq!(get(&m, "sql.procedural.max_block_depth"), 2.0);
 }
+
+// ── PR #257 round-14 review regressions ─────────────────────────────────
+
+/// A nested routine's END restores the body gate saved at its header:
+/// declarations *after* a local routine stay declarations, so their
+/// initializers create no paths (Codex P2, PR #257 round 14).
+#[test]
+fn declarations_after_a_nested_routine_stay_declarations() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           procedure p is\n\
+           begin\n\
+             null;\n\
+           end;\n\
+           flag boolean := true and false;\n\
+         begin\n\
+           null;\n\
+         end;\n\
+         /\n",
+    );
+    // Anonymous entry 1 + p's entry 1 — the initializer's AND is no path.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// Oracle editioning modifiers before a package header still arm the
+/// spec gate: `CREATE OR REPLACE EDITIONABLE PACKAGE … AS` introduces
+/// declarations, not a body (Codex P2, PR #257 round 14).
+#[test]
+fn editionable_package_spec_declarations_are_not_paths() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace editionable package pkg_ed as\n\
+           flag constant boolean := true and false;\n\
+         end pkg_ed;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// T-SQL Service Broker `BEGIN CONVERSATION …` opens no block scope: no
+/// block, no anonymous entry (Codex P2, PR #257 round 14).
+#[test]
+fn begin_conversation_is_not_a_block() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         begin conversation timer (@handle) timeout = 60;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.block_count"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 0.0);
+}
+
+/// A named exception *declaration* (`some_error EXCEPTION;`) is not a
+/// handler section: no synthetic block seeds, so the real BEGIN reports
+/// depth 1 (Codex P2, PR #257 round 14).
+#[test]
+fn exception_declaration_is_not_a_handler_section() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           some_error exception;\n\
+         begin\n\
+           raise some_error;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 0.0);
+    // Entry 1 + RAISE 1.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+}

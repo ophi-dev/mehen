@@ -256,11 +256,18 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
     let word = |i: usize| tokens.get(i).map(|t| t.word.as_str()).unwrap_or("");
     for (i, t) in tokens.iter().enumerate() {
         match t.word.as_str() {
-            // `BEGIN` (block, not `BEGIN TRANSACTION`) is procedural context.
+            // `BEGIN` (block, not `BEGIN TRANSACTION` / Service Broker
+            // `BEGIN CONVERSATION` / `BEGIN DIALOG`) is procedural context.
             "BEGIN"
                 if !matches!(
                     word(i + 1),
-                    "TRANSACTION" | "TRAN" | "WORK" | "DISTRIBUTED" | ";"
+                    "TRANSACTION"
+                        | "TRAN"
+                        | "WORK"
+                        | "DISTRIBUTED"
+                        | "CONVERSATION"
+                        | "DIALOG"
+                        | ";"
                 ) =>
             {
                 return true;
@@ -426,11 +433,15 @@ fn scalar_if_call(tokens: &[PToken], i: usize) -> bool {
 enum Ctx {
     Block {
         exception_section: bool,
-        /// This block is a routine's *body* — opened for a pending
-        /// `FUNCTION`/`PROCEDURE` header. Cognitive nesting resets at the
-        /// topmost such block, so a nested subprogram's decisions don't
-        /// inherit the outer routine's lexical depth (Codex P2).
-        routine_body: bool,
+        /// `Some(gate)` = this block is a routine's *body* — opened for a
+        /// pending `FUNCTION`/`PROCEDURE` header — carrying the body-gate
+        /// state saved at that header. Cognitive nesting resets at the
+        /// topmost such block so a nested subprogram's decisions don't
+        /// inherit the outer routine's lexical depth (Codex P2), and the
+        /// block's END restores the saved gate so a nested routine in a
+        /// DECLARE section doesn't leak `in_body` into the declarations
+        /// after it (Codex P2).
+        routine_body: Option<bool>,
     },
     Try,
     Catch,
@@ -512,10 +523,11 @@ struct Machine<'a> {
     pending_spec_header: bool,
     /// Definition headers whose body block hasn't opened yet — the next
     /// plain `BEGIN`s consume these and tag their blocks `routine_body`
-    /// (nesting baselines, Codex P2). Counter, not flag: an Oracle DECLARE
-    /// section can stack several nested subprogram headers before their
-    /// bodies open.
-    pending_routine_bodies: u32,
+    /// (nesting baselines, Codex P2). A stack, not a flag: an Oracle
+    /// DECLARE section can stack several nested subprogram headers before
+    /// their bodies open. Each entry is the body-gate state at its header,
+    /// restored when the routine's body block closes (Codex P2).
+    pending_routine_bodies: Vec<bool>,
     /// Previous code token was a boolean operator with this text (`AND`/
     /// `OR`); any other token breaks the run. Used for sequence-based
     /// cognitive counting (+1 per run of like operators, +1 on alternation).
@@ -534,7 +546,7 @@ impl Machine<'_> {
                 matches!(
                     c,
                     Ctx::Block {
-                        routine_body: true,
+                        routine_body: Some(_),
                         ..
                     }
                 )
@@ -754,7 +766,7 @@ impl Machine<'_> {
                     // nesting (Codex P2).
                     if self.pending_routine_header {
                         self.pending_routine_header = false;
-                        self.pending_routine_bodies = self.pending_routine_bodies.saturating_sub(1);
+                        self.pending_routine_bodies.pop();
                     }
                     // Loop headers still pending a body opener at the
                     // terminator were single-statement loops (`WHILE @a > 0
@@ -802,7 +814,7 @@ impl Machine<'_> {
                     // `AS EXTERNAL NAME …`) never opens a `BEGIN` block:
                     // retire the header's pending body marker (Codex P2).
                     if matches!(word(i + 1), "LANGUAGE" | "EXTERNAL") {
-                        self.pending_routine_bodies = self.pending_routine_bodies.saturating_sub(1);
+                        self.pending_routine_bodies.pop();
                     }
                     self.break_bool_run();
                 }
@@ -817,7 +829,7 @@ impl Machine<'_> {
                         .map(|j| tokens[j].word.as_str())
                         .unwrap_or("");
                     if !matches!(prev, "DROP" | "ALTER" | "ON" | "END" | "EXISTS") {
-                        self.pending_routine_bodies += 1;
+                        self.pending_routine_bodies.push(self.in_body);
                     }
                     // The signature (nested subprogram in a DECLARE section,
                     // or the outer definition itself) runs until
@@ -831,13 +843,13 @@ impl Machine<'_> {
                             i.checked_sub(1)
                                 .map(|j| tokens[j].word.as_str())
                                 .unwrap_or(""),
-                            "CREATE" | "REPLACE"
+                            "CREATE" | "REPLACE" | "EDITIONABLE" | "NONEDITIONABLE"
                         ) =>
                 {
-                    // `CREATE [OR REPLACE] PACKAGE [BODY]` / `CREATE TYPE`:
-                    // the upcoming IS/AS introduces declarations (Codex P2).
-                    // The prev-token guard keeps `%TYPE` attributes and
-                    // `DROP PACKAGE` out.
+                    // `CREATE [OR REPLACE] [NON]EDITIONABLE PACKAGE [BODY]`
+                    // / `CREATE TYPE`: the upcoming IS/AS introduces
+                    // declarations (Codex P2 ×2). The prev-token guard
+                    // keeps `%TYPE` attributes and `DROP PACKAGE` out.
                     self.pending_spec_header = true;
                     self.break_bool_run();
                 }
@@ -849,8 +861,10 @@ impl Machine<'_> {
                     self.pending_routine_header = false;
                     self.pending_spec_header = false;
                     match word(i + 1) {
-                        // Transaction control, not a block.
-                        "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED" | ";" => {}
+                        // Transaction control / Service Broker statements,
+                        // not a block (Codex P2).
+                        "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED"
+                        | "CONVERSATION" | ";" => {}
                         "TRY" => {
                             self.in_body = true;
                             self.raw_count(ProceduralMetric::BlockCount, t.span, reason::BLOCK);
@@ -889,14 +903,9 @@ impl Machine<'_> {
                             self.stack.push(Ctx::Block {
                                 exception_section: false,
                                 // Consume one armed header: this block is
-                                // that routine's body (Codex P2).
-                                routine_body: {
-                                    let armed = self.pending_routine_bodies > 0;
-                                    if armed {
-                                        self.pending_routine_bodies -= 1;
-                                    }
-                                    armed
-                                },
+                                // that routine's body, carrying the gate to
+                                // restore at its END (Codex P2).
+                                routine_body: self.pending_routine_bodies.pop(),
                             });
                             self.note_block_depth(t.span);
                         }
@@ -985,12 +994,19 @@ impl Machine<'_> {
                             // Bare END closes the nearest block or CASE
                             // *expression* (whose WHEN arms stay
                             // declarative).
-                            if let Some(Ctx::Block { .. }) = self.pop_matching(|c| {
+                            if let Some(Ctx::Block { routine_body, .. }) = self.pop_matching(|c| {
                                 matches!(
                                     c,
                                     Ctx::Block { .. } | Ctx::Case { .. } | Ctx::Try | Ctx::Catch
                                 )
                             }) {
+                                // A routine body's END restores the gate
+                                // saved at its header: declarations after a
+                                // nested routine stay declarations
+                                // (Codex P2).
+                                if let Some(saved_gate) = routine_body {
+                                    self.in_body = saved_gate;
+                                }
                                 // (`IF @a > 0 WHILE @b > 0 BEGIN … END`
                                 // leaves the IF unbound because the BEGIN
                                 // bound the pending loop — Codex P2.)
@@ -1139,13 +1155,17 @@ impl Machine<'_> {
                         _ => {}
                     }
                 }
-                "EXCEPTION" if kw => {
+                "EXCEPTION" if kw && word(i + 1) == "WHEN" => {
                     self.break_bool_run();
                     // PL/SQL & BigQuery: the block's handler section starts.
-                    // A Handler context from a previous section cannot be on
-                    // top here, so marking the nearest block suffices. In an
-                    // unparsable *fragment* the opening BEGIN may be lost —
-                    // seed a block so the section's handlers still count.
+                    // Section position is proven by the following `WHEN` —
+                    // a named exception *declaration* (`some_error
+                    // EXCEPTION;`) is not a section and must not mark or
+                    // seed any block (Codex P2). A Handler context from a
+                    // previous section cannot be on top here, so marking
+                    // the nearest block suffices. In an unparsable
+                    // *fragment* the opening BEGIN may be lost — seed a
+                    // block so the section's handlers still count.
                     match self
                         .stack
                         .iter_mut()
@@ -1157,7 +1177,7 @@ impl Machine<'_> {
                         }) => *exception_section = true,
                         _ => self.stack.push(Ctx::Block {
                             exception_section: true,
-                            routine_body: false,
+                            routine_body: None,
                         }),
                     }
                 }
@@ -1619,7 +1639,7 @@ pub(crate) fn extract(
             pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
-            pending_routine_bodies: 0,
+            pending_routine_bodies: Vec::new(),
             pending_spec_header: false,
             last_bool: None,
         };
@@ -1696,7 +1716,7 @@ pub(crate) fn extract(
             pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
-            pending_routine_bodies: 0,
+            pending_routine_bodies: Vec::new(),
             pending_spec_header: false,
             last_bool: None,
         };
@@ -1776,7 +1796,13 @@ pub(crate) fn extract(
                     || (t.word == "BEGIN"
                         && !matches!(
                             tokens.get(1).map(|t| t.word.as_str()).unwrap_or(""),
-                            "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED" | ";"
+                            "TRANSACTION"
+                                | "TRAN"
+                                | "WORK"
+                                | "DIALOG"
+                                | "DISTRIBUTED"
+                                | "CONVERSATION"
+                                | ";"
                         ))
             });
             if control_led {
@@ -1833,7 +1859,7 @@ pub(crate) fn extract(
             pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
-            pending_routine_bodies: 0,
+            pending_routine_bodies: Vec::new(),
             pending_spec_header: false,
             last_bool: None,
         };
