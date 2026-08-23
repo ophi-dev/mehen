@@ -2617,3 +2617,70 @@ fn exception_declaration_is_not_a_handler_section() {
     // Entry 1 + RAISE 1.
     assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
 }
+
+// ── PR #257 round-15 review regressions ─────────────────────────────────
+
+/// A routine's IS/AS introduces its declaration section — initializers and
+/// cursor-query predicates there are not executable control flow; the body
+/// opens at the routine's BEGIN (Codex P2, PR #257 round 15).
+#[test]
+fn routine_declaration_sections_are_not_paths() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+           flag boolean := true and false;\n\
+           cursor c is select * from t where a = 1 and b = 2;\n\
+         begin\n\
+           null;\n\
+         end;\n\
+         /\n",
+    );
+    // Entry only — no declaration boolean counts.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// A standalone T-SQL raise batch lost to a root `Unparsable` run is
+/// measured like the same tokens inside a parsed block (Codex P2, PR #257
+/// round 15).
+#[test]
+fn standalone_raise_batches_are_measured() {
+    let throw = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         throw 51000, 'oops', 1;\n",
+    );
+    assert_eq!(get(&throw, "sql.procedural.raise_throw_count"), 1.0);
+    assert_eq!(get(&throw, "sql.procedural.cyclomatic_complexity"), 1.0);
+}
+
+/// The embedded-query metric is the worst *individual* query: two trivial
+/// SELECTs score like one, not like their sum (Codex P2, PR #257
+/// round 15).
+#[test]
+fn embedded_query_score_is_a_maximum_not_a_sum() {
+    let one = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p_one is\n\
+           v number;\n\
+         begin\n\
+           select 1 into v from dual;\n\
+         end;\n\
+         /\n",
+    );
+    let two = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p_two is\n\
+           v number;\n\
+         begin\n\
+           select 1 into v from dual;\n\
+           select 2 into v from dual;\n\
+         end;\n\
+         /\n",
+    );
+    let single = get(&one, "sql.structural_complexity.max_embedded_query");
+    assert!(single > 0.0);
+    assert_eq!(
+        get(&two, "sql.structural_complexity.max_embedded_query"),
+        single
+    );
+}

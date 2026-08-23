@@ -280,6 +280,12 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
             // An `ELSE`-led fragment is the else branch of a control
             // statement the grammar split off (T-SQL `IF …; ELSE …`).
             "ELSE" if i == 0 => return true,
+            // A *leading* raise statement the grammar lost whole
+            // (standalone T-SQL `THROW 51000, …;` / `RAISERROR (…);`
+            // batches — Codex P2): measured like the same tokens inside a
+            // parsed block. Leading position keeps column references named
+            // `raise` out.
+            "THROW" | "RAISERROR" | "SIGNAL" | "RAISE" if i == 0 => return true,
             // A *leading* control-position `IF` is a decision the grammar
             // lost whole (T-SQL `IF @a = 1 THROW …` at file level —
             // Codex P2). Mid-run `IF`s stay unadmitted (ambiguous with DDL
@@ -521,6 +527,11 @@ struct Machine<'a> {
     /// (a package initialization block or a member routine's body), so
     /// package-level declaration initializers create no paths (Codex P2).
     pending_spec_header: bool,
+    /// Effective dialect is T-SQL: its `AS` opens a routine body directly
+    /// (`CREATE PROCEDURE p AS SELECT 1` — no BEGIN required), while
+    /// Oracle's `IS`/`AS` introduce a declaration section that is not a
+    /// path (Codex P2).
+    tsql: bool,
     /// Definition headers whose body block hasn't opened yet — the next
     /// plain `BEGIN`s consume these and tag their blocks `routine_body`
     /// (nesting baselines, Codex P2). A stack, not a flag: an Oracle
@@ -803,10 +814,16 @@ impl Machine<'_> {
                 }
                 "IS" | "AS" if kw => {
                     // A package/type header's IS/AS introduces declarations
-                    // — not a body (Codex P2).
+                    // — not a body (Codex P2). A routine header's IS/AS
+                    // likewise introduces its *declaration section* (cursor
+                    // queries, initializers — not paths): the body opens at
+                    // the routine's BEGIN (Codex P2). T-SQL is the
+                    // exception — its AS opens the body directly, no BEGIN
+                    // required. Any other IS/AS (`cursor c IS select …`, a
+                    // column alias) is no body opener at all.
                     if self.pending_spec_header {
                         self.pending_spec_header = false;
-                    } else {
+                    } else if self.pending_routine_header && self.tsql && t.word == "AS" {
                         self.in_body = true;
                     }
                     self.pending_routine_header = false;
@@ -1460,6 +1477,7 @@ pub(crate) fn extract(
     facts: &mut SqlFileFacts,
 ) {
     let bigquery = dialect == DialectKind::Bigquery;
+    let tsql = dialect == DialectKind::Tsql;
     // The dialects whose grammars split routine bodies into *root*
     // unparsable spills — the only ones where a top-level run can be a
     // routine continuation (T-SQL batch bodies, MySQL delimiter bodies).
@@ -1475,18 +1493,16 @@ pub(crate) fn extract(
         .map(|(idx, u)| (u.start_byte, u.end_byte, idx))
         .collect();
     let mut unit_tallies = vec![(0.0f64, 0.0f64); facts.procedural_units.len()];
-    // Query facts of body continuations, accumulated per owning routine:
-    // when sqruff splits a routine body into sibling statements, the queries
-    // in those fragments belong to the routine's embedded score (Codex P2).
-    // Facts are merged (sums for counts, max for depths) and scored once per
-    // routine, so parser fragmentation cannot inflate the max-shaped
-    // structural terms. Unparsable spills contribute nothing here — they
-    // contain no typed query nodes to extract.
-    let mut continuation_facts: Vec<SqlFileFacts> = facts
-        .procedural_units
-        .iter()
-        .map(|_| SqlFileFacts::default())
-        .collect();
+    // Per-query facts of body continuations, accumulated per owning
+    // routine: when sqruff splits a routine body into sibling statements,
+    // the queries in those fragments belong to the routine's embedded
+    // score (Codex P2). Each maximal query root keeps its own facts — the
+    // routine's score is the *maximum* over its individual queries, so
+    // neither parser fragmentation nor many trivial statements can inflate
+    // the worst-query metric (Codex P2 ×2). Unparsable spills contribute
+    // nothing here — they contain no typed query nodes to extract.
+    let mut continuation_facts: Vec<Vec<SqlFileFacts>> =
+        facts.procedural_units.iter().map(|_| Vec::new()).collect();
     let mut change_risk: Vec<ChangeRiskEvidence> = Vec::new();
 
     let push_entry = |procedural: &mut ProceduralFacts, span: SourceSpan| {
@@ -1641,6 +1657,7 @@ pub(crate) fn extract(
             pending_routine_header: false,
             pending_routine_bodies: Vec::new(),
             pending_spec_header: false,
+            tsql,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1662,7 +1679,7 @@ pub(crate) fn extract(
         // max-shaped structural terms charge once per routine, not once per
         // parser fragment.
         if let Some(idx) = fallback_unit {
-            merge_query_facts(&mut continuation_facts[idx], &query_facts_of(node));
+            continuation_facts[idx].extend(query_root_facts(node));
             // The continuation is part of the routine's source extent:
             // extend the unit's span so the emitted `Function` space covers
             // the full body, not just the header fragment sqruff kept
@@ -1718,6 +1735,7 @@ pub(crate) fn extract(
             pending_routine_header: false,
             pending_routine_bodies: Vec::new(),
             pending_spec_header: false,
+            tsql,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1861,6 +1879,7 @@ pub(crate) fn extract(
             pending_routine_header: false,
             pending_routine_bodies: Vec::new(),
             pending_spec_header: false,
+            tsql,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1907,18 +1926,20 @@ pub(crate) fn extract(
         }
     }
 
-    // Embedded query complexity per routine (§9.3): the structural score of
-    // the query constructs inside each unit's subtree — computed with the
-    // unit as the crawl root so subquery depths are unit-relative — merged
-    // with the facts of body continuations attributed to it above (merged as
-    // facts, not summed as scores, so max-shaped terms charge once).
+    // Embedded query complexity per routine (§9.3 — "the worst embedded
+    // query inside any single routine"): each maximal query root in the
+    // unit's subtree (and its attributed continuations) scores separately,
+    // and the routine takes the *maximum* — two trivial SELECTs score like
+    // one, not like their sum (Codex P2).
     let unit_nodes = crate::facts::procedural_unit_nodes(root);
     debug_assert_eq!(unit_nodes.len(), facts.procedural_units.len());
     let mut max_unit: Option<(usize, f64)> = None;
     for (idx, node) in unit_nodes.iter().enumerate() {
-        let mut unit_facts = query_facts_of(node);
-        merge_query_facts(&mut unit_facts, &continuation_facts[idx]);
-        let score = crate::composite::structural(&unit_facts);
+        let score = query_root_facts(node)
+            .iter()
+            .chain(continuation_facts[idx].iter())
+            .map(crate::composite::structural)
+            .fold(0.0f64, f64::max);
         if let Some(unit) = facts.procedural_units.get_mut(idx) {
             unit.embedded_query_structural = score;
         }
@@ -1967,20 +1988,22 @@ fn last_unit_before(unit_ranges: &[(u32, u32, usize)], byte: u32) -> Option<usiz
         .map(|&(_, _, idx)| idx)
 }
 
-/// The declarative query facts of one region's subtree — the input to
-/// `sql.structural_complexity` scoring (§8.1).
+/// The declarative query facts of each *maximal query root* in a region's
+/// subtree — the per-query inputs to `sql.structural_complexity` scoring
+/// (§8.1). One entry per root: the embedded metric is the *maximum* over
+/// individual queries, never a sum across them (Codex P2).
 ///
 /// Nested routine definitions are *excluded*: a subprogram declared inside
 /// the region scores its own queries when it is scored as its own unit, so
 /// embedded complexity follows the same innermost-ownership contract as the
 /// control-flow increments — an outer routine with no query of its own
 /// cannot outrank its child on the child's query (Codex P2). The walk
-/// descends past containers that hold nested definitions and runs the
-/// extractors on each maximal definition-free subtree, merging with
-/// [`merge_query_facts`] (sums for counts, max for depths — the same merge
-/// continuations use, so depth semantics stay piece-relative either way).
-fn query_facts_of(region: &ErasedSegment) -> SqlFileFacts {
-    let mut acc = SqlFileFacts::default();
+/// descends past containers that hold nested definitions; within each
+/// definition-free subtree, the maximal query roots (recurse_into=false
+/// keeps a WITH's inner SELECTs from double-extracting) each yield their
+/// own facts.
+fn query_root_facts(region: &ErasedSegment) -> Vec<SqlFileFacts> {
+    let mut roots = Vec::new();
     let mut pending: Vec<ErasedSegment> = region.segments().to_vec();
     while let Some(node) = pending.pop() {
         if crate::facts::PROCEDURAL_UNITS.contains(node.get_type()) {
@@ -1997,15 +2020,12 @@ fn query_facts_of(region: &ErasedSegment) -> SqlFileFacts {
         if holds_nested {
             pending.extend(node.segments().iter().cloned());
         } else {
-            // Only *query* nodes feed embedded facts (Codex P2): crawl the
-            // maximal query roots (recurse_into=false keeps a WITH's inner
-            // SELECTs from double-extracting) and extract within each.
             for query in node.recursive_crawl(&QUERY_ROOTS, false, &SyntaxSet::EMPTY, true) {
-                merge_query_facts(&mut acc, &subtree_query_facts(&query));
+                roots.push(subtree_query_facts(&query));
             }
         }
     }
-    acc
+    roots
 }
 
 /// The query facts of one query-root subtree, collected with the node as
@@ -2024,38 +2044,4 @@ fn subtree_query_facts(region: &ErasedSegment) -> SqlFileFacts {
     crate::facts::extract_expressions(region, &mut mini.expressions);
     crate::facts::extract_cte_graph(region, &mut mini.ctes);
     mini
-}
-
-/// Merge one region's query facts into a routine's accumulator: additive
-/// fields sum, depth-shaped fields take the maximum. Covers exactly the
-/// fields `composite::structural` reads (§8.1) — a routine split across
-/// parser fragments scores as one routine, not once per fragment
-/// (Codex P2).
-fn merge_query_facts(acc: &mut SqlFileFacts, other: &SqlFileFacts) {
-    acc.query_block_count += other.query_block_count;
-    acc.ctes.count += other.ctes.count;
-    acc.ctes.max_dependency_depth = acc
-        .ctes
-        .max_dependency_depth
-        .max(other.ctes.max_dependency_depth);
-    acc.joins.total += other.joins.total;
-    acc.joins.left += other.joins.left;
-    acc.joins.right += other.joins.right;
-    acc.joins.full += other.joins.full;
-    acc.joins.cross += other.joins.cross;
-    acc.subqueries.count += other.subqueries.count;
-    acc.subqueries.max_depth = acc.subqueries.max_depth.max(other.subqueries.max_depth);
-    acc.subqueries.correlated_count += other.subqueries.correlated_count;
-    acc.subqueries.derived_table_count += other.subqueries.derived_table_count;
-    acc.predicates.boolean_operator_count += other.predicates.boolean_operator_count;
-    acc.predicates.max_boolean_depth = acc
-        .predicates
-        .max_boolean_depth
-        .max(other.predicates.max_boolean_depth);
-    acc.cases.count += other.cases.count;
-    acc.cases.max_depth = acc.cases.max_depth.max(other.cases.max_depth);
-    acc.windows.function_count += other.windows.function_count;
-    acc.aggregates.function_count += other.aggregates.function_count;
-    acc.set_ops.count += other.set_ops.count;
-    acc.expressions.max_depth = acc.expressions.max_depth.max(other.expressions.max_depth);
 }
