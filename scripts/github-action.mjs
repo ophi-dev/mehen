@@ -127,6 +127,9 @@ async function main() {
   fs.writeFileSync(reportJson, `${diff.stdout.trim()}\n`, "utf8");
 
   const diffs = parseDiffJson(diff.stdout);
+  const analysisErrors = parseAnalysisErrors(diff.stdout);
+  const blockingAnalysisErrors =
+    countBlockingAnalysisDiagnostics(analysisErrors);
   const gateViolations = parseGateViolations(diff.stdout);
   const violations = collectThresholdViolations(diffs, thresholds);
   let markdown = renderMarkdown(
@@ -137,6 +140,7 @@ async function main() {
     version,
     gateViolations,
     baseCoverage.disclosure,
+    analysisErrors,
   );
 
   // Phase F (§39): `mehen diff --output-format markdown` emits a
@@ -166,14 +170,16 @@ async function main() {
   // delta thresholds and repository `mehen.toml` breaches parsed from
   // the diff report.
   setOutput("violations", String(violations.length + gateViolations.length));
+  setOutput("analysis_errors", String(blockingAnalysisErrors));
   setOutput("report_json", reportJson);
   setOutput("report_markdown", reportMarkdown);
 
+  let shouldFail = false;
   if (violations.length > 0 && boolInput("FAIL_ON_THRESHOLD", true)) {
     console.error(
       `Mehen threshold check failed with ${violations.length} violation(s).`,
     );
-    process.exit(1);
+    shouldFail = true;
   }
 
   // A deferred quality-gate failure from the diff itself (configured
@@ -183,6 +189,20 @@ async function main() {
     console.error(
       `mehen diff exited with status ${diff.gateStatus}: a configured quality gate failed (see the report above).`,
     );
+    shouldFail = true;
+  }
+
+  if (
+    blockingAnalysisErrors > 0 &&
+    boolInput("FAIL_ON_ANALYSIS_ERROR", false)
+  ) {
+    console.error(
+      `Mehen analysis check failed with ${blockingAnalysisErrors} blocking diagnostic(s) (see the report above).`,
+    );
+    shouldFail = true;
+  }
+
+  if (shouldFail) {
     process.exit(1);
   }
 }
@@ -941,9 +961,8 @@ function runMehen(cli, args, options = {}) {
  * Whether a failing `mehen diff --output-format json` invocation is a
  * configured quality-gate exit: the payload must be complete AND carry
  * the explicit `threshold_violations` signal the CLI emits only when a
- * `mehen.toml` gate fired. An analysis failure also exits 1 with
- * well-formed JSON but without that key — it must keep failing fast
- * instead of publishing a partial report under the wrong reason.
+ * `mehen.toml` gate fired. Per-file analysis diagnostics are advisory in
+ * current CLIs and live in their own `analysis_errors` array.
  */
 function isGateFailureReport(stdout) {
   try {
@@ -1125,6 +1144,73 @@ function parseGateViolations(stdout) {
   }
 }
 
+function parseAnalysisErrors(stdout) {
+  try {
+    const parsed = JSON.parse(typeof stdout === "string" ? stdout : "");
+    return parsed && Array.isArray(parsed.analysis_errors)
+      ? parsed.analysis_errors
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function analysisDiagnosticRows(records) {
+  const rows = [];
+  const seen = new Set();
+  for (const record of Array.isArray(records) ? records : []) {
+    const path = typeof record?.path === "string" ? record.path : "";
+    const side = record?.side === "base" ? "base" : "head";
+    for (const diagnostic of Array.isArray(record?.diagnostics)
+      ? record.diagnostics
+      : []) {
+      const severity =
+        typeof diagnostic?.severity === "string"
+          ? diagnostic.severity.toLowerCase()
+          : "warning";
+      const code =
+        typeof diagnostic?.code === "string"
+          ? diagnostic.code
+          : "analysis.diagnostic";
+      const message =
+        typeof diagnostic?.message === "string"
+          ? diagnostic.message
+          : "Analyzer diagnostic";
+      const line = Number.isInteger(diagnostic?.span?.start_line)
+        ? diagnostic.span.start_line
+        : null;
+      const spanKey = diagnostic?.span
+        ? [
+            diagnostic.span.start_byte,
+            diagnostic.span.end_byte,
+            diagnostic.span.start_line,
+            diagnostic.span.end_line,
+          ]
+        : null;
+      const key = JSON.stringify([
+        path,
+        side,
+        severity,
+        code,
+        message,
+        spanKey,
+      ]);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      rows.push({ path, side, severity, code, message, line });
+    }
+  }
+  return rows;
+}
+
+function countBlockingAnalysisDiagnostics(records) {
+  return analysisDiagnosticRows(records).filter(
+    (row) => row.severity === "error" || row.severity === "fatal",
+  ).length;
+}
+
 function renderMarkdown(
   diffs,
   context,
@@ -1133,6 +1219,7 @@ function renderMarkdown(
   version = "",
   gateViolations = [],
   coverageNote = null,
+  analysisErrors = [],
 ) {
   const title = input("COMMENT_TITLE", DEFAULT_TITLE).trim() || DEFAULT_TITLE;
   const scope =
@@ -1198,6 +1285,22 @@ function renderMarkdown(
     }
   }
 
+  const analysisRows = analysisDiagnosticRows(analysisErrors);
+  if (analysisRows.length > 0) {
+    body += "\n### Analysis diagnostics\n\n";
+    body +=
+      "Mehen reported analyzer diagnostics. Sides with error or fatal diagnostics use only metrics that remain valid without the failed parse.\n\n";
+    body += "| File | Side | Severity | Diagnostic |\n";
+    body += "|---|---|---|---|\n";
+    for (const row of analysisRows) {
+      const revision = row.side === "base" ? context.baseSha : context.sha;
+      const side =
+        row.side === "base" ? context.baseLabel || "base" : "head";
+      const line = row.line ? ` at line ${row.line}` : "";
+      body += `| ${renderFile(row.path, context, revision)} | ${escapeCell(side)} | ${escapeCell(row.severity)} | \`${escapeCell(row.code)}\`${line}: ${escapeCell(row.message)} |\n`;
+    }
+  }
+
   if (sawNotApplicable) {
     body +=
       "\n> `—` indicates the metric does not apply to the file's language.\n";
@@ -1220,16 +1323,16 @@ function renderFooter(version) {
   return `${FOOTER_PREFIX}${versionSuffix} ${FOOTER_SUFFIX}`;
 }
 
-function renderFile(filePath, context) {
+function renderFile(filePath, context, revision = context.sha) {
   const escaped = escapeCell(filePath);
-  if (!context.repository || !context.sha) {
+  if (!context.repository || !revision) {
     return escaped;
   }
   const urlPath = String(filePath)
     .split("/")
     .map((part) => encodeURIComponent(part))
     .join("/");
-  return `[${escaped}](https://github.com/${context.repository}/blob/${context.sha}/${urlPath})`;
+  return `[${escaped}](https://github.com/${context.repository}/blob/${revision}/${urlPath})`;
 }
 
 // Build the master header as the union of metrics across all files, preserving
@@ -1575,11 +1678,14 @@ export {
   isGateFailureReport,
   isNotApplicable,
   listFilesRecursively,
+  countBlockingAnalysisDiagnostics,
+  parseAnalysisErrors,
   parseGateViolations,
   parseList,
   parseThresholds,
   parseVersionOutput,
   pickBaseArtifact,
+  renderMarkdown,
   renderFooter,
   unionMetricColumns,
 };

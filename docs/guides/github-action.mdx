@@ -80,6 +80,7 @@ trees:
 | `github-token` | (workflow token) | GitHub token used to update PR comments. |
 | `thresholds` | `""` | Adverse per-file delta limits, e.g. `cyclomatic=5,cognitive=3,loc.lloc=100`. |
 | `fail-on-threshold` | `true` | Fail the action when any configured threshold is exceeded. |
+| `fail-on-analysis-error` | `false` | Fail after publishing the report when any file has an error- or fatal-severity analysis diagnostic. |
 | `comment-title` | `## 📊 Source Code Metrics` | Markdown heading used for the sticky comment. |
 | `coverage-files` | `""` | Coverage report paths produced by an earlier test step (newline, comma, or semicolon separated; literal paths). Enables the [coverage trend columns](#coverage-trends). |
 | `coverage-base-source` | `auto` | Where base-revision coverage comes from on PRs: `auto`, `cache`, `artifact`, `codecov`, or `off`. |
@@ -91,6 +92,7 @@ trees:
 | Output | Description |
 |---|---|
 | `violations` | Number of threshold violations. |
+| `analysis_errors` | Number of unique error- or fatal-severity analysis diagnostics. |
 | `report_json` | Path to the JSON diff report produced by mehen. |
 | `report_markdown` | Path to the rendered Markdown report. |
 
@@ -132,6 +134,16 @@ single table whose columns are the union of each language's defaults — every r
 columns its analyzer emits, and the rest render as `–`. This keeps SQL changes visible on the default
 action path instead of silently dropping out. See [`mehen diff`](/commands/diff) for how the default
 metric set is resolved per file language.
+
+## Analysis diagnostics
+
+An unsupported language feature or malformed file no longer prevents the Action from publishing
+the rest of the report. The sticky comment adds an **Analysis diagnostics** table naming the file,
+revision side, severity, reason code, and message. Static cells for a blocked side render as
+unavailable; parser-independent values and other files remain valid.
+
+Diagnostics are advisory by default. Set `fail-on-analysis-error: true` to publish the complete
+comment and then fail the workflow step.
 
 ## Coverage trends
 
@@ -259,6 +271,7 @@ Notes for shared setups:
           cyclomatic=3
           cognitive=3
         fail-on-threshold: true
+        fail-on-analysis-error: true
     ```
   </Tab>
   <Tab title="Comment-only (advisory)">

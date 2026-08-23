@@ -620,11 +620,12 @@ fn collect_diagnostics(
 ///
 /// Per the diagnostic contract (rewrite plan §9.3), `Warning` is
 /// informational, while `Error` or `Fatal` signals that the analysis is
-/// incomplete — diff orchestrators must surface those (CLI exit 1, JSON
-/// `analysis_errors`). Returns `true` iff any diagnostic in `diagnostics`
-/// reaches the blocking threshold. Lives in the post-1.0 `diff` module
-/// so it survives the legacy-engine teardown; the legacy diff path
-/// re-uses it via `pub(crate)`.
+/// incomplete — diff orchestrators must reject the partial static tree
+/// and surface the diagnostics. Process failure is a caller policy.
+/// Returns `true` iff any diagnostic in `diagnostics` reaches the
+/// blocking threshold. Lives in the post-1.0 `diff` module so it
+/// survives the legacy-engine teardown; the legacy diff path re-uses
+/// it via `pub(crate)`.
 pub(crate) fn has_blocking_diagnostic(diagnostics: &[ParseDiagnostic]) -> bool {
     diagnostics.iter().any(|d| {
         matches!(
@@ -780,6 +781,11 @@ pub struct DiffOpts {
         value_parser = parse_fail_on_flag,
     )]
     fail_on: Vec<FailOn>,
+    /// Exit with status 1 after rendering when any analyzed side has
+    /// an error- or fatal-severity diagnostic. By default those sides
+    /// are reported as unavailable while the rest of the diff succeeds.
+    #[clap(long)]
+    fail_on_analysis_error: bool,
     /// Head-side coverage: the shared `--coverage` flag
     /// (`PATH|auto|off`, repeatable, bare means `auto`). Also loads
     /// lazily when a `coverage.*` column or configured threshold asks,
@@ -1140,13 +1146,13 @@ fn run_diff_inner(
     //    longer used; we drive `LanguageAnalyzer::analyze` and read
     //    selector values out of the root `MetricSpace`'s `MetricSet`.
     //
-    //    Recoverable parser errors are surfaced as
-    //    `DiagnosticSeverity::Error` / `Fatal` by the per-language
-    //    analyzers (plan §9.3). Track whether any analyzed side reported
-    //    an error/fatal so the diff exits non-zero at the end — partial
-    //    metrics from a broken parse must not pass CI silently.
+    //    Recoverable parser errors are surfaced as structured
+    //    diagnostics. A blocked side contributes no partial static
+    //    metrics, but it does not invalidate measurements from other
+    //    files; callers can opt back into strict gating with
+    //    `--fail-on-analysis-error`.
     let mut diffs = Vec::new();
-    let mut analysis_failed = false;
+    let mut analysis_errors: Vec<AnalysisErrorRecord> = Vec::new();
     // Configured metric thresholds (`mehen.toml`): evaluated per file
     // against the *head* side of the metrics this diff reports.
     let threshold_policy = config
@@ -1183,6 +1189,25 @@ fn run_diff_inner(
                 cf.path.display(),
                 language.canonical()
             );
+            for side in [
+                (!is_new).then_some(DiffSide::Base),
+                (!is_deleted).then_some(DiffSide::Head),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                analysis_errors.push(AnalysisErrorRecord {
+                    path: utf8_path.clone(),
+                    side,
+                    diagnostics: vec![ParseDiagnostic::warning(
+                        "engine.analyzer_unavailable",
+                        format!(
+                            "no analyzer registered for `{}` in this build; static metrics are unavailable",
+                            language.canonical()
+                        ),
+                    )],
+                });
+            }
         }
 
         // Selectors for *this* file: the explicit list, or this language's
@@ -1206,52 +1231,96 @@ fn run_diff_inner(
             langs
         };
 
-        let mut analyze = |bytes: Vec<u8>, side: &str| -> Option<MetricSpace> {
+        let mut analyze = |bytes: Vec<u8>, side: DiffSide| -> Option<MetricSpace> {
             let analyzer = analyzer.as_deref()?;
-            let text = String::from_utf8(bytes).ok()?;
+            let side_label = match side {
+                DiffSide::Base => "baseline",
+                DiffSide::Head => "current",
+            };
+            let text = match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    let diagnostic = ParseDiagnostic::warning(
+                        "engine.undecodable",
+                        "not valid UTF-8; static analysis unavailable for this side",
+                    );
+                    log::warn!(
+                        "{} ({side_label}): {}: {}",
+                        cf.path.display(),
+                        diagnostic.code,
+                        diagnostic.message
+                    );
+                    analysis_errors.push(AnalysisErrorRecord {
+                        path: utf8_path.clone(),
+                        side,
+                        diagnostics: vec![diagnostic],
+                    });
+                    return None;
+                }
+            };
             let source = SourceFile::new(utf8_path.clone(), *language, text);
             let analysis = match analyzer.analyze(&source, &analysis_config) {
                 Ok(a) => a,
                 Err(err) => {
-                    log::error!("{} ({side}): analyzer failed: {err}", cf.path.display());
-                    analysis_failed = true;
+                    let diagnostic = ParseDiagnostic::error("analysis.error", err.to_string());
+                    log::error!(
+                        "{} ({side_label}): {}: {}",
+                        cf.path.display(),
+                        diagnostic.code,
+                        diagnostic.message
+                    );
+                    analysis_errors.push(AnalysisErrorRecord {
+                        path: utf8_path.clone(),
+                        side,
+                        diagnostics: vec![diagnostic],
+                    });
                     return None;
                 }
             };
             for diag in &analysis.diagnostics {
                 match diag.severity {
                     DiagnosticSeverity::Warning => log::warn!(
-                        "{} ({side}): {}: {}",
+                        "{} ({side_label}): {}: {}",
                         cf.path.display(),
                         diag.code,
                         diag.message
                     ),
                     DiagnosticSeverity::Error | DiagnosticSeverity::Fatal => log::error!(
-                        "{} ({side}): {}: {}",
+                        "{} ({side_label}): {}: {}",
                         cf.path.display(),
                         diag.code,
                         diag.message
                     ),
                 }
             }
+            if !analysis.diagnostics.is_empty() {
+                analysis_errors.push(AnalysisErrorRecord {
+                    path: utf8_path.clone(),
+                    side,
+                    diagnostics: analysis.diagnostics.clone(),
+                });
+            }
             if has_blocking_diagnostic(&analysis.diagnostics) {
-                analysis_failed = true;
                 // A partial tree behind an `Error`/`Fatal` diagnostic
                 // is not a measurement (§9.3): emitting its truncated
                 // statics — or blending them into the history
-                // composites — would mislead even though the run
-                // already exits non-zero. The side falls back to the
-                // history-only synthetic space below.
+                // composites — would mislead. The side falls back to
+                // the history-only synthetic space below.
                 return None;
             }
             Some(analysis.root)
         };
 
+        let mut baseline_static_available = false;
         let mut baseline_space: Option<MetricSpace> = if is_new {
             None
         } else {
             match mehen_git::read_blob(&repo, &from_ref, base_path) {
-                Ok(Some(bytes)) => analyze(bytes, "baseline"),
+                Ok(Some(bytes)) => {
+                    let space = analyze(bytes, DiffSide::Base);
+                    baseline_static_available = space.is_some();
+                    space
+                }
                 Ok(None) => None,
                 Err(e) => {
                     log::warn!("Skipping baseline for {}: {e}", cf.path.display());
@@ -1260,11 +1329,16 @@ fn run_diff_inner(
             }
         };
 
+        let mut current_static_available = false;
         let mut current_space: Option<MetricSpace> = if is_deleted {
             None
         } else {
             match mehen_git::read_blob(&repo, &to_ref, &cf.path) {
-                Ok(Some(bytes)) => analyze(bytes, "current"),
+                Ok(Some(bytes)) => {
+                    let space = analyze(bytes, DiffSide::Head);
+                    current_static_available = space.is_some();
+                    space
+                }
                 Ok(None) => None,
                 Err(e) => {
                     log::warn!("Skipping current for {}: {e}", cf.path.display());
@@ -1558,25 +1632,28 @@ fn run_diff_inner(
                             baseline_space.is_some() && !base_measured,
                             current_space.is_some() && !head_measured,
                         )
-                    } else {
+                    } else if sel.name.starts_with("history.") {
                         let baseline_history_missing =
-                            matches!(histories.as_ref(), Some((None, _)))
-                                && !is_new_row
-                                && sel.name.starts_with("history.");
+                            matches!(histories.as_ref(), Some((None, _))) && !is_new;
                         (
                             baseline_history_missing
-                                || (baseline_space.is_some()
+                                || (!is_new
                                     && !history_metrics::selector_available(
                                         sel.name,
                                         baseline_composites,
                                         baseline_history_available,
                                     )),
-                            current_space.is_some()
+                            !is_deleted
                                 && !history_metrics::selector_available(
                                     sel.name,
                                     current_composites,
                                     current_history_available,
                                 ),
+                        )
+                    } else {
+                        (
+                            !is_new && !baseline_static_available,
+                            !is_deleted && !current_static_available,
                         )
                     };
                 let baseline = baseline_space
@@ -1714,7 +1791,14 @@ fn run_diff_inner(
     let format = opts.output_format.unwrap_or(DiffFormat::Markdown);
     match format {
         DiffFormat::Markdown => {
-            print_markdown(&diffs, &display_selectors, &from_label, &from_ref, &to_ref);
+            print_markdown(
+                &diffs,
+                &display_selectors,
+                &analysis_errors,
+                &from_label,
+                &from_ref,
+                &to_ref,
+            );
             if !doc_files.is_empty() {
                 let mut ctx = DocRenderCtx::new(&from_label);
                 let repo_url = ci_ctx
@@ -1736,17 +1820,7 @@ fn run_diff_inner(
             } else {
                 Some(&doc_files)
             };
-            // A failed analysis means the measurements behind the
-            // breaches are partial: withhold the machine-readable gate
-            // signal so consumers (the GitHub Action) fail fast on the
-            // analysis error instead of publishing an incomplete
-            // report as an ordinary gate failure.
-            let publishable_breaches: &[crate::config_file::ThresholdBreach] = if analysis_failed {
-                &[]
-            } else {
-                &threshold_breaches
-            };
-            if let Err(e) = print_json(&diffs, doc_ref, publishable_breaches) {
+            if let Err(e) = print_json(&diffs, doc_ref, &analysis_errors, &threshold_breaches) {
                 // Surface the error loudly — exit code 2 mirrors the
                 // --fail-on gate and is distinct from the generic exit 1
                 // that covers setup/IO errors in run_diff_inner.
@@ -1776,15 +1850,21 @@ fn run_diff_inner(
         std::process::exit(2);
     }
 
-    // Per the diagnostic contract (rewrite plan §9.3), recoverable
-    // parser errors must surface as a non-zero exit so CI cannot pass
-    // partial metrics computed from a known-broken parse. Checked
-    // before the threshold gate: a broken analysis outranks a quality
-    // gate evaluated on the parseable remainder. Exit 1 lines up with
-    // the generic setup/IO bucket and is distinct from exit 2 (doc
-    // gate). Diagnostics are already logged above; this gate only
-    // flips the exit code.
-    if analysis_failed {
+    // Advisory by default: each blocked side is represented by
+    // `analysis_errors`, and its static cells render as unavailable.
+    // Strict callers can restore the historical non-zero behavior
+    // without losing the complete report.
+    if opts.fail_on_analysis_error
+        && analysis_errors
+            .iter()
+            .flat_map(|record| &record.diagnostics)
+            .any(|diagnostic| {
+                matches!(
+                    diagnostic.severity,
+                    DiagnosticSeverity::Error | DiagnosticSeverity::Fatal
+                )
+            })
+    {
         std::process::exit(1);
     }
 
@@ -2081,6 +2161,7 @@ fn legacy_path_is_selected(path: &Path, paths: &[PathBuf]) -> bool {
 fn print_markdown(
     diffs: &[FileDiff],
     selectors: &[MetricSelector],
+    analysis_errors: &[AnalysisErrorRecord],
     from_label: &str,
     from: &str,
     to: &str,
@@ -2095,42 +2176,101 @@ fn print_markdown(
 
     if diffs.is_empty() {
         out.push_str("No metric changes detected.\n");
-        write!(std::io::stdout().lock(), "{out}").unwrap();
+    } else {
+        // Header
+        out.push_str("| File |");
+        for sel in selectors {
+            out.push_str(&format!(" {} |", sel.label));
+        }
+        out.push('\n');
+
+        // Separator
+        out.push_str("|---|");
+        for _ in selectors {
+            out.push_str("---:|");
+        }
+        out.push('\n');
+
+        // Rows. Each cell is looked up by selector *name* against the file's
+        // metrics, so a file that doesn't publish a given column (e.g. a SQL file
+        // under the `cyclomatic` column of a mixed PR) renders an em dash rather
+        // than a misaligned value.
+        for diff in diffs {
+            out.push_str(&format!("| {} |", diff.path.display()));
+            for sel in selectors {
+                out.push(' ');
+                match diff.metrics.iter().find(|m| m.name == sel.name) {
+                    Some(md) => out.push_str(&format_metric_cell(md, from_label)),
+                    None => out.push('\u{2013}'), // – (column not applicable to this file)
+                }
+                out.push_str(" |");
+            }
+            out.push('\n');
+        }
+    }
+
+    write_analysis_diagnostics(&mut out, analysis_errors);
+    write!(std::io::stdout().lock(), "{out}").unwrap();
+}
+
+fn write_analysis_diagnostics(out: &mut String, records: &[AnalysisErrorRecord]) {
+    if records.is_empty() {
         return;
     }
 
-    // Header
-    out.push_str("| File |");
-    for sel in selectors {
-        out.push_str(&format!(" {} |", sel.label));
-    }
-    out.push('\n');
+    out.push_str("\n## Analysis diagnostics\n\n");
+    out.push_str(
+        "Static metrics are unavailable for sides with error or fatal diagnostics; other measurements remain valid.\n\n",
+    );
+    out.push_str("| File | Side | Severity | Diagnostic |\n");
+    out.push_str("|---|---|---|---|\n");
 
-    // Separator
-    out.push_str("|---|");
-    for _ in selectors {
-        out.push_str("---:|");
-    }
-    out.push('\n');
-
-    // Rows. Each cell is looked up by selector *name* against the file's
-    // metrics, so a file that doesn't publish a given column (e.g. a SQL file
-    // under the `cyclomatic` column of a mixed PR) renders an em dash rather
-    // than a misaligned value.
-    for diff in diffs {
-        out.push_str(&format!("| {} |", diff.path.display()));
-        for sel in selectors {
-            out.push(' ');
-            match diff.metrics.iter().find(|m| m.name == sel.name) {
-                Some(md) => out.push_str(&format_metric_cell(md, from_label)),
-                None => out.push('\u{2013}'), // – (column not applicable to this file)
+    let mut seen = std::collections::BTreeSet::new();
+    for record in records {
+        let side = match record.side {
+            DiffSide::Base => "base",
+            DiffSide::Head => "head",
+        };
+        for diagnostic in &record.diagnostics {
+            let severity = match diagnostic.severity {
+                DiagnosticSeverity::Warning => "warning",
+                DiagnosticSeverity::Error => "error",
+                DiagnosticSeverity::Fatal => "fatal",
+            };
+            let span_key = diagnostic
+                .span
+                .as_ref()
+                .map(|span| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        span.start_byte, span.end_byte, span.start_line, span.end_line
+                    )
+                })
+                .unwrap_or_default();
+            let key = format!(
+                "{}\0{side}\0{severity}\0{}\0{}\0{span_key}",
+                record.path, diagnostic.code, diagnostic.message,
+            );
+            if !seen.insert(key) {
+                continue;
             }
-            out.push_str(" |");
+            let path = escape_markdown_cell(record.path.as_str());
+            let code = escape_markdown_cell(&diagnostic.code);
+            let message = escape_markdown_cell(&diagnostic.message);
+            let line = diagnostic
+                .span
+                .as_ref()
+                .map(|span| format!(" at line {}", span.start_line))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "| {path} | {side} | {severity} | `{code}`{line}: {message} |\n"
+            ));
         }
-        out.push('\n');
     }
+}
 
-    write!(std::io::stdout().lock(), "{out}").unwrap();
+fn escape_markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace(['\r', '\n'], " ")
 }
 
 fn format_metric_cell(md: &MetricDiff, from: &str) -> String {
@@ -2215,29 +2355,32 @@ fn format_f64(v: f64) -> String {
 
 // ── JSON output ────────────────────────────────────────────────────────
 
-/// Emit a single JSON document with a `source_code` key and an optional
-/// `markdown` key. Downstream consumers (`jq`, `serde_json`) see one top-level
-/// object, not two concatenated arrays.
+/// Emit a single JSON document with `source_code` and `analysis_errors`
+/// keys plus optional `markdown` and `threshold_violations` sections.
+/// Downstream consumers (`jq`, `serde_json`) see one top-level object,
+/// not concatenated arrays.
 ///
 /// Serialization errors bubble up as `Err` so `run_diff_inner` exits
 /// non-zero instead of silently writing an empty `""` to stdout.
 fn print_json(
     diffs: &[FileDiff],
     docs: Option<&[DocDiffFile]>,
+    analysis_errors: &[AnalysisErrorRecord],
     threshold_breaches: &[crate::config_file::ThresholdBreach],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut payload = serde_json::Map::new();
     payload.insert("source_code".to_string(), serde_json::to_value(diffs)?);
+    payload.insert(
+        "analysis_errors".to_string(),
+        serde_json::to_value(analysis_errors)?,
+    );
     if let Some(docs) = docs {
         payload.insert(
             "markdown".to_string(),
             serde_json::Value::Array(doc_json_payload(docs)),
         );
     }
-    // Present only when a configured `mehen.toml` gate fired — the
-    // explicit signal machine consumers (e.g. the GitHub Action) use
-    // to distinguish a quality-gate exit (1, with this key) from an
-    // analysis failure (also exit 1, but without it).
+    // Present only when a configured `mehen.toml` gate fired.
     if !threshold_breaches.is_empty() {
         payload.insert(
             "threshold_violations".to_string(),
@@ -3630,6 +3773,7 @@ binary.md binary
             show_unchanged: false,
             ignore_git_attributes: true,
             fail_on: vec![],
+            fail_on_analysis_error: false,
             coverage: Default::default(),
             base_coverage: vec![],
         }
@@ -3962,7 +4106,7 @@ src/archive.txt binary
             is_deleted: false,
             functions: 0,
         }];
-        let res = print_json(&diffs, None, &[]);
+        let res = print_json(&diffs, None, &[], &[]);
         assert!(res.is_ok(), "valid input must serialize cleanly");
     }
 
@@ -3973,7 +4117,7 @@ src/archive.txt binary
         // emitter used `unwrap_or_default` and silently wrote an empty
         // JSON document to stdout when serde_json failed.
         let diffs: Vec<FileDiff> = vec![];
-        let res: Result<(), Box<dyn std::error::Error>> = print_json(&diffs, None, &[]);
+        let res: Result<(), Box<dyn std::error::Error>> = print_json(&diffs, None, &[], &[]);
         assert!(res.is_ok());
     }
 

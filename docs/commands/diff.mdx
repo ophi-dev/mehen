@@ -24,6 +24,7 @@ mehen diff [OPTIONS]
 | `--show-unchanged` | Show files where every metric is unchanged. |
 | `--ignore-git-attributes[=<BOOL>]` | Skip files marked `linguist-generated`, `linguist-vendored`, or `binary` (default `true`; `--ignore-generated` remains an alias). |
 | `--fail-on <FAIL_ON>` | Exit non-zero when named thresholds are crossed. Comma-separated: `dmi-drop`, `new-broken-link`, `filler-high`, `all`. |
+| `--fail-on-analysis-error` | Exit `1` after rendering when any analyzed side has an error- or fatal-severity diagnostic. Without this flag, the diagnostic is advisory and other files remain reportable. |
 | `--coverage[=PATH\|auto\|off]` | Head-side coverage input, with the same semantics as on [`mehen metrics`](/commands/metrics): explicit report paths (repeatable), `auto` to [discover reports](/metrics/coverage/auto-discovery), `off` to disable. Bare `--coverage` means `auto`. When omitted, coverage loads lazily — when a `coverage.*` metric or configured threshold asks for it, or when `--base-coverage` is given. |
 | `--base-coverage=<PATH>` | Coverage report(s) for the **base** revision (repeatable). Enriches the baseline side of the diff so `coverage.*` columns carry real trend arrows instead of "new measurement". Explicit paths only — no discovery, since the working tree holds *head* artifacts. See [Coverage trend columns](#coverage-trend-columns). |
 | `--config <PATH>` | Pin a [configuration file](/configuration) instead of discovering `mehen.toml` upward from the working directory. |
@@ -146,6 +147,19 @@ and a configured coverage threshold is itself a lazy ingestion trigger — no fl
 The rules align with the severity-1 / severity-2 indicators on the
 [PR comment design](/guides/pr-comment-design) page.
 
+## Analysis diagnostics
+
+A parser or analyzer can reject one side of one file without invalidating the whole comparison.
+`mehen diff` records the affected path, side (`base` or `head`), severity, reason code, and message
+under the top-level JSON `analysis_errors` array. Markdown output adds the same information in an
+**Analysis diagnostics** table.
+
+Static metrics from an error- or fatal-severity side are withheld rather than computed from a
+partial syntax tree. Parser-independent measurements such as repository history remain available,
+and parseable files continue through normal metric and threshold evaluation. The command exits `0`
+by default when diagnostics are the only issue. Add `--fail-on-analysis-error` when incomplete
+analysis should remain a strict CI gate; the complete report is still emitted before exit `1`.
+
 ## Configured thresholds
 
 When a [`mehen.toml`](/configuration) is present, the **head side** of every changed source-code
@@ -164,8 +178,8 @@ See [Concepts → Thresholds and diffs](/concepts/thresholds-and-diffs) for how 
 
 | Code | Meaning |
 |---|---|
-| 0 | Success — the comment is advisory. |
-| 1 | IO, git, parser-fatal, or unsupported-language error. Also: a [configured metric threshold](/configuration) crossed, after the report is emitted. |
+| 0 | Success — including advisory per-file analysis diagnostics. |
+| 1 | IO, git, or serialization failure; `--fail-on-analysis-error` found a blocking diagnostic; or a [configured metric threshold](/configuration) crossed. Reports are emitted first for the latter two cases. |
 | 2 | One or more `--fail-on` rules crossed (gating exit). |
 
 ## See also

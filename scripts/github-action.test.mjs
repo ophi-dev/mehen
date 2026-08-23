@@ -12,6 +12,7 @@ import {
   canonicalMetricName,
   codecovToLcov,
   collectThresholdViolations,
+  countBlockingAnalysisDiagnostics,
   diffJsonHasDocs,
   extractMarkdownDocsSection,
   extractZip,
@@ -21,12 +22,14 @@ import {
   isGateFailureReport,
   isNotApplicable,
   listFilesRecursively,
+  parseAnalysisErrors,
   parseGateViolations,
   parseList,
   parseThresholds,
   parseVersionOutput,
   pickBaseArtifact,
   renderFooter,
+  renderMarkdown,
   unionMetricColumns,
 } from "./github-action.mjs";
 
@@ -60,6 +63,100 @@ test("parseGateViolations is empty for passing runs and older CLIs", () => {
   assert.deepEqual(parseGateViolations(undefined), []);
 });
 
+test("parseAnalysisErrors extracts structured per-side diagnostics", () => {
+  const errors = parseAnalysisErrors(
+    JSON.stringify({
+      source_code: [],
+      analysis_errors: [
+        {
+          path: "internal/config/rules.go",
+          side: "head",
+          diagnostics: [
+            {
+              severity: "error",
+              code: "go.syntax_error",
+              message: "tree-sitter error node at line 347",
+              span: null,
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].path, "internal/config/rules.go");
+});
+
+test("parseAnalysisErrors is empty for older or malformed output", () => {
+  assert.deepEqual(parseAnalysisErrors('{"source_code": []}'), []);
+  assert.deepEqual(parseAnalysisErrors("not json"), []);
+  assert.deepEqual(parseAnalysisErrors(undefined), []);
+});
+
+test("blocking analysis diagnostic count deduplicates parser recovery noise", () => {
+  const duplicate = {
+    severity: "error",
+    code: "go.syntax_error",
+    message: "tree-sitter error node at line 347",
+    span: null,
+  };
+  const records = [
+    {
+      path: "internal/config/rules.go",
+      side: "head",
+      diagnostics: [duplicate, { ...duplicate }],
+    },
+    {
+      path: "README.md",
+      side: "head",
+      diagnostics: [
+        {
+          severity: "warning",
+          code: "markdown.reference",
+          message: "reference could not be resolved",
+        },
+      ],
+    },
+  ];
+  assert.equal(countBlockingAnalysisDiagnostics(records), 1);
+});
+
+test("renderMarkdown reports analysis diagnostics without hiding other results", () => {
+  const markdown = renderMarkdown(
+    [],
+    {
+      eventName: "pull_request",
+      repository: "wharflab/tally",
+      sha: "head-sha",
+      baseSha: "base-sha",
+      baseLabel: "main",
+    },
+    new Map(),
+    [],
+    "1.11.0",
+    [],
+    null,
+    [
+      {
+        path: "internal/config/rules.go",
+        side: "head",
+        diagnostics: [
+          {
+            severity: "error",
+            code: "go.syntax_error",
+            message: "tree-sitter error node at line 347",
+          },
+        ],
+      },
+    ],
+  );
+  assert.ok(markdown.includes("### Analysis diagnostics"));
+  assert.ok(markdown.includes("go.syntax_error"));
+  assert.ok(markdown.includes("internal/config/rules.go"));
+  assert.ok(markdown.includes("head-sha"));
+  assert.ok(markdown.includes("No metric changes detected."));
+});
+
 test("isGateFailureReport requires the explicit threshold_violations signal", () => {
   assert.equal(
     isGateFailureReport(
@@ -76,10 +173,16 @@ test("isGateFailureReport requires the explicit threshold_violations signal", ()
 });
 
 test("isGateFailureReport rejects reports without a fired gate", () => {
-  // An analysis failure also exits 1 with well-formed JSON — without
-  // the threshold_violations key it must keep failing fast.
+  // Analysis diagnostics use their own advisory array and are not a
+  // repository-threshold gate signal.
   assert.equal(isGateFailureReport('{"source_code": [], "markdown": []}'), false);
   assert.equal(isGateFailureReport('{"source_code": [{"path": "a.py"}]}'), false);
+  assert.equal(
+    isGateFailureReport(
+      '{"source_code": [], "analysis_errors": [{"path": "a.py"}]}',
+    ),
+    false,
+  );
   assert.equal(
     isGateFailureReport('{"source_code": [], "threshold_violations": []}'),
     false,

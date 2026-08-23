@@ -9,9 +9,11 @@ use crate::span::SourceSpan;
 ///
 /// Per the rewrite plan §9.3:
 /// - `Warning`: recoverable, exit 0 unless thresholds fail.
-/// - `Error`: analysis incomplete; `mehen metrics` exits 1, `mehen diff`
-///   records under `analysis_errors`.
-/// - `Fatal`: IO/toolchain/invariant failure; exit 1.
+/// - `Error`: analysis incomplete; `mehen metrics` exits 1, while
+///   `mehen diff` records the affected side under `analysis_errors`
+///   and only exits 1 when strict analysis gating is requested.
+/// - `Fatal`: toolchain/invariant failure; follows the same command-level
+///   policy as `Error`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagnosticSeverity {

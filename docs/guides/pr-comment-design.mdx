@@ -14,6 +14,23 @@ the [GitHub Action](/guides/github-action). This page is the user-facing referen
 When a PR touches one or more Markdown files, `mehen diff` emits a **Documentation Metrics** section
 below the existing source-code table.
 
+When an analyzer reports a diagnostic, the Action also appends an **Analysis diagnostics** table.
+This section is factual and mechanically derived: file, revision side, severity, stable reason
+code, and analyzer message. Exact duplicate diagnostics are collapsed so parser recovery does not
+repeat the same row.
+
+```markdown
+### Analysis diagnostics
+
+| File | Side | Severity | Diagnostic |
+|---|---|---|---|
+| [internal/config/rules.go](…) | head | error | `go.syntax_error`: tree-sitter error node at line 347 |
+```
+
+An error or fatal diagnostic makes that side's static metrics unavailable, but does not hide
+parseable files or fail the Action by default. Strict repositories opt in with
+`fail-on-analysis-error: true`.
+
 The non-negotiable constraint: **every character of output is mechanically derivable from the AST, the
 metric tables, and the threshold bands defined in [Markdown metrics](/metrics/markdown/overview) and
 [Markdown prose metrics](/metrics/markdown/prose/overview).** No LLM call, no "likely cause" inference,

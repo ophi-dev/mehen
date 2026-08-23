@@ -82,6 +82,9 @@ Markdown files emit a top-level `markdown:` block with the
 ```
 
 The GitHub Action consumes JSON for decisions and the Markdown shape for the comment body.
+`analysis_errors` is always an array. Each record names the affected path and `base`/`head` side
+and carries structured diagnostics; error- or fatal-severity records make that side's static
+metrics unavailable without invalidating other files.
 
 ## Pretty-printing
 
