@@ -2868,3 +2868,49 @@ fn mysql_single_statement_routine_recovers_as_a_unit() {
     // Entry 1 + SIGNAL 1.
     assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
 }
+
+// ── PR #257 round-18 review regressions ─────────────────────────────────
+
+/// Two separately recovered MySQL definitions stay independent: the second
+/// run never attaches to the first routine, so their spaces don't overlap
+/// and each keeps its own entry (Codex P2, PR #257 round 18). A parsed
+/// statement between them keeps the parse gaps distinct — adjacent
+/// unparsable definitions merge into one run, which recovers only the
+/// leading header (a documented limit of run-granularity recovery).
+#[test]
+fn recovered_definitions_stay_independent() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p1() signal sqlstate '45000';\n\
+         select 1;\n\
+         create procedure p2() signal sqlstate '45001';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 2.0);
+    // Two entries + two SIGNALs.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 4.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 2.0);
+}
+
+/// A recovered MySQL single-statement function counts its body-level
+/// RETURN: the signature ends at the parameter list's close (Codex P2,
+/// PR #257 round 18).
+#[test]
+fn mysql_single_statement_function_counts_its_return() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create function f(x int) returns int return x + 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.return_count"), 1.0);
+}
+
+/// Backtick-quoted MySQL routine names recover like plain ones (Codex P2,
+/// PR #257 round 18).
+#[test]
+fn backtick_quoted_recovered_name_is_accepted() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure `p`() signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+}

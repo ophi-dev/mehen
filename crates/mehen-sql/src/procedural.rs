@@ -540,6 +540,12 @@ struct Machine<'a> {
     /// T-SQL/MySQL/BigQuery `DECLARE`s are ordinary body statements
     /// (Codex P2).
     oracle: bool,
+    /// Effective dialect is MySQL: the `)` closing a routine's parameter
+    /// list ends its signature — a single-statement body (`… RETURNS INT
+    /// RETURN x + 1;`) has no `AS`/`BEGIN` opener, so the transition must
+    /// happen at the header's own boundary (Codex P2). The pending body
+    /// *marker* stays armed for bodies that do open a `BEGIN`.
+    mysql: bool,
     /// Definition headers whose body block hasn't opened yet — the next
     /// plain `BEGIN`s consume these and tag their blocks `routine_body`
     /// (nesting baselines, Codex P2). A stack, not a flag: an Oracle
@@ -775,6 +781,13 @@ impl Machine<'_> {
             let t = &tokens[i];
             let kw = t.keyword_like;
             match t.word.as_str() {
+                ")" if self.mysql && self.pending_routine_header => {
+                    // MySQL signatures end at the parameter list's close:
+                    // what follows (`RETURNS <type>`, characteristics, then
+                    // the body — possibly a bare single statement) is past
+                    // the signature (Codex P2).
+                    self.pending_routine_header = false;
+                }
                 ";" => {
                     // A routine header ending at the terminator without
                     // IS/AS/BEGIN is a *forward declaration* / prototype
@@ -1517,6 +1530,7 @@ pub(crate) fn extract(
     let bigquery = dialect == DialectKind::Bigquery;
     let tsql = dialect == DialectKind::Tsql;
     let oracle = dialect == DialectKind::Oracle;
+    let mysql = dialect == DialectKind::Mysql;
     // The dialects whose grammars split routine bodies into *root*
     // unparsable spills — the only ones where a top-level run can be a
     // routine continuation (T-SQL batch bodies, MySQL delimiter bodies).
@@ -1707,6 +1721,7 @@ pub(crate) fn extract(
             pending_spec_header: false,
             tsql,
             oracle,
+            mysql,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1790,6 +1805,7 @@ pub(crate) fn extract(
             pending_spec_header: false,
             tsql,
             oracle,
+            mysql,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1833,12 +1849,13 @@ pub(crate) fn extract(
             continue; // already scanned within its statement's region
         }
         let tokens = tokens_of(run, line_at);
-        // A run that *is* a recovered routine unit (synthetic T-SQL/MySQL
-        // definition, Codex P1) is proven procedural by its header — the
-        // generic spill-marker gate would reject bodies without spill
+        // A run that *holds* recovered routine units (synthetic T-SQL/MySQL
+        // definitions, Codex P1) is proven procedural by their headers —
+        // the generic spill-marker gate would reject bodies without spill
         // markers (`CREATE TRIGGER … AS IF EXISTS (…) RAISERROR (…)`,
-        // Codex P1).
-        let recovered_unit = unit_ranges.iter().any(|&(s, e, _)| s == start && e == end);
+        // Codex P1). Typed units never live inside an unparsable run, so
+        // containment implies recovery.
+        let recovered_unit = unit_ranges.iter().any(|&(s, e, _)| start <= s && e <= end);
         if !recovered_unit && !unparsable_is_procedural(&tokens) {
             continue;
         }
@@ -1853,7 +1870,13 @@ pub(crate) fn extract(
         // and resume that routine's scanner state (Codex P2) — unless a
         // `GO` between them severs the tie: the run is a new batch
         // (Codex P2). No unit → file-level only, fresh state.
-        let fallback_unit = if spills_routine_bodies {
+        let fallback_unit = if recovered_unit {
+            // A recovered definition is its own routine: it never continues
+            // the one before it — no stale scanner state, no span stretch
+            // over a sibling definition (Codex P2). Its tokens attribute by
+            // containment (the run *is* the unit range).
+            None
+        } else if spills_routine_bodies {
             last_unit_before(&unit_ranges, start).filter(|&idx| {
                 let unit_end = facts.procedural_units[idx].end_byte;
                 !go_boundaries
@@ -1950,6 +1973,7 @@ pub(crate) fn extract(
             pending_spec_header: false,
             tsql,
             oracle,
+            mysql,
             last_bool: None,
         };
         machine.scan(&tokens);

@@ -2691,12 +2691,15 @@ fn extract_objects(
             if !has_own_where_clause(u) {
                 obj.update_without_where_count += 1;
                 if emit_contributions {
-                    record_change_risk(
-                        evidence,
+                    let span = segment_span(u, line_at).unwrap_or(fallback_span);
+                    record_object(
+                        obj_evidence,
                         true,
-                        segment_span(u, line_at).unwrap_or(fallback_span),
-                        ChangeRiskFactor::UpdateWithoutWhere,
+                        "sql.dml.update_without_where_count",
+                        "sql.dml.update_without_where",
+                        span,
                     );
+                    record_change_risk(evidence, true, span, ChangeRiskFactor::UpdateWithoutWhere);
                 }
             }
         }
@@ -2705,12 +2708,15 @@ fn extract_objects(
             if !has_own_where_clause(d) {
                 obj.delete_without_where_count += 1;
                 if emit_contributions {
-                    record_change_risk(
-                        evidence,
+                    let span = segment_span(d, line_at).unwrap_or(fallback_span);
+                    record_object(
+                        obj_evidence,
                         true,
-                        segment_span(d, line_at).unwrap_or(fallback_span),
-                        ChangeRiskFactor::DeleteWithoutWhere,
+                        "sql.dml.delete_without_where_count",
+                        "sql.dml.delete_without_where",
+                        span,
                     );
+                    record_change_risk(evidence, true, span, ChangeRiskFactor::DeleteWithoutWhere);
                 }
             }
         }
@@ -3265,19 +3271,31 @@ fn extract_procedural_units(
             {
                 continue;
             }
-            let Some(name) = tsql_definition_header_name(&run) else {
+            let headers = recovered_definition_headers(&run);
+            if headers.is_empty() {
                 continue;
-            };
-            facts.procedural_units.push(ProceduralUnitFacts {
-                name: Some(name),
-                start_line: line_at(start_byte),
-                end_line: line_at(end_byte.saturating_sub(1)),
-                start_byte,
-                end_byte,
-                cyclomatic_complexity: 0.0,
-                cognitive_complexity: 0.0,
-                embedded_query_structural: 0.0,
-            });
+            }
+            // Each header starts its own unit; a unit runs to the next
+            // header or the run's end. sqruff's error recovery often
+            // swallows *several* definitions (and even parseable statements
+            // between them) into one run — splitting at header boundaries
+            // keeps sibling definitions independent (Codex P2).
+            for (k, (header_start, name)) in headers.iter().enumerate() {
+                let unit_end = headers
+                    .get(k + 1)
+                    .map(|&(next_start, _)| next_start)
+                    .unwrap_or(end_byte);
+                facts.procedural_units.push(ProceduralUnitFacts {
+                    name: Some(name.clone()),
+                    start_line: line_at(*header_start),
+                    end_line: line_at(unit_end.saturating_sub(1)),
+                    start_byte: *header_start,
+                    end_byte: unit_end,
+                    cyclomatic_complexity: 0.0,
+                    cognitive_complexity: 0.0,
+                    embedded_query_structural: 0.0,
+                });
+            }
         }
         // Keep the pre-order contract (parents before children, source
         // order): synthetic units interleave with typed ones by position.
@@ -3287,84 +3305,97 @@ fn extract_procedural_units(
     }
 }
 
-/// The declared name when a token run *leads* with a T-SQL definition
-/// header (`CREATE [OR ALTER] FUNCTION|PROC[EDURE]|TRIGGER <name>`), else
-/// `None`. Works over the run's leaf code tokens; the name keeps its
-/// original case and re-joins dotted parts split by the lexer.
-fn tsql_definition_header_name(run: &ErasedSegment) -> Option<String> {
-    fn leaf_words(node: &ErasedSegment, out: &mut Vec<String>) {
-        if out.len() >= 12 {
-            return;
-        }
+/// The recovered definition headers in a token run: each `(start byte,
+/// name)` where a `CREATE [OR ALTER|REPLACE] [DEFINER = <user>]
+/// FUNCTION|PROC[EDURE]|TRIGGER <name>` (or `ALTER <kind> <name>`) header
+/// sits at a statement boundary — the run's start, or right after a `;` or
+/// `GO`. sqruff's error recovery can swallow several definitions into one
+/// run, so a run yields one unit *per header* (Codex P2). Names keep their
+/// original case; dotted qualification split by the lexer is re-joined.
+fn recovered_definition_headers(run: &ErasedSegment) -> Vec<(u32, String)> {
+    fn leaf_tokens(node: &ErasedSegment, out: &mut Vec<(u32, String)>) {
         let children = node.segments();
         if children.is_empty() {
             if !(node.is_comment() || node.is_whitespace() || node.is_meta()) {
                 let raw = node.raw().trim();
-                if !raw.is_empty() {
-                    out.push(raw.to_string());
+                if !raw.is_empty()
+                    && let Some(pm) = node.get_position_marker()
+                {
+                    out.push((pm.source_slice.start as u32, raw.to_string()));
                 }
             }
             return;
         }
         for child in children {
-            leaf_words(child, out);
+            leaf_tokens(child, out);
         }
     }
-    let mut words = Vec::new();
-    leaf_words(run, &mut words);
-    let mut i = 0usize;
-    let leading = words.first()?;
-    if !(leading.eq_ignore_ascii_case("CREATE") || leading.eq_ignore_ascii_case("ALTER")) {
-        return None;
-    }
-    i += 1;
-    // `CREATE OR ALTER` (T-SQL) / `CREATE OR REPLACE` (MariaDB).
-    if words.get(i).is_some_and(|w| w.eq_ignore_ascii_case("OR"))
-        && words
-            .get(i + 1)
-            .is_some_and(|w| w.eq_ignore_ascii_case("ALTER") || w.eq_ignore_ascii_case("REPLACE"))
-    {
-        i += 2;
-    }
-    // MySQL `DEFINER = user` clause between CREATE and the kind keyword.
-    if words
-        .get(i)
-        .is_some_and(|w| w.eq_ignore_ascii_case("DEFINER"))
-    {
+    fn header_at(tokens: &[(u32, String)], mut i: usize) -> Option<String> {
+        let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
+        if !(word(i).eq_ignore_ascii_case("CREATE") || word(i).eq_ignore_ascii_case("ALTER")) {
+            return None;
+        }
         i += 1;
-        if words.get(i).is_some_and(|w| w == "=") {
-            i += 1;
-        }
-        i += 1; // the definer value
-    }
-    let kind = words.get(i)?;
-    if !(kind.eq_ignore_ascii_case("FUNCTION")
-        || kind.eq_ignore_ascii_case("PROCEDURE")
-        || kind.eq_ignore_ascii_case("PROC")
-        || kind.eq_ignore_ascii_case("TRIGGER"))
-    {
-        return None;
-    }
-    i += 1;
-    let mut name = words.get(i)?.clone();
-    // Identifier sanity: a name never starts with punctuation.
-    if !name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '[' || c == '"')
-    {
-        return None;
-    }
-    // Re-join dotted qualification the lexer split (`dbo` `.` `f`).
-    while words.get(i + 1).is_some_and(|w| w == ".") {
-        if let Some(part) = words.get(i + 2) {
-            name = format!("{name}.{part}");
+        // `CREATE OR ALTER` (T-SQL) / `CREATE OR REPLACE` (MariaDB).
+        if word(i).eq_ignore_ascii_case("OR")
+            && (word(i + 1).eq_ignore_ascii_case("ALTER")
+                || word(i + 1).eq_ignore_ascii_case("REPLACE"))
+        {
             i += 2;
-        } else {
-            break;
+        }
+        // MySQL `DEFINER = user` clause between CREATE and the kind keyword.
+        if word(i).eq_ignore_ascii_case("DEFINER") {
+            i += 1;
+            if word(i) == "=" {
+                i += 1;
+            }
+            i += 1; // the definer value
+        }
+        let kind = word(i);
+        if !(kind.eq_ignore_ascii_case("FUNCTION")
+            || kind.eq_ignore_ascii_case("PROCEDURE")
+            || kind.eq_ignore_ascii_case("PROC")
+            || kind.eq_ignore_ascii_case("TRIGGER"))
+        {
+            return None;
+        }
+        i += 1;
+        let mut name = tokens.get(i)?.1.clone();
+        // Identifier sanity: a name never starts with punctuation — quoted
+        // identifiers (`[bracketed]`, `"double"`, MySQL backticks —
+        // Codex P2) are names too.
+        if !name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '[' || c == '"' || c == '`')
+        {
+            return None;
+        }
+        // Re-join dotted qualification the lexer split (`dbo` `.` `f`).
+        while tokens.get(i + 1).is_some_and(|(_, w)| w == ".") {
+            if let Some((_, part)) = tokens.get(i + 2) {
+                name = format!("{name}.{part}");
+                i += 2;
+            } else {
+                break;
+            }
+        }
+        Some(name)
+    }
+    let mut tokens = Vec::new();
+    leaf_tokens(run, &mut tokens);
+    let mut headers = Vec::new();
+    for j in 0..tokens.len() {
+        let boundary =
+            j == 0 || tokens[j - 1].1 == ";" || tokens[j - 1].1.eq_ignore_ascii_case("GO");
+        if !boundary {
+            continue;
+        }
+        if let Some(name) = header_at(&tokens, j) {
+            headers.push((tokens[j].0, name));
         }
     }
-    Some(name)
+    headers
 }
 
 /// Collect the distinct read and write object names touched by the file.

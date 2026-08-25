@@ -332,3 +332,24 @@ fn object_counter_evidence_sums_to_the_metrics() {
         }));
     }
 }
+
+/// The no-WHERE counters are evidence-backed under their own keys, not
+/// just as change risk (Codex P1, PR #257 round 18).
+#[test]
+fn no_where_counter_evidence_sums_to_the_metrics() {
+    let sql = "UPDATE t SET c = 1;\nDELETE FROM u;\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    for key in [
+        "sql.dml.update_without_where_count",
+        "sql.dml.delete_without_where_count",
+    ] {
+        let sum: f64 = analysis
+            .contributions
+            .iter()
+            .filter(|item| item.metric.as_str() == key)
+            .map(|item| item.amount)
+            .sum();
+        assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+        assert_eq!(sum, 1.0, "expected count for {key}");
+    }
+}
