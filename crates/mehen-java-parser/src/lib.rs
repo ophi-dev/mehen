@@ -47,12 +47,12 @@
 //! use mehen_java_parser::hooks::JavaParserBase;
 //! use mehen_java_parser::java_parser::{self, JavaParser};
 //! use mehen_java_parser::java_lexer::JavaLexer;
-//! use antlr4_runtime::{CommonTokenStream, InputStream};
-//! // `number_of_syntax_errors` is a `Parser`-trait method, so the trait
-//! // must be in scope to call it.
-//! use antlr4_runtime::Parser;
+//! // The runtime is re-exported by this crate, so no direct
+//! // `antlr-rust-runtime` dependency is needed. `number_of_syntax_errors`
+//! // is a `Parser`-trait method, so the trait must be in scope to call it.
+//! use mehen_java_parser::antlr4_runtime::{CommonTokenStream, InputStream, Parser};
 //!
-//! # fn main() -> Result<(), antlr4_runtime::AntlrError> {
+//! # fn main() -> Result<(), mehen_java_parser::antlr4_runtime::AntlrError> {
 //! let lexer = JavaLexer::new(InputStream::new("class C {}\n"));
 //! let tokens = CommonTokenStream::new(lexer);
 //! // `with_typed_hooks` installs the JavaParserBase predicate port.
