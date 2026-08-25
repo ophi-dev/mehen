@@ -286,6 +286,9 @@ fn unparsable_is_procedural(tokens: &[PToken]) -> bool {
             // parsed block. Leading position keeps column references named
             // `raise` out.
             "THROW" | "RAISERROR" | "SIGNAL" | "RAISE" if i == 0 => return true,
+            // A *leading* `GOTO` is a standalone jump batch — the cognitive
+            // model explicitly charges it (Codex P2).
+            "GOTO" if i == 0 => return true,
             // A *leading* control-position `IF` is a decision the grammar
             // lost whole (T-SQL `IF @a = 1 THROW …` at file level —
             // Codex P2). Mid-run `IF`s stay unadmitted (ambiguous with DDL
@@ -845,17 +848,20 @@ impl Machine<'_> {
                     }
                     self.break_bool_run();
                 }
-                "FUNCTION" | "PROCEDURE" if kw => {
+                "FUNCTION" | "PROCEDURE" | "PROC" | "TRIGGER" if kw => {
                     // A definition header arms a routine-body marker for the
                     // block that will open it — reference positions (`DROP
-                    // PROCEDURE`, `ALTER FUNCTION`, `GRANT … ON PROCEDURE`,
-                    // `END FUNCTION`, `COMMENT ON …`) name a routine without
-                    // defining one (Codex P2).
+                    // PROCEDURE`, `GRANT … ON PROCEDURE`, `END FUNCTION`,
+                    // `COMMENT ON …`) name a routine without defining one
+                    // (Codex P2). `ALTER FUNCTION|TRIGGER` is a
+                    // *redefinition* under T-SQL semantics and arms too
+                    // (Codex P1) — an Oracle `ALTER FUNCTION f COMPILE;`
+                    // retires harmlessly at its terminator.
                     let prev = i
                         .checked_sub(1)
                         .map(|j| tokens[j].word.as_str())
                         .unwrap_or("");
-                    if !matches!(prev, "DROP" | "ALTER" | "ON" | "END" | "EXISTS") {
+                    if !matches!(prev, "DROP" | "ON" | "END" | "EXISTS") {
                         self.pending_routine_bodies.push(self.in_body);
                     }
                     // The signature (nested subprogram in a DECLARE section,
@@ -1827,7 +1833,13 @@ pub(crate) fn extract(
             continue; // already scanned within its statement's region
         }
         let tokens = tokens_of(run, line_at);
-        if !unparsable_is_procedural(&tokens) {
+        // A run that *is* a recovered routine unit (synthetic T-SQL/MySQL
+        // definition, Codex P1) is proven procedural by its header — the
+        // generic spill-marker gate would reject bodies without spill
+        // markers (`CREATE TRIGGER … AS IF EXISTS (…) RAISERROR (…)`,
+        // Codex P1).
+        let recovered_unit = unit_ranges.iter().any(|&(s, e, _)| s == start && e == end);
+        if !recovered_unit && !unparsable_is_procedural(&tokens) {
             continue;
         }
         // A top-level spill is the body of the routine it follows — but
@@ -1920,8 +1932,17 @@ pub(crate) fn extract(
             // The marker gate just proved this fragment is procedural body
             // content (it may start mid-body — T-SQL spills lose the opening
             // BEGIN to the parsed part), so the body gate is open from the
-            // start — except standalone DECLARE-led runs (Codex P2).
-            in_body: restored_body || !(standalone && declare_led),
+            // start — except standalone DECLARE-led runs (Codex P2) and
+            // recovered T-SQL definitions, whose *header* leads the run:
+            // their body opens at AS/BEGIN like any parsed definition
+            // (a MySQL single-statement body has no opener, so it keeps
+            // the open gate — Codex P1).
+            in_body: restored_body
+                || (if recovered_unit {
+                    !tsql
+                } else {
+                    !(standalone && declare_led)
+                }),
             pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,
@@ -2010,11 +2031,9 @@ pub(crate) fn extract(
         }
     }
     // Synthetic units score their attributed continuations alone.
-    for idx in 0..facts.procedural_units.len() {
-        if facts.procedural_units[idx].embedded_query_structural == 0.0
-            && !continuation_facts[idx].is_empty()
-        {
-            let score = continuation_facts[idx]
+    for (idx, roots) in continuation_facts.iter().enumerate() {
+        if facts.procedural_units[idx].embedded_query_structural == 0.0 && !roots.is_empty() {
+            let score = roots
                 .iter()
                 .map(crate::composite::structural)
                 .fold(0.0f64, f64::max);

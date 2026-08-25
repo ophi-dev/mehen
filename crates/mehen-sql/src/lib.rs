@@ -206,6 +206,13 @@ impl LanguageAnalyzer for SqlAnalyzer {
                 "sql.predicate.not",
             );
         }
+        // Raw object-family counters (`sql.dml.*`, `sql.ddl.*`, `sql.dcl.*`,
+        // `sql.transaction.*`) are evidence-backed: both the per-statement
+        // classification path and the anonymous-block body scan record one
+        // entry per increment (Codex P1).
+        for item in &file_facts.object_evidence {
+            contribution_collector.record(item.metric, item.span, 1.0, item.reason);
+        }
 
         // Per-statement spaces so top-offenders / nested reporting can attribute
         // metrics to a statement's line range (research foundation §4.4).

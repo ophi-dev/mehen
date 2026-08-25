@@ -41,13 +41,24 @@ fn change_risk_contributions_are_weighted_spanned_and_complete() {
     let contributions = &analysis.contributions;
 
     assert!(!contributions.is_empty());
-    assert!(contributions.iter().all(|item| {
-        item.metric.as_str() == "sql.change_risk_score"
-            && item.span.start_byte <= item.span.end_byte
-            && item.span.end_byte as usize <= sql.len()
-            && item.span.start_line >= 1
-            && item.span.start_line <= item.span.end_line
-    }));
+    // Change-risk entries are well-formed; the raw object counters emit
+    // their own evidence family alongside (PR #257 round 17).
+    assert!(
+        contributions
+            .iter()
+            .filter(|item| item.metric.as_str() == "sql.change_risk_score")
+            .all(|item| {
+                item.span.start_byte <= item.span.end_byte
+                    && item.span.end_byte as usize <= sql.len()
+                    && item.span.start_line >= 1
+                    && item.span.start_line <= item.span.end_line
+            })
+    );
+    assert!(
+        contributions
+            .iter()
+            .any(|item| item.metric.as_str() == "sql.ddl.drop_count")
+    );
 
     assert_risk_sum(&analysis);
 
@@ -286,4 +297,38 @@ fn predicate_not_evidence_sums_to_the_metric() {
     }));
     let sum: f64 = nots.iter().map(|item| item.amount).sum();
     assert_eq!(sum, metric(&analysis, "sql.predicate.not_count"));
+}
+
+/// Raw object-family counters are evidence-backed under their own keys —
+/// both the per-statement classification path and the anonymous-block body
+/// scan — and each key's evidence sums to its metric (Codex P1, PR #257
+/// round 17).
+#[test]
+fn object_counter_evidence_sums_to_the_metrics() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               update t set c = 1 where id = 1;\n\
+               drop table old_stuff;\n\
+               begin\n\
+                 update accounts set bal = 0;\n\
+                 insert into audit_log (id) values (1);\n\
+               end;\n\
+               /\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    for (key, expected) in [
+        ("sql.dml.update_count", 2.0),
+        ("sql.dml.insert_count", 1.0),
+        ("sql.ddl.drop_count", 1.0),
+    ] {
+        let entries: Vec<_> = analysis
+            .contributions
+            .iter()
+            .filter(|item| item.metric.as_str() == key)
+            .collect();
+        let sum: f64 = entries.iter().map(|item| item.amount).sum();
+        assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+        assert_eq!(sum, expected, "expected count for {key}");
+        assert!(entries.iter().all(|item| {
+            (item.span.end_byte as usize) <= sql.len() && item.span.start_line >= 1
+        }));
+    }
 }

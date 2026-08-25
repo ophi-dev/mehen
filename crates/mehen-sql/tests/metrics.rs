@@ -2799,3 +2799,72 @@ fn signal_named_function_call_is_not_a_raise() {
     );
     assert_eq!(get(&real, "sql.procedural.raise_throw_count"), 1.0);
 }
+
+// ── PR #257 round-17 review regressions ─────────────────────────────────
+
+/// Standalone `ALTER FUNCTION|TRIGGER … AS …` definitions recover as
+/// routine units like their CREATE counterparts (Codex P1, PR #257
+/// round 17).
+#[test]
+fn tsql_alter_definitions_recover_as_units() {
+    let function = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         alter function dbo.f(@x int) returns int\n\
+         as\n\
+         begin\n\
+           return @x;\n\
+         end\n",
+    );
+    assert_eq!(get(&function, "sql.procedural.routine_count"), 1.0);
+
+    let trigger = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         alter trigger trg on t after insert\n\
+         as select 1;\n",
+    );
+    assert_eq!(get(&trigger, "sql.procedural.routine_count"), 1.0);
+}
+
+/// A recovered definition's body is scanned without needing a spill
+/// marker: a no-BEGIN trigger body's IF and RAISERROR count (Codex P1,
+/// PR #257 round 17).
+#[test]
+fn recovered_definition_body_scans_without_spill_markers() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create trigger trg on t after insert\n\
+         as if exists (select 1 from inserted where qty < 0)\n\
+           raiserror ('negative qty', 16, 1);\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // Entry 1 + IF 1 + RAISERROR 1.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
+}
+
+/// A standalone `GOTO label;` batch is admitted to the scanner and charges
+/// its cognitive penalty (Codex P2, PR #257 round 17).
+#[test]
+fn standalone_goto_batch_is_measured() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         goto done;\n",
+    );
+    assert!(get(&m, "sql.procedural.cognitive_complexity") >= 1.0);
+}
+
+/// MySQL single-statement routine bodies (`CREATE PROCEDURE p() SIGNAL …`)
+/// recover as units with their body measured (Codex P1, PR #257
+/// round 17).
+#[test]
+fn mysql_single_statement_routine_recovers_as_a_unit() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p() signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // Entry 1 + SIGNAL 1.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+}

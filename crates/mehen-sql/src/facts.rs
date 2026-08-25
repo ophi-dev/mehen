@@ -327,6 +327,17 @@ pub(crate) struct ChangeRiskEvidence {
     pub factor: ChangeRiskFactor,
 }
 
+/// One evidence entry for a raw object-family counter (`sql.dml.*`,
+/// `sql.ddl.*`, `sql.dcl.*`, `sql.transaction.*`): the statement or block
+/// DML node that moved the metric (Codex P1). `metric == Σ evidence` holds
+/// per key because every increment site records one entry.
+#[derive(Clone, Debug)]
+pub(crate) struct ObjectEvidence {
+    pub metric: &'static str,
+    pub reason: &'static str,
+    pub span: SourceSpan,
+}
+
 /// Per-statement facts with source span (research foundation §5.2).
 #[derive(Clone, Debug)]
 pub(crate) struct StatementFacts {
@@ -403,6 +414,8 @@ pub(crate) struct SqlFileFacts {
     pub ctes: CteFacts,
     pub objects: ObjectFacts,
     pub change_risk_evidence: Vec<ChangeRiskEvidence>,
+    /// Evidence for the raw object-family counters (Codex P1).
+    pub object_evidence: Vec<ObjectEvidence>,
     pub halstead: HalsteadFacts,
     pub relation_ref_count: u32,
     /// Count of `SyntaxKind::Unparsable` segments (parser-health, §6.16).
@@ -523,6 +536,7 @@ pub(crate) fn extract(
     dialect: DialectKind,
 ) -> SqlFileFacts {
     let tsql = dialect == DialectKind::Tsql;
+    let mysql = dialect == DialectKind::Mysql;
     let bigquery = dialect == DialectKind::Bigquery;
     let mut facts = SqlFileFacts::default();
 
@@ -532,7 +546,7 @@ pub(crate) fn extract(
     // routine's body statements surface as top-level statements themselves —
     // classification needs the unit ranges to recognize them as
     // routine-owned (Codex P1).
-    extract_procedural_units(root, &line_at, tsql, &mut facts);
+    extract_procedural_units(root, &line_at, tsql, mysql, &mut facts);
 
     // ── statements ──────────────────────────────────────────────────
     let unit_ranges: Vec<(u32, u32)> = facts
@@ -2451,14 +2465,49 @@ fn extract_objects(
     };
     let obj = &mut facts.objects;
     let evidence = &mut facts.change_risk_evidence;
+    let obj_evidence = &mut facts.object_evidence;
     // Per-statement-kind counters (used by the DML/DDL/TCL metric keys).
     for stmt in &facts.statements {
         match stmt.kind {
-            StatementKind::Insert => obj.insert_count += 1,
-            StatementKind::Update => obj.update_count += 1,
-            StatementKind::Delete => obj.delete_count += 1,
+            StatementKind::Insert => {
+                obj.insert_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.insert_count",
+                    "sql.dml.insert",
+                    statement_span(stmt),
+                );
+            }
+            StatementKind::Update => {
+                obj.update_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.update_count",
+                    "sql.dml.update",
+                    statement_span(stmt),
+                );
+            }
+            StatementKind::Delete => {
+                obj.delete_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.delete_count",
+                    "sql.dml.delete",
+                    statement_span(stmt),
+                );
+            }
             StatementKind::Merge => {
                 obj.merge_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.merge_count",
+                    "sql.dml.merge",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2469,9 +2518,25 @@ fn extract_objects(
             StatementKind::CreateTable
             | StatementKind::CreateTableAsSelect
             | StatementKind::CreateView
-            | StatementKind::CreateOther => obj.create_count += 1,
+            | StatementKind::CreateOther => {
+                obj.create_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.ddl.create_count",
+                    "sql.ddl.create",
+                    statement_span(stmt),
+                );
+            }
             StatementKind::AlterTable => {
                 obj.alter_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.ddl.alter_count",
+                    "sql.ddl.alter",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2481,6 +2546,13 @@ fn extract_objects(
             }
             StatementKind::Drop => {
                 obj.drop_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.ddl.drop_count",
+                    "sql.ddl.drop",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2490,6 +2562,13 @@ fn extract_objects(
             }
             StatementKind::Truncate => {
                 obj.truncate_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.ddl.truncate_count",
+                    "sql.ddl.truncate",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2499,6 +2578,13 @@ fn extract_objects(
             }
             StatementKind::Grant | StatementKind::Revoke => {
                 obj.grant_revoke_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dcl.grant_revoke_count",
+                    "sql.dcl.grant_revoke",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2508,6 +2594,13 @@ fn extract_objects(
             }
             StatementKind::TransactionControl => {
                 obj.transaction_control_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.transaction.control_count",
+                    "sql.transaction.control",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2533,7 +2626,14 @@ fn extract_objects(
     debug_assert_eq!(statements.len(), facts.statements.len());
     for (node, stmt) in statements.iter().zip(facts.statements.iter()) {
         if stmt.kind == StatementKind::AnonymousBlock {
-            scan_block_body_dml(node, line_at, obj, evidence, emit_contributions);
+            scan_block_body_dml(
+                node,
+                line_at,
+                obj,
+                evidence,
+                obj_evidence,
+                emit_contributions,
+            );
         }
     }
 
@@ -2690,43 +2790,57 @@ fn scan_block_body_dml(
     line_at: &impl Fn(u32) -> u32,
     obj: &mut ObjectFacts,
     evidence: &mut Vec<ChangeRiskEvidence>,
+    obj_evidence: &mut Vec<ObjectEvidence>,
     emit_contributions: bool,
 ) {
     let span_of =
         |seg: &ErasedSegment| segment_span(seg, line_at).unwrap_or_else(SourceSpan::empty);
-    obj.insert_count += block
-        .recursive_crawl(&INSERT_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false)
-        .len() as u32;
-    obj.update_count += block
-        .recursive_crawl(&UPDATE_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false)
-        .len() as u32;
-    obj.delete_count += block
-        .recursive_crawl(&DELETE_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false)
-        .len() as u32;
-    obj.create_count += block
-        .recursive_crawl(
-            &CREATE_TABLE_STATEMENTS,
-            false,
-            &PROCEDURAL_DEFINITIONS,
-            false,
-        )
-        .len() as u32
-        + block
-            .recursive_crawl(
-                &CREATE_VIEW_STATEMENTS,
-                false,
-                &PROCEDURAL_DEFINITIONS,
-                false,
-            )
-            .len() as u32
-        + block
-            .recursive_crawl(
-                &CREATE_OTHER_STATEMENTS,
-                false,
-                &PROCEDURAL_DEFINITIONS,
-                false,
-            )
-            .len() as u32;
+    for seg in block.recursive_crawl(&INSERT_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false) {
+        obj.insert_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dml.insert_count",
+            "sql.dml.insert",
+            span_of(&seg),
+        );
+    }
+    for seg in block.recursive_crawl(&UPDATE_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false) {
+        obj.update_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dml.update_count",
+            "sql.dml.update",
+            span_of(&seg),
+        );
+    }
+    for seg in block.recursive_crawl(&DELETE_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false) {
+        obj.delete_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dml.delete_count",
+            "sql.dml.delete",
+            span_of(&seg),
+        );
+    }
+    for set in [
+        &CREATE_TABLE_STATEMENTS,
+        &CREATE_VIEW_STATEMENTS,
+        &CREATE_OTHER_STATEMENTS,
+    ] {
+        for seg in block.recursive_crawl(set, false, &PROCEDURAL_DEFINITIONS, false) {
+            obj.create_count += 1;
+            record_object(
+                obj_evidence,
+                emit_contributions,
+                "sql.ddl.create_count",
+                "sql.ddl.create",
+                span_of(&seg),
+            );
+        }
+    }
     for seg in block.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::MergeStatement),
         false,
@@ -2734,6 +2848,13 @@ fn scan_block_body_dml(
         false,
     ) {
         obj.merge_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dml.merge_count",
+            "sql.dml.merge",
+            span_of(&seg),
+        );
         record_change_risk(
             evidence,
             emit_contributions,
@@ -2743,6 +2864,13 @@ fn scan_block_body_dml(
     }
     for seg in block.recursive_crawl(&DROP_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false) {
         obj.drop_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.ddl.drop_count",
+            "sql.ddl.drop",
+            span_of(&seg),
+        );
         record_change_risk(
             evidence,
             emit_contributions,
@@ -2757,6 +2885,13 @@ fn scan_block_body_dml(
         false,
     ) {
         obj.truncate_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.ddl.truncate_count",
+            "sql.ddl.truncate",
+            span_of(&seg),
+        );
         record_change_risk(
             evidence,
             emit_contributions,
@@ -2771,6 +2906,13 @@ fn scan_block_body_dml(
         false,
     ) {
         obj.alter_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.ddl.alter_count",
+            "sql.ddl.alter",
+            span_of(&seg),
+        );
         record_change_risk(
             evidence,
             emit_contributions,
@@ -2785,6 +2927,13 @@ fn scan_block_body_dml(
         false,
     ) {
         obj.grant_revoke_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dcl.grant_revoke_count",
+            "sql.dcl.grant_revoke",
+            span_of(&seg),
+        );
         record_change_risk(
             evidence,
             emit_contributions,
@@ -2809,6 +2958,13 @@ fn scan_block_body_dml(
             continue;
         }
         obj.transaction_control_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.transaction.control_count",
+            "sql.transaction.control",
+            span_of(&seg),
+        );
         record_change_risk(
             evidence,
             emit_contributions,
@@ -3051,6 +3207,7 @@ fn extract_procedural_units(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
     tsql: bool,
+    mysql: bool,
     facts: &mut SqlFileFacts,
 ) {
     let units = procedural_unit_nodes(root);
@@ -3078,14 +3235,18 @@ fn extract_procedural_units(
     }
     // sqruff 0.40's overridden T-SQL statement grammar leaves whole valid
     // definitions (`CREATE FUNCTION dbo.f(@x int) RETURNS int AS BEGIN …`,
-    // `CREATE TRIGGER trg ON t FOR INSERT AS …`) in root `Unparsable`
-    // nodes — no `PROCEDURAL_UNITS` kind ever forms. Recover units from the
-    // unambiguous header token shape at the start of a root run: `CREATE
-    // [OR ALTER] FUNCTION|PROC[EDURE]|TRIGGER <name>` (Codex P1). Scoped
-    // to the T-SQL dialect and to *leading* headers so broken declarative
-    // SQL in other dialects stays unrecognized; the unit spans the whole
-    // run — the batch semantics that already govern T-SQL body ownership.
-    if tsql {
+    // `CREATE TRIGGER trg ON t FOR INSERT AS …`, standalone `ALTER
+    // FUNCTION|TRIGGER … AS …` — Codex P1 ×2) in root `Unparsable` nodes —
+    // no `PROCEDURAL_UNITS` kind ever forms. MySQL single-statement bodies
+    // (`CREATE PROCEDURE p() SIGNAL SQLSTATE '45000';`) share the fate
+    // (Codex P1). Recover units from the unambiguous header token shape at
+    // the start of a root run: `CREATE [OR ALTER|REPLACE]
+    // [DEFINER = <user>] FUNCTION|PROC[EDURE]|TRIGGER <name>` or `ALTER
+    // <kind> <name>`. Scoped to the T-SQL/MySQL dialects and to *leading*
+    // headers so broken declarative SQL in other dialects stays
+    // unrecognized; the unit spans the whole run — the batch/delimiter
+    // semantics that already govern body ownership in those dialects.
+    if tsql || mysql {
         for run in root.recursive_crawl(
             &SyntaxSet::single(SyntaxKind::Unparsable),
             true,
@@ -3132,7 +3293,7 @@ fn extract_procedural_units(
 /// original case and re-joins dotted parts split by the lexer.
 fn tsql_definition_header_name(run: &ErasedSegment) -> Option<String> {
     fn leaf_words(node: &ErasedSegment, out: &mut Vec<String>) {
-        if out.len() >= 8 {
+        if out.len() >= 12 {
             return;
         }
         let children = node.segments();
@@ -3152,16 +3313,29 @@ fn tsql_definition_header_name(run: &ErasedSegment) -> Option<String> {
     let mut words = Vec::new();
     leaf_words(run, &mut words);
     let mut i = 0usize;
-    if !words.first()?.eq_ignore_ascii_case("CREATE") {
+    let leading = words.first()?;
+    if !(leading.eq_ignore_ascii_case("CREATE") || leading.eq_ignore_ascii_case("ALTER")) {
         return None;
     }
     i += 1;
+    // `CREATE OR ALTER` (T-SQL) / `CREATE OR REPLACE` (MariaDB).
     if words.get(i).is_some_and(|w| w.eq_ignore_ascii_case("OR"))
         && words
             .get(i + 1)
-            .is_some_and(|w| w.eq_ignore_ascii_case("ALTER"))
+            .is_some_and(|w| w.eq_ignore_ascii_case("ALTER") || w.eq_ignore_ascii_case("REPLACE"))
     {
         i += 2;
+    }
+    // MySQL `DEFINER = user` clause between CREATE and the kind keyword.
+    if words
+        .get(i)
+        .is_some_and(|w| w.eq_ignore_ascii_case("DEFINER"))
+    {
+        i += 1;
+        if words.get(i).is_some_and(|w| w == "=") {
+            i += 1;
+        }
+        i += 1; // the definer value
     }
     let kind = words.get(i)?;
     if !(kind.eq_ignore_ascii_case("FUNCTION")
@@ -3506,6 +3680,22 @@ fn record_change_risk(
 ) {
     if enabled {
         evidence.push(ChangeRiskEvidence { span, factor });
+    }
+}
+
+fn record_object(
+    evidence: &mut Vec<ObjectEvidence>,
+    enabled: bool,
+    metric: &'static str,
+    reason: &'static str,
+    span: SourceSpan,
+) {
+    if enabled {
+        evidence.push(ObjectEvidence {
+            metric,
+            reason,
+            span,
+        });
     }
 }
 
