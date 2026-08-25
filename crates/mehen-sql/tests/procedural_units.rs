@@ -355,3 +355,41 @@ fn nested_routine_owns_its_embedded_queries() {
     // …and not on the outer routine, which has no query of its own.
     assert_eq!(get(outer, "sql.structural_complexity"), 0.0);
 }
+
+/// A recovered package-body member ending with the common unnamed `END;`
+/// still gets a bounded span: the initialization section's control flow
+/// stays file-level instead of attributing to the last member (Codex P2,
+/// PR #257 round 20).
+#[test]
+fn unnamed_end_bounds_a_recovered_member() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               create package body pkg as\n\
+               \x20 procedure p is\n\
+               \x20 begin\n\
+               \x20   null;\n\
+               \x20 end;\n\
+               begin\n\
+               \x20 if 1 = 1 then\n\
+               \x20   null;\n\
+               \x20 end if;\n\
+               end pkg;\n\
+               /\n";
+    let analysis = analyze(sql);
+    let member = analysis
+        .root
+        .spaces
+        .iter()
+        .flat_map(|s| std::iter::once(s).chain(s.spaces.iter()))
+        .find(|s| s.kind == SpaceKind::Function)
+        .expect("member Function space");
+    assert_eq!(member.name.as_deref(), Some("p"));
+    // The member ends at its own END; — before the init section's BEGIN.
+    assert!(member.span.end_line <= 6, "member ends at line 6");
+    // Its entry only: the init section's IF is file-level.
+    let cyclo = member
+        .metrics
+        .get(&MetricKey::new("sql.procedural.cyclomatic_complexity"))
+        .map(|v| v.as_f64())
+        .expect("member cyclomatic");
+    assert_eq!(cyclo, 1.0);
+}

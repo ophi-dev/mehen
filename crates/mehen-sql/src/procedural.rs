@@ -546,6 +546,10 @@ struct Machine<'a> {
     /// happen at the header's own boundary (Codex P2). The pending body
     /// *marker* stays armed for bodies that do open a `BEGIN`.
     mysql: bool,
+    /// Open-paren depth inside a MySQL routine signature: a parameter
+    /// type's own parens (`DECIMAL(10,2)`) must not end the signature —
+    /// only the *outer* parameter list's close does (Codex P2).
+    signature_paren_depth: u32,
     /// Definition headers whose body block hasn't opened yet — the next
     /// plain `BEGIN`s consume these and tag their blocks `routine_body`
     /// (nesting baselines, Codex P2). A stack, not a flag: an Oracle
@@ -781,14 +785,22 @@ impl Machine<'_> {
             let t = &tokens[i];
             let kw = t.keyword_like;
             match t.word.as_str() {
+                "(" if self.mysql && self.pending_routine_header => {
+                    self.signature_paren_depth += 1;
+                }
                 ")" if self.mysql && self.pending_routine_header => {
-                    // MySQL signatures end at the parameter list's close:
-                    // what follows (`RETURNS <type>`, characteristics, then
-                    // the body — possibly a bare single statement with no
-                    // `BEGIN` opener) is past the signature, so the body
-                    // gate opens here (Codex P2 ×2).
-                    self.pending_routine_header = false;
-                    self.in_body = true;
+                    // MySQL signatures end at the *outer* parameter list's
+                    // close — a parameter type's own parens
+                    // (`DECIMAL(10,2)`) sit deeper (Codex P2). What follows
+                    // (`RETURNS <type>`, characteristics, then the body —
+                    // possibly a bare single statement with no `BEGIN`
+                    // opener) is past the signature, so the body gate opens
+                    // here (Codex P2 ×2).
+                    self.signature_paren_depth = self.signature_paren_depth.saturating_sub(1);
+                    if self.signature_paren_depth == 0 {
+                        self.pending_routine_header = false;
+                        self.in_body = true;
+                    }
                 }
                 "ROW"
                     if self.mysql
@@ -1432,7 +1444,7 @@ impl Machine<'_> {
                         self.count_dynamic_sql(t.span);
                     }
                 }
-                "DBMS_SQL" if word(i + 1) == "." && word(i + 3) == "(" => {
+                "DBMS_SQL" if self.oracle && word(i + 1) == "." && word(i + 3) == "(" => {
                     // The Oracle dynamic-SQL package, recognized only in the
                     // qualified *call* shape (`DBMS_SQL.PARSE(…)`): the
                     // parsed package qualifier lexes as a `NakedIdentifier`
@@ -1738,6 +1750,7 @@ pub(crate) fn extract(
             tsql,
             oracle,
             mysql,
+            signature_paren_depth: 0,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1822,6 +1835,7 @@ pub(crate) fn extract(
             tsql,
             oracle,
             mysql,
+            signature_paren_depth: 0,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1986,6 +2000,7 @@ pub(crate) fn extract(
             tsql,
             oracle,
             mysql,
+            signature_paren_depth: 0,
             last_bool: None,
         };
         machine.scan(&tokens);

@@ -2768,15 +2768,28 @@ fn extract_objects(
         SyntaxKind::OracleDeleteStatement,
         SyntaxKind::MergeStatement,
     ]);
-    obj.returning_count = statements
+    for (node, _) in statements
         .iter()
         .zip(facts.statements.iter())
         .filter(|(_, stmt)| stmt.kind != StatementKind::Procedural)
-        .flat_map(|(node, _)| {
-            node.recursive_crawl(&DML_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true)
-        })
-        .map(|s| count_keyword(&s, "RETURNING") + count_keyword(&s, "OUTPUT"))
-        .sum();
+    {
+        for dml in node.recursive_crawl(&DML_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true) {
+            for kw in keyword_tokens(&dml, "RETURNING")
+                .into_iter()
+                .chain(keyword_tokens(&dml, "OUTPUT"))
+            {
+                obj.returning_count += 1;
+                // Each counted clause is one evidence entry (Codex P1).
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.returning_count",
+                    "sql.dml.returning",
+                    segment_span(&kw, line_at).unwrap_or(fallback_span),
+                );
+            }
+        }
+    }
 }
 
 /// Node-based DML/DDL/DCL/TCL tally for one anonymous block's body — the
@@ -3401,8 +3414,12 @@ fn recovered_package_body_members(run: &ErasedSegment, run_end: u32) -> Vec<(u32
         }
         headers.push((j, *token_start, name.to_string()));
     }
-    // Spans: to the named `END <name>` when present, else the next header
-    // or the run's end.
+    // Spans: to the END that balances the member's body — `BEGIN`/`CASE`
+    // open, bare/named `END …;` and `END CASE` close, `END IF/LOOP/WHILE/
+    // REPEAT` close their own constructs without touching block depth —
+    // so the common unnamed `END;` terminator is recognized too, and an
+    // initialization section after the last member stays file-level
+    // (Codex P2). Fallback: the next member's header or the run's end.
     let mut members = Vec::new();
     for (k, (token_idx, member_start, name)) in headers.iter().enumerate() {
         let fallback_end = headers
@@ -3410,24 +3427,45 @@ fn recovered_package_body_members(run: &ErasedSegment, run_end: u32) -> Vec<(u32
             .map(|&(_, next_start, _)| next_start)
             .unwrap_or(run_end);
         let mut member_end = fallback_end;
+        let mut depth = 0u32;
+        let mut opened = false;
         for j in *token_idx..tokens.len() {
-            if word(j).eq_ignore_ascii_case("END")
-                && word(j + 1).eq_ignore_ascii_case(name)
-                && word(j + 2) == ";"
-            {
-                // Through the terminator.
-                member_end = tokens
-                    .get(j + 2)
-                    .map(|&(b, _)| b + 1)
-                    .unwrap_or(fallback_end);
-                break;
-            }
             // Stop searching past the next member.
             if tokens[j].0 >= fallback_end {
                 break;
             }
+            let w = word(j);
+            if w.eq_ignore_ascii_case("BEGIN") || w.eq_ignore_ascii_case("CASE") {
+                depth += 1;
+                opened = true;
+            } else if w.eq_ignore_ascii_case("END") {
+                let next = word(j + 1);
+                if next.eq_ignore_ascii_case("IF")
+                    || next.eq_ignore_ascii_case("LOOP")
+                    || next.eq_ignore_ascii_case("WHILE")
+                    || next.eq_ignore_ascii_case("REPEAT")
+                {
+                    continue;
+                }
+                depth = depth.saturating_sub(1);
+                if opened && depth == 0 {
+                    // Through the optional name and terminator.
+                    let mut t = j + 1;
+                    if word(t).eq_ignore_ascii_case(name) {
+                        t += 1;
+                    }
+                    if word(t) == ";" {
+                        t += 1;
+                    }
+                    member_end = tokens
+                        .get(t - 1)
+                        .map(|(b, tok)| b + tok.len() as u32)
+                        .unwrap_or(fallback_end);
+                    break;
+                }
+            }
         }
-        members.push((*member_start, member_end, name.clone()));
+        members.push((*member_start, member_end.min(fallback_end), name.clone()));
     }
     members
 }
@@ -3984,6 +4022,19 @@ fn count_anywhere(node: &ErasedSegment, kind: SyntaxKind) -> u32 {
 fn count_any(node: &ErasedSegment, set: &SyntaxSet) -> u32 {
     node.recursive_crawl(set, true, &SyntaxSet::EMPTY, true)
         .len() as u32
+}
+
+/// The keyword tokens whose raw text equals `word` (case-insensitive).
+fn keyword_tokens(node: &ErasedSegment, word: &str) -> Vec<ErasedSegment> {
+    node.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::Keyword),
+        true,
+        &SyntaxSet::EMPTY,
+        true,
+    )
+    .into_iter()
+    .filter(|k| k.raw().eq_ignore_ascii_case(word))
+    .collect()
 }
 
 /// Count keyword tokens whose raw text equals `word` (case-insensitive).

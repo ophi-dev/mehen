@@ -353,3 +353,21 @@ fn no_where_counter_evidence_sums_to_the_metrics() {
         assert_eq!(sum, 1.0, "expected count for {key}");
     }
 }
+
+/// The RETURNING/OUTPUT clause counter is evidence-backed under its own
+/// key (Codex P1, PR #257 round 20).
+#[test]
+fn returning_counter_evidence_sums_to_the_metric() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               update t set c = 1 returning c into v;\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    let key = "sql.dml.returning_count";
+    let sum: f64 = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.metric.as_str() == key)
+        .map(|item| item.amount)
+        .sum();
+    assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+    assert_eq!(sum, 1.0);
+}

@@ -2996,3 +2996,36 @@ fn oracle_package_body_parse_gap_recovers_members() {
     // The member's entry only — NULL bodies add no paths.
     assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
 }
+
+// ── PR #257 round-20 review regressions ─────────────────────────────────
+
+/// MySQL parameter types with their own parens (`DECIMAL(10,2)`) don't end
+/// the signature early — the body gate opens at the *outer* parameter
+/// list's close, so a default expression's AND stays declaration syntax
+/// (Codex P2, PR #257 round 20).
+#[test]
+fn mysql_nested_parameter_parens_stay_in_the_signature() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p(x decimal(10,2), flag boolean default true and false)\n\
+         signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // Entry 1 + SIGNAL 1 — the default's AND is no path.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// `dbms_sql` outside Oracle is an ordinary schema name, not the dynamic
+/// SQL package (Codex P2, PR #257 round 20).
+#[test]
+fn dbms_sql_qualifier_requires_the_oracle_dialect() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure p as\n\
+         begin\n\
+           select dbms_sql.foo();\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
+}
