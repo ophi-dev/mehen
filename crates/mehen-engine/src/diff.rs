@@ -1175,6 +1175,7 @@ fn run_diff_inner(
         // Renamed files carry the baseline under their old path — both
         // the baseline blob and the baseline history live there.
         let base_path = cf.source_path.as_deref().unwrap_or(cf.path.as_path());
+        let base_utf8_path = Utf8PathBuf::try_from(base_path.to_path_buf()).ok();
 
         // No analyzer for a recognized language (the owning crate is
         // feature-gated off in this build): static columns are
@@ -1196,8 +1197,12 @@ fn run_diff_inner(
             .into_iter()
             .flatten()
             {
+                let diagnostic_path = match side {
+                    DiffSide::Base => base_utf8_path.as_ref().unwrap_or(utf8_path),
+                    DiffSide::Head => utf8_path,
+                };
                 analysis_errors.push(AnalysisErrorRecord {
-                    path: utf8_path.clone(),
+                    path: diagnostic_path.clone(),
                     side,
                     diagnostics: vec![ParseDiagnostic::warning(
                         "engine.analyzer_unavailable",
@@ -1233,9 +1238,9 @@ fn run_diff_inner(
 
         let mut analyze = |bytes: Vec<u8>, side: DiffSide| -> Option<MetricSpace> {
             let analyzer = analyzer.as_deref()?;
-            let side_label = match side {
-                DiffSide::Base => "baseline",
-                DiffSide::Head => "current",
+            let (side_label, side_path) = match side {
+                DiffSide::Base => ("baseline", base_utf8_path.as_ref().unwrap_or(utf8_path)),
+                DiffSide::Head => ("current", utf8_path),
             };
             let text = match String::from_utf8(bytes) {
                 Ok(text) => text,
@@ -1246,31 +1251,31 @@ fn run_diff_inner(
                     );
                     log::warn!(
                         "{} ({side_label}): {}: {}",
-                        cf.path.display(),
+                        side_path,
                         diagnostic.code,
                         diagnostic.message
                     );
                     analysis_errors.push(AnalysisErrorRecord {
-                        path: utf8_path.clone(),
+                        path: side_path.clone(),
                         side,
                         diagnostics: vec![diagnostic],
                     });
                     return None;
                 }
             };
-            let source = SourceFile::new(utf8_path.clone(), *language, text);
+            let source = SourceFile::new(side_path.clone(), *language, text);
             let analysis = match analyzer.analyze(&source, &analysis_config) {
                 Ok(a) => a,
                 Err(err) => {
                     let diagnostic = ParseDiagnostic::error("analysis.error", err.to_string());
                     log::error!(
                         "{} ({side_label}): {}: {}",
-                        cf.path.display(),
+                        side_path,
                         diagnostic.code,
                         diagnostic.message
                     );
                     analysis_errors.push(AnalysisErrorRecord {
-                        path: utf8_path.clone(),
+                        path: side_path.clone(),
                         side,
                         diagnostics: vec![diagnostic],
                     });
@@ -1281,13 +1286,13 @@ fn run_diff_inner(
                 match diag.severity {
                     DiagnosticSeverity::Warning => log::warn!(
                         "{} ({side_label}): {}: {}",
-                        cf.path.display(),
+                        side_path,
                         diag.code,
                         diag.message
                     ),
                     DiagnosticSeverity::Error | DiagnosticSeverity::Fatal => log::error!(
                         "{} ({side_label}): {}: {}",
-                        cf.path.display(),
+                        side_path,
                         diag.code,
                         diag.message
                     ),
@@ -1295,7 +1300,7 @@ fn run_diff_inner(
             }
             if !analysis.diagnostics.is_empty() {
                 analysis_errors.push(AnalysisErrorRecord {
-                    path: utf8_path.clone(),
+                    path: side_path.clone(),
                     side,
                     diagnostics: analysis.diagnostics.clone(),
                 });
@@ -1628,16 +1633,13 @@ fn run_diff_inner(
                         if !base_measured && !head_measured {
                             return None;
                         }
-                        (
-                            baseline_space.is_some() && !base_measured,
-                            current_space.is_some() && !head_measured,
-                        )
+                        (!is_new && !base_measured, !is_deleted && !head_measured)
                     } else if sel.name.starts_with("history.") {
                         let baseline_history_missing =
-                            matches!(histories.as_ref(), Some((None, _))) && !is_new;
+                            matches!(histories.as_ref(), Some((None, _))) && !is_new_row;
                         (
                             baseline_history_missing
-                                || (!is_new
+                                || (baseline_space.is_some()
                                     && !history_metrics::selector_available(
                                         sel.name,
                                         baseline_composites,
