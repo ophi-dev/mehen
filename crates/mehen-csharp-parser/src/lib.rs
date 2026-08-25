@@ -51,11 +51,12 @@
 //! ```no_run
 //! use mehen_csharp_parser::c_sharp_parser::{self, CSharpParser};
 //! use mehen_csharp_parser::c_sharp_lexer::CSharpLexer;
-//! // `number_of_syntax_errors` is a `Parser`-trait method, so the trait
-//! // must be in scope to call it.
-//! use antlr4_runtime::Parser;
+//! // The runtime is re-exported by this crate, so no direct
+//! // `antlr-rust-runtime` dependency is needed. `number_of_syntax_errors`
+//! // is a `Parser`-trait method, so the trait must be in scope to call it.
+//! use mehen_csharp_parser::antlr4_runtime::Parser;
 //!
-//! # fn main() -> Result<(), antlr4_runtime::AntlrError> {
+//! # fn main() -> Result<(), mehen_csharp_parser::antlr4_runtime::AntlrError> {
 //! // One-call setup: build lexer + token stream + parser and run an entry
 //! // rule. `parse_with_parser` keeps the parser so you can read diagnostics.
 //! let out = c_sharp_parser::parse_with_parser(
