@@ -2090,6 +2090,67 @@ fn diff_reports_history_only_for_unparsable_files() {
 }
 
 #[test]
+fn renamed_base_diagnostics_use_the_source_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+
+    let broken = "def f(x):\n    if x:\n        return 1\n    return 0\n\n\ndef broken(:\n";
+    write_python(dir.path(), "before.py", broken);
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "rename-diagnostic-base"]);
+
+    git_ok(dir.path(), &["mv", "before.py", "after.py"]);
+    write_python(
+        dir.path(),
+        "after.py",
+        "def f(x):\n    if x:\n        return 1\n    return 0\n\n\ndef repaired():\n    return 2\n",
+    );
+    commit_all(dir.path(), "rename and repair");
+    git_ok(dir.path(), &["tag", "rename-diagnostic-head"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mehen"))
+        .current_dir(dir.path())
+        .args([
+            "diff",
+            "--from",
+            "rename-diagnostic-base",
+            "--to",
+            "rename-diagnostic-head",
+            "--metrics",
+            "cognitive",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("GITHUB_EVENT_NAME")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("GITHUB_SHA")
+        .env_remove("GITHUB_REPOSITORY")
+        .output()
+        .expect("failed to run mehen diff");
+    assert!(
+        output.status.success(),
+        "base diagnostics are advisory: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("diff output must be JSON");
+    let errors = value["analysis_errors"]
+        .as_array()
+        .expect("analysis_errors array");
+    let base_error = errors
+        .iter()
+        .find(|record| record["side"].as_str() == Some("base"))
+        .unwrap_or_else(|| panic!("expected base diagnostic: {errors:?}"));
+    assert_eq!(
+        base_error["path"].as_str(),
+        Some("before.py"),
+        "the base-side diagnostic must link to the path that exists at the base revision"
+    );
+}
+
+#[test]
 fn split_rename_baselines_reject_blocked_source_analyses() {
     // The split-rename baseline staging re-analyzes the *source* blob
     // for composite inputs; a source with blocking parse errors must
@@ -2155,5 +2216,15 @@ fn split_rename_baselines_reject_blocked_source_analyses() {
         metric["baseline"].as_f64(),
         Some(0.0),
         "partial source statics staged into the synthetic baseline: {metric:?}"
+    );
+    assert_eq!(
+        metric["baseline_unavailable"].as_bool(),
+        Some(true),
+        "a blocked source parse must not turn the synthetic baseline into a measured zero: {metric:?}"
+    );
+    assert_eq!(
+        metric["delta"].as_f64(),
+        Some(0.0),
+        "an unavailable synthetic baseline cannot support a trend: {metric:?}"
     );
 }

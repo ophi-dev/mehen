@@ -680,6 +680,78 @@ fn diff_renders_one_sided_coverage_as_measurement_change_and_omits_unmeasured() 
 }
 
 #[test]
+fn diff_marks_missing_coverage_unavailable_when_the_other_side_cannot_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    write(
+        dir.path(),
+        "head-broken.py",
+        "HEAD_MARKER = 1\n\ndef head_ok():\n    return 1\n",
+    );
+    write(
+        dir.path(),
+        "base-broken.py",
+        "BASE_MARKER = 2\n\ndef base_broken(:\n",
+    );
+    commit_all(dir.path(), "base");
+    git_ok(dir.path(), &["tag", "parse-coverage-base"]);
+
+    write(
+        dir.path(),
+        "head-broken.py",
+        "HEAD_MARKER = 1\n\ndef head_broken(:\n",
+    );
+    write(
+        dir.path(),
+        "base-broken.py",
+        "BASE_MARKER = 2\n\ndef base_ok():\n    return 2\n",
+    );
+    commit_all(dir.path(), "head");
+    git_ok(dir.path(), &["tag", "parse-coverage-head"]);
+
+    write(
+        dir.path(),
+        "base.info",
+        "TN:\nSF:head-broken.py\nDA:1,1\nend_of_record\n",
+    );
+    write(
+        dir.path(),
+        "head.info",
+        "TN:\nSF:base-broken.py\nDA:1,1\nend_of_record\n",
+    );
+
+    let output = mehen_diff(
+        dir.path(),
+        &[
+            "--from",
+            "parse-coverage-base",
+            "--to",
+            "parse-coverage-head",
+            "--metrics",
+            "cognitive,coverage.line",
+            "--coverage=head.info",
+            "--base-coverage=base.info",
+            "--output-format",
+            "json",
+        ],
+    );
+    let json = json_stdout(&output);
+
+    let head_broken = coverage_line_metric(&json, "head-broken.py")
+        .unwrap_or_else(|| panic!("missing base coverage measurement: {json}"));
+    assert_eq!(head_broken["baseline"], 100.0, "{head_broken}");
+    assert_eq!(head_broken["current_unavailable"], true);
+    assert_eq!(head_broken["delta"], 0.0);
+
+    let base_broken = coverage_line_metric(&json, "base-broken.py")
+        .unwrap_or_else(|| panic!("missing head coverage measurement: {json}"));
+    assert_eq!(base_broken["current"], 100.0, "{base_broken}");
+    assert_eq!(base_broken["baseline_unavailable"], true);
+    assert_eq!(base_broken["delta"], 0.0);
+}
+
+#[test]
 fn diff_new_and_deleted_files_keep_honest_coverage_cells() {
     let dir = tempfile::tempdir().unwrap();
     init_git_repo(dir.path());
