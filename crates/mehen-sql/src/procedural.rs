@@ -784,9 +784,25 @@ impl Machine<'_> {
                 ")" if self.mysql && self.pending_routine_header => {
                     // MySQL signatures end at the parameter list's close:
                     // what follows (`RETURNS <type>`, characteristics, then
-                    // the body — possibly a bare single statement) is past
-                    // the signature (Codex P2).
+                    // the body — possibly a bare single statement with no
+                    // `BEGIN` opener) is past the signature, so the body
+                    // gate opens here (Codex P2 ×2).
                     self.pending_routine_header = false;
+                    self.in_body = true;
+                }
+                "ROW"
+                    if self.mysql
+                        && self.pending_routine_header
+                        && i.checked_sub(1)
+                            .map(|j| tokens[j].word.as_str())
+                            .unwrap_or("")
+                            == "EACH" =>
+                {
+                    // MySQL triggers have no parameter list: `FOR EACH ROW`
+                    // ends the header and the (possibly single-statement)
+                    // body follows (Codex P2).
+                    self.pending_routine_header = false;
+                    self.in_body = true;
                 }
                 ";" => {
                     // A routine header ending at the terminator without
@@ -1956,16 +1972,12 @@ pub(crate) fn extract(
             // content (it may start mid-body — T-SQL spills lose the opening
             // BEGIN to the parsed part), so the body gate is open from the
             // start — except standalone DECLARE-led runs (Codex P2) and
-            // recovered T-SQL definitions, whose *header* leads the run:
-            // their body opens at AS/BEGIN like any parsed definition
-            // (a MySQL single-statement body has no opener, so it keeps
-            // the open gate — Codex P1).
-            in_body: restored_body
-                || (if recovered_unit {
-                    !tsql
-                } else {
-                    !(standalone && declare_led)
-                }),
+            // recovered definitions, whose *header* leads the run: their
+            // body opens at AS/BEGIN (T-SQL), the parameter list's close or
+            // `FOR EACH ROW` (MySQL), or IS→BEGIN (Oracle members), so
+            // header tokens like `CREATE OR REPLACE` never count as body
+            // booleans (Codex P2).
+            in_body: restored_body || (!recovered_unit && !(standalone && declare_led)),
             pending_loop_headers: 0,
             pending_between: false,
             pending_routine_header: false,

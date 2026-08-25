@@ -2914,3 +2914,85 @@ fn backtick_quoted_recovered_name_is_accepted() {
     );
     assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
 }
+
+// ── PR #257 round-19 review regressions ─────────────────────────────────
+
+/// A standard MySQL `DELIMITER //` script recovers its definitions: the
+/// custom delimiter is a statement boundary before each header, including
+/// the very first one (Codex P1, PR #257 round 19).
+#[test]
+fn mysql_delimiter_script_recovers_definitions() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter //\n\
+         create procedure p1()\n\
+         begin\n\
+           signal sqlstate '45000';\n\
+         end//\n\
+         create procedure p2()\n\
+         begin\n\
+           signal sqlstate '45001';\n\
+         end//\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 2.0);
+}
+
+/// A MySQL `DEFINER = user@host` account expression spans several tokens —
+/// the header recognizer consumes it whole (Codex P1, PR #257 round 19).
+#[test]
+fn mysql_definer_account_expression_is_consumed() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create definer = `root`@`localhost` procedure p() signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+}
+
+/// A recovered definition's header tokens stay outside the body gate:
+/// `CREATE OR REPLACE …` counts no boolean for its `OR` (Codex P2, PR #257
+/// round 19).
+#[test]
+fn recovered_header_or_is_not_a_boolean_path() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create or replace procedure p() signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // Entry 1 + SIGNAL 1 — no boolean increment from the header's OR.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// MySQL `ALTER PROCEDURE p COMMENT …` alters metadata, not a body: no
+/// routine recovers from it (Codex P2, PR #257 round 19).
+#[test]
+fn mysql_alter_procedure_metadata_is_not_a_definition() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         alter procedure p comment 'new comment';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 0.0);
+}
+
+/// An Oracle package body lost to a parse gap recovers its member
+/// routines; the initialization section stays file-level (Codex P1,
+/// PR #257 round 19).
+#[test]
+fn oracle_package_body_parse_gap_recovers_members() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create package body pkg as\n\
+           procedure p is\n\
+           begin\n\
+             null;\n\
+           end p;\n\
+         begin\n\
+           null;\n\
+         end pkg;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // The member's entry only — NULL bodies add no paths.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+}

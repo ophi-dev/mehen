@@ -537,6 +537,7 @@ pub(crate) fn extract(
 ) -> SqlFileFacts {
     let tsql = dialect == DialectKind::Tsql;
     let mysql = dialect == DialectKind::Mysql;
+    let oracle = dialect == DialectKind::Oracle;
     let bigquery = dialect == DialectKind::Bigquery;
     let mut facts = SqlFileFacts::default();
 
@@ -546,7 +547,7 @@ pub(crate) fn extract(
     // routine's body statements surface as top-level statements themselves —
     // classification needs the unit ranges to recognize them as
     // routine-owned (Codex P1).
-    extract_procedural_units(root, &line_at, tsql, mysql, &mut facts);
+    extract_procedural_units(root, &line_at, tsql, mysql, oracle, &mut facts);
 
     // ── statements ──────────────────────────────────────────────────
     let unit_ranges: Vec<(u32, u32)> = facts
@@ -3214,6 +3215,7 @@ fn extract_procedural_units(
     line_at: &impl Fn(u32) -> u32,
     tsql: bool,
     mysql: bool,
+    oracle: bool,
     facts: &mut SqlFileFacts,
 ) {
     let units = procedural_unit_nodes(root);
@@ -3271,7 +3273,7 @@ fn extract_procedural_units(
             {
                 continue;
             }
-            let headers = recovered_definition_headers(&run);
+            let headers = recovered_definition_headers(&run, tsql);
             if headers.is_empty() {
                 continue;
             }
@@ -3303,36 +3305,149 @@ fn extract_procedural_units(
             .procedural_units
             .sort_by_key(|u| (u.start_byte, std::cmp::Reverse(u.end_byte)));
     }
+    // Oracle package *bodies* fall into the same parse gap: sqruff 0.40
+    // emits `CREATE PACKAGE BODY pkg AS PROCEDURE p IS BEGIN … END p; …`
+    // wholly as a root `Unparsable` run (Codex P1). Recover the member
+    // routines: `PROCEDURE|FUNCTION <name>` headers at `;` boundaries
+    // inside a run *leading* with a package-body header. A member's span
+    // ends at its named `END <name>` when present (the PL/SQL convention),
+    // else at the next member or the run's end — so an initialization
+    // section stays file-level.
+    if oracle {
+        for run in root.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::Unparsable),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        ) {
+            let Some(pm) = run.get_position_marker() else {
+                continue;
+            };
+            let (start_byte, end_byte) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+            if facts
+                .procedural_units
+                .iter()
+                .any(|u| u.start_byte <= start_byte && end_byte <= u.end_byte)
+            {
+                continue;
+            }
+            let members = recovered_package_body_members(&run, end_byte);
+            for (member_start, member_end, name) in members {
+                facts.procedural_units.push(ProceduralUnitFacts {
+                    name: Some(name),
+                    start_line: line_at(member_start),
+                    end_line: line_at(member_end.saturating_sub(1)),
+                    start_byte: member_start,
+                    end_byte: member_end,
+                    cyclomatic_complexity: 0.0,
+                    cognitive_complexity: 0.0,
+                    embedded_query_structural: 0.0,
+                });
+            }
+        }
+        facts
+            .procedural_units
+            .sort_by_key(|u| (u.start_byte, std::cmp::Reverse(u.end_byte)));
+    }
+}
+
+/// The member routines recovered from an Oracle package-body parse gap:
+/// `(start, end, name)` per `PROCEDURE|FUNCTION <name>` header at a `;`
+/// boundary in a run that *leads* with `CREATE [OR REPLACE]
+/// [EDITIONABLE|NONEDITIONABLE] PACKAGE BODY <name>`. Package
+/// *specifications* (no BODY keyword) declare prototypes, not members —
+/// they recover nothing.
+fn recovered_package_body_members(run: &ErasedSegment, run_end: u32) -> Vec<(u32, u32, String)> {
+    let mut tokens = Vec::new();
+    leaf_tokens(run, &mut tokens);
+    let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
+    // Leading package-body header check.
+    let mut i = 0usize;
+    if !word(i).eq_ignore_ascii_case("CREATE") {
+        return Vec::new();
+    }
+    i += 1;
+    if word(i).eq_ignore_ascii_case("OR") && word(i + 1).eq_ignore_ascii_case("REPLACE") {
+        i += 2;
+    }
+    if word(i).eq_ignore_ascii_case("EDITIONABLE") || word(i).eq_ignore_ascii_case("NONEDITIONABLE")
+    {
+        i += 1;
+    }
+    if !(word(i).eq_ignore_ascii_case("PACKAGE") && word(i + 1).eq_ignore_ascii_case("BODY")) {
+        return Vec::new();
+    }
+    // Member headers at `;` boundaries (or right after the package's IS/AS).
+    let mut headers: Vec<(usize, u32, String)> = Vec::new();
+    for (j, (token_start, _)) in tokens.iter().enumerate() {
+        let kind = word(j);
+        if !(kind.eq_ignore_ascii_case("PROCEDURE") || kind.eq_ignore_ascii_case("FUNCTION")) {
+            continue;
+        }
+        let prev = if j == 0 { "" } else { word(j - 1) };
+        let boundary =
+            prev == ";" || prev.eq_ignore_ascii_case("IS") || prev.eq_ignore_ascii_case("AS");
+        if !boundary {
+            continue;
+        }
+        let name = word(j + 1);
+        if name.is_empty()
+            || !name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '"')
+        {
+            continue;
+        }
+        headers.push((j, *token_start, name.to_string()));
+    }
+    // Spans: to the named `END <name>` when present, else the next header
+    // or the run's end.
+    let mut members = Vec::new();
+    for (k, (token_idx, member_start, name)) in headers.iter().enumerate() {
+        let fallback_end = headers
+            .get(k + 1)
+            .map(|&(_, next_start, _)| next_start)
+            .unwrap_or(run_end);
+        let mut member_end = fallback_end;
+        for j in *token_idx..tokens.len() {
+            if word(j).eq_ignore_ascii_case("END")
+                && word(j + 1).eq_ignore_ascii_case(name)
+                && word(j + 2) == ";"
+            {
+                // Through the terminator.
+                member_end = tokens
+                    .get(j + 2)
+                    .map(|&(b, _)| b + 1)
+                    .unwrap_or(fallback_end);
+                break;
+            }
+            // Stop searching past the next member.
+            if tokens[j].0 >= fallback_end {
+                break;
+            }
+        }
+        members.push((*member_start, member_end, name.clone()));
+    }
+    members
 }
 
 /// The recovered definition headers in a token run: each `(start byte,
-/// name)` where a `CREATE [OR ALTER|REPLACE] [DEFINER = <user>]
-/// FUNCTION|PROC[EDURE]|TRIGGER <name>` (or `ALTER <kind> <name>`) header
-/// sits at a statement boundary — the run's start, or right after a `;` or
-/// `GO`. sqruff's error recovery can swallow several definitions into one
-/// run, so a run yields one unit *per header* (Codex P2). Names keep their
-/// original case; dotted qualification split by the lexer is re-joined.
-fn recovered_definition_headers(run: &ErasedSegment) -> Vec<(u32, String)> {
-    fn leaf_tokens(node: &ErasedSegment, out: &mut Vec<(u32, String)>) {
-        let children = node.segments();
-        if children.is_empty() {
-            if !(node.is_comment() || node.is_whitespace() || node.is_meta()) {
-                let raw = node.raw().trim();
-                if !raw.is_empty()
-                    && let Some(pm) = node.get_position_marker()
-                {
-                    out.push((pm.source_slice.start as u32, raw.to_string()));
-                }
-            }
-            return;
-        }
-        for child in children {
-            leaf_tokens(child, out);
-        }
-    }
-    fn header_at(tokens: &[(u32, String)], mut i: usize) -> Option<String> {
+/// name)` where a `CREATE [OR ALTER|REPLACE] [DEFINER = <account>]
+/// FUNCTION|PROC[EDURE]|TRIGGER <name>` header sits at a statement
+/// boundary — the run's start, or right after `;`, `GO`, or a MySQL custom
+/// delimiter (`//`, `$$` — punctuation-only tokens, Codex P1). sqruff's
+/// error recovery can swallow several definitions into one run, so a run
+/// yields one unit *per header* (Codex P2). Standalone `ALTER <kind>`
+/// headers count only when `allow_alter` (T-SQL redefinitions) — MySQL's
+/// `ALTER PROCEDURE p COMMENT …` alters metadata, not the body (Codex P2).
+/// Names keep their original case; dotted qualification split by the lexer
+/// is re-joined.
+fn recovered_definition_headers(run: &ErasedSegment, allow_alter: bool) -> Vec<(u32, String)> {
+    fn header_at(tokens: &[(u32, String)], mut i: usize, allow_alter: bool) -> Option<String> {
         let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
-        if !(word(i).eq_ignore_ascii_case("CREATE") || word(i).eq_ignore_ascii_case("ALTER")) {
+        let leading_alter = word(i).eq_ignore_ascii_case("ALTER");
+        if !(word(i).eq_ignore_ascii_case("CREATE") || (leading_alter && allow_alter)) {
             return None;
         }
         i += 1;
@@ -3343,13 +3458,25 @@ fn recovered_definition_headers(run: &ErasedSegment) -> Vec<(u32, String)> {
         {
             i += 2;
         }
-        // MySQL `DEFINER = user` clause between CREATE and the kind keyword.
+        // MySQL `DEFINER = <account>` between CREATE and the kind keyword:
+        // the account is a multi-token expression (`` `root`@`localhost` ``,
+        // `CURRENT_USER()`), so consume until the kind keyword appears
+        // (bounded — Codex P1).
         if word(i).eq_ignore_ascii_case("DEFINER") {
+            let limit = i + 8;
             i += 1;
-            if word(i) == "=" {
+            while i <= limit {
+                let w = word(i);
+                if w.eq_ignore_ascii_case("FUNCTION")
+                    || w.eq_ignore_ascii_case("PROCEDURE")
+                    || w.eq_ignore_ascii_case("PROC")
+                    || w.eq_ignore_ascii_case("TRIGGER")
+                    || w.is_empty()
+                {
+                    break;
+                }
                 i += 1;
             }
-            i += 1; // the definer value
         }
         let kind = word(i);
         if !(kind.eq_ignore_ascii_case("FUNCTION")
@@ -3386,16 +3513,47 @@ fn recovered_definition_headers(run: &ErasedSegment) -> Vec<(u32, String)> {
     leaf_tokens(run, &mut tokens);
     let mut headers = Vec::new();
     for j in 0..tokens.len() {
-        let boundary =
-            j == 0 || tokens[j - 1].1 == ";" || tokens[j - 1].1.eq_ignore_ascii_case("GO");
+        let boundary = j == 0 || {
+            let prev = tokens[j - 1].1.as_str();
+            prev == ";" || prev.eq_ignore_ascii_case("GO") || is_custom_delimiter(prev)
+        };
         if !boundary {
             continue;
         }
-        if let Some(name) = header_at(&tokens, j) {
+        if let Some(name) = header_at(&tokens, j, allow_alter) {
             headers.push((tokens[j].0, name));
         }
     }
     headers
+}
+
+/// Whether a token looks like a MySQL client custom delimiter (`//`, `$$`,
+/// `;;`): punctuation-only, drawn from the characters delimiters are made
+/// of. Identifiers, quoted names, and operators with operands never match.
+fn is_custom_delimiter(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| matches!(c, '/' | '$' | ';' | '|' | '!'))
+}
+
+/// The leaf code tokens of a node with their start bytes, in source order.
+fn leaf_tokens(node: &ErasedSegment, out: &mut Vec<(u32, String)>) {
+    let children = node.segments();
+    if children.is_empty() {
+        if !(node.is_comment() || node.is_whitespace() || node.is_meta()) {
+            let raw = node.raw().trim();
+            if !raw.is_empty()
+                && let Some(pm) = node.get_position_marker()
+            {
+                out.push((pm.source_slice.start as u32, raw.to_string()));
+            }
+        }
+        return;
+    }
+    for child in children {
+        leaf_tokens(child, out);
+    }
 }
 
 /// Collect the distinct read and write object names touched by the file.
