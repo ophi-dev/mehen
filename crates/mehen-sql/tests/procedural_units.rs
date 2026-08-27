@@ -393,3 +393,73 @@ fn unnamed_end_bounds_a_recovered_member() {
         .expect("member cyclomatic");
     assert_eq!(cyclo, 1.0);
 }
+
+/// A declaration-level `CASE … END` initializer doesn't terminate a
+/// recovered member early: only its executable `BEGIN` arms termination
+/// (Codex P2, PR #257 round 21).
+#[test]
+fn declaration_case_does_not_truncate_a_recovered_member() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               create package body pkg as\n\
+               \x20 procedure p is\n\
+               \x20   x number := case when 1 = 1 then 1 else 0 end;\n\
+               \x20 begin\n\
+               \x20   null;\n\
+               \x20 end;\n\
+               end pkg;\n\
+               /\n";
+    let analysis = analyze(sql);
+    let member = analysis
+        .root
+        .spaces
+        .iter()
+        .flat_map(|s| std::iter::once(s).chain(s.spaces.iter()))
+        .find(|s| s.kind == SpaceKind::Function)
+        .expect("member Function space");
+    assert_eq!(member.name.as_deref(), Some("p"));
+    // The member runs through its real body END (line 7), not the
+    // declaration initializer's END (line 3).
+    assert!(member.span.end_line >= 7, "member covers its body");
+}
+
+/// A nested subprogram inside a recovered member doesn't truncate the
+/// outer span: both become units, the outer containing the inner
+/// (Codex P2, PR #257 round 21).
+#[test]
+fn nested_recovered_member_keeps_the_outer_span() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               create package body pkg as\n\
+               \x20 procedure outer_p is\n\
+               \x20   procedure inner_p is\n\
+               \x20   begin\n\
+               \x20     null;\n\
+               \x20   end;\n\
+               \x20 begin\n\
+               \x20   null;\n\
+               \x20 end;\n\
+               end pkg;\n\
+               /\n";
+    let analysis = analyze(sql);
+    let mut functions: Vec<(String, u32, u32)> = Vec::new();
+    fn walk(space: &mehen_core::MetricSpace, out: &mut Vec<(String, u32, u32)>) {
+        if space.kind == SpaceKind::Function {
+            out.push((
+                space.name.clone().unwrap_or_default(),
+                space.span.start_line,
+                space.span.end_line,
+            ));
+        }
+        for child in &space.spaces {
+            walk(child, out);
+        }
+    }
+    for space in &analysis.root.spaces {
+        walk(space, &mut functions);
+    }
+    assert_eq!(functions.len(), 2, "outer and inner members: {functions:?}");
+    let outer = functions.iter().find(|(n, _, _)| n == "outer_p").unwrap();
+    let inner = functions.iter().find(|(n, _, _)| n == "inner_p").unwrap();
+    // The outer member covers its own body END (line 10), past the inner.
+    assert!(outer.2 >= 10, "outer spans through its body: {outer:?}");
+    assert!(inner.2 <= 7, "inner ends at its own END: {inner:?}");
+}

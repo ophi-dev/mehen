@@ -2593,6 +2593,18 @@ fn extract_objects(
                     ChangeRiskFactor::GrantRevoke,
                 );
             }
+            StatementKind::AnonymousBlock => {
+                // The classification itself is an improved, evidence-backed
+                // fact: contribution output explains each executing block
+                // under its kind-count key (Codex P1).
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.statement.kind_count.anonymous_block",
+                    "sql.statement.anonymous_block",
+                    statement_span(stmt),
+                );
+            }
             StatementKind::TransactionControl => {
                 obj.transaction_control_count += 1;
                 record_object(
@@ -2654,20 +2666,46 @@ fn extract_objects(
             .filter(|name| !read_objects.contains_key(*name))
             .count()) as u32;
     if emit_contributions {
-        for span in write_objects.values() {
-            record_change_risk(
-                evidence,
+        // One first-occurrence contribution per distinct object under the
+        // raw keys too — read/write/touch counts explain themselves
+        // (Codex P1). Touch = read ∪ write: every read span plus the
+        // write-only ones.
+        for (name, span) in &write_objects {
+            let span = span.unwrap_or(fallback_span);
+            record_change_risk(evidence, true, span, ChangeRiskFactor::WriteObject);
+            record_object(
+                obj_evidence,
                 true,
-                span.unwrap_or(fallback_span),
-                ChangeRiskFactor::WriteObject,
+                "sql.object.write_count",
+                "sql.object.write",
+                span,
             );
+            if !read_objects.contains_key(name) {
+                record_object(
+                    obj_evidence,
+                    true,
+                    "sql.object.touch_count",
+                    "sql.object.touch",
+                    span,
+                );
+            }
         }
         for span in read_objects.values() {
-            record_change_risk(
-                evidence,
+            let span = span.unwrap_or(fallback_span);
+            record_change_risk(evidence, true, span, ChangeRiskFactor::ReadObject);
+            record_object(
+                obj_evidence,
                 true,
-                span.unwrap_or(fallback_span),
-                ChangeRiskFactor::ReadObject,
+                "sql.object.read_count",
+                "sql.object.read",
+                span,
+            );
+            record_object(
+                obj_evidence,
+                true,
+                "sql.object.touch_count",
+                "sql.object.touch",
+                span,
             );
         }
     }
@@ -3268,6 +3306,10 @@ fn extract_procedural_units(
     // unrecognized; the unit spans the whole run — the batch/delimiter
     // semantics that already govern body ownership in those dialects.
     if tsql || mysql {
+        // The client's *declared* delimiters (`DELIMITER %%`) are statement
+        // boundaries too — they aren't limited to any punctuation set
+        // (Codex P1).
+        let declared_delimiters = declared_delimiters(root);
         for run in root.recursive_crawl(
             &SyntaxSet::single(SyntaxKind::Unparsable),
             true,
@@ -3286,7 +3328,7 @@ fn extract_procedural_units(
             {
                 continue;
             }
-            let headers = recovered_definition_headers(&run, tsql);
+            let headers = recovered_definition_headers(&run, tsql, &declared_delimiters);
             if headers.is_empty() {
                 continue;
             }
@@ -3414,30 +3456,41 @@ fn recovered_package_body_members(run: &ErasedSegment, run_end: u32) -> Vec<(u32
         }
         headers.push((j, *token_start, name.to_string()));
     }
-    // Spans: to the END that balances the member's body — `BEGIN`/`CASE`
-    // open, bare/named `END …;` and `END CASE` close, `END IF/LOOP/WHILE/
-    // REPEAT` close their own constructs without touching block depth —
-    // so the common unnamed `END;` terminator is recognized too, and an
-    // initialization section after the last member stays file-level
-    // (Codex P2). Fallback: the next member's header or the run's end.
-    let mut members = Vec::new();
-    for (k, (token_idx, member_start, name)) in headers.iter().enumerate() {
-        let fallback_end = headers
-            .get(k + 1)
-            .map(|&(_, next_start, _)| next_start)
-            .unwrap_or(run_end);
-        let mut member_end = fallback_end;
+    // Spans: to the END that balances the member's *body*. `BEGIN` opens
+    // the executable body — a declaration-level `CASE … END` expression
+    // balances without arming termination (Codex P2). Nested subprogram
+    // headers recurse, so an outer member's span survives its local
+    // routines instead of truncating at their headers (Codex P2).
+    // `END IF/LOOP/WHILE/REPEAT` close their own constructs; `END CASE`
+    // closes its CASE without re-opening. Fallback: the run's end.
+    let header_indices: std::collections::BTreeSet<usize> =
+        headers.iter().map(|&(token_idx, _, _)| token_idx).collect();
+    fn member_end_index(
+        tokens: &[(u32, String)],
+        header_idx: usize,
+        header_indices: &std::collections::BTreeSet<usize>,
+    ) -> Option<usize> {
+        let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
         let mut depth = 0u32;
         let mut opened = false;
-        for j in *token_idx..tokens.len() {
-            // Stop searching past the next member.
-            if tokens[j].0 >= fallback_end {
-                break;
+        let mut j = header_idx + 1;
+        while j < tokens.len() {
+            if header_indices.contains(&j) {
+                if !opened && depth == 0 {
+                    // A bodyless prototype: it ends before the next header.
+                    return Some(j.saturating_sub(1));
+                }
+                // A nested subprogram: skip past its balanced end.
+                let nested_end = member_end_index(tokens, j, header_indices)?;
+                j = nested_end + 1;
+                continue;
             }
             let w = word(j);
-            if w.eq_ignore_ascii_case("BEGIN") || w.eq_ignore_ascii_case("CASE") {
+            if w.eq_ignore_ascii_case("BEGIN") {
                 depth += 1;
                 opened = true;
+            } else if w.eq_ignore_ascii_case("CASE") {
+                depth += 1;
             } else if w.eq_ignore_ascii_case("END") {
                 let next = word(j + 1);
                 if next.eq_ignore_ascii_case("IF")
@@ -3445,27 +3498,43 @@ fn recovered_package_body_members(run: &ErasedSegment, run_end: u32) -> Vec<(u32
                     || next.eq_ignore_ascii_case("WHILE")
                     || next.eq_ignore_ascii_case("REPEAT")
                 {
+                    j += 2;
                     continue;
                 }
                 depth = depth.saturating_sub(1);
+                if next.eq_ignore_ascii_case("CASE") {
+                    // `END CASE` closes its statement; skip the CASE token
+                    // so it doesn't re-open.
+                    j += 2;
+                    continue;
+                }
                 if opened && depth == 0 {
-                    // Through the optional name and terminator.
+                    // Through the optional trailing name and terminator.
                     let mut t = j + 1;
-                    if word(t).eq_ignore_ascii_case(name) {
+                    if word(t)
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '"')
+                    {
                         t += 1;
                     }
                     if word(t) == ";" {
                         t += 1;
                     }
-                    member_end = tokens
-                        .get(t - 1)
-                        .map(|(b, tok)| b + tok.len() as u32)
-                        .unwrap_or(fallback_end);
-                    break;
+                    return Some(t - 1);
                 }
             }
+            j += 1;
         }
-        members.push((*member_start, member_end.min(fallback_end), name.clone()));
+        None
+    }
+    let mut members = Vec::new();
+    for (token_idx, member_start, name) in headers.iter() {
+        let member_end = member_end_index(&tokens, *token_idx, &header_indices)
+            .and_then(|idx| tokens.get(idx))
+            .map(|(b, tok)| b + tok.len() as u32)
+            .unwrap_or(run_end);
+        members.push((*member_start, member_end, name.clone()));
     }
     members
 }
@@ -3481,7 +3550,11 @@ fn recovered_package_body_members(run: &ErasedSegment, run_end: u32) -> Vec<(u32
 /// `ALTER PROCEDURE p COMMENT …` alters metadata, not the body (Codex P2).
 /// Names keep their original case; dotted qualification split by the lexer
 /// is re-joined.
-fn recovered_definition_headers(run: &ErasedSegment, allow_alter: bool) -> Vec<(u32, String)> {
+fn recovered_definition_headers(
+    run: &ErasedSegment,
+    allow_alter: bool,
+    declared_delimiters: &[String],
+) -> Vec<(u32, String)> {
     fn header_at(tokens: &[(u32, String)], mut i: usize, allow_alter: bool) -> Option<String> {
         let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
         let leading_alter = word(i).eq_ignore_ascii_case("ALTER");
@@ -3553,7 +3626,10 @@ fn recovered_definition_headers(run: &ErasedSegment, allow_alter: bool) -> Vec<(
     for j in 0..tokens.len() {
         let boundary = j == 0 || {
             let prev = tokens[j - 1].1.as_str();
-            prev == ";" || prev.eq_ignore_ascii_case("GO") || is_custom_delimiter(prev)
+            prev == ";"
+                || prev.eq_ignore_ascii_case("GO")
+                || is_custom_delimiter(prev)
+                || declared_delimiters.iter().any(|d| d == prev)
         };
         if !boundary {
             continue;
@@ -3563,6 +3639,22 @@ fn recovered_definition_headers(run: &ErasedSegment, allow_alter: bool) -> Vec<(
         }
     }
     headers
+}
+
+/// The delimiters a MySQL client script *declares* (`DELIMITER %%`): each
+/// token following a `DELIMITER` keyword anywhere in the file. Declared
+/// delimiters are arbitrary strings — no punctuation whitelist covers them
+/// (Codex P1).
+fn declared_delimiters(root: &ErasedSegment) -> Vec<String> {
+    let mut tokens = Vec::new();
+    leaf_tokens(root, &mut tokens);
+    let mut delimiters = Vec::new();
+    for pair in tokens.windows(2) {
+        if pair[0].1.eq_ignore_ascii_case("DELIMITER") && pair[1].1 != ";" {
+            delimiters.push(pair[1].1.clone());
+        }
+    }
+    delimiters
 }
 
 /// Whether a token looks like a MySQL client custom delimiter (`//`, `$$`,

@@ -371,3 +371,32 @@ fn returning_counter_evidence_sums_to_the_metric() {
     assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
     assert_eq!(sum, 1.0);
 }
+
+/// Distinct-object counters and the anonymous-block kind count are
+/// evidence-backed under their own keys (Codex P1 ×2, PR #257 round 21).
+#[test]
+fn object_and_kind_count_evidence_sums_to_the_metrics() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               update t set c = 1 where id = 1;\n\
+               select * from u;\n\
+               begin\n\
+                 null;\n\
+               end;\n\
+               /\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    for key in [
+        "sql.object.write_count",
+        "sql.object.read_count",
+        "sql.object.touch_count",
+        "sql.statement.kind_count.anonymous_block",
+    ] {
+        let sum: f64 = analysis
+            .contributions
+            .iter()
+            .filter(|item| item.metric.as_str() == key)
+            .map(|item| item.amount)
+            .sum();
+        assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+        assert!(sum >= 1.0, "expected a positive count for {key}");
+    }
+}

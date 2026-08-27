@@ -550,6 +550,11 @@ struct Machine<'a> {
     /// type's own parens (`DECIMAL(10,2)`) must not end the signature —
     /// only the *outer* parameter list's close does (Codex P2).
     signature_paren_depth: u32,
+    /// Byte offsets where recovered definitions start inside this region:
+    /// one run can hold several opener-less definitions, and each header
+    /// must scan with a closed body gate and a fresh signature (Codex P2).
+    /// Sorted; empty for ordinary regions.
+    reset_gate_at: Vec<u32>,
     /// Definition headers whose body block hasn't opened yet — the next
     /// plain `BEGIN`s consume these and tag their blocks `routine_body`
     /// (nesting baselines, Codex P2). A stack, not a flag: an Oracle
@@ -783,6 +788,16 @@ impl Machine<'_> {
         let mut i = 0usize;
         while i < tokens.len() {
             let t = &tokens[i];
+            // A recovered definition boundary: close the body gate and
+            // reset the signature so the new header's tokens (`CREATE OR
+            // REPLACE …`) never count as body content (Codex P2).
+            if !self.reset_gate_at.is_empty()
+                && self.reset_gate_at.binary_search(&t.span.start_byte).is_ok()
+            {
+                self.in_body = false;
+                self.pending_routine_header = false;
+                self.signature_paren_depth = 0;
+            }
             let kw = t.keyword_like;
             match t.word.as_str() {
                 "(" if self.mysql && self.pending_routine_header => {
@@ -1426,9 +1441,11 @@ impl Machine<'_> {
                         // Plain `EXEC procname` is a static call — no count.
                     }
                 }
-                "SP_EXECUTESQL" if kw => {
+                "SP_EXECUTESQL" if kw && self.tsql => {
                     // Reached only without a preceding EXEC/EXECUTE (which
-                    // consumes it above).
+                    // consumes it above). T-SQL only: elsewhere an
+                    // `sp_executesql(…)` is an ordinary user function call
+                    // (Codex P2).
                     self.break_bool_run();
                     if self.in_body {
                         self.count_dynamic_sql(t.span);
@@ -1751,6 +1768,7 @@ pub(crate) fn extract(
             oracle,
             mysql,
             signature_paren_depth: 0,
+            reset_gate_at: Vec::new(),
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1836,6 +1854,7 @@ pub(crate) fn extract(
             oracle,
             mysql,
             signature_paren_depth: 0,
+            reset_gate_at: Vec::new(),
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1886,6 +1905,17 @@ pub(crate) fn extract(
         // Codex P1). Typed units never live inside an unparsable run, so
         // containment implies recovery.
         let recovered_unit = unit_ranges.iter().any(|&(s, e, _)| start <= s && e <= end);
+        // Every recovered definition inside this run scans with a fresh
+        // gate at its header (Codex P2).
+        let reset_gate_at: Vec<u32> = if recovered_unit {
+            unit_ranges
+                .iter()
+                .filter(|&&(s, e, _)| start <= s && e <= end)
+                .map(|&(s, _, _)| s)
+                .collect()
+        } else {
+            Vec::new()
+        };
         if !recovered_unit && !unparsable_is_procedural(&tokens) {
             continue;
         }
@@ -2001,6 +2031,7 @@ pub(crate) fn extract(
             oracle,
             mysql,
             signature_paren_depth: 0,
+            reset_gate_at,
             last_bool: None,
         };
         machine.scan(&tokens);

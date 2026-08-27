@@ -3029,3 +3029,52 @@ fn dbms_sql_qualifier_requires_the_oracle_dialect() {
     );
     assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
 }
+
+// ── PR #257 round-21 review regressions ─────────────────────────────────
+
+/// A declared `DELIMITER %%` (arbitrary token, no punctuation whitelist)
+/// is a recovery boundary (Codex P1, PR #257 round 21).
+#[test]
+fn declared_delimiter_is_a_recovery_boundary() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter %%\n\
+         create procedure p()\n\
+         begin\n\
+           signal sqlstate '45000';\n\
+         end%%\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+}
+
+/// The body gate resets at every recovered definition in a shared run: the
+/// second header's `OR` counts nothing (Codex P2, PR #257 round 21).
+#[test]
+fn body_gate_resets_between_recovered_definitions() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p() signal sqlstate '45000';\n\
+         select 1;\n\
+         create or replace procedure q() signal sqlstate '45001';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 2.0);
+    // Two entries + two SIGNALs — no boolean from q's header.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 4.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// `sp_executesql` outside T-SQL is an ordinary function name (Codex P2,
+/// PR #257 round 21).
+#[test]
+fn sp_executesql_requires_the_tsql_dialect() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           sp_executesql('value');\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
+}
