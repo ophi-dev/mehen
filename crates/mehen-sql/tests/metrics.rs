@@ -3078,3 +3078,51 @@ fn sp_executesql_requires_the_tsql_dialect() {
     );
     assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
 }
+
+// ── PR #257 round-22 review regressions ─────────────────────────────────
+
+/// A call-shaped `raise_application_error(…)` outside Oracle is an
+/// ordinary UDF (Codex P2, PR #257 round 22).
+#[test]
+fn raise_application_error_requires_the_oracle_dialect() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure p as\n\
+         begin\n\
+           select dbo.raise_application_error(1);\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 0.0);
+}
+
+/// A call-shaped `loop(…)` is a UDF, not a loop keyword (Codex P2, PR #257
+/// round 22).
+#[test]
+fn loop_named_function_call_is_not_a_loop() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure p as\n\
+         begin\n\
+           select dbo.loop(1);\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// A recovered MySQL unit ends at its own terminator: statements between
+/// definitions in a shared run stay outside every unit and outside the
+/// body gate (Codex P2, PR #257 round 22).
+#[test]
+fn intervening_statements_stay_outside_recovered_units() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p() signal sqlstate '45000';\n\
+         select true and false;\n\
+         create procedure q() signal sqlstate '45001';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 2.0);
+    // Two entries + two SIGNALs; the SELECT's AND is not procedural body.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 4.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}

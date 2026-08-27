@@ -463,3 +463,55 @@ fn nested_recovered_member_keeps_the_outer_span() {
     assert!(outer.2 >= 10, "outer spans through its body: {outer:?}");
     assert!(inner.2 <= 7, "inner ends at its own END: {inner:?}");
 }
+
+/// A nested subprogram declared before the outer member's BEGIN (inside a
+/// parse-gap package body with an initialization section) doesn't
+/// truncate the outer span: prototype-vs-body is decided per member by
+/// its own first `;` vs `IS`/`AS` (Codex P2, PR #257 round 22).
+#[test]
+fn nested_declaration_before_outer_begin_keeps_the_outer_span() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               create package body pkg as\n\
+               \x20 procedure outer_p is\n\
+               \x20   procedure inner_p is\n\
+               \x20   begin\n\
+               \x20     null;\n\
+               \x20   end;\n\
+               \x20 begin\n\
+               \x20   if 1 = 1 then\n\
+               \x20     null;\n\
+               \x20   end if;\n\
+               \x20 end;\n\
+               begin\n\
+               \x20 null;\n\
+               end pkg;\n\
+               /\n";
+    let analysis = analyze(sql);
+    let mut functions: Vec<(String, u32, u32, f64)> = Vec::new();
+    fn walk(space: &mehen_core::MetricSpace, out: &mut Vec<(String, u32, u32, f64)>) {
+        if space.kind == SpaceKind::Function {
+            out.push((
+                space.name.clone().unwrap_or_default(),
+                space.span.start_line,
+                space.span.end_line,
+                space
+                    .metrics
+                    .get(&MetricKey::new("sql.procedural.cyclomatic_complexity"))
+                    .map(|v| v.as_f64())
+                    .unwrap_or(0.0),
+            ));
+        }
+        for child in &space.spaces {
+            walk(child, out);
+        }
+    }
+    for space in &analysis.root.spaces {
+        walk(space, &mut functions);
+    }
+    assert_eq!(functions.len(), 2, "outer and inner members: {functions:?}");
+    let outer = functions.iter().find(|(n, ..)| n == "outer_p").unwrap();
+    // The outer member covers its executable body (through line 12) — the
+    // nested declaration didn't end it — and owns its IF (entry 1 + IF 1).
+    assert!(outer.2 >= 12, "outer spans through its body: {outer:?}");
+    assert_eq!(outer.3, 2.0, "outer owns its IF: {outer:?}");
+}

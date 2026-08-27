@@ -3328,20 +3328,32 @@ fn extract_procedural_units(
             {
                 continue;
             }
-            let headers = recovered_definition_headers(&run, tsql, &declared_delimiters);
+            let mut run_tokens = Vec::new();
+            leaf_tokens(&run, &mut run_tokens);
+            let headers = recovered_definition_headers(&run_tokens, tsql, &declared_delimiters);
             if headers.is_empty() {
                 continue;
             }
-            // Each header starts its own unit; a unit runs to the next
-            // header or the run's end. sqruff's error recovery often
-            // swallows *several* definitions (and even parseable statements
-            // between them) into one run — splitting at header boundaries
-            // keeps sibling definitions independent (Codex P2).
-            for (k, (header_start, name)) in headers.iter().enumerate() {
-                let unit_end = headers
+            // Each header starts its own unit. Under MySQL a unit ends at
+            // its own balanced body / terminator, so intervening statements
+            // in the shared run stay outside its span (Codex P2); under
+            // T-SQL batch semantics it runs to the next header or the
+            // run's end. sqruff's error recovery often swallows *several*
+            // definitions (and even parseable statements between them)
+            // into one run — splitting keeps siblings independent
+            // (Codex P2).
+            for (k, (token_idx, header_start, name)) in headers.iter().enumerate() {
+                let fallback_end = headers
                     .get(k + 1)
-                    .map(|&(next_start, _)| next_start)
+                    .map(|&(_, next_start, _)| next_start)
                     .unwrap_or(end_byte);
+                let unit_end = if mysql {
+                    mysql_recovered_unit_end(&run_tokens, *token_idx, &declared_delimiters)
+                        .unwrap_or(fallback_end)
+                        .min(fallback_end)
+                } else {
+                    fallback_end
+                };
                 facts.procedural_units.push(ProceduralUnitFacts {
                     name: Some(name.clone()),
                     start_line: line_at(*header_start),
@@ -3471,16 +3483,35 @@ fn recovered_package_body_members(run: &ErasedSegment, run_end: u32) -> Vec<(u32
         header_indices: &std::collections::BTreeSet<usize>,
     ) -> Option<usize> {
         let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
+        // Prototype or body? From the header, the first of `;` vs `IS`/`AS`
+        // decides: `PROCEDURE p(a NUMBER);` is a bodyless prototype ending
+        // at its terminator, while a real member reaches `IS`/`AS` first
+        // (Codex P2 — the discrimination is per member, so a *nested*
+        // prototype is handled by its own recursion, never by an early
+        // return in the outer walk).
+        let mut j = header_idx + 1;
+        loop {
+            let w = word(j);
+            if w.is_empty() {
+                return None;
+            }
+            if w == ";" {
+                return Some(j); // a prototype: ends at its terminator
+            }
+            if w.eq_ignore_ascii_case("IS") || w.eq_ignore_ascii_case("AS") {
+                break; // a member with a body
+            }
+            j += 1;
+        }
+        // Balanced body walk: `BEGIN` opens (and arms termination), `CASE`
+        // opens, `END IF/LOOP/WHILE/REPEAT` close their own constructs,
+        // `END CASE` closes without re-opening, nested subprogram headers
+        // recurse (a nested prototype returns its `;`, a nested body its
+        // balanced END — either way the outer walk continues past it).
         let mut depth = 0u32;
         let mut opened = false;
-        let mut j = header_idx + 1;
         while j < tokens.len() {
             if header_indices.contains(&j) {
-                if !opened && depth == 0 {
-                    // A bodyless prototype: it ends before the next header.
-                    return Some(j.saturating_sub(1));
-                }
-                // A nested subprogram: skip past its balanced end.
                 let nested_end = member_end_index(tokens, j, header_indices)?;
                 j = nested_end + 1;
                 continue;
@@ -3551,10 +3582,10 @@ fn recovered_package_body_members(run: &ErasedSegment, run_end: u32) -> Vec<(u32
 /// Names keep their original case; dotted qualification split by the lexer
 /// is re-joined.
 fn recovered_definition_headers(
-    run: &ErasedSegment,
+    tokens: &[(u32, String)],
     allow_alter: bool,
     declared_delimiters: &[String],
-) -> Vec<(u32, String)> {
+) -> Vec<(usize, u32, String)> {
     fn header_at(tokens: &[(u32, String)], mut i: usize, allow_alter: bool) -> Option<String> {
         let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
         let leading_alter = word(i).eq_ignore_ascii_case("ALTER");
@@ -3620,8 +3651,6 @@ fn recovered_definition_headers(
         }
         Some(name)
     }
-    let mut tokens = Vec::new();
-    leaf_tokens(run, &mut tokens);
     let mut headers = Vec::new();
     for j in 0..tokens.len() {
         let boundary = j == 0 || {
@@ -3634,11 +3663,71 @@ fn recovered_definition_headers(
         if !boundary {
             continue;
         }
-        if let Some(name) = header_at(&tokens, j, allow_alter) {
-            headers.push((tokens[j].0, name));
+        if let Some(name) = header_at(tokens, j, allow_alter) {
+            headers.push((j, tokens[j].0, name));
         }
     }
     headers
+}
+
+/// Where a recovered MySQL definition *ends*: its balanced `BEGIN … END`
+/// body through the following delimiter, or — for an opener-less
+/// single-statement body — its first top-level `;`/delimiter. Ending at
+/// the routine's own terminator keeps intervening statements out of the
+/// unit's span and complexity (Codex P2).
+fn mysql_recovered_unit_end(
+    tokens: &[(u32, String)],
+    header_idx: usize,
+    declared_delimiters: &[String],
+) -> Option<u32> {
+    let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
+    let is_delim =
+        |w: &str| w == ";" || is_custom_delimiter(w) || declared_delimiters.iter().any(|d| d == w);
+    let token_end = |j: usize| tokens.get(j).map(|(b, w)| b + w.len() as u32);
+    let mut paren = 0i32;
+    let mut depth = 0u32;
+    let mut opened = false;
+    let mut j = header_idx + 1;
+    while j < tokens.len() {
+        let w = word(j);
+        if w == "(" {
+            paren += 1;
+        } else if w == ")" {
+            paren -= 1;
+        } else if paren <= 0 {
+            if w.eq_ignore_ascii_case("BEGIN") {
+                depth += 1;
+                opened = true;
+            } else if w.eq_ignore_ascii_case("CASE") {
+                depth += 1;
+            } else if w.eq_ignore_ascii_case("END") {
+                let next = word(j + 1);
+                if next.eq_ignore_ascii_case("IF")
+                    || next.eq_ignore_ascii_case("LOOP")
+                    || next.eq_ignore_ascii_case("WHILE")
+                    || next.eq_ignore_ascii_case("REPEAT")
+                {
+                    j += 2;
+                    continue;
+                }
+                depth = depth.saturating_sub(1);
+                if next.eq_ignore_ascii_case("CASE") {
+                    j += 2;
+                    continue;
+                }
+                if opened && depth == 0 {
+                    // Through the following delimiter when present.
+                    let t = if is_delim(word(j + 1)) { j + 1 } else { j };
+                    return token_end(t);
+                }
+            } else if !opened && depth == 0 && is_delim(w) {
+                // A single-statement body ends at its terminator.
+                return token_end(j);
+            }
+        }
+        j += 1;
+    }
+    None
 }
 
 /// The delimiters a MySQL client script *declares* (`DELIMITER %%`): each

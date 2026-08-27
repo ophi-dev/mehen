@@ -550,11 +550,15 @@ struct Machine<'a> {
     /// type's own parens (`DECIMAL(10,2)`) must not end the signature —
     /// only the *outer* parameter list's close does (Codex P2).
     signature_paren_depth: u32,
-    /// Byte offsets where recovered definitions start inside this region:
-    /// one run can hold several opener-less definitions, and each header
-    /// must scan with a closed body gate and a fresh signature (Codex P2).
-    /// Sorted; empty for ordinary regions.
+    /// Byte offsets where recovered definitions start *and end* inside
+    /// this region: one run can hold several opener-less definitions, and
+    /// each header must scan with a closed body gate and a fresh signature
+    /// — which closes again past the definition's end (Codex P2 ×2).
+    /// Sorted and deduplicated; empty for ordinary regions.
     reset_gate_at: Vec<u32>,
+    /// Cursor into `reset_gate_at`: boundaries at or before the current
+    /// token have been applied.
+    reset_cursor: usize,
     /// Definition headers whose body block hasn't opened yet — the next
     /// plain `BEGIN`s consume these and tag their blocks `routine_body`
     /// (nesting baselines, Codex P2). A stack, not a flag: an Oracle
@@ -788,12 +792,20 @@ impl Machine<'_> {
         let mut i = 0usize;
         while i < tokens.len() {
             let t = &tokens[i];
-            // A recovered definition boundary: close the body gate and
-            // reset the signature so the new header's tokens (`CREATE OR
-            // REPLACE …`) never count as body content (Codex P2).
-            if !self.reset_gate_at.is_empty()
-                && self.reset_gate_at.binary_search(&t.span.start_byte).is_ok()
+            // A recovered definition boundary (header start or unit end):
+            // close the body gate and reset the signature so neither the
+            // next header's tokens (`CREATE OR REPLACE …`) nor statements
+            // between definitions count as body content (Codex P2 ×2).
+            let mut crossed_boundary = false;
+            while self
+                .reset_gate_at
+                .get(self.reset_cursor)
+                .is_some_and(|&b| b <= t.span.start_byte)
             {
+                self.reset_cursor += 1;
+                crossed_boundary = true;
+            }
+            if crossed_boundary {
                 self.in_body = false;
                 self.pending_routine_header = false;
                 self.signature_paren_depth = 0;
@@ -1293,7 +1305,9 @@ impl Machine<'_> {
                         i += 1;
                     }
                 }
-                "LOOP" if kw => {
+                "LOOP" if kw && !t.is_function_name => {
+                    // A call-shaped `loop(…)` (`SELECT dbo.loop(1)`) is a
+                    // UDF, not a loop keyword (Codex P2).
                     self.break_bool_run();
                     if self.pending_loop_headers > 0 {
                         // Body opener of a WHILE/FOR header — its Loop
@@ -1396,7 +1410,10 @@ impl Machine<'_> {
                         self.cyclo(t.span, reason::RAISE_THROW);
                     }
                 }
-                "RAISE_APPLICATION_ERROR" if kw => {
+                "RAISE_APPLICATION_ERROR" if kw && self.oracle => {
+                    // Oracle only: elsewhere a call-shaped
+                    // `raise_application_error(…)` is an ordinary UDF
+                    // (Codex P2).
                     self.break_bool_run();
                     if self.in_body {
                         self.raw_count(
@@ -1769,6 +1786,7 @@ pub(crate) fn extract(
             mysql,
             signature_paren_depth: 0,
             reset_gate_at: Vec::new(),
+            reset_cursor: 0,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1855,6 +1873,7 @@ pub(crate) fn extract(
             mysql,
             signature_paren_depth: 0,
             reset_gate_at: Vec::new(),
+            reset_cursor: 0,
             last_bool: None,
         };
         machine.scan(&tokens);
@@ -1906,13 +1925,18 @@ pub(crate) fn extract(
         // containment implies recovery.
         let recovered_unit = unit_ranges.iter().any(|&(s, e, _)| start <= s && e <= end);
         // Every recovered definition inside this run scans with a fresh
-        // gate at its header (Codex P2).
+        // gate at its header, and the gate *closes* again at each unit's
+        // end so intervening statements between definitions never count as
+        // body content (Codex P2 ×2).
         let reset_gate_at: Vec<u32> = if recovered_unit {
-            unit_ranges
+            let mut boundaries: Vec<u32> = unit_ranges
                 .iter()
                 .filter(|&&(s, e, _)| start <= s && e <= end)
-                .map(|&(s, _, _)| s)
-                .collect()
+                .flat_map(|&(s, e, _)| [s, e])
+                .collect();
+            boundaries.sort_unstable();
+            boundaries.dedup();
+            boundaries
         } else {
             Vec::new()
         };
@@ -2032,6 +2056,7 @@ pub(crate) fn extract(
             mysql,
             signature_paren_depth: 0,
             reset_gate_at,
+            reset_cursor: 0,
             last_bool: None,
         };
         machine.scan(&tokens);
