@@ -1108,7 +1108,34 @@ function parseDiffJson(stdout) {
   }
 }
 
-function readGithubContext() {
+function resolveGitCommit(revision, cwd = process.cwd()) {
+  const trimmed = String(revision ?? "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const result = spawnSync(
+    "git",
+    [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      "--end-of-options",
+      `${trimmed}^{commit}`,
+    ],
+    {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+    },
+  );
+  if (result.error || result.status !== 0) {
+    return "";
+  }
+  const resolved = result.stdout.trim();
+  return /^[0-9a-f]{40,64}$/i.test(resolved) ? resolved : "";
+}
+
+function readGithubContext(cwd = process.cwd()) {
   let payload = {};
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (eventPath && fs.existsSync(eventPath)) {
@@ -1116,12 +1143,24 @@ function readGithubContext() {
   }
 
   const pullRequest = payload.pull_request;
+  const eventHeadSha = pullRequest?.head?.sha || process.env.GITHUB_SHA || "";
+  const eventBaseSha = pullRequest?.base?.sha || "";
+  const configuredFrom = input("FROM").trim();
+  const configuredTo = input("TO").trim();
   return {
     eventName: process.env.GITHUB_EVENT_NAME || "",
     repository: process.env.GITHUB_REPOSITORY || "",
-    sha: pullRequest?.head?.sha || process.env.GITHUB_SHA || "",
-    baseSha: pullRequest?.base?.sha || "",
-    baseLabel: pullRequest?.base?.ref || input("FROM").trim() || "base",
+    // Event SHAs stay authoritative for PR-scoped coverage retrieval.
+    sha: eventHeadSha,
+    baseSha: eventBaseSha,
+    // Report links follow the exact refs passed to `mehen diff`.
+    headRevision: configuredTo
+      ? resolveGitCommit(configuredTo, cwd)
+      : eventHeadSha,
+    baseRevision: configuredFrom
+      ? resolveGitCommit(configuredFrom, cwd)
+      : eventBaseSha,
+    baseLabel: configuredFrom || pullRequest?.base?.ref || "base",
     prNumber: pullRequest?.number || payload.number || null,
     token: input("GITHUB_TOKEN").trim() || process.env.GITHUB_TOKEN || "",
   };
@@ -1293,7 +1332,10 @@ function renderMarkdown(
     body += "| File | Side | Severity | Diagnostic |\n";
     body += "|---|---|---|---|\n";
     for (const row of analysisRows) {
-      const revision = row.side === "base" ? context.baseSha : context.sha;
+      const revision =
+        row.side === "base"
+          ? context.baseRevision || context.baseSha
+          : context.headRevision || context.sha;
       const side =
         row.side === "base" ? context.baseLabel || "base" : "head";
       const line = row.line ? ` at line ${row.line}` : "";
@@ -1323,7 +1365,11 @@ function renderFooter(version) {
   return `${FOOTER_PREFIX}${versionSuffix} ${FOOTER_SUFFIX}`;
 }
 
-function renderFile(filePath, context, revision = context.sha) {
+function renderFile(
+  filePath,
+  context,
+  revision = context.headRevision || context.sha,
+) {
   const escaped = escapeCell(filePath);
   if (!context.repository || !revision) {
     return escaped;
@@ -1685,6 +1731,7 @@ export {
   parseThresholds,
   parseVersionOutput,
   pickBaseArtifact,
+  readGithubContext,
   renderMarkdown,
   renderFooter,
   unionMetricColumns,

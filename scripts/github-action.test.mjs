@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +29,7 @@ import {
   parseThresholds,
   parseVersionOutput,
   pickBaseArtifact,
+  readGithubContext,
   renderFooter,
   renderMarkdown,
   unionMetricColumns,
@@ -127,8 +129,10 @@ test("renderMarkdown reports analysis diagnostics without hiding other results",
     {
       eventName: "pull_request",
       repository: "wharflab/tally",
-      sha: "head-sha",
-      baseSha: "base-sha",
+      sha: "event-head-sha",
+      baseSha: "event-base-sha",
+      headRevision: "analyzed-head-sha",
+      baseRevision: "analyzed-base-sha",
       baseLabel: "main",
     },
     new Map(),
@@ -148,13 +152,93 @@ test("renderMarkdown reports analysis diagnostics without hiding other results",
           },
         ],
       },
+      {
+        path: "internal/config/old-rules.go",
+        side: "base",
+        diagnostics: [
+          {
+            severity: "error",
+            code: "go.syntax_error",
+            message: "tree-sitter error node at line 12",
+          },
+        ],
+      },
     ],
   );
   assert.ok(markdown.includes("### Analysis diagnostics"));
   assert.ok(markdown.includes("go.syntax_error"));
   assert.ok(markdown.includes("internal/config/rules.go"));
-  assert.ok(markdown.includes("head-sha"));
+  assert.ok(markdown.includes("analyzed-head-sha"));
+  assert.ok(markdown.includes("analyzed-base-sha"));
+  assert.ok(!markdown.includes("event-head-sha"));
+  assert.ok(!markdown.includes("event-base-sha"));
   assert.ok(markdown.includes("No metric changes detected."));
+});
+
+test("readGithubContext resolves explicit analysis refs separately from event SHAs", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "mehen-action-context-"));
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "Mehen Test",
+    GIT_AUTHOR_EMAIL: "test@mehen.invalid",
+    GIT_COMMITTER_NAME: "Mehen Test",
+    GIT_COMMITTER_EMAIL: "test@mehen.invalid",
+  };
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: repo, env: gitEnv, encoding: "utf8" }).trim();
+  git("init", "-q", "-b", "main");
+  fs.writeFileSync(path.join(repo, "sample.txt"), "base\n", "utf8");
+  git("add", "sample.txt");
+  git("commit", "-q", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  fs.writeFileSync(path.join(repo, "sample.txt"), "head\n", "utf8");
+  git("commit", "-q", "-am", "head");
+  const head = git("rev-parse", "HEAD");
+
+  const eventPath = path.join(repo, "event.json");
+  fs.writeFileSync(
+    eventPath,
+    JSON.stringify({
+      number: 261,
+      pull_request: {
+        number: 261,
+        base: { ref: "main", sha: "event-base-sha" },
+        head: { sha: "event-head-sha" },
+      },
+    }),
+    "utf8",
+  );
+
+  const names = [
+    "GHA_MEHEN_FROM",
+    "GHA_MEHEN_TO",
+    "GITHUB_EVENT_PATH",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_REPOSITORY",
+  ];
+  const saved = new Map(names.map((name) => [name, process.env[name]]));
+  try {
+    process.env.GHA_MEHEN_FROM = "HEAD~1";
+    process.env.GHA_MEHEN_TO = "HEAD";
+    process.env.GITHUB_EVENT_PATH = eventPath;
+    process.env.GITHUB_EVENT_NAME = "pull_request";
+    process.env.GITHUB_REPOSITORY = "ophi-dev/mehen";
+
+    const context = readGithubContext(repo);
+    assert.equal(context.baseSha, "event-base-sha");
+    assert.equal(context.sha, "event-head-sha");
+    assert.equal(context.baseRevision, base);
+    assert.equal(context.headRevision, head);
+    assert.equal(context.baseLabel, "HEAD~1");
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
 });
 
 test("isGateFailureReport requires the explicit threshold_violations signal", () => {
