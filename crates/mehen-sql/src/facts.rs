@@ -18,7 +18,7 @@
 //! (see [`extract_cte_graph`]).
 
 use mehen_core::SourceSpan;
-use sqruff_lib_core::dialects::Dialect;
+use sqruff_lib_core::dialects::init::DialectKind;
 use sqruff_lib_core::dialects::syntax::{SyntaxKind, SyntaxSet};
 use sqruff_lib_core::parser::segments::ErasedSegment;
 
@@ -45,6 +45,12 @@ pub(crate) enum StatementKind {
     TransactionControl,
     Explain,
     Procedural,
+    /// `DECLARE … BEGIN … END` anonymous blocks and top-level procedural
+    /// scripting statements (T-SQL `IF`/`WHILE`/`BEGIN` batch statements,
+    /// BigQuery scripting). Unlike a routine definition, these *execute when
+    /// the file is applied*, so their body DML/TCL feeds the object-touch
+    /// and change-risk scans (research foundation §5.2 `anonymous_block`).
+    AnonymousBlock,
     SetOperation,
     Unknown,
 }
@@ -71,6 +77,7 @@ impl StatementKind {
         StatementKind::TransactionControl,
         StatementKind::Explain,
         StatementKind::Procedural,
+        StatementKind::AnonymousBlock,
         StatementKind::SetOperation,
         StatementKind::Unknown,
     ];
@@ -96,6 +103,7 @@ impl StatementKind {
             StatementKind::TransactionControl => "transaction_control",
             StatementKind::Explain => "explain",
             StatementKind::Procedural => "procedural",
+            StatementKind::AnonymousBlock => "anonymous_block",
             StatementKind::SetOperation => "set_operation",
             StatementKind::Unknown => "unknown",
         }
@@ -119,14 +127,19 @@ pub(crate) struct JoinFacts {
     pub total: u32,
 }
 
-/// Predicate / boolean-logic facts (research foundation §6.7).
+/// Predicate / boolean-logic facts (research foundation §6.7). `IN`/`LIKE`/
+/// `BETWEEN` predicates fold into `comparison_count` per §6.7; IN-subqueries
+/// are counted separately as `sql.subquery.in_count`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PredicateFacts {
     pub boolean_operator_count: u32,
     pub max_boolean_depth: u32,
     pub not_count: u32,
+    /// Byte ranges of the counted `NOT` tokens — one `MetricEvidence` entry
+    /// each under `sql.predicate.not_count` (Codex P1). Lines are resolved
+    /// at collection time in `lib.rs`.
+    pub not_spans: Vec<(u32, u32)>,
     pub comparison_count: u32,
-    pub in_count: u32,
     /// `NOT IN`, `= NULL`, `<> NULL` and similar dialect-risky NULL logic.
     pub null_semantics_risk_count: u32,
 }
@@ -268,6 +281,7 @@ pub(crate) enum ChangeRiskFactor {
     DeleteWithoutWhere,
     UpdateWithoutWhere,
     GrantRevoke,
+    DynamicSql,
     Merge,
     CreateOrReplace,
     TransactionControl,
@@ -280,7 +294,7 @@ impl ChangeRiskFactor {
         match self {
             Self::Drop | Self::Truncate => 8.0,
             Self::Alter | Self::DeleteWithoutWhere | Self::UpdateWithoutWhere => 6.0,
-            Self::GrantRevoke => 5.0,
+            Self::GrantRevoke | Self::DynamicSql => 5.0,
             Self::Merge | Self::CreateOrReplace => 4.0,
             Self::TransactionControl => 3.0,
             Self::WriteObject => 2.0,
@@ -296,6 +310,7 @@ impl ChangeRiskFactor {
             Self::DeleteWithoutWhere => "sql.change_risk.delete_without_where",
             Self::UpdateWithoutWhere => "sql.change_risk.update_without_where",
             Self::GrantRevoke => "sql.change_risk.grant_revoke",
+            Self::DynamicSql => "sql.change_risk.dynamic_sql",
             Self::Merge => "sql.change_risk.merge",
             Self::CreateOrReplace => "sql.change_risk.create_or_replace",
             Self::TransactionControl => "sql.change_risk.transaction_control",
@@ -310,6 +325,17 @@ impl ChangeRiskFactor {
 pub(crate) struct ChangeRiskEvidence {
     pub span: SourceSpan,
     pub factor: ChangeRiskFactor,
+}
+
+/// One evidence entry for a raw object-family counter (`sql.dml.*`,
+/// `sql.ddl.*`, `sql.dcl.*`, `sql.transaction.*`): the statement or block
+/// DML node that moved the metric (Codex P1). `metric == Σ evidence` holds
+/// per key because every increment site records one entry.
+#[derive(Clone, Debug)]
+pub(crate) struct ObjectEvidence {
+    pub metric: &'static str,
+    pub reason: &'static str,
+    pub span: SourceSpan,
 }
 
 /// Per-statement facts with source span (research foundation §5.2).
@@ -341,6 +367,16 @@ pub(crate) struct ProceduralUnitFacts {
     pub end_line: u32,
     pub start_byte: u32,
     pub end_byte: u32,
+    /// Per-unit procedural composite tallies (Phase 3): the share of the
+    /// file's cyclomatic/cognitive increments whose source position falls
+    /// inside this unit (innermost-unit attribution), plus this unit's own
+    /// entry path. Zero for units whose bodies the parser lost to a sibling
+    /// `Unparsable` run — those increments stay file-level.
+    pub cyclomatic_complexity: f64,
+    pub cognitive_complexity: f64,
+    /// `sql.structural_complexity` of the query constructs embedded in this
+    /// unit's subtree (§9.3 `max_embedded_query` feeds from these).
+    pub embedded_query_structural: f64,
 }
 
 /// Halstead operator/operand tallies (research foundation §7). Operators and
@@ -360,6 +396,8 @@ pub(crate) struct SqlFileFacts {
     pub statements: Vec<StatementFacts>,
     /// Procedural units in pre-order (see [`ProceduralUnitFacts`]).
     pub procedural_units: Vec<ProceduralUnitFacts>,
+    /// Procedural control-flow facts (research foundation §6.17, Phase 3).
+    pub procedural: crate::procedural::ProceduralFacts,
     pub query_block_count: u32,
     pub query_block_max_depth: u32,
     pub select_item_total: u32,
@@ -376,6 +414,8 @@ pub(crate) struct SqlFileFacts {
     pub ctes: CteFacts,
     pub objects: ObjectFacts,
     pub change_risk_evidence: Vec<ChangeRiskEvidence>,
+    /// Evidence for the raw object-family counters (Codex P1).
+    pub object_evidence: Vec<ObjectEvidence>,
     pub halstead: HalsteadFacts,
     pub relation_ref_count: u32,
     /// Count of `SyntaxKind::Unparsable` segments (parser-health, §6.16).
@@ -398,20 +438,129 @@ pub(crate) struct SqlFileFacts {
 
 const SELECT_STATEMENT: SyntaxSet = SyntaxSet::single(SyntaxKind::SelectStatement);
 
-/// Build facts for `root` (the parsed `File` segment) under `dialect`.
+// ── dialect-folding kind sets ──────────────────────────────────────────
+//
+// sqruff's Oracle dialect emits its own parallel statement/reference kinds
+// (`OracleUpdateStatement`, `OracleTableReference`, …) instead of the ANSI
+// ones, and T-SQL adds `BulkInsertStatement`. Every scan that matched only
+// the ANSI kind silently skipped Oracle DML — top-level `UPDATE`/`INSERT`/
+// `DELETE`/`COMMIT` in an Oracle file classified as `unknown` and appeared
+// in no `sql.dml.*`, object-touch, or change-risk metric. These sets fold
+// the dialect variants so every consumer sees one vocabulary (verified
+// against the sqruff v0.40.0 `SyntaxKind` inventory: Oracle is the only
+// dialect with parallel DML kinds).
+
+/// `table_reference` in any dialect spelling.
+const TABLE_REFERENCES: SyntaxSet =
+    SyntaxSet::new(&[SyntaxKind::TableReference, SyntaxKind::OracleTableReference]);
+
+const INSERT_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::InsertStatement,
+    SyntaxKind::OracleInsertStatement,
+    SyntaxKind::BulkInsertStatement,
+]);
+
+const UPDATE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::UpdateStatement,
+    SyntaxKind::OracleUpdateStatement,
+]);
+
+const DELETE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::DeleteStatement,
+    SyntaxKind::OracleDeleteStatement,
+]);
+
+const TRANSACTION_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::TransactionStatement,
+    SyntaxKind::OracleTransactionStatement,
+]);
+
+const CREATE_TABLE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::CreateTableStatement,
+    SyntaxKind::OracleCreateTableStatement,
+]);
+
+const CREATE_VIEW_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::CreateViewStatement,
+    SyntaxKind::CreateMaterializedViewStatement,
+    SyntaxKind::OracleCreateViewStatement,
+]);
+
+const ALTER_TABLE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::AlterTableStatement,
+    SyntaxKind::OracleAlterTableStatement,
+]);
+
+const DROP_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::DropTableStatement,
+    SyntaxKind::DropViewStatement,
+    SyntaxKind::DropIndexStatement,
+    SyntaxKind::DropStatement,
+    SyntaxKind::DropFunctionStatement,
+    SyntaxKind::DropSchemaStatement,
+    SyntaxKind::OracleDropPackageStatement,
+    SyntaxKind::OracleDropProcedureStatement,
+    SyntaxKind::OracleDropSynonymStatement,
+    SyntaxKind::OracleDropDatabaseLinkStatement,
+]);
+
+/// Non-table/view CREATE kinds that the per-statement path classifies as
+/// `create_other` (by its raw-text CREATE fallback). The node-based
+/// anonymous-block scan cannot use raw-text classification, so it mirrors
+/// the family with the typed kinds an executing block can realistically
+/// contain — `IF … BEGIN CREATE INDEX ix ON t(c); END` is real migration DDL
+/// (Codex P2). Routine/trigger definitions are deliberately absent: they are
+/// procedural and the `PROCEDURAL_DEFINITIONS` boundary excludes them.
+const CREATE_OTHER_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::CreateIndexStatement,
+    SyntaxKind::CreateSequenceStatement,
+    SyntaxKind::CreateSchemaStatement,
+    SyntaxKind::CreateSynonymStatement,
+    SyntaxKind::CreateDatabaseStatement,
+    SyntaxKind::CreateDomainStatement,
+    SyntaxKind::CreateExtensionStatement,
+    SyntaxKind::CreateTypeStatement,
+    SyntaxKind::CreateUserStatement,
+    SyntaxKind::CreateRoleStatement,
+]);
+
+/// Build facts for `root` (the parsed `File` segment). `dialect` is the
+/// effective dialect: T-SQL's batch model changes statement-ownership
+/// semantics (a routine body extends to the next `GO`), and BigQuery's bare
+/// scripting `BEGIN`/`END` statements parse as transaction-statement
+/// wrappers that must not classify as TCL (Codex P1).
 pub(crate) fn extract(
     root: &ErasedSegment,
-    dialect: &Dialect,
     line_at: impl Fn(u32) -> u32,
     emit_contributions: bool,
+    dialect: DialectKind,
 ) -> SqlFileFacts {
+    let tsql = dialect == DialectKind::Tsql;
+    let mysql = dialect == DialectKind::Mysql;
+    let oracle = dialect == DialectKind::Oracle;
+    let bigquery = dialect == DialectKind::Bigquery;
     let mut facts = SqlFileFacts::default();
 
-    // ── statements ──────────────────────────────────────────────────
-    classify_statements(root, &line_at, &mut facts);
-
     // ── procedural units (function-shaped scopes) ───────────────────
-    extract_procedural_units(root, &line_at, &mut facts);
+    // Extracted *before* statement classification: BigQuery-style grammars
+    // wrap routines in segments without a top-level `Statement` node, so the
+    // routine's body statements surface as top-level statements themselves —
+    // classification needs the unit ranges to recognize them as
+    // routine-owned (Codex P1).
+    extract_procedural_units(root, &line_at, tsql, mysql, oracle, &mut facts);
+
+    // ── statements ──────────────────────────────────────────────────
+    let unit_ranges: Vec<(u32, u32)> = facts
+        .procedural_units
+        .iter()
+        .map(|u| (u.start_byte, u.end_byte))
+        .collect();
+    classify_statements(root, &line_at, tsql, bigquery, &unit_ranges, &mut facts);
+
+    // ── procedural control flow (research foundation §6.17) ─────────
+    // Needs statement classification and units; contributes dynamic-SQL
+    // change-risk evidence alongside `extract_objects`' below.
+    crate::procedural::extract(root, &line_at, emit_contributions, dialect, &mut facts);
 
     // ── unparsable / parser health ──────────────────────────────────
     let unparsables = root.recursive_crawl(
@@ -481,13 +630,13 @@ pub(crate) fn extract(
 
     // ── relation references ─────────────────────────────────────────
     facts.relation_ref_count =
-        count_anywhere(root, SyntaxKind::TableReference) + facts.subqueries.derived_table_count;
+        count_any(root, &TABLE_REFERENCES) + facts.subqueries.derived_table_count;
 
     // ── CTE graph (via sqruff Query analysis) ───────────────────────
-    extract_cte_graph(root, dialect, &mut facts.ctes);
+    extract_cte_graph(root, &mut facts.ctes);
 
     // ── object-touch / DML-DDL risk ─────────────────────────────────
-    extract_objects(root, &line_at, &mut facts, emit_contributions);
+    extract_objects(root, &line_at, bigquery, &mut facts, emit_contributions);
 
     // ── Halstead ────────────────────────────────────────────────────
     extract_halstead(root, &mut facts.halstead);
@@ -500,23 +649,73 @@ pub(crate) fn extract(
 fn classify_statements(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
+    tsql: bool,
+    bigquery: bool,
+    unit_ranges: &[(u32, u32)],
     facts: &mut SqlFileFacts,
 ) {
     // Top-level `Statement` nodes are direct children of `File`; do not
     // recurse into nested statements (a subquery `SELECT` is a query block,
     // not a top-level statement).
-    let statements = root.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::Statement),
-        false,
-        &SyntaxSet::EMPTY,
-        false,
-    );
+    let statements = top_level_statements(root, bigquery);
+    // Whether the previous statement was (or continued) a routine
+    // definition. sqruff's tsql grammar splits long procedure bodies into
+    // sibling statements; T-SQL batch semantics say the body extends to the
+    // next `GO`/EOF — `CREATE PROCEDURE` must be alone in its batch — so
+    // under the tsql dialect *every* statement after a routine definition is
+    // the routine's body until a `GO` separator (Codex P1). Other dialects
+    // have real statement terminators, so only *control-shaped* fragments
+    // (keyword-led T-SQL shapes, MySQL's per-branch typed statements)
+    // reclassify there; a plain `UPDATE` after an Oracle routine is
+    // independent. Typed blocks (Oracle `BEGIN…END`) never reclassify —
+    // they are genuine anonymous blocks wherever they appear. `unknown`
+    // statements (parse debris between spills) keep the chain alive.
+    let mut prev_procedural = false;
     for stmt in &statements {
-        let kind = classify_statement(stmt);
         let (start_byte, end_byte) = stmt
             .get_position_marker()
             .map(|pm| (pm.source_slice.start as u32, pm.source_slice.end as u32))
             .unwrap_or((0, 0));
+        let mut kind = classify_statement(stmt, bigquery);
+        // A statement whose bytes live *inside* a routine unit is the
+        // routine's body — BigQuery-style grammars wrap `CREATE PROCEDURE`
+        // in a segment without a top-level `Statement` node, so the body's
+        // statements surface as top-level statements themselves. They run
+        // when the routine is *called*, not when the file is applied, so
+        // they must not publish executing DML, touched objects, or
+        // missing-WHERE risk (Codex P1). Strict containment: a definition
+        // statement contains its unit, never the reverse.
+        let routine_owned = kind != StatementKind::Procedural
+            && unit_ranges.iter().any(|&(s, e)| {
+                s <= start_byte && end_byte <= e && (s, e) != (start_byte, end_byte)
+            });
+        if routine_owned {
+            kind = StatementKind::Procedural;
+        }
+        let is_go = kind == StatementKind::Unknown && is_go_separator(stmt);
+        if prev_procedural && !is_go && kind != StatementKind::Procedural {
+            let continuation = if tsql {
+                true
+            } else {
+                kind == StatementKind::AnonymousBlock
+                    && matches!(
+                        anonymous_block_shape(stmt),
+                        Some(AnonymousBlockShape::KeywordLed | AnonymousBlockShape::TypedControl)
+                    )
+            };
+            if continuation {
+                kind = StatementKind::Procedural;
+            }
+        }
+        prev_procedural = match kind {
+            _ if is_go => false,
+            // Body statements owned by containment never seed a
+            // continuation chain — attribution is complete without one.
+            StatementKind::Procedural if routine_owned => prev_procedural,
+            StatementKind::Procedural => true,
+            StatementKind::Unknown => prev_procedural,
+            _ => false,
+        };
         facts.statements.push(StatementFacts {
             kind,
             start_line: line_at(start_byte),
@@ -528,20 +727,35 @@ fn classify_statements(
 }
 
 /// Classify a `Statement` node by inspecting which statement-body kind it
-/// contains. sqruff produces dialect-specific `Drop*`/`Create*` variants, so
-/// we probe with a broad `SyntaxSet` and map by the first match.
-fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
-    let has = |k: SyntaxKind| {
+/// contains. sqruff produces dialect-specific `Drop*`/`Create*`/Oracle DML
+/// variants, so we probe with the dialect-folding `SyntaxSet`s above and map
+/// by the first match.
+fn classify_statement(stmt: &ErasedSegment, bigquery: bool) -> StatementKind {
+    let has_any = |set: &SyntaxSet| {
         !stmt
-            .recursive_crawl(&SyntaxSet::single(k), false, &SyntaxSet::EMPTY, true)
+            .recursive_crawl(set, false, &SyntaxSet::EMPTY, true)
             .is_empty()
     };
+    let has = |k: SyntaxKind| has_any(&SyntaxSet::single(k));
 
-    // Procedural definitions are classified *first*: a `CREATE PROCEDURE` /
-    // `FUNCTION` / `TRIGGER` body commonly contains `INSERT`/`UPDATE`/…, but
-    // the top-level statement is the routine definition, not the nested DML —
-    // classifying it as DML would also wrongly feed `extract_objects`'
-    // DML/no-WHERE risk metrics (Codex P2).
+    // Anonymous blocks and top-level scripting statements come *before* the
+    // routine-definition check: an anonymous block may *declare* a nested
+    // procedure in its DECLARE section, and the nested definition must not
+    // make the executing outer block look like a routine definition (its
+    // UPDATE runs on apply! — Codex P1). The shape walk skips
+    // `PROCEDURAL_DEFINITIONS` subtrees, so a routine's *own* body block
+    // never marks the routine statement as an anonymous block, and the DML
+    // sniffing below stays unreachable for blocks (`BEGIN UPDATE t …; END;`
+    // contains an UpdateStatement, but the statement is the block).
+    if stmt_is_anonymous_block(stmt, bigquery) {
+        return StatementKind::AnonymousBlock;
+    }
+
+    // Routine definitions: `CREATE PROCEDURE` / `FUNCTION` / `TRIGGER`
+    // bodies commonly contain `INSERT`/`UPDATE`/…, but the top-level
+    // statement is the routine definition, not the nested DML — classifying
+    // it as DML would also wrongly feed `extract_objects`' DML/no-WHERE risk
+    // metrics (Codex P2).
     if stmt_is_procedural(stmt) {
         return StatementKind::Procedural;
     }
@@ -555,42 +769,36 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
     if has(SyntaxKind::MergeStatement) {
         return StatementKind::Merge;
     }
-    if has(SyntaxKind::InsertStatement) {
+    if has_any(&INSERT_STATEMENTS) {
         return StatementKind::Insert;
     }
-    if has(SyntaxKind::UpdateStatement) {
+    if has_any(&UPDATE_STATEMENTS) {
         return StatementKind::Update;
     }
-    if has(SyntaxKind::DeleteStatement) {
+    if has_any(&DELETE_STATEMENTS) {
         return StatementKind::Delete;
     }
     if has(SyntaxKind::TruncateStatement) {
         return StatementKind::Truncate;
     }
-    if has(SyntaxKind::AlterTableStatement) {
+    if has_any(&ALTER_TABLE_STATEMENTS) {
         return StatementKind::AlterTable;
     }
     // CREATE family: distinguish CTAS, view, table, other.
-    if has(SyntaxKind::CreateTableStatement) {
+    if has_any(&CREATE_TABLE_STATEMENTS) {
         // CTAS = CREATE TABLE … AS SELECT — the statement embeds a select.
         if has(SyntaxKind::SelectStatement) || has(SyntaxKind::WithCompoundStatement) {
             return StatementKind::CreateTableAsSelect;
         }
         return StatementKind::CreateTable;
     }
-    if has(SyntaxKind::CreateViewStatement) || has(SyntaxKind::CreateMaterializedViewStatement) {
+    if has_any(&CREATE_VIEW_STATEMENTS) {
         return StatementKind::CreateView;
     }
     if stmt_contains_create(stmt) {
         return StatementKind::CreateOther;
     }
-    if has(SyntaxKind::DropTableStatement)
-        || has(SyntaxKind::DropViewStatement)
-        || has(SyntaxKind::DropIndexStatement)
-        || has(SyntaxKind::DropStatement)
-        || has(SyntaxKind::DropFunctionStatement)
-        || has(SyntaxKind::DropSchemaStatement)
-    {
+    if has_any(&DROP_STATEMENTS) {
         return StatementKind::Drop;
     }
     if has(SyntaxKind::AccessStatement) {
@@ -601,8 +809,15 @@ fn classify_statement(stmt: &ErasedSegment) -> StatementKind {
         }
         return StatementKind::Grant;
     }
-    if has(SyntaxKind::TransactionStatement) {
-        return StatementKind::TransactionControl;
+    if has_any(&TRANSACTION_STATEMENTS) {
+        // BigQuery's bare scripting `END;` also parses as a transaction
+        // statement — it is the closer of a scripting block, not TCL, so it
+        // must not add transaction-control risk (Codex P1). The matching
+        // bare `BEGIN;` never reaches here (classified anonymous above).
+        // Falls through to `unknown`: a closer is no statement of its own.
+        if !(bigquery && bare_scripting_bracket(stmt).is_some()) {
+            return StatementKind::TransactionControl;
+        }
     }
     if has(SyntaxKind::ExplainStatement) {
         return StatementKind::Explain;
@@ -662,6 +877,178 @@ fn stmt_is_procedural(stmt: &ErasedSegment) -> bool {
         .is_empty()
 }
 
+/// Typed `BEGIN…END` block node kinds — genuine anonymous blocks wherever
+/// they appear (Oracle `DECLARE…BEGIN…END`, T-SQL/ANSI blocks).
+const TYPED_BLOCK_KINDS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::OracleBeginEndBlock,
+    SyntaxKind::BeginEndBlock,
+    SyntaxKind::AtomicBeginEndBlock,
+]);
+
+/// Typed scripting/control statement node kinds. At top level these are
+/// either genuine scripting (BigQuery) or — far more often — fragments of a
+/// routine body that a dialect grammar split into sibling statements (MySQL
+/// splits *every branch* of an `IF` into its own `IfThenStatement`
+/// statement). The distinction is positional: fragments directly follow a
+/// routine definition.
+const TYPED_CONTROL_KINDS: SyntaxSet = SyntaxSet::new(&[
+    SyntaxKind::IfStatements,
+    SyntaxKind::IfStatement,
+    SyntaxKind::IfThenStatement,
+    SyntaxKind::WhileStatements,
+    SyntaxKind::WhileStatement,
+    SyntaxKind::LoopStatements,
+    SyntaxKind::LoopStatement,
+    SyntaxKind::RepeatStatement,
+    SyntaxKind::ForInStatement,
+]);
+
+/// How a statement qualifies as an anonymous block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnonymousBlockShape {
+    /// A typed `BEGIN…END` block node (Oracle, T-SQL/ANSI) — a genuine
+    /// anonymous block wherever it appears.
+    TypedBlock,
+    /// A typed scripting/control statement (`IfThenStatement`,
+    /// `WhileStatement`, …) — genuine scripting when standalone, a routine
+    /// body fragment when it directly follows a routine definition.
+    TypedControl,
+    /// A T-SQL keyword-led control statement (`IF`/`WHILE`/`BEGIN` + nested
+    /// statements without a dedicated node kind) — same positional rule as
+    /// `TypedControl`.
+    KeywordLed,
+}
+
+/// Whether a (non-routine) statement is an anonymous block / top-level
+/// scripting statement, and which shape it takes.
+///
+/// Three shapes, per the CST probes (parser comparison §9):
+/// - a typed block node reached without crossing a `Bracketed` group (a
+///   parenthesized subquery is not the statement's body) — Oracle blocks;
+/// - a typed scripting/control statement — BigQuery scripting, MySQL body
+///   fragments;
+/// - a T-SQL keyword-led statement: the first substantive child is the bare
+///   keyword `IF`/`WHILE`/`BEGIN` (sqruff's tsql dialect nests the controlled
+///   statements under it without a dedicated node kind). `BEGIN` is checked
+///   against `TRANSACTION`/`TRAN`/`WORK`/`DIALOG` so T-SQL transaction
+///   control (which also parses keyword-led in fragments) stays TCL.
+fn anonymous_block_shape(stmt: &ErasedSegment) -> Option<AnonymousBlockShape> {
+    fn contains_kind(node: &ErasedSegment, kinds: &SyntaxSet) -> bool {
+        for child in node.segments() {
+            if kinds.contains(child.get_type()) {
+                return true;
+            }
+            // A parenthesized subquery is not the statement's body, and a
+            // routine definition's own body block belongs to the routine —
+            // a `CREATE PROCEDURE` must never look like an anonymous block
+            // because of the `BEGIN…END`/scripting nodes inside it
+            // (Codex P1).
+            if child.is_type(SyntaxKind::Bracketed)
+                || PROCEDURAL_DEFINITIONS.contains(child.get_type())
+            {
+                continue;
+            }
+            if contains_kind(child, kinds) {
+                return true;
+            }
+        }
+        false
+    }
+    if contains_kind(stmt, &TYPED_BLOCK_KINDS) {
+        return Some(AnonymousBlockShape::TypedBlock);
+    }
+    if contains_kind(stmt, &TYPED_CONTROL_KINDS) {
+        return Some(AnonymousBlockShape::TypedControl);
+    }
+    // T-SQL keyword-led shape: first two substantive children.
+    let mut lead = stmt
+        .segments()
+        .iter()
+        .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment());
+    let first = lead.next()?;
+    if !first.is_type(SyntaxKind::Keyword) {
+        return None;
+    }
+    let word = first.raw().to_ascii_uppercase();
+    match word.as_str() {
+        "IF" | "WHILE" => Some(AnonymousBlockShape::KeywordLed),
+        "BEGIN" => {
+            let next = lead
+                .next()
+                .map(|s| s.raw().to_ascii_uppercase())
+                .unwrap_or_default();
+            if matches!(
+                next.as_str(),
+                "TRANSACTION" | "TRAN" | "WORK" | "DIALOG" | "DISTRIBUTED"
+            ) {
+                None
+            } else {
+                Some(AnonymousBlockShape::KeywordLed)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn stmt_is_anonymous_block(stmt: &ErasedSegment, bigquery: bool) -> bool {
+    anonymous_block_shape(stmt).is_some()
+        || (bigquery && bare_scripting_bracket(stmt) == Some(ScriptingBracket::Begin))
+}
+
+/// Which bare scripting bracket a BigQuery `TransactionStatement`-wrapped
+/// statement is, if any. BigQuery's grammar parses the scripting block
+/// openers/closers `BEGIN;`/`END;` as transaction statements whose *sole*
+/// keyword is the bracket — real transaction control (`BEGIN TRANSACTION`)
+/// carries more keywords and stays TCL (Codex P1). Only meaningful under
+/// the BigQuery dialect: a bare `BEGIN;`/`END;` in PostgreSQL *is*
+/// transaction control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptingBracket {
+    Begin,
+    End,
+}
+
+pub(crate) fn bare_scripting_bracket(stmt: &ErasedSegment) -> Option<ScriptingBracket> {
+    let wrapper = stmt
+        .segments()
+        .iter()
+        .find(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment())?;
+    if !TRANSACTION_STATEMENTS.contains(wrapper.get_type()) {
+        return None;
+    }
+    transaction_node_bracket(wrapper)
+}
+
+/// The sole-keyword bracket shape of a transaction-statement *node*, if any.
+pub(crate) fn transaction_node_bracket(node: &ErasedSegment) -> Option<ScriptingBracket> {
+    let keywords: Vec<String> = node
+        .segments()
+        .iter()
+        .filter(|s| s.is_type(SyntaxKind::Keyword))
+        .map(|s| s.raw().to_ascii_uppercase())
+        .collect();
+    match keywords.as_slice() {
+        [word] if word == "BEGIN" => Some(ScriptingBracket::Begin),
+        [word] if word == "END" => Some(ScriptingBracket::End),
+        _ => None,
+    }
+}
+
+/// Whether a statement is a bare T-SQL `GO` batch separator (its only code
+/// token is the keyword `GO`).
+pub(crate) fn is_go_separator(stmt: &ErasedSegment) -> bool {
+    let mut code = stmt
+        .segments()
+        .iter()
+        .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment());
+    let Some(first) = code.next() else {
+        return false;
+    };
+    code.next().is_none()
+        && first.is_type(SyntaxKind::Keyword)
+        && first.raw().eq_ignore_ascii_case("GO")
+}
+
 // ── joins ──────────────────────────────────────────────────────────────
 
 /// Count and classify explicit `JOIN` clauses.
@@ -672,7 +1059,7 @@ fn stmt_is_procedural(stmt: &ErasedSegment) -> bool {
 /// separation risks false positives (e.g. `FROM a, LATERAL f(a.x)`). Explicit
 /// `CROSS JOIN` is counted; implicit cross-join detection is deferred (research
 /// foundation §6.5 lists it as a derive-later item).
-fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
+pub(crate) fn extract_joins(root: &ErasedSegment, joins: &mut JoinFacts) {
     let clauses = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::JoinClause),
         true,
@@ -875,7 +1262,7 @@ fn operand_is_column_reference(seg: &ErasedSegment) -> bool {
 
 // ── set operations ───────────────────────────────────────────────────
 
-fn extract_set_ops(root: &ErasedSegment, set_ops: &mut SetOpFacts) {
+pub(crate) fn extract_set_ops(root: &ErasedSegment, set_ops: &mut SetOpFacts) {
     let ops = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::SetOperator),
         true,
@@ -901,7 +1288,7 @@ fn extract_set_ops(root: &ErasedSegment, set_ops: &mut SetOpFacts) {
 
 // ── CASE ────────────────────────────────────────────────────────────────
 
-fn extract_cases(root: &ErasedSegment, cases: &mut CaseFacts) {
+pub(crate) fn extract_cases(root: &ErasedSegment, cases: &mut CaseFacts) {
     let all = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::CaseExpression),
         true,
@@ -956,7 +1343,7 @@ fn count_anywhere_within_case(case: &ErasedSegment, kind: SyntaxKind) -> u32 {
 
 // ── window functions ─────────────────────────────────────────────────
 
-fn extract_windows(root: &ErasedSegment, windows: &mut WindowFacts) {
+pub(crate) fn extract_windows(root: &ErasedSegment, windows: &mut WindowFacts) {
     let overs = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::OverClause),
         true,
@@ -1019,7 +1406,7 @@ const AGGREGATE_NAMES: &[&str] = &[
     "COUNT_BIG",
 ];
 
-fn extract_aggregates(root: &ErasedSegment, agg: &mut AggregateFacts) {
+pub(crate) fn extract_aggregates(root: &ErasedSegment, agg: &mut AggregateFacts) {
     let functions = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::Function),
         true,
@@ -1077,7 +1464,7 @@ const PREDICATE_PARENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::JoinOnCondition,
 ]);
 
-fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
+pub(crate) fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
     // Boolean operators are `BinaryOperator` nodes whose raw text is AND/OR
     // (the CST does not distinguish boolean from arithmetic binary operators
     // by kind — empirically verified from a parse dump).
@@ -1093,10 +1480,9 @@ fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
             pred.boolean_operator_count += 1;
         }
     }
-    pred.not_count = count_keyword(root, "NOT");
+    pred.not_spans = collect_predicate_nots(root);
+    pred.not_count = pred.not_spans.len() as u32;
     pred.comparison_count = count_anywhere(root, SyntaxKind::ComparisonOperator);
-    // `IN (...)` predicates.
-    pred.in_count = count_keyword(root, "IN");
 
     // Max boolean nesting depth within predicate-bearing clauses.
     let parents = root.recursive_crawl(&PREDICATE_PARENTS, true, &SyntaxSet::EMPTY, true);
@@ -1110,6 +1496,74 @@ fn extract_predicates(root: &ErasedSegment, pred: &mut PredicateFacts) {
     // and adjacent `NOT`+`IN` keyword tokens — so text inside comments or
     // string literals (`-- avoid x = NULL`, `'NOT IN list'`) is never counted.
     pred.null_semantics_risk_count = count_null_semantics_risk(root);
+}
+
+/// Collect the source ranges of `NOT` keyword tokens that act as
+/// predicate/boolean operators (§6.7) — `not_count` is their count and each
+/// range becomes one `MetricEvidence` entry under the metric's own key
+/// (Codex P1). Two non-predicate contexts a raw keyword count picks up are
+/// excluded:
+///
+/// - `NOT NULL` column constraints in DDL (`id INT NOT NULL`) — but only
+///   with column-definition/constraint ancestry: a boolean `WHERE NOT NULL`
+///   predicate is a genuine unary negation and counts (Codex P2). A
+///   genuine `IS NOT NULL` predicate always counts (the `IS` before the
+///   `NOT` distinguishes it).
+/// - `IF NOT EXISTS` guards *inside CREATE/DROP statements* (`CREATE TABLE
+///   IF NOT EXISTS`) — but the same token run as a procedural condition
+///   (T-SQL `IF NOT EXISTS (SELECT …) BEGIN …`) is a genuine negation and
+///   counts, so the exclusion requires DDL ancestry (Codex P2). A `WHERE
+///   NOT EXISTS (…)` predicate has no `IF` and always counts.
+///
+/// Works over sibling code tokens, mirroring `count_null_semantics_risk`.
+fn collect_predicate_nots(root: &ErasedSegment) -> Vec<(u32, u32)> {
+    /// Statement kinds whose `IF NOT EXISTS` is a DDL guard.
+    const DDL_GUARD_CONTEXTS: SyntaxSet = CREATE_TABLE_STATEMENTS
+        .union(&CREATE_VIEW_STATEMENTS)
+        .union(&CREATE_OTHER_STATEMENTS)
+        .union(&ALTER_TABLE_STATEMENTS)
+        .union(&DROP_STATEMENTS);
+    /// Contexts whose `NOT NULL` is a column constraint, not a predicate.
+    const CONSTRAINT_CONTEXTS: SyntaxSet = SyntaxSet::new(&[
+        SyntaxKind::ColumnDefinition,
+        SyntaxKind::ColumnConstraintSegment,
+    ]);
+    fn walk(node: &ErasedSegment, in_ddl: bool, in_constraint: bool, spans: &mut Vec<(u32, u32)>) {
+        let code: Vec<&ErasedSegment> = node
+            .segments()
+            .iter()
+            .filter(|s| !s.is_whitespace() && !s.is_meta() && !s.is_comment())
+            .collect();
+        for (i, seg) in code.iter().enumerate() {
+            if !seg.is_type(SyntaxKind::Keyword) || !seg.raw().eq_ignore_ascii_case("NOT") {
+                continue;
+            }
+            let neighbor = |j: Option<usize>| {
+                j.and_then(|k| code.get(k))
+                    .map(|s| s.raw().to_ascii_uppercase())
+                    .unwrap_or_default()
+            };
+            let prev = neighbor(i.checked_sub(1));
+            let next = neighbor(Some(i + 1));
+            let null_constraint = in_constraint && next == "NULL" && prev != "IS";
+            let ddl_guard = in_ddl && next == "EXISTS" && prev == "IF";
+            if !null_constraint
+                && !ddl_guard
+                && let Some(pm) = seg.get_position_marker()
+            {
+                spans.push((pm.source_slice.start as u32, pm.source_slice.end as u32));
+            }
+        }
+        for child in node.segments() {
+            let child_in_ddl = in_ddl || DDL_GUARD_CONTEXTS.contains(child.get_type());
+            let child_in_constraint =
+                in_constraint || CONSTRAINT_CONTEXTS.contains(child.get_type());
+            walk(child, child_in_ddl, child_in_constraint, spans);
+        }
+    }
+    let mut spans = Vec::new();
+    walk(root, false, false, &mut spans);
+    spans
 }
 
 /// Count NULL-semantics risks from parsed tokens (comments/literals excluded):
@@ -1244,7 +1698,11 @@ fn redundant_outer_bracket(node: &ErasedSegment) -> u32 {
 
 // ── subqueries / derived tables ───────────────────────────────────────
 
-fn extract_subqueries(root: &ErasedSegment, selects: &[ErasedSegment], sub: &mut SubqueryFacts) {
+pub(crate) fn extract_subqueries(
+    root: &ErasedSegment,
+    selects: &[ErasedSegment],
+    sub: &mut SubqueryFacts,
+) {
     // A subquery is any SELECT that is nested inside another query construct.
     // The outermost SELECT(s) of each top-level statement are not subqueries.
     for sel in selects {
@@ -1403,12 +1861,7 @@ fn relation_names(node: &ErasedSegment) -> Vec<String> {
     for elem in &from_elems {
         // Table reference(s) of this FROM element (again, not those inside a
         // derived-table subquery nested in the element).
-        for tr in elem.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
-            true,
-            &SELECT_STATEMENT,
-            true,
-        ) {
+        for tr in elem.recursive_crawl(&TABLE_REFERENCES, true, &SELECT_STATEMENT, true) {
             names.push(last_identifier(&tr));
         }
         // The element's own (table) alias, if any.
@@ -1498,7 +1951,7 @@ fn count_scalar_subqueries(root: &ErasedSegment) -> u32 {
 
 // ── expressions / functions ───────────────────────────────────────────
 
-fn extract_expressions(root: &ErasedSegment, expr: &mut ExpressionFacts) {
+pub(crate) fn extract_expressions(root: &ErasedSegment, expr: &mut ExpressionFacts) {
     // Max expression AST depth across all Expression nodes.
     let expressions = root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::Expression),
@@ -1720,7 +2173,7 @@ fn nearest_select_depth(root: &ErasedSegment, target: &ErasedSegment) -> u32 {
 
 // ── CTE graph (via sqruff Query analysis) ─────────────────────────────
 
-fn extract_cte_graph(root: &ErasedSegment, _dialect: &Dialect, ctes: &mut CteFacts) {
+pub(crate) fn extract_cte_graph(root: &ErasedSegment, ctes: &mut CteFacts) {
     // The CTE dependency graph is derived directly from `CommonTableExpression`
     // CST nodes: each carries a name identifier and a body whose
     // `TableReference`s name its dependencies. We deliberately avoid sqruff's
@@ -1806,7 +2259,7 @@ fn extract_cte_graph(root: &ErasedSegment, _dialect: &Dialect, ctes: &mut CteFac
         // appears as a table reference *within this WITH block* and *outside*
         // its own definition body.
         let block_refs = with.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
+            &TABLE_REFERENCES,
             true,
             &SyntaxSet::single(SyntaxKind::WithCompoundStatement),
             false,
@@ -1869,12 +2322,7 @@ fn is_trivial_cte(cte: &ErasedSegment) -> bool {
     // The CTE body is the bracketed SELECT after `AS`. A trivial body has
     // exactly one table reference and none of the structure-adding clauses.
     let table_refs = cte
-        .recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        )
+        .recursive_crawl(&TABLE_REFERENCES, true, &SyntaxSet::EMPTY, true)
         .len();
     if table_refs != 1 {
         return false;
@@ -1924,12 +2372,7 @@ fn cte_body_dependencies(
     cte: &ErasedSegment,
     cte_names: &[String],
 ) -> std::collections::BTreeSet<String> {
-    let refs = cte.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::TableReference),
-        true,
-        &SyntaxSet::EMPTY,
-        true,
-    );
+    let refs = cte.recursive_crawl(&TABLE_REFERENCES, true, &SyntaxSet::EMPTY, true);
     // Nested `WITH` blocks inside this body. A reference is *shadowed* when it
     // sits inside a nested block that defines the same name — it then resolves
     // to that inner CTE, not the enclosing block's. The shadowing scope is the
@@ -2012,6 +2455,7 @@ fn longest_chain(edges: &std::collections::BTreeMap<String, Vec<String>>, nodes:
 fn extract_objects(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
+    bigquery: bool,
     facts: &mut SqlFileFacts,
     emit_contributions: bool,
 ) {
@@ -2022,14 +2466,49 @@ fn extract_objects(
     };
     let obj = &mut facts.objects;
     let evidence = &mut facts.change_risk_evidence;
+    let obj_evidence = &mut facts.object_evidence;
     // Per-statement-kind counters (used by the DML/DDL/TCL metric keys).
     for stmt in &facts.statements {
         match stmt.kind {
-            StatementKind::Insert => obj.insert_count += 1,
-            StatementKind::Update => obj.update_count += 1,
-            StatementKind::Delete => obj.delete_count += 1,
+            StatementKind::Insert => {
+                obj.insert_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.insert_count",
+                    "sql.dml.insert",
+                    statement_span(stmt),
+                );
+            }
+            StatementKind::Update => {
+                obj.update_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.update_count",
+                    "sql.dml.update",
+                    statement_span(stmt),
+                );
+            }
+            StatementKind::Delete => {
+                obj.delete_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.delete_count",
+                    "sql.dml.delete",
+                    statement_span(stmt),
+                );
+            }
             StatementKind::Merge => {
                 obj.merge_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.merge_count",
+                    "sql.dml.merge",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2040,9 +2519,25 @@ fn extract_objects(
             StatementKind::CreateTable
             | StatementKind::CreateTableAsSelect
             | StatementKind::CreateView
-            | StatementKind::CreateOther => obj.create_count += 1,
+            | StatementKind::CreateOther => {
+                obj.create_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.ddl.create_count",
+                    "sql.ddl.create",
+                    statement_span(stmt),
+                );
+            }
             StatementKind::AlterTable => {
                 obj.alter_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.ddl.alter_count",
+                    "sql.ddl.alter",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2052,6 +2547,13 @@ fn extract_objects(
             }
             StatementKind::Drop => {
                 obj.drop_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.ddl.drop_count",
+                    "sql.ddl.drop",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2061,6 +2563,13 @@ fn extract_objects(
             }
             StatementKind::Truncate => {
                 obj.truncate_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.ddl.truncate_count",
+                    "sql.ddl.truncate",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2070,6 +2579,13 @@ fn extract_objects(
             }
             StatementKind::Grant | StatementKind::Revoke => {
                 obj.grant_revoke_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dcl.grant_revoke_count",
+                    "sql.dcl.grant_revoke",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2077,8 +2593,27 @@ fn extract_objects(
                     ChangeRiskFactor::GrantRevoke,
                 );
             }
+            StatementKind::AnonymousBlock => {
+                // The classification itself is an improved, evidence-backed
+                // fact: contribution output explains each executing block
+                // under its kind-count key (Codex P1).
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.statement.kind_count.anonymous_block",
+                    "sql.statement.anonymous_block",
+                    statement_span(stmt),
+                );
+            }
             StatementKind::TransactionControl => {
                 obj.transaction_control_count += 1;
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.transaction.control_count",
+                    "sql.transaction.control",
+                    statement_span(stmt),
+                );
                 record_change_risk(
                     evidence,
                     emit_contributions,
@@ -2090,13 +2625,39 @@ fn extract_objects(
         }
     }
 
+    // Anonymous blocks *execute when the file is applied* (unlike routine
+    // definitions, whose bodies only run when called), so DML/DDL/DCL/TCL
+    // inside them is real migration risk. The per-statement-kind loop above
+    // cannot see it — the statement classifies as `anonymous_block` — so the
+    // block bodies are scanned node-based here. Nested routine definitions
+    // (subprograms declared in a block's DECLARE section) stay excluded via
+    // the `PROCEDURAL_DEFINITIONS` crawl boundary, mirroring every other
+    // object scan. Statement nodes are paired with their classification by
+    // index — `top_level_statements` is the same crawl `classify_statements`
+    // consumed (CodeRabbit).
+    let statements = top_level_statements(root, bigquery);
+    debug_assert_eq!(statements.len(), facts.statements.len());
+    for (node, stmt) in statements.iter().zip(facts.statements.iter()) {
+        if stmt.kind == StatementKind::AnonymousBlock {
+            scan_block_body_dml(
+                node,
+                line_at,
+                obj,
+                evidence,
+                obj_evidence,
+                emit_contributions,
+            );
+        }
+    }
+
     // Distinct read/write/touch object counts (research foundation §6.14:
     // "distinct objects read/written/touched"). Counting objects rather than
     // statements means a 10-table SELECT contributes 10 reads, and an object
     // both read and written is touched once. Read objects are table references
     // in FROM/JOIN positions; write objects are the statement-level targets of
     // write statements. Names are uppercased so case variants collapse.
-    let (read_objects, write_objects) = collect_touched_objects(root, line_at, emit_contributions);
+    let (read_objects, write_objects) =
+        collect_touched_objects(&statements, &facts.statements, line_at, emit_contributions);
     obj.read_object_count = read_objects.len() as u32;
     obj.write_object_count = write_objects.len() as u32;
     obj.touch_count = (read_objects.len()
@@ -2105,65 +2666,97 @@ fn extract_objects(
             .filter(|name| !read_objects.contains_key(*name))
             .count()) as u32;
     if emit_contributions {
-        for span in write_objects.values() {
-            record_change_risk(
-                evidence,
+        // One first-occurrence contribution per distinct object under the
+        // raw keys too — read/write/touch counts explain themselves
+        // (Codex P1). Touch = read ∪ write: every read span plus the
+        // write-only ones.
+        for (name, span) in &write_objects {
+            let span = span.unwrap_or(fallback_span);
+            record_change_risk(evidence, true, span, ChangeRiskFactor::WriteObject);
+            record_object(
+                obj_evidence,
                 true,
-                span.unwrap_or(fallback_span),
-                ChangeRiskFactor::WriteObject,
+                "sql.object.write_count",
+                "sql.object.write",
+                span,
             );
+            if !read_objects.contains_key(name) {
+                record_object(
+                    obj_evidence,
+                    true,
+                    "sql.object.touch_count",
+                    "sql.object.touch",
+                    span,
+                );
+            }
         }
         for span in read_objects.values() {
-            record_change_risk(
-                evidence,
+            let span = span.unwrap_or(fallback_span);
+            record_change_risk(evidence, true, span, ChangeRiskFactor::ReadObject);
+            record_object(
+                obj_evidence,
                 true,
-                span.unwrap_or(fallback_span),
-                ChangeRiskFactor::ReadObject,
+                "sql.object.read_count",
+                "sql.object.read",
+                span,
+            );
+            record_object(
+                obj_evidence,
+                true,
+                "sql.object.touch_count",
+                "sql.object.touch",
+                span,
             );
         }
     }
 
-    // UPDATE/DELETE without WHERE. The WHERE crawl must stop at nested
-    // SELECT nodes: `UPDATE t SET v = (SELECT v FROM u WHERE u.id = t.id)` has no
-    // *statement-level* WHERE — it still rewrites every row — but a naive
-    // recursive crawl would find the subquery's WHERE and wrongly clear the
-    // no-WHERE flag (Codex P1). Passing `SELECT_STATEMENT` as the
-    // no-recurse set confines the search to the statement's own clauses.
-    let updates = root.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::UpdateStatement),
-        true,
-        &PROCEDURAL_DEFINITIONS,
-        true,
-    );
-    for u in &updates {
-        if !has_own_where_clause(u) {
-            obj.update_without_where_count += 1;
-            if emit_contributions {
-                record_change_risk(
-                    evidence,
-                    true,
-                    segment_span(u, line_at).unwrap_or(fallback_span),
-                    ChangeRiskFactor::UpdateWithoutWhere,
-                );
+    // UPDATE/DELETE without WHERE. Two scoping rules:
+    // - the WHERE crawl stops at nested SELECT nodes: `UPDATE t SET v =
+    //   (SELECT v FROM u WHERE u.id = t.id)` has no *statement-level* WHERE —
+    //   it still rewrites every row — but a naive recursive crawl would find
+    //   the subquery's WHERE and wrongly clear the no-WHERE flag (Codex P1);
+    // - only non-`procedural` statements are scanned: a routine definition's
+    //   body DML runs when called, not when the file is applied. The
+    //   `PROCEDURAL_DEFINITIONS` crawl boundary covers well-formed routine
+    //   nodes; skipping `procedural`-classified statements additionally
+    //   covers T-SQL body fragments that sqruff splits into sibling
+    //   statements (Codex P1).
+    for (node, stmt) in statements.iter().zip(facts.statements.iter()) {
+        if stmt.kind == StatementKind::Procedural {
+            continue;
+        }
+        let updates = node.recursive_crawl(&UPDATE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
+        for u in &updates {
+            if !has_own_where_clause(u) {
+                obj.update_without_where_count += 1;
+                if emit_contributions {
+                    let span = segment_span(u, line_at).unwrap_or(fallback_span);
+                    record_object(
+                        obj_evidence,
+                        true,
+                        "sql.dml.update_without_where_count",
+                        "sql.dml.update_without_where",
+                        span,
+                    );
+                    record_change_risk(evidence, true, span, ChangeRiskFactor::UpdateWithoutWhere);
+                }
             }
         }
-    }
-    let deletes = root.recursive_crawl(
-        &SyntaxSet::single(SyntaxKind::DeleteStatement),
-        true,
-        &PROCEDURAL_DEFINITIONS,
-        true,
-    );
-    for d in &deletes {
-        if !has_own_where_clause(d) {
-            obj.delete_without_where_count += 1;
-            if emit_contributions {
-                record_change_risk(
-                    evidence,
-                    true,
-                    segment_span(d, line_at).unwrap_or(fallback_span),
-                    ChangeRiskFactor::DeleteWithoutWhere,
-                );
+        let deletes = node.recursive_crawl(&DELETE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
+        for d in &deletes {
+            if !has_own_where_clause(d) {
+                obj.delete_without_where_count += 1;
+                if emit_contributions {
+                    let span = segment_span(d, line_at).unwrap_or(fallback_span);
+                    record_object(
+                        obj_evidence,
+                        true,
+                        "sql.dml.delete_without_where_count",
+                        "sql.dml.delete_without_where",
+                        span,
+                    );
+                    record_change_risk(evidence, true, span, ChangeRiskFactor::DeleteWithoutWhere);
+                }
             }
         }
     }
@@ -2200,18 +2793,243 @@ fn extract_objects(
     // from `Keyword` tokens inside DML statements (INSERT/UPDATE/DELETE/MERGE).
     // The clause word is lexed as a `Keyword`, whereas a column or table named
     // `output`/`returning` is a `NakedIdentifier` — so this never fires on
-    // `UPDATE t SET output = 1` or `INSERT INTO output (…)`.
+    // `UPDATE t SET output = 1` or `INSERT INTO output (…)`. `procedural`
+    // statements (routine definitions and their split body fragments) are
+    // skipped like every other object scan.
     const DML_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
         SyntaxKind::InsertStatement,
+        SyntaxKind::OracleInsertStatement,
+        SyntaxKind::BulkInsertStatement,
         SyntaxKind::UpdateStatement,
+        SyntaxKind::OracleUpdateStatement,
         SyntaxKind::DeleteStatement,
+        SyntaxKind::OracleDeleteStatement,
         SyntaxKind::MergeStatement,
     ]);
-    let dml_stmts = root.recursive_crawl(&DML_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
-    obj.returning_count = dml_stmts
+    for (node, _) in statements
         .iter()
-        .map(|s| count_keyword(s, "RETURNING") + count_keyword(s, "OUTPUT"))
-        .sum();
+        .zip(facts.statements.iter())
+        .filter(|(_, stmt)| stmt.kind != StatementKind::Procedural)
+    {
+        for dml in node.recursive_crawl(&DML_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true) {
+            for kw in keyword_tokens(&dml, "RETURNING")
+                .into_iter()
+                .chain(keyword_tokens(&dml, "OUTPUT"))
+            {
+                obj.returning_count += 1;
+                // Each counted clause is one evidence entry (Codex P1).
+                record_object(
+                    obj_evidence,
+                    emit_contributions,
+                    "sql.dml.returning_count",
+                    "sql.dml.returning",
+                    segment_span(&kw, line_at).unwrap_or(fallback_span),
+                );
+            }
+        }
+    }
+}
+
+/// Node-based DML/DDL/DCL/TCL tally for one anonymous block's body — the
+/// statement-kind counters (`sql.dml.*`, `sql.ddl.*`,
+/// `sql.dcl.grant_revoke_count`, `sql.transaction.control_count`) and their
+/// change-risk terms, mirroring the per-statement loop in `extract_objects`
+/// arm for arm (Codex P1: `IF … DROP TABLE t; END IF` executes the drop when
+/// the file is applied). Only statement kinds are counted here; object
+/// touches and the without-WHERE risks are covered by the per-statement node
+/// scans, which do not stop at anonymous blocks.
+///
+/// Every crawl passes `recurse_into = false` so only the *outermost* match
+/// on each path counts — sqruff double-wraps some kinds (an Oracle GRANT
+/// parses as `AccessStatement > AccessStatement`), and a descend-into-match
+/// crawl would count both layers.
+fn scan_block_body_dml(
+    block: &ErasedSegment,
+    line_at: &impl Fn(u32) -> u32,
+    obj: &mut ObjectFacts,
+    evidence: &mut Vec<ChangeRiskEvidence>,
+    obj_evidence: &mut Vec<ObjectEvidence>,
+    emit_contributions: bool,
+) {
+    let span_of =
+        |seg: &ErasedSegment| segment_span(seg, line_at).unwrap_or_else(SourceSpan::empty);
+    for seg in block.recursive_crawl(&INSERT_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false) {
+        obj.insert_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dml.insert_count",
+            "sql.dml.insert",
+            span_of(&seg),
+        );
+    }
+    for seg in block.recursive_crawl(&UPDATE_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false) {
+        obj.update_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dml.update_count",
+            "sql.dml.update",
+            span_of(&seg),
+        );
+    }
+    for seg in block.recursive_crawl(&DELETE_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false) {
+        obj.delete_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dml.delete_count",
+            "sql.dml.delete",
+            span_of(&seg),
+        );
+    }
+    for set in [
+        &CREATE_TABLE_STATEMENTS,
+        &CREATE_VIEW_STATEMENTS,
+        &CREATE_OTHER_STATEMENTS,
+    ] {
+        for seg in block.recursive_crawl(set, false, &PROCEDURAL_DEFINITIONS, false) {
+            obj.create_count += 1;
+            record_object(
+                obj_evidence,
+                emit_contributions,
+                "sql.ddl.create_count",
+                "sql.ddl.create",
+                span_of(&seg),
+            );
+        }
+    }
+    for seg in block.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::MergeStatement),
+        false,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        obj.merge_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dml.merge_count",
+            "sql.dml.merge",
+            span_of(&seg),
+        );
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::Merge,
+        );
+    }
+    for seg in block.recursive_crawl(&DROP_STATEMENTS, false, &PROCEDURAL_DEFINITIONS, false) {
+        obj.drop_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.ddl.drop_count",
+            "sql.ddl.drop",
+            span_of(&seg),
+        );
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::Drop,
+        );
+    }
+    for seg in block.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::TruncateStatement),
+        false,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        obj.truncate_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.ddl.truncate_count",
+            "sql.ddl.truncate",
+            span_of(&seg),
+        );
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::Truncate,
+        );
+    }
+    for seg in block.recursive_crawl(
+        &ALTER_TABLE_STATEMENTS,
+        false,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        obj.alter_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.ddl.alter_count",
+            "sql.ddl.alter",
+            span_of(&seg),
+        );
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::Alter,
+        );
+    }
+    for seg in block.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::AccessStatement),
+        false,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        obj.grant_revoke_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.dcl.grant_revoke_count",
+            "sql.dcl.grant_revoke",
+            span_of(&seg),
+        );
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::GrantRevoke,
+        );
+    }
+    for seg in block.recursive_crawl(
+        &TRANSACTION_STATEMENTS,
+        false,
+        &PROCEDURAL_DEFINITIONS,
+        false,
+    ) {
+        // Sole-keyword `BEGIN`/`END` wrappers are scripting-block brackets,
+        // not TCL (BigQuery — Codex P1). Real transaction control inside a
+        // block (`BEGIN TRANSACTION`, `COMMIT`, `ROLLBACK`) carries other
+        // keywords; the only dialects lexing bare-`BEGIN` TCL (PostgreSQL,
+        // MySQL) never surface it inside a typed block statement — MySQL
+        // blocks live in routines and PostgreSQL DO bodies are opaque
+        // dollar-quoted literals.
+        if transaction_node_bracket(&seg).is_some() {
+            continue;
+        }
+        obj.transaction_control_count += 1;
+        record_object(
+            obj_evidence,
+            emit_contributions,
+            "sql.transaction.control_count",
+            "sql.transaction.control",
+            span_of(&seg),
+        );
+        record_change_risk(
+            evidence,
+            emit_contributions,
+            span_of(&seg),
+            ChangeRiskFactor::TransactionControl,
+        );
+    }
 }
 
 /// The uppercased text of every *code* leaf token in `node` (comments,
@@ -2276,16 +3094,24 @@ fn has_own_where_clause(stmt: &ErasedSegment) -> bool {
 }
 
 /// Write-statement kinds whose statement-level `table_reference` targets are
-/// the objects they mutate.
+/// the objects they mutate. Includes the Oracle parallel kinds (see the
+/// dialect-folding sets above).
 const WRITE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::InsertStatement,
+    SyntaxKind::OracleInsertStatement,
+    SyntaxKind::BulkInsertStatement,
     SyntaxKind::UpdateStatement,
+    SyntaxKind::OracleUpdateStatement,
     SyntaxKind::DeleteStatement,
+    SyntaxKind::OracleDeleteStatement,
     SyntaxKind::MergeStatement,
     SyntaxKind::TruncateStatement,
     SyntaxKind::AlterTableStatement,
+    SyntaxKind::OracleAlterTableStatement,
     SyntaxKind::CreateTableStatement,
+    SyntaxKind::OracleCreateTableStatement,
     SyntaxKind::CreateViewStatement,
+    SyntaxKind::OracleCreateViewStatement,
     SyntaxKind::CreateMaterializedViewStatement,
     SyntaxKind::CreateIndexStatement,
     SyntaxKind::DropTableStatement,
@@ -2294,6 +3120,10 @@ const WRITE_STATEMENTS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::DropFunctionStatement,
     SyntaxKind::DropSchemaStatement,
     SyntaxKind::DropStatement,
+    SyntaxKind::OracleDropPackageStatement,
+    SyntaxKind::OracleDropProcedureStatement,
+    SyntaxKind::OracleDropSynonymStatement,
+    SyntaxKind::OracleDropDatabaseLinkStatement,
 ]);
 
 /// Procedural-definition statement kinds. DML/object scans pass this as their
@@ -2324,7 +3154,7 @@ const PROCEDURAL_DEFINITIONS: SyntaxSet = SyntaxSet::new(&[
 /// `SpaceKind::Function` space. Deliberately *excludes* the package/type-body
 /// containers in [`PROCEDURAL_DEFINITIONS`]: a package body is a module, and
 /// its routines are the function-shaped units inside it.
-const PROCEDURAL_UNITS: SyntaxSet = SyntaxSet::new(&[
+pub(crate) const PROCEDURAL_UNITS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::CreateProcedureStatement,
     SyntaxKind::CreateFunctionStatement,
     SyntaxKind::CreateTriggerStatement,
@@ -2346,6 +3176,85 @@ const UNIT_NAME_KINDS: SyntaxSet = SyntaxSet::new(&[
     SyntaxKind::TriggerReference,
 ]);
 
+/// The routine-definition CST nodes in the same pre-order as
+/// [`extract_procedural_units`] collects `ProceduralUnitFacts` — callers zip
+/// the two by index (e.g. for per-unit embedded-query scoring). Two filters
+/// keep the sequence honest:
+/// - nodes without a position marker are dropped so both sequences stay
+///   index-aligned with the facts (which cannot represent a span-less unit)
+///   — otherwise every unit after a skipped node would take its neighbor's
+///   embedded score (CodeRabbit);
+/// - Oracle member *prototypes* are dropped: a package/type specification
+///   declares `PROCEDURE p;` with the same `OracleCreateProcedureStatement`
+///   kind as an implementation, but has no `BEGIN…END` body — a prototype
+///   is not an executable routine and must not grow an entry path or a
+///   coverage space (Codex P2). The prototype test is *contextual*, not a
+///   blanket body requirement: Oracle also has executable definitions
+///   without an `OracleBeginEndBlock` — Java/C call-specs (`AS LANGUAGE
+///   JAVA …`) and triggers whose body is a `CALL` clause — so only bodyless
+///   routines sitting inside a package/type *specification* are dropped
+///   (Codex P2). A bodyless forward declaration inside a package *body* is
+///   kept: it is indistinguishable from a call-spec without deeper clause
+///   parsing, and over-counting a declared routine is the safer error for a
+///   coverage denominator. Non-Oracle kinds keep body-less shapes: a
+///   PostgreSQL `$$`-quoted body is an opaque literal, not a block node.
+pub(crate) fn procedural_unit_nodes(root: &ErasedSegment) -> Vec<ErasedSegment> {
+    const ORACLE_ROUTINE_KINDS: SyntaxSet = SyntaxSet::new(&[
+        SyntaxKind::OracleCreateProcedureStatement,
+        SyntaxKind::OracleCreateFunctionStatement,
+        SyntaxKind::OracleCreateTriggerStatement,
+    ]);
+    // Package/type *specification* byte ranges. sqruff parses `CREATE
+    // PACKAGE` and `CREATE PACKAGE BODY` as the same node kind with an
+    // optional `BODY` keyword child, so the keyword picks the spec form.
+    const ORACLE_SPEC_CONTAINERS: SyntaxSet = SyntaxSet::new(&[
+        SyntaxKind::OracleCreatePackageStatement,
+        SyntaxKind::OracleCreateTypeStatement,
+    ]);
+    let spec_ranges: Vec<(u32, u32)> = root
+        .recursive_crawl(&ORACLE_SPEC_CONTAINERS, true, &SyntaxSet::EMPTY, false)
+        .into_iter()
+        .filter(|node| {
+            !node.is_type(SyntaxKind::OracleCreatePackageStatement)
+                || !node.segments().iter().any(|child| {
+                    child.is_type(SyntaxKind::Keyword) && child.raw().eq_ignore_ascii_case("body")
+                })
+        })
+        .filter_map(|node| {
+            let pm = node.get_position_marker()?;
+            Some((pm.source_slice.start as u32, pm.source_slice.end as u32))
+        })
+        .collect();
+    root.recursive_crawl(&PROCEDURAL_UNITS, true, &SyntaxSet::EMPTY, false)
+        .into_iter()
+        .filter(|unit| unit.get_position_marker().is_some())
+        .filter(|unit| {
+            if !ORACLE_ROUTINE_KINDS.contains(unit.get_type()) {
+                return true;
+            }
+            let has_body = !unit
+                .recursive_crawl(
+                    &SyntaxSet::single(SyntaxKind::OracleBeginEndBlock),
+                    true,
+                    &SyntaxSet::EMPTY,
+                    true,
+                )
+                .is_empty();
+            if has_body {
+                return true;
+            }
+            // Bodyless: a prototype only in a spec context.
+            let Some(pm) = unit.get_position_marker() else {
+                return false;
+            };
+            let (start, end) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+            !spec_ranges
+                .iter()
+                .any(|&(s, e)| s <= start && end <= e && (s, e) != (start, end))
+        })
+        .collect()
+}
+
 /// Collect procedural units (routine definitions) in pre-order.
 ///
 /// `recurse_into = true` descends into matched definitions, so routines
@@ -2355,9 +3264,12 @@ const UNIT_NAME_KINDS: SyntaxSet = SyntaxSet::new(&[
 fn extract_procedural_units(
     root: &ErasedSegment,
     line_at: &impl Fn(u32) -> u32,
+    tsql: bool,
+    mysql: bool,
+    oracle: bool,
     facts: &mut SqlFileFacts,
 ) {
-    let units = root.recursive_crawl(&PROCEDURAL_UNITS, true, &SyntaxSet::EMPTY, false);
+    let units = procedural_unit_nodes(root);
     for unit in &units {
         let Some(pm) = unit.get_position_marker() else {
             continue;
@@ -2375,7 +3287,491 @@ fn extract_procedural_units(
             end_line: line_at(end_byte.saturating_sub(1)),
             start_byte,
             end_byte,
+            cyclomatic_complexity: 0.0,
+            cognitive_complexity: 0.0,
+            embedded_query_structural: 0.0,
         });
+    }
+    // sqruff 0.40's overridden T-SQL statement grammar leaves whole valid
+    // definitions (`CREATE FUNCTION dbo.f(@x int) RETURNS int AS BEGIN …`,
+    // `CREATE TRIGGER trg ON t FOR INSERT AS …`, standalone `ALTER
+    // FUNCTION|TRIGGER … AS …` — Codex P1 ×2) in root `Unparsable` nodes —
+    // no `PROCEDURAL_UNITS` kind ever forms. MySQL single-statement bodies
+    // (`CREATE PROCEDURE p() SIGNAL SQLSTATE '45000';`) share the fate
+    // (Codex P1). Recover units from the unambiguous header token shape at
+    // the start of a root run: `CREATE [OR ALTER|REPLACE]
+    // [DEFINER = <user>] FUNCTION|PROC[EDURE]|TRIGGER <name>` or `ALTER
+    // <kind> <name>`. Scoped to the T-SQL/MySQL dialects and to *leading*
+    // headers so broken declarative SQL in other dialects stays
+    // unrecognized; the unit spans the whole run — the batch/delimiter
+    // semantics that already govern body ownership in those dialects.
+    if tsql || mysql {
+        // The client's *declared* delimiters (`DELIMITER %%`) are statement
+        // boundaries too — they aren't limited to any punctuation set
+        // (Codex P1).
+        let declared_delimiters = declared_delimiters(root);
+        for run in root.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::Unparsable),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        ) {
+            let Some(pm) = run.get_position_marker() else {
+                continue;
+            };
+            let (start_byte, end_byte) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+            // Runs inside an already-recognized unit belong to it.
+            if facts
+                .procedural_units
+                .iter()
+                .any(|u| u.start_byte <= start_byte && end_byte <= u.end_byte)
+            {
+                continue;
+            }
+            let mut run_tokens = Vec::new();
+            leaf_tokens(&run, &mut run_tokens);
+            let headers = recovered_definition_headers(&run_tokens, tsql, &declared_delimiters);
+            if headers.is_empty() {
+                continue;
+            }
+            // Each header starts its own unit. Under MySQL a unit ends at
+            // its own balanced body / terminator, so intervening statements
+            // in the shared run stay outside its span (Codex P2); under
+            // T-SQL batch semantics it runs to the next header or the
+            // run's end. sqruff's error recovery often swallows *several*
+            // definitions (and even parseable statements between them)
+            // into one run — splitting keeps siblings independent
+            // (Codex P2).
+            for (k, (token_idx, header_start, name)) in headers.iter().enumerate() {
+                let fallback_end = headers
+                    .get(k + 1)
+                    .map(|&(_, next_start, _)| next_start)
+                    .unwrap_or(end_byte);
+                let unit_end = if mysql {
+                    mysql_recovered_unit_end(&run_tokens, *token_idx, &declared_delimiters)
+                        .unwrap_or(fallback_end)
+                        .min(fallback_end)
+                } else {
+                    fallback_end
+                };
+                facts.procedural_units.push(ProceduralUnitFacts {
+                    name: Some(name.clone()),
+                    start_line: line_at(*header_start),
+                    end_line: line_at(unit_end.saturating_sub(1)),
+                    start_byte: *header_start,
+                    end_byte: unit_end,
+                    cyclomatic_complexity: 0.0,
+                    cognitive_complexity: 0.0,
+                    embedded_query_structural: 0.0,
+                });
+            }
+        }
+        // Keep the pre-order contract (parents before children, source
+        // order): synthetic units interleave with typed ones by position.
+        facts
+            .procedural_units
+            .sort_by_key(|u| (u.start_byte, std::cmp::Reverse(u.end_byte)));
+    }
+    // Oracle package *bodies* fall into the same parse gap: sqruff 0.40
+    // emits `CREATE PACKAGE BODY pkg AS PROCEDURE p IS BEGIN … END p; …`
+    // wholly as a root `Unparsable` run (Codex P1). Recover the member
+    // routines: `PROCEDURE|FUNCTION <name>` headers at `;` boundaries
+    // inside a run *leading* with a package-body header. A member's span
+    // ends at its named `END <name>` when present (the PL/SQL convention),
+    // else at the next member or the run's end — so an initialization
+    // section stays file-level.
+    if oracle {
+        for run in root.recursive_crawl(
+            &SyntaxSet::single(SyntaxKind::Unparsable),
+            true,
+            &SyntaxSet::EMPTY,
+            true,
+        ) {
+            let Some(pm) = run.get_position_marker() else {
+                continue;
+            };
+            let (start_byte, end_byte) = (pm.source_slice.start as u32, pm.source_slice.end as u32);
+            if facts
+                .procedural_units
+                .iter()
+                .any(|u| u.start_byte <= start_byte && end_byte <= u.end_byte)
+            {
+                continue;
+            }
+            let members = recovered_package_body_members(&run, end_byte);
+            for (member_start, member_end, name) in members {
+                facts.procedural_units.push(ProceduralUnitFacts {
+                    name: Some(name),
+                    start_line: line_at(member_start),
+                    end_line: line_at(member_end.saturating_sub(1)),
+                    start_byte: member_start,
+                    end_byte: member_end,
+                    cyclomatic_complexity: 0.0,
+                    cognitive_complexity: 0.0,
+                    embedded_query_structural: 0.0,
+                });
+            }
+        }
+        facts
+            .procedural_units
+            .sort_by_key(|u| (u.start_byte, std::cmp::Reverse(u.end_byte)));
+    }
+}
+
+/// The member routines recovered from an Oracle package-body parse gap:
+/// `(start, end, name)` per `PROCEDURE|FUNCTION <name>` header at a `;`
+/// boundary in a run that *leads* with `CREATE [OR REPLACE]
+/// [EDITIONABLE|NONEDITIONABLE] PACKAGE BODY <name>`. Package
+/// *specifications* (no BODY keyword) declare prototypes, not members —
+/// they recover nothing.
+fn recovered_package_body_members(run: &ErasedSegment, run_end: u32) -> Vec<(u32, u32, String)> {
+    let mut tokens = Vec::new();
+    leaf_tokens(run, &mut tokens);
+    let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
+    // Leading package-body header check.
+    let mut i = 0usize;
+    if !word(i).eq_ignore_ascii_case("CREATE") {
+        return Vec::new();
+    }
+    i += 1;
+    if word(i).eq_ignore_ascii_case("OR") && word(i + 1).eq_ignore_ascii_case("REPLACE") {
+        i += 2;
+    }
+    if word(i).eq_ignore_ascii_case("EDITIONABLE") || word(i).eq_ignore_ascii_case("NONEDITIONABLE")
+    {
+        i += 1;
+    }
+    if !(word(i).eq_ignore_ascii_case("PACKAGE") && word(i + 1).eq_ignore_ascii_case("BODY")) {
+        return Vec::new();
+    }
+    // Member headers at `;` boundaries (or right after the package's IS/AS).
+    let mut headers: Vec<(usize, u32, String)> = Vec::new();
+    for (j, (token_start, _)) in tokens.iter().enumerate() {
+        let kind = word(j);
+        if !(kind.eq_ignore_ascii_case("PROCEDURE") || kind.eq_ignore_ascii_case("FUNCTION")) {
+            continue;
+        }
+        let prev = if j == 0 { "" } else { word(j - 1) };
+        let boundary =
+            prev == ";" || prev.eq_ignore_ascii_case("IS") || prev.eq_ignore_ascii_case("AS");
+        if !boundary {
+            continue;
+        }
+        let name = word(j + 1);
+        if name.is_empty()
+            || !name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '"')
+        {
+            continue;
+        }
+        headers.push((j, *token_start, name.to_string()));
+    }
+    // Spans: to the END that balances the member's *body*. `BEGIN` opens
+    // the executable body — a declaration-level `CASE … END` expression
+    // balances without arming termination (Codex P2). Nested subprogram
+    // headers recurse, so an outer member's span survives its local
+    // routines instead of truncating at their headers (Codex P2).
+    // `END IF/LOOP/WHILE/REPEAT` close their own constructs; `END CASE`
+    // closes its CASE without re-opening. Fallback: the run's end.
+    let header_indices: std::collections::BTreeSet<usize> =
+        headers.iter().map(|&(token_idx, _, _)| token_idx).collect();
+    fn member_end_index(
+        tokens: &[(u32, String)],
+        header_idx: usize,
+        header_indices: &std::collections::BTreeSet<usize>,
+    ) -> Option<usize> {
+        let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
+        // Prototype or body? From the header, the first of `;` vs `IS`/`AS`
+        // decides: `PROCEDURE p(a NUMBER);` is a bodyless prototype ending
+        // at its terminator, while a real member reaches `IS`/`AS` first
+        // (Codex P2 — the discrimination is per member, so a *nested*
+        // prototype is handled by its own recursion, never by an early
+        // return in the outer walk).
+        let mut j = header_idx + 1;
+        loop {
+            let w = word(j);
+            if w.is_empty() {
+                return None;
+            }
+            if w == ";" {
+                return Some(j); // a prototype: ends at its terminator
+            }
+            if w.eq_ignore_ascii_case("IS") || w.eq_ignore_ascii_case("AS") {
+                break; // a member with a body
+            }
+            j += 1;
+        }
+        // Balanced body walk: `BEGIN` opens (and arms termination), `CASE`
+        // opens, `END IF/LOOP/WHILE/REPEAT` close their own constructs,
+        // `END CASE` closes without re-opening, nested subprogram headers
+        // recurse (a nested prototype returns its `;`, a nested body its
+        // balanced END — either way the outer walk continues past it).
+        let mut depth = 0u32;
+        let mut opened = false;
+        while j < tokens.len() {
+            if header_indices.contains(&j) {
+                let nested_end = member_end_index(tokens, j, header_indices)?;
+                j = nested_end + 1;
+                continue;
+            }
+            let w = word(j);
+            if w.eq_ignore_ascii_case("BEGIN") {
+                depth += 1;
+                opened = true;
+            } else if w.eq_ignore_ascii_case("CASE") {
+                depth += 1;
+            } else if w.eq_ignore_ascii_case("END") {
+                let next = word(j + 1);
+                if next.eq_ignore_ascii_case("IF")
+                    || next.eq_ignore_ascii_case("LOOP")
+                    || next.eq_ignore_ascii_case("WHILE")
+                    || next.eq_ignore_ascii_case("REPEAT")
+                {
+                    j += 2;
+                    continue;
+                }
+                depth = depth.saturating_sub(1);
+                if next.eq_ignore_ascii_case("CASE") {
+                    // `END CASE` closes its statement; skip the CASE token
+                    // so it doesn't re-open.
+                    j += 2;
+                    continue;
+                }
+                if opened && depth == 0 {
+                    // Through the optional trailing name and terminator.
+                    let mut t = j + 1;
+                    if word(t)
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '"')
+                    {
+                        t += 1;
+                    }
+                    if word(t) == ";" {
+                        t += 1;
+                    }
+                    return Some(t - 1);
+                }
+            }
+            j += 1;
+        }
+        None
+    }
+    let mut members = Vec::new();
+    for (token_idx, member_start, name) in headers.iter() {
+        let member_end = member_end_index(&tokens, *token_idx, &header_indices)
+            .and_then(|idx| tokens.get(idx))
+            .map(|(b, tok)| b + tok.len() as u32)
+            .unwrap_or(run_end);
+        members.push((*member_start, member_end, name.clone()));
+    }
+    members
+}
+
+/// The recovered definition headers in a token run: each `(start byte,
+/// name)` where a `CREATE [OR ALTER|REPLACE] [DEFINER = <account>]
+/// FUNCTION|PROC[EDURE]|TRIGGER <name>` header sits at a statement
+/// boundary — the run's start, or right after `;`, `GO`, or a MySQL custom
+/// delimiter (`//`, `$$` — punctuation-only tokens, Codex P1). sqruff's
+/// error recovery can swallow several definitions into one run, so a run
+/// yields one unit *per header* (Codex P2). Standalone `ALTER <kind>`
+/// headers count only when `allow_alter` (T-SQL redefinitions) — MySQL's
+/// `ALTER PROCEDURE p COMMENT …` alters metadata, not the body (Codex P2).
+/// Names keep their original case; dotted qualification split by the lexer
+/// is re-joined.
+fn recovered_definition_headers(
+    tokens: &[(u32, String)],
+    allow_alter: bool,
+    declared_delimiters: &[String],
+) -> Vec<(usize, u32, String)> {
+    fn header_at(tokens: &[(u32, String)], mut i: usize, allow_alter: bool) -> Option<String> {
+        let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
+        let leading_alter = word(i).eq_ignore_ascii_case("ALTER");
+        if !(word(i).eq_ignore_ascii_case("CREATE") || (leading_alter && allow_alter)) {
+            return None;
+        }
+        i += 1;
+        // `CREATE OR ALTER` (T-SQL) / `CREATE OR REPLACE` (MariaDB).
+        if word(i).eq_ignore_ascii_case("OR")
+            && (word(i + 1).eq_ignore_ascii_case("ALTER")
+                || word(i + 1).eq_ignore_ascii_case("REPLACE"))
+        {
+            i += 2;
+        }
+        // MySQL `DEFINER = <account>` between CREATE and the kind keyword:
+        // the account is a multi-token expression (`` `root`@`localhost` ``,
+        // `CURRENT_USER()`), so consume until the kind keyword appears
+        // (bounded — Codex P1).
+        if word(i).eq_ignore_ascii_case("DEFINER") {
+            let limit = i + 8;
+            i += 1;
+            while i <= limit {
+                let w = word(i);
+                if w.eq_ignore_ascii_case("FUNCTION")
+                    || w.eq_ignore_ascii_case("PROCEDURE")
+                    || w.eq_ignore_ascii_case("PROC")
+                    || w.eq_ignore_ascii_case("TRIGGER")
+                    || w.is_empty()
+                {
+                    break;
+                }
+                i += 1;
+            }
+        }
+        let kind = word(i);
+        if !(kind.eq_ignore_ascii_case("FUNCTION")
+            || kind.eq_ignore_ascii_case("PROCEDURE")
+            || kind.eq_ignore_ascii_case("PROC")
+            || kind.eq_ignore_ascii_case("TRIGGER"))
+        {
+            return None;
+        }
+        i += 1;
+        let mut name = tokens.get(i)?.1.clone();
+        // Identifier sanity: a name never starts with punctuation — quoted
+        // identifiers (`[bracketed]`, `"double"`, MySQL backticks —
+        // Codex P2) are names too.
+        if !name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '[' || c == '"' || c == '`')
+        {
+            return None;
+        }
+        // Re-join dotted qualification the lexer split (`dbo` `.` `f`).
+        while tokens.get(i + 1).is_some_and(|(_, w)| w == ".") {
+            if let Some((_, part)) = tokens.get(i + 2) {
+                name = format!("{name}.{part}");
+                i += 2;
+            } else {
+                break;
+            }
+        }
+        Some(name)
+    }
+    let mut headers = Vec::new();
+    for j in 0..tokens.len() {
+        let boundary = j == 0 || {
+            let prev = tokens[j - 1].1.as_str();
+            prev == ";"
+                || prev.eq_ignore_ascii_case("GO")
+                || is_custom_delimiter(prev)
+                || declared_delimiters.iter().any(|d| d == prev)
+        };
+        if !boundary {
+            continue;
+        }
+        if let Some(name) = header_at(tokens, j, allow_alter) {
+            headers.push((j, tokens[j].0, name));
+        }
+    }
+    headers
+}
+
+/// Where a recovered MySQL definition *ends*: its balanced `BEGIN … END`
+/// body through the following delimiter, or — for an opener-less
+/// single-statement body — its first top-level `;`/delimiter. Ending at
+/// the routine's own terminator keeps intervening statements out of the
+/// unit's span and complexity (Codex P2).
+fn mysql_recovered_unit_end(
+    tokens: &[(u32, String)],
+    header_idx: usize,
+    declared_delimiters: &[String],
+) -> Option<u32> {
+    let word = |j: usize| tokens.get(j).map(|(_, w)| w.as_str()).unwrap_or("");
+    let is_delim =
+        |w: &str| w == ";" || is_custom_delimiter(w) || declared_delimiters.iter().any(|d| d == w);
+    let token_end = |j: usize| tokens.get(j).map(|(b, w)| b + w.len() as u32);
+    let mut paren = 0i32;
+    let mut depth = 0u32;
+    let mut opened = false;
+    let mut j = header_idx + 1;
+    while j < tokens.len() {
+        let w = word(j);
+        if w == "(" {
+            paren += 1;
+        } else if w == ")" {
+            paren -= 1;
+        } else if paren <= 0 {
+            if w.eq_ignore_ascii_case("BEGIN") {
+                depth += 1;
+                opened = true;
+            } else if w.eq_ignore_ascii_case("CASE") {
+                depth += 1;
+            } else if w.eq_ignore_ascii_case("END") {
+                let next = word(j + 1);
+                if next.eq_ignore_ascii_case("IF")
+                    || next.eq_ignore_ascii_case("LOOP")
+                    || next.eq_ignore_ascii_case("WHILE")
+                    || next.eq_ignore_ascii_case("REPEAT")
+                {
+                    j += 2;
+                    continue;
+                }
+                depth = depth.saturating_sub(1);
+                if next.eq_ignore_ascii_case("CASE") {
+                    j += 2;
+                    continue;
+                }
+                if opened && depth == 0 {
+                    // Through the following delimiter when present.
+                    let t = if is_delim(word(j + 1)) { j + 1 } else { j };
+                    return token_end(t);
+                }
+            } else if !opened && depth == 0 && is_delim(w) {
+                // A single-statement body ends at its terminator.
+                return token_end(j);
+            }
+        }
+        j += 1;
+    }
+    None
+}
+
+/// The delimiters a MySQL client script *declares* (`DELIMITER %%`): each
+/// token following a `DELIMITER` keyword anywhere in the file. Declared
+/// delimiters are arbitrary strings — no punctuation whitelist covers them
+/// (Codex P1).
+fn declared_delimiters(root: &ErasedSegment) -> Vec<String> {
+    let mut tokens = Vec::new();
+    leaf_tokens(root, &mut tokens);
+    let mut delimiters = Vec::new();
+    for pair in tokens.windows(2) {
+        if pair[0].1.eq_ignore_ascii_case("DELIMITER") && pair[1].1 != ";" {
+            delimiters.push(pair[1].1.clone());
+        }
+    }
+    delimiters
+}
+
+/// Whether a token looks like a MySQL client custom delimiter (`//`, `$$`,
+/// `;;`): punctuation-only, drawn from the characters delimiters are made
+/// of. Identifiers, quoted names, and operators with operands never match.
+fn is_custom_delimiter(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| matches!(c, '/' | '$' | ';' | '|' | '!'))
+}
+
+/// The leaf code tokens of a node with their start bytes, in source order.
+fn leaf_tokens(node: &ErasedSegment, out: &mut Vec<(u32, String)>) {
+    let children = node.segments();
+    if children.is_empty() {
+        if !(node.is_comment() || node.is_whitespace() || node.is_meta()) {
+            let raw = node.raw().trim();
+            if !raw.is_empty()
+                && let Some(pm) = node.get_position_marker()
+            {
+                out.push((pm.source_slice.start as u32, raw.to_string()));
+            }
+        }
+        return;
+    }
+    for child in children {
+        leaf_tokens(child, out);
     }
 }
 
@@ -2387,8 +3783,15 @@ fn extract_procedural_units(
 /// children that are *not* inside a FROM/JOIN element (e.g. the `accounts`
 /// in `UPDATE accounts …`, the `target` in `INSERT INTO target …`). Names are
 /// uppercased so case variants collapse to one object.
+///
+/// `procedural` statements are skipped entirely: a routine body's objects
+/// are touched when the routine is *called*, not when the file is applied.
+/// The skip covers both well-formed definitions (whose bodies the
+/// `PROCEDURAL_DEFINITIONS` crawl boundary would exclude anyway) and T-SQL
+/// body fragments that sqruff splits into sibling statements (Codex P1).
 fn collect_touched_objects(
-    root: &ErasedSegment,
+    statements: &[ErasedSegment],
+    kinds: &[StatementFacts],
     line_at: &impl Fn(u32) -> u32,
     emit_contributions: bool,
 ) -> (
@@ -2409,7 +3812,10 @@ fn collect_touched_objects(
     // So a reference is treated as CTE-local only when an *ancestor*
     // `WithCompoundStatement` defines its name. We resolve that by node
     // identity (`cte_local_refs`), not by a flat name set.
-    for stmt in &top_level_statements(root) {
+    for (stmt, facts) in statements.iter().zip(kinds.iter()) {
+        if facts.kind == StatementKind::Procedural {
+            continue;
+        }
         let cte_local = cte_local_refs(stmt);
         collect_statement_objects(
             stmt,
@@ -2426,14 +3832,26 @@ fn collect_touched_objects(
 
 /// Top-level `Statement` nodes (one per DML/DDL/… statement in the file),
 /// not descending into nested statements (a procedural body or a subquery's
-/// inner statement is handled within its owner's scope).
-fn top_level_statements(root: &ErasedSegment) -> Vec<ErasedSegment> {
+/// inner statement is handled within its owner's scope). The single crawl
+/// definition every statement-indexed consumer shares (`classify_statements`,
+/// `extract_objects`, `procedural::extract`), so their zips stay aligned.
+///
+/// Under BigQuery, the bare `END;` scripting bracket is filtered out here —
+/// it is a syntactic closer, not a statement, and counting it would inflate
+/// `sql.statement.count`, the `unknown` kind, and statement-kind entropy
+/// (Codex P2). Filtering at the shared crawl keeps every consumer's
+/// index-zip aligned. The matching `BEGIN;` stays: it *is* the anonymous
+/// scripting block.
+pub(crate) fn top_level_statements(root: &ErasedSegment, bigquery: bool) -> Vec<ErasedSegment> {
     root.recursive_crawl(
         &SyntaxSet::single(SyntaxKind::Statement),
         false,
         &SyntaxSet::EMPTY,
         true,
     )
+    .into_iter()
+    .filter(|stmt| !bigquery || bare_scripting_bracket(stmt) != Some(ScriptingBracket::End))
+    .collect()
 }
 
 /// The `TableReference` nodes within `stmt` that resolve to a CTE alias visible
@@ -2465,12 +3883,7 @@ fn cte_local_refs(stmt: &ErasedSegment) -> Vec<ErasedSegment> {
         // Every table reference in this WITH's subtree (the CTE bodies and the
         // main query) is in-scope for these names; mark the ones whose name
         // matches as CTE-local.
-        for tr in w.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        ) {
+        for tr in w.recursive_crawl(&TABLE_REFERENCES, true, &SyntaxSet::EMPTY, true) {
             if names.contains(&tr.raw().to_ascii_uppercase()) {
                 local.push(tr);
             }
@@ -2500,9 +3913,21 @@ fn collect_statement_objects(
     // `recurse_into = false` returns the outermost match on each path.
     const TARGET_REFS: SyntaxSet = SyntaxSet::new(&[
         SyntaxKind::TableReference,
+        SyntaxKind::OracleTableReference,
         SyntaxKind::FunctionName,
         SyntaxKind::DatabaseReference,
     ]);
+    // Oracle routine/package/synonym drops name their target through kinds
+    // that are far too generic to scan on every write statement (a
+    // `seq.nextval` in an INSERT is an `ObjectReference` too): `DROP
+    // PROCEDURE p` → `OracleFunctionName`, `DROP PACKAGE`/`DROP SYNONYM` →
+    // `ObjectReference`. Without them the statement counts in
+    // `sql.ddl.drop_count` but its target is missing from the write objects
+    // (Codex P2), so the extended set applies to the drop family only.
+    const DROP_TARGET_REFS: SyntaxSet = TARGET_REFS.union(&SyntaxSet::new(&[
+        SyntaxKind::ObjectReference,
+        SyntaxKind::OracleFunctionName,
+    ]));
 
     // Writes: the mutated target of each write statement is its *first*
     // statement-level reference in document order (not inside a nested SELECT).
@@ -2521,22 +3946,49 @@ fn collect_statement_objects(
     // no-op and only the read pass below runs).
     let write_stmts = stmt.recursive_crawl(&WRITE_STATEMENTS, true, &PROCEDURAL_DEFINITIONS, true);
     for ws in &write_stmts {
-        let stmt_tables = ws.recursive_crawl(&TARGET_REFS, false, &SELECT_STATEMENT, true);
+        // The Oracle drop family names its target through generic reference
+        // kinds; every other write statement uses the narrow set (see
+        // `DROP_TARGET_REFS`).
+        let refs = if matches!(
+            ws.get_type(),
+            SyntaxKind::OracleDropPackageStatement
+                | SyntaxKind::OracleDropProcedureStatement
+                | SyntaxKind::OracleDropSynonymStatement
+                | SyntaxKind::OracleDropDatabaseLinkStatement
+        ) {
+            &DROP_TARGET_REFS
+        } else {
+            &TARGET_REFS
+        };
+        let stmt_tables = ws.recursive_crawl(refs, false, &SELECT_STATEMENT, true);
         // Multi-target DDL mutates *every* statement-level reference (`DROP
-        // TABLE a, b`, `TRUNCATE a, b`). Host-object shapes mutate only their
-        // first reference (the target); later references are reads:
+        // TABLE a, b`, `TRUNCATE a, b`), and so do INSERT statements — a plain
+        // `INSERT INTO t SELECT … FROM s` keeps `s` inside the SELECT (the
+        // crawl stops there), while Oracle `INSERT ALL INTO a … INTO b …`
+        // legitimately lists several statement-level targets, all of them
+        // written (Codex P2). Host-object shapes mutate only their first
+        // reference (the target); later references are reads:
         //   - DML: `UPDATE dst … FROM src`, `MERGE INTO dst USING src` — `dst`
         //     is written, sources are read.
         //   - `CREATE INDEX idx ON t` / `DROP INDEX idx ON t` — `idx` is the
         //     written object, the host table `t` is only a read.
+        //   - `CREATE TABLE child (… REFERENCES parent(id))` and
+        //     `ALTER TABLE … ADD CONSTRAINT … REFERENCES parent` mutate only
+        //     their subject; the referenced table is read, not written
+        //     (Codex P2).
         let first_target_only = matches!(
             ws.get_type(),
-            SyntaxKind::InsertStatement
-                | SyntaxKind::UpdateStatement
+            SyntaxKind::UpdateStatement
+                | SyntaxKind::OracleUpdateStatement
                 | SyntaxKind::DeleteStatement
+                | SyntaxKind::OracleDeleteStatement
                 | SyntaxKind::MergeStatement
                 | SyntaxKind::CreateIndexStatement
                 | SyntaxKind::DropIndexStatement
+                | SyntaxKind::CreateTableStatement
+                | SyntaxKind::OracleCreateTableStatement
+                | SyntaxKind::AlterTableStatement
+                | SyntaxKind::OracleAlterTableStatement
         );
         let all_targets = !first_target_only;
         for (i, tr) in stmt_tables.iter().enumerate() {
@@ -2568,12 +4020,7 @@ fn collect_statement_objects(
         true,
     );
     for elem in &from_elems {
-        for tr in elem.recursive_crawl(
-            &SyntaxSet::single(SyntaxKind::TableReference),
-            true,
-            &SyntaxSet::EMPTY,
-            true,
-        ) {
+        for tr in elem.recursive_crawl(&TABLE_REFERENCES, true, &SyntaxSet::EMPTY, true) {
             let is_write_target = write_target_nodes.iter().any(|w| w.is(&tr));
             if !is_cte_local(&tr) && !is_write_target {
                 record_object_occurrence(
@@ -2612,7 +4059,7 @@ fn record_object_occurrence(
         .or_insert(candidate);
 }
 
-fn statement_span(statement: &StatementFacts) -> SourceSpan {
+pub(crate) fn statement_span(statement: &StatementFacts) -> SourceSpan {
     SourceSpan::new(
         statement.start_byte,
         statement.end_byte,
@@ -2641,6 +4088,22 @@ fn record_change_risk(
 ) {
     if enabled {
         evidence.push(ChangeRiskEvidence { span, factor });
+    }
+}
+
+fn record_object(
+    evidence: &mut Vec<ObjectEvidence>,
+    enabled: bool,
+    metric: &'static str,
+    reason: &'static str,
+    span: SourceSpan,
+) {
+    if enabled {
+        evidence.push(ObjectEvidence {
+            metric,
+            reason,
+            span,
+        });
     }
 }
 
@@ -2734,6 +4197,25 @@ fn count_direct(node: &ErasedSegment, kind: SyntaxKind) -> u32 {
 fn count_anywhere(node: &ErasedSegment, kind: SyntaxKind) -> u32 {
     node.recursive_crawl(&SyntaxSet::single(kind), true, &SyntaxSet::EMPTY, true)
         .len() as u32
+}
+
+/// Count occurrences of any kind in `set` anywhere in the subtree.
+fn count_any(node: &ErasedSegment, set: &SyntaxSet) -> u32 {
+    node.recursive_crawl(set, true, &SyntaxSet::EMPTY, true)
+        .len() as u32
+}
+
+/// The keyword tokens whose raw text equals `word` (case-insensitive).
+fn keyword_tokens(node: &ErasedSegment, word: &str) -> Vec<ErasedSegment> {
+    node.recursive_crawl(
+        &SyntaxSet::single(SyntaxKind::Keyword),
+        true,
+        &SyntaxSet::EMPTY,
+        true,
+    )
+    .into_iter()
+    .filter(|k| k.raw().eq_ignore_ascii_case(word))
+    .collect()
 }
 
 /// Count keyword tokens whose raw text equals `word` (case-insensitive).
