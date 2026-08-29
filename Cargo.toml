@@ -102,7 +102,7 @@ gix = { version = "^0.86", default-features = false, features = ["attributes", "
 # `encoding`) stay off: parsing is hand-rolled streaming, and non-UTF-8
 # report encodings are rejected as diagnostics. Keep ≥0.41 — it carries the
 # fixes for RUSTSEC-2026-0194/-0195.
-quick-xml = "^0.41"
+quick-xml = "^0.42"
 # `globset`, `ignore`, and `toml` graduated from mehen-engine-inline pins
 # to workspace pins when `mehen-coverage-discovery` became their second
 # consumer (artifact scanning walks and declarative tool-config
