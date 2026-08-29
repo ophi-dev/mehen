@@ -654,7 +654,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -1516,7 +1516,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a791e6620676a875f362f3156ed213e73ca099a09bf992c18812abe65cc37b1"
 dependencies = [
  "bstr",
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -4003,15 +4003,15 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_edition"
-version = "0.0.348"
+version = "0.0.349"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8c90ffac4361bd329fe2360e858d92bb55fbcf92eee0a8aba1dc73177685b45"
+checksum = "328b6c928e624558fdf875facc1ebd7930cc3c0bb9bf66c3f50acab1dfad7287"
 
 [[package]]
 name = "ra_ap_parser"
-version = "0.0.348"
+version = "0.0.349"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c9e5e8bba8eb47e76f228d0bd13b09e55295b956043f4520641b50458f9aeb8"
+checksum = "74e2e1c85d765598ee09405eb7bf59e2b9a707d45ddeb537a0b4f8c678bb23b3"
 dependencies = [
  "drop_bomb",
  "ra-ap-rustc_lexer",
@@ -4023,9 +4023,9 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_stdx"
-version = "0.0.348"
+version = "0.0.349"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28196cfcf2da5ba087ff2fe535763642ce5f1b028d3c369c8b00631f30b6015f"
+checksum = "41b9d594912f65457b2a0343410cc2969bbc1f25bf0af07806e18131edf40633"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
@@ -4039,9 +4039,9 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_syntax"
-version = "0.0.348"
+version = "0.0.349"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aeda1039f9e669fee08df80409b08e952795f1609dec09745e7ad890e59aa3c"
+checksum = "a59dd095cfb96a92a7ec17e15f8bbaebade7dec496e1e39a25692a4a10c34314"
 dependencies = [
  "either",
  "itertools 0.15.0",
