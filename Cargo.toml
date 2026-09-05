@@ -120,7 +120,7 @@ toml = "^1.1"
 antlr4_runtime = { package = "antlr-rust-runtime", version = "=0.33.1" }
 antlr_rust_codegen = { package = "antlr-rust-codegen", version = "=0.33.1" }
 
-tree-sitter = "=0.26.13"
+tree-sitter = "=0.27.0"
 # Per-language grammars (`tree-sitter-c`, `tree-sitter-go`,
 # `tree-sitter-pwsh`)
 # are pinned inline in their consuming analyzer crate. xtask reaches
