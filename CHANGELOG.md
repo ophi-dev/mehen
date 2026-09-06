@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.11.0](https://github.com/ophi-dev/mehen/compare/v1.10.0...v1.11.0) (2026-09-06)
+
+
+### Features
+
+* **action:** GitHub Code Quality interop + workflow-artifact base-coverage source ([#256](https://github.com/ophi-dev/mehen/issues/256)) ([45ae3e1](https://github.com/ophi-dev/mehen/commit/45ae3e12fce5f2650c3fb8741f3e58f0a8c4d169))
+* integrate GitHub native code coverage API via Cobertura report ([#253](https://github.com/ophi-dev/mehen/issues/253)) ([35a8767](https://github.com/ophi-dev/mehen/commit/35a87679ffc8ddff6e30ff569c64e8578889a211))
+* **metrics:** emit contribution evidence across all analyzers ([#252](https://github.com/ophi-dev/mehen/issues/252)) ([55bbf4a](https://github.com/ophi-dev/mehen/commit/55bbf4a2b4fdc649cb6c905d743745d9f9d9f179))
+
+
+### Bug Fixes
+
+* address PR review comment ([5a32e6f](https://github.com/ophi-dev/mehen/commit/5a32e6fa9c9e9f30d357414fef62a4ddfa839ddd))
+* address PR review comment ([6c6068f](https://github.com/ophi-dev/mehen/commit/6c6068fa3f8bda43ca5aca5ce1137f9f959dce88))
+* **diff:** make per-file analysis errors advisory ([6a34971](https://github.com/ophi-dev/mehen/commit/6a3497154f74053580d2b5089a07f6c110f7f8d8))
+
+
+### Parser & Grammar Updates
+
+* bump ra_ap_syntax from 0.0.347 to 0.0.348 ([#260](https://github.com/ophi-dev/mehen/issues/260)) ([42bd4ef](https://github.com/ophi-dev/mehen/commit/42bd4ef9f901d0230966c6c0dfc7f7ee3448a001))
+* bump ra_ap_syntax from 0.0.348 to 0.0.349 ([#267](https://github.com/ophi-dev/mehen/issues/267)) ([a118e45](https://github.com/ophi-dev/mehen/commit/a118e4523233fcbb4b6575916c082c782cf4d7ad))
+* bump ra_ap_syntax from 0.0.349 to 0.0.350 ([#275](https://github.com/ophi-dev/mehen/issues/275)) ([475fb28](https://github.com/ophi-dev/mehen/commit/475fb28024514fc228e389b1dc190729678b137a))
+* bump the mago group with 4 updates ([#259](https://github.com/ophi-dev/mehen/issues/259)) ([0017ac0](https://github.com/ophi-dev/mehen/commit/0017ac0f75f92120dba1794472d61daae78e16fd))
+* bump the mago group with 4 updates ([#265](https://github.com/ophi-dev/mehen/issues/265)) ([6d9bd5b](https://github.com/ophi-dev/mehen/commit/6d9bd5b341890c8bccfcf39b5903f80c711a62f4))
+* bump the mago group with 5 updates ([#272](https://github.com/ophi-dev/mehen/issues/272)) ([00f2abd](https://github.com/ophi-dev/mehen/commit/00f2abd12bbb5a89f044d833a5dea3ca8722a625))
+* bump the oxc group with 6 updates ([#258](https://github.com/ophi-dev/mehen/issues/258)) ([7c9761f](https://github.com/ophi-dev/mehen/commit/7c9761ff4f68d9bd18835091922f7c3f03bcff8b))
+* bump the oxc group with 6 updates ([#264](https://github.com/ophi-dev/mehen/issues/264)) ([cc8c3c9](https://github.com/ophi-dev/mehen/commit/cc8c3c96581ce14f34877ba2c3dd937140340afb))
+* bump the oxc group with 6 updates ([#271](https://github.com/ophi-dev/mehen/issues/271)) ([c9cd012](https://github.com/ophi-dev/mehen/commit/c9cd01271d68564ab3e4fbd67c79fc2844fb00ed))
+* bump tree-sitter from 0.26.12 to 0.26.13 in the tree-sitter group ([#263](https://github.com/ophi-dev/mehen/issues/263)) ([10cf533](https://github.com/ophi-dev/mehen/commit/10cf53376901c57b49e2db2dcea7266e00b0a428))
+* bump tree-sitter from 0.26.13 to 0.27.0 in the tree-sitter group ([#270](https://github.com/ophi-dev/mehen/issues/270)) ([80606c4](https://github.com/ophi-dev/mehen/commit/80606c46538ce3fc0bc046380ec4b21d21936718))
+
 ## [1.10.0](https://github.com/ophi-dev/mehen/compare/v1.9.0...v1.10.0) (2026-08-19)
 
 
