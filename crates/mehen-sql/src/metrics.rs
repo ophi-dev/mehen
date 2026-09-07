@@ -15,31 +15,6 @@ use crate::dialect::{DialectResolution, dialect_label};
 use crate::facts::{SqlFileFacts, StatementKind};
 use crate::loc::SqlLoc;
 
-/// All distinct statement kinds, so `kind_count.<kind>` keys are emitted with
-/// an explicit `0` when absent (grepability over silent omission).
-const ALL_STATEMENT_KINDS: &[StatementKind] = &[
-    StatementKind::Select,
-    StatementKind::WithSelect,
-    StatementKind::Insert,
-    StatementKind::Update,
-    StatementKind::Delete,
-    StatementKind::Merge,
-    StatementKind::CreateView,
-    StatementKind::CreateTable,
-    StatementKind::CreateTableAsSelect,
-    StatementKind::CreateOther,
-    StatementKind::AlterTable,
-    StatementKind::Drop,
-    StatementKind::Truncate,
-    StatementKind::Grant,
-    StatementKind::Revoke,
-    StatementKind::TransactionControl,
-    StatementKind::Explain,
-    StatementKind::Procedural,
-    StatementKind::SetOperation,
-    StatementKind::Unknown,
-];
-
 const JOIN_KINDS: &[&str] = &[
     "inner", "left", "right", "full", "cross", "natural", "lateral",
 ];
@@ -66,6 +41,7 @@ pub(crate) fn publish(
     publish_expressions(facts, target);
     publish_output(facts, target);
     publish_objects(facts, target);
+    publish_procedural(facts, target);
     publish_dialect(facts, loc, dialect, target);
     publish_parser(facts, loc, target);
     publish_halstead(facts, target);
@@ -97,8 +73,9 @@ fn publish_loc(loc: &SqlLoc, target: &mut MetricSet) {
 
 fn publish_statements(facts: &SqlFileFacts, target: &mut MetricSet) {
     set(target, "sql.statement.count", facts.statements.len());
-    // kind_count.<kind>
-    for kind in ALL_STATEMENT_KINDS {
+    // kind_count.<kind> — every kind gets an explicit `0` when absent
+    // (grepability over silent omission).
+    for kind in StatementKind::ALL {
         let n = facts.statements.iter().filter(|s| s.kind == *kind).count();
         set(
             target,
@@ -374,6 +351,55 @@ fn publish_objects(facts: &SqlFileFacts, target: &mut MetricSet) {
         target,
         "sql.transaction.control_count",
         o.transaction_control_count,
+    );
+}
+
+/// Procedural-SQL metrics (research foundation §6.17, Phase 3). Published
+/// unconditionally — a purely declarative file reports explicit zeros, the
+/// same contract as every other family.
+fn publish_procedural(facts: &SqlFileFacts, target: &mut MetricSet) {
+    let p = &facts.procedural;
+    set(target, "sql.procedural.block_count", p.block_count);
+    set(target, "sql.procedural.routine_count", p.routine_count);
+    set(
+        target,
+        "sql.procedural.cyclomatic_complexity",
+        p.cyclomatic_complexity,
+    );
+    set(
+        target,
+        "sql.procedural.cognitive_complexity",
+        p.cognitive_complexity,
+    );
+    set(target, "sql.procedural.max_block_depth", p.max_block_depth);
+    set(target, "sql.procedural.loop_count", p.loop_count);
+    set(target, "sql.procedural.if_count", p.if_count);
+    set(
+        target,
+        "sql.procedural.case_statement_count",
+        p.case_statement_count,
+    );
+    set(
+        target,
+        "sql.procedural.exception_handler_count",
+        p.exception_handler_count,
+    );
+    set(target, "sql.procedural.return_count", p.return_count);
+    set(
+        target,
+        "sql.procedural.raise_throw_count",
+        p.raise_throw_count,
+    );
+    set(
+        target,
+        "sql.procedural.dynamic_sql_count",
+        p.dynamic_sql_count,
+    );
+    // §9.3: the worst embedded query inside any single routine.
+    set(
+        target,
+        "sql.structural_complexity.max_embedded_query",
+        p.max_embedded_query_structural,
     );
 }
 
