@@ -2715,7 +2715,7 @@ checksum = "2532096657941c2fea9c289d370a250971c689d4f143798ff67113ec042024a5"
 
 [[package]]
 name = "mehen"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "camino",
  "clap",
@@ -2731,7 +2731,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-antlr"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "antlr-rust-runtime",
  "mehen-core",
@@ -2739,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-c"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2757,7 +2757,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-core"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "camino",
  "serde",
@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-coverage"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "camino",
  "insta",
@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-coverage-discovery"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "camino",
  "globset",
@@ -2796,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-csharp"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-antlr",
@@ -2810,14 +2810,14 @@ dependencies = [
 
 [[package]]
 name = "mehen-csharp-parser"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "antlr-rust-runtime",
 ]
 
 [[package]]
 name = "mehen-engine"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "camino",
  "clap",
@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-git"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "gix",
  "log",
@@ -2864,7 +2864,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-go"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2882,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-java"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-antlr",
@@ -2896,14 +2896,14 @@ dependencies = [
 
 [[package]]
 name = "mehen-java-parser"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "antlr-rust-runtime",
 ]
 
 [[package]]
 name = "mehen-kotlin"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-antlr",
@@ -2917,14 +2917,14 @@ dependencies = [
 
 [[package]]
 name = "mehen-kotlin-parser"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "antlr-rust-runtime",
 ]
 
 [[package]]
 name = "mehen-markdown"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "camino",
  "insta",
@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-metrics"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "mehen-core",
  "serde",
@@ -2951,7 +2951,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-php"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mago-allocator",
@@ -2968,7 +2968,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-powershell"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-python"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-core",
@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-report"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "mehen-core",
  "mehen-markdown",
@@ -3007,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-ruby"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-core",
@@ -3020,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-rust"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-core",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-sql"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-core",
@@ -3047,7 +3047,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-tree-sitter"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "mehen-core",
  "mehen-metrics",
@@ -3057,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "mehen-typescript"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "insta",
  "mehen-core",
@@ -6053,7 +6053,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "antlr-rust-codegen",
  "askama",
