@@ -42,12 +42,19 @@ higher-is-worse and maintainability/health scores to higher-is-better; prefix a 
 to override. Named profile presets (`sql.analytics_default`, `sql.migration_default`,
 `sql.procedural_default`) and diff-aware delta gates remain to be wired through the threshold engine.
 
-## Phase 3 — procedural SQL
+## Phase 3 — procedural SQL ✅ shipped
 
-- PL/SQL and T-SQL procedural block detection.
-- Procedural cyclomatic / cognitive complexity (using Sonar's PL/SQL increments as reference).
-- Exception / cursor / loop / dynamic-SQL metrics.
-- Embedded query complexity attribution inside routines.
+- PL/SQL and T-SQL procedural block detection, plus MySQL and BigQuery-scripting constructs.
+- Procedural cyclomatic / cognitive complexity (using Sonar's PL/SQL increments as reference),
+  file-level and per-routine, with contribution evidence.
+- Exception / loop / dynamic-SQL / raise metrics; dynamic SQL feeds `sql.change_risk_score`.
+- Embedded query complexity attribution inside routines
+  (`sql.structural_complexity.max_embedded_query` and per-routine spaces).
+
+See [Procedural SQL metrics](/metrics/sql/procedural) for the metric definitions and the
+token-machine measurement model. Known parser-bound limitations (degrade to `Unparsable`, never
+mis-count): PL/SQL cursor `FOR` loops and procedural `CASE` statements under the Oracle grammar,
+MySQL routine bodies, and PostgreSQL `$$`-quoted function bodies (opaque strings).
 
 ## Phase 4 — optional schema and lineage enrichments
 

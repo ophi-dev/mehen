@@ -41,13 +41,24 @@ fn change_risk_contributions_are_weighted_spanned_and_complete() {
     let contributions = &analysis.contributions;
 
     assert!(!contributions.is_empty());
-    assert!(contributions.iter().all(|item| {
-        item.metric.as_str() == "sql.change_risk_score"
-            && item.span.start_byte <= item.span.end_byte
-            && item.span.end_byte as usize <= sql.len()
-            && item.span.start_line >= 1
-            && item.span.start_line <= item.span.end_line
-    }));
+    // Change-risk entries are well-formed; the raw object counters emit
+    // their own evidence family alongside (PR #257 round 17).
+    assert!(
+        contributions
+            .iter()
+            .filter(|item| item.metric.as_str() == "sql.change_risk_score")
+            .all(|item| {
+                item.span.start_byte <= item.span.end_byte
+                    && item.span.end_byte as usize <= sql.len()
+                    && item.span.start_line >= 1
+                    && item.span.start_line <= item.span.end_line
+            })
+    );
+    assert!(
+        contributions
+            .iter()
+            .any(|item| item.metric.as_str() == "sql.ddl.drop_count")
+    );
 
     assert_risk_sum(&analysis);
 
@@ -141,5 +152,251 @@ fn every_implemented_change_risk_term_has_a_stable_reason() {
             analysis.contributions
         );
         assert_risk_sum(&analysis);
+    }
+}
+
+// ── procedural evidence (Phase 3) ───────────────────────────────────────
+
+/// Procedural metrics are evidence-backed: the published value equals the
+/// sum of contribution amounts by construction — the composites *and* every
+/// raw `*_count` under its own key (Codex P1, PR #257 round 10) — for both
+/// the typed-CST path (PL/SQL) and the token-fallback path (T-SQL with
+/// unparsable spills). `max_block_depth`, a high-water mark, keeps the
+/// invariant with a single contribution at the deepest opener (Codex P1,
+/// round 11).
+#[test]
+fn procedural_complexity_evidence_sums_to_the_metric() {
+    for fixture in [
+        include_str!("fixtures/plsql_procedure_control_flow.sql"),
+        include_str!("fixtures/tsql_procedure_control_flow.sql"),
+        include_str!("fixtures/mysql_procedure_control_flow.sql"),
+        include_str!("fixtures/bigquery_scripting.sql"),
+    ] {
+        let analysis = analyze(fixture, &AnalysisConfig::production());
+        for key in [
+            "sql.procedural.cyclomatic_complexity",
+            "sql.procedural.cognitive_complexity",
+            "sql.procedural.block_count",
+            "sql.procedural.routine_count",
+            "sql.procedural.loop_count",
+            "sql.procedural.if_count",
+            "sql.procedural.case_statement_count",
+            "sql.procedural.exception_handler_count",
+            "sql.procedural.return_count",
+            "sql.procedural.raise_throw_count",
+            "sql.procedural.dynamic_sql_count",
+            "sql.procedural.max_block_depth",
+        ] {
+            let sum: f64 = analysis
+                .contributions
+                .iter()
+                .filter(|item| item.metric.as_str() == key)
+                .map(|item| item.amount)
+                .sum();
+            assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+        }
+        // Spans are well-formed and inside the file.
+        assert!(
+            analysis
+                .contributions
+                .iter()
+                .filter(|item| item.metric.as_str().starts_with("sql.procedural."))
+                .all(|item| {
+                    item.span.start_byte <= item.span.end_byte
+                        && item.span.end_byte as usize <= fixture.len()
+                        && item.span.start_line >= 1
+                }),
+        );
+    }
+}
+
+/// Dynamic SQL (`EXECUTE IMMEDIATE`, `sp_executesql`) is a change-risk term
+/// with its own stable reason code, and the risk-sum invariant holds with it.
+#[test]
+fn dynamic_sql_contributes_to_change_risk() {
+    let analysis = analyze(
+        include_str!("fixtures/plsql_procedure_control_flow.sql"),
+        &AnalysisConfig::production(),
+    );
+    let dynamic: Vec<_> = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.reason.as_str() == "sql.change_risk.dynamic_sql")
+        .collect();
+    assert_eq!(dynamic.len(), 1);
+    assert_eq!(dynamic[0].amount, 5.0);
+    assert_risk_sum(&analysis);
+}
+
+/// The benchmark profile skips procedural evidence without changing the
+/// procedural metrics (counts are always exact; evidence is opt-in).
+#[test]
+fn benchmark_profile_skips_procedural_evidence_without_changing_metrics() {
+    let sql = include_str!("fixtures/plsql_procedure_control_flow.sql");
+    let production = analyze(sql, &AnalysisConfig::production());
+    let benchmark = analyze(sql, &AnalysisConfig::benchmark());
+
+    assert!(
+        production
+            .contributions
+            .iter()
+            .any(|item| item.metric.as_str().starts_with("sql.procedural."))
+    );
+    assert!(benchmark.contributions.is_empty());
+    for key in [
+        "sql.procedural.cyclomatic_complexity",
+        "sql.procedural.cognitive_complexity",
+        "sql.change_risk_score",
+    ] {
+        assert_eq!(metric(&production, key), metric(&benchmark, key), "{key}");
+    }
+}
+
+/// `sql.structural_complexity.max_embedded_query` is evidence-backed: one
+/// entry naming the winning routine, whose amount equals the published value
+/// (Codex P1, PR #257 round 2).
+#[test]
+fn embedded_query_max_has_evidence_for_the_winning_routine() {
+    let analysis = analyze(
+        include_str!("fixtures/plsql_procedure_control_flow.sql"),
+        &AnalysisConfig::production(),
+    );
+    let entries: Vec<_> = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.metric.as_str() == "sql.structural_complexity.max_embedded_query")
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].reason.as_str(), "sql.procedural.embedded_query");
+    assert_eq!(
+        entries[0].amount,
+        metric(&analysis, "sql.structural_complexity.max_embedded_query")
+    );
+    assert!(entries[0].amount > 0.0);
+}
+
+/// `sql.predicate.not_count` is evidence-backed: each counted negation
+/// carries its token span and reason, and the sum equals the metric
+/// (Codex P1, PR #257 round 13).
+#[test]
+fn predicate_not_evidence_sums_to_the_metric() {
+    let sql = "SELECT * FROM t WHERE NOT active AND flag IS NOT NULL;\n\
+               CREATE TABLE u (id INT NOT NULL);\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    let nots: Vec<_> = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.metric.as_str() == "sql.predicate.not_count")
+        .collect();
+    // `NOT active` + `IS NOT NULL` count; the column constraint does not.
+    assert_eq!(nots.len(), 2);
+    assert!(nots.iter().all(|item| {
+        item.reason.as_str() == "sql.predicate.not"
+            && item.amount == 1.0
+            && (item.span.end_byte as usize) <= sql.len()
+    }));
+    let sum: f64 = nots.iter().map(|item| item.amount).sum();
+    assert_eq!(sum, metric(&analysis, "sql.predicate.not_count"));
+}
+
+/// Raw object-family counters are evidence-backed under their own keys —
+/// both the per-statement classification path and the anonymous-block body
+/// scan — and each key's evidence sums to its metric (Codex P1, PR #257
+/// round 17).
+#[test]
+fn object_counter_evidence_sums_to_the_metrics() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               update t set c = 1 where id = 1;\n\
+               drop table old_stuff;\n\
+               begin\n\
+                 update accounts set bal = 0;\n\
+                 insert into audit_log (id) values (1);\n\
+               end;\n\
+               /\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    for (key, expected) in [
+        ("sql.dml.update_count", 2.0),
+        ("sql.dml.insert_count", 1.0),
+        ("sql.ddl.drop_count", 1.0),
+    ] {
+        let entries: Vec<_> = analysis
+            .contributions
+            .iter()
+            .filter(|item| item.metric.as_str() == key)
+            .collect();
+        let sum: f64 = entries.iter().map(|item| item.amount).sum();
+        assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+        assert_eq!(sum, expected, "expected count for {key}");
+        assert!(entries.iter().all(|item| {
+            (item.span.end_byte as usize) <= sql.len() && item.span.start_line >= 1
+        }));
+    }
+}
+
+/// The no-WHERE counters are evidence-backed under their own keys, not
+/// just as change risk (Codex P1, PR #257 round 18).
+#[test]
+fn no_where_counter_evidence_sums_to_the_metrics() {
+    let sql = "UPDATE t SET c = 1;\nDELETE FROM u;\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    for key in [
+        "sql.dml.update_without_where_count",
+        "sql.dml.delete_without_where_count",
+    ] {
+        let sum: f64 = analysis
+            .contributions
+            .iter()
+            .filter(|item| item.metric.as_str() == key)
+            .map(|item| item.amount)
+            .sum();
+        assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+        assert_eq!(sum, 1.0, "expected count for {key}");
+    }
+}
+
+/// The RETURNING/OUTPUT clause counter is evidence-backed under its own
+/// key (Codex P1, PR #257 round 20).
+#[test]
+fn returning_counter_evidence_sums_to_the_metric() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               update t set c = 1 returning c into v;\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    let key = "sql.dml.returning_count";
+    let sum: f64 = analysis
+        .contributions
+        .iter()
+        .filter(|item| item.metric.as_str() == key)
+        .map(|item| item.amount)
+        .sum();
+    assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+    assert_eq!(sum, 1.0);
+}
+
+/// Distinct-object counters and the anonymous-block kind count are
+/// evidence-backed under their own keys (Codex P1 ×2, PR #257 round 21).
+#[test]
+fn object_and_kind_count_evidence_sums_to_the_metrics() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               update t set c = 1 where id = 1;\n\
+               select * from u;\n\
+               begin\n\
+                 null;\n\
+               end;\n\
+               /\n";
+    let analysis = analyze(sql, &AnalysisConfig::production());
+    for key in [
+        "sql.object.write_count",
+        "sql.object.read_count",
+        "sql.object.touch_count",
+        "sql.statement.kind_count.anonymous_block",
+    ] {
+        let sum: f64 = analysis
+            .contributions
+            .iter()
+            .filter(|item| item.metric.as_str() == key)
+            .map(|item| item.amount)
+            .sum();
+        assert_eq!(sum, metric(&analysis, key), "evidence sum for {key}");
+        assert!(sum >= 1.0, "expected a positive count for {key}");
     }
 }
