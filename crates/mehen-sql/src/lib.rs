@@ -32,6 +32,7 @@ mod dialect;
 mod facts;
 mod loc;
 mod metrics;
+mod procedural;
 
 use mehen_core::{
     AnalysisBackend, AnalysisConfig, ContributionCollector, Language, LanguageAnalysis,
@@ -132,7 +133,12 @@ impl LanguageAnalyzer for SqlAnalyzer {
         let line_index = &source.line_index;
         let line_at = |byte: u32| line_index.line_at(byte);
 
-        let mut file_facts = facts::extract(&parsed, &dialect, line_at, config.emit_contributions);
+        let mut file_facts = facts::extract(
+            &parsed,
+            line_at,
+            config.emit_contributions,
+            resolution.effective,
+        );
         // Lexer errors (malformed tokens) are distinct from unparsable parse
         // segments. The current sqruff release never populates this vector, but
         // surface them into parser-health so a future version cannot make
@@ -157,6 +163,55 @@ impl LanguageAnalyzer for SqlAnalyzer {
                 item.factor.amount(),
                 item.factor.reason(),
             );
+        }
+        // Procedural composites are evidence-backed too: the published value
+        // equals the sum of its contributions by construction (§4.7).
+        for item in &file_facts.procedural.evidence {
+            let metric = match item.metric {
+                procedural::ProceduralMetric::Cyclomatic => "sql.procedural.cyclomatic_complexity",
+                procedural::ProceduralMetric::Cognitive => "sql.procedural.cognitive_complexity",
+                procedural::ProceduralMetric::EmbeddedQueryMax => {
+                    "sql.structural_complexity.max_embedded_query"
+                }
+                procedural::ProceduralMetric::BlockCount => "sql.procedural.block_count",
+                procedural::ProceduralMetric::RoutineCount => "sql.procedural.routine_count",
+                procedural::ProceduralMetric::LoopCount => "sql.procedural.loop_count",
+                procedural::ProceduralMetric::IfCount => "sql.procedural.if_count",
+                procedural::ProceduralMetric::CaseStatementCount => {
+                    "sql.procedural.case_statement_count"
+                }
+                procedural::ProceduralMetric::ExceptionHandlerCount => {
+                    "sql.procedural.exception_handler_count"
+                }
+                procedural::ProceduralMetric::ReturnCount => "sql.procedural.return_count",
+                procedural::ProceduralMetric::RaiseThrowCount => "sql.procedural.raise_throw_count",
+                procedural::ProceduralMetric::DynamicSqlCount => "sql.procedural.dynamic_sql_count",
+                procedural::ProceduralMetric::MaxBlockDepth => "sql.procedural.max_block_depth",
+            };
+            contribution_collector.record(metric, item.span, item.amount, item.reason);
+        }
+        // Predicate NOTs are evidence-backed too — the improved
+        // `sql.predicate.not_count` explains each counted negation with its
+        // token span (Codex P1).
+        for &(start, end) in &file_facts.predicates.not_spans {
+            contribution_collector.record(
+                "sql.predicate.not_count",
+                SourceSpan {
+                    start_byte: start,
+                    end_byte: end,
+                    start_line: line_at(start),
+                    end_line: line_at(end.saturating_sub(1)),
+                },
+                1.0,
+                "sql.predicate.not",
+            );
+        }
+        // Raw object-family counters (`sql.dml.*`, `sql.ddl.*`, `sql.dcl.*`,
+        // `sql.transaction.*`) are evidence-backed: both the per-statement
+        // classification path and the anonymous-block body scan record one
+        // entry per increment (Codex P1).
+        for item in &file_facts.object_evidence {
+            contribution_collector.record(item.metric, item.span, 1.0, item.reason);
         }
 
         // Per-statement spaces so top-offenders / nested reporting can attribute
@@ -286,6 +341,21 @@ fn attach_procedural_unit_spaces(
             },
         );
         space.name = unit.name.clone();
+        // Per-routine procedural composites (Phase 3): the same keys as the
+        // file-level aggregates, scoped to this routine — the numbers
+        // `mehen top-offenders` shows next to a function name, and the
+        // complexity denominator CRAP will use.
+        space.metrics.insert(
+            "sql.procedural.cyclomatic_complexity",
+            unit.cyclomatic_complexity,
+        );
+        space.metrics.insert(
+            "sql.procedural.cognitive_complexity",
+            unit.cognitive_complexity,
+        );
+        space
+            .metrics
+            .insert("sql.structural_complexity", unit.embedded_query_structural);
         while let Some((_, _, open_end)) = stack.last() {
             if unit.start_byte >= *open_end {
                 close_one(&mut stack, &mut top_level);
@@ -519,6 +589,18 @@ pub const PUBLISHED_METRIC_KEYS: &[&str] = &[
     "sql.predicate.max_boolean_depth",
     "sql.predicate.not_count",
     "sql.predicate.null_semantics_risk_count",
+    "sql.procedural.block_count",
+    "sql.procedural.case_statement_count",
+    "sql.procedural.cognitive_complexity",
+    "sql.procedural.cyclomatic_complexity",
+    "sql.procedural.dynamic_sql_count",
+    "sql.procedural.exception_handler_count",
+    "sql.procedural.if_count",
+    "sql.procedural.loop_count",
+    "sql.procedural.max_block_depth",
+    "sql.procedural.raise_throw_count",
+    "sql.procedural.return_count",
+    "sql.procedural.routine_count",
     "sql.query_block.avg_select_items",
     "sql.query_block.count",
     "sql.query_block.max_depth",
@@ -540,6 +622,7 @@ pub const PUBLISHED_METRIC_KEYS: &[&str] = &[
     "sql.statement.kind_entropy",
     "sql.statement.unparsed_count",
     "sql.structural_complexity",
+    "sql.structural_complexity.max_embedded_query",
     "sql.subquery.correlated_count",
     "sql.subquery.count",
     "sql.subquery.exists_count",

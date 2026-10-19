@@ -387,3 +387,53 @@ no rewrite required.
 - Dialect inventory: `sqlparser::dialect` exposes 16 dialect structs plus
   `dialect_from_str`; our sqruff build compiles 12 feature-gated dialects
   alongside the always-present `ansi`.
+
+
+---
+
+## 9. Addendum — Phase-3 procedural re-probe (2026-08-20)
+
+**Status:** pre-implementation check before building `sql.procedural.*` ·
+**Verdict: §8.5 stands — keep sqruff for Phase 3 and Phase 4.**
+
+Before implementing Phase 3 (procedural metrics), `sqlparser` was re-probed
+specifically on the constructs Phase 3 must parse — *definitions with bodies*,
+not isolated control-flow statements. `sqlparser` is still at **v0.62.0**
+(May 2026, no newer release), so §8's structural findings stand; this pass
+adds the procedural detail §8.2 lacked. sqruff side probed at **v0.40.0**
+(current pin) via a throwaway CST dumper, not via `SqlAnalyzer`.
+
+| Probe (realistic bodies) | `sqlparser` 0.62 | sqruff 0.40 |
+|---|---|---|
+| T-SQL `CREATE PROCEDURE dbo.p @x INT AS BEGIN … END` | ❌ `Err` at the header (`Expected: AS, found: @batch`) — zero statements | ✅ statement + header typed; `IF`/`WHILE` parse as keyword+`Expression`+nested `Statement`; tail of long bodies can degrade to `Unparsable` |
+| T-SQL `BEGIN TRY … END CATCH` (isolated) | ❌ `Err` | ✅ parses (keyword run + typed nested statements) |
+| T-SQL `EXEC sp_executesql` / `PRINT` / `THROW` / `GOTO` / cursor DDL at top level | ❌ `Err` (except bare `WHILE`) | ⚠️ `Unparsable`, but tokens stay classified (`Word`/`SingleQuote`/`InlineComment`), so token-level counting stays trivia-safe |
+| PL/SQL `CREATE OR REPLACE PROCEDURE … IS … BEGIN … EXCEPTION … END` | ❌ `Err` — grammar has no Oracle `CREATE PROCEDURE` at all | ✅ rich typed nodes: `OracleCreateProcedureStatement`, `OracleBeginEndBlock`, `OracleIfThenStatement`/`OracleIfClause`, `WhileLoopStatement`, `OracleLoopStatement`, `OracleExitStatement`, `OracleExecuteImmediateStatement`, `RaiseStatement`, `OracleReturnStatement`, `OracleNullStatement`, `DeclareCursorVariable` |
+| PL/SQL anonymous block `BEGIN IF … END IF; END;` | ❌ `Err` | ✅ parses |
+| PL/SQL cursor `FOR rec IN c LOOP` / procedural `CASE` statement | n/a (whole file already `Err`) | ⚠️ `Unparsable` (graceful; surfaces in `sql.parser.*`) |
+
+Key insight, sharper than §8.2 put it: `sqlparser`'s typed procedural AST
+(`IfStatement`, `WhileStatement`, `RaiseStatement`, …) exists primarily for
+BigQuery-style *scripting at top level*. The procedure/function *definitions*
+that contain 95 % of real procedural SQL hard-fail to parse for both MsSql and
+Oracle dialects — and with no error recovery, one such definition zeroes out
+every metric for the file. That is the exact opposite of what Phase 3 needs,
+and Phase 4 (`sql.lineage.*`) would additionally lose sqruff's `lineage` crate
+(in-repo `crates/lineage`; note it is **not published to crates.io**, so
+Phase 4 will need either a git pin exception or an upstream publish request).
+
+Phase-3 implementation consequences adopted from this probe:
+
+1. **Oracle/PL-SQL metrics ride the typed CST nodes** listed above.
+2. **T-SQL metrics fall back to lexed-token counting** (`Keyword`/`Word`
+   tokens inside procedural statements and `Unparsable` runs). This is still
+   lexer-derived, never regex-on-text: comments lex as `InlineComment`/
+   `BlockComment` and string literals as `SingleQuote` even inside
+   `Unparsable`, so `-- exec this` or `'goto'` cannot false-match.
+3. **ANTLR `tsql` stays the escalation path** (§7.4) if linter-grade T-SQL
+   depth ever stops being enough — the runtime/codegen infrastructure now
+   exists in-repo (`mehen-antlr`, `cargo xtask antlr generate`), which §4
+   predates. `sqlparser` is not that path.
+
+Evidence: probe crates `/tmp/sqlparser-probe3` (sqlparser v0.62.0) and
+`/tmp/mehen-sql-dump` (sqruff v0.40.0 CST dumper), 2026-08-20.
