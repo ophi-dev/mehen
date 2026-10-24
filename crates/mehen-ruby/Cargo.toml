@@ -39,7 +39,7 @@ mehen-metrics = { workspace = true }
 # Windows runners need `LIBCLANG_PATH` (e.g. `choco install llvm`).
 # The release binary path means end users do not need any of this —
 # only people building `mehen` from source.
-ruby-prism = "=1.9.0"
+ruby-prism = "=2.0.0"
 smol_str = { workspace = true }
 
 [dev-dependencies]
