@@ -2530,9 +2530,9 @@ dependencies = [
 
 [[package]]
 name = "mago-allocator"
-version = "1.57.0"
+version = "1.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2396e6cabc0fc47ae034bb69073e3a7c195a167d788703f45f9f18e824a6bd0"
+checksum = "48579c950d7ed4285ab6b8a061b9fe75c596ed520742ebf464d93ae693ee9d06"
 dependencies = [
  "allocator-api2",
  "blink-alloc",
@@ -2541,13 +2541,14 @@ dependencies = [
 
 [[package]]
 name = "mago-database"
-version = "1.57.0"
+version = "1.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fe2d8a5be71e64b9260894ca1b1c184898e334636783b96a75b0fb794120bed"
+checksum = "503dc2251eb18f31d1f70f98d83f2a1f55ad699c1a8b9da953a30161afbc3be8"
 dependencies = [
  "foldhash 0.2.0",
  "glob",
  "globset",
+ "ignore",
  "memchr",
  "notify",
  "rayon",
@@ -2589,18 +2590,18 @@ dependencies = [
 
 [[package]]
 name = "mago-span"
-version = "1.57.0"
+version = "1.58.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4317880bd90e74d2ce71e22a79e1c12bbf574b3685d1c13ae147b71c1678e07"
+checksum = "fe6a32c7fa425a2d606b2872c0e2b2464bd84e79fd404e2ad63bfd0e7c186b2b"
 dependencies = [
  "mago-database",
 ]
 
 [[package]]
 name = "mago-syntax"
-version = "1.51.0"
+version = "1.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8819ebdf92f6380a14205e0b8231a07b5134984eaf58fbcccbf76dbe8a40e5"
+checksum = "e7bfb587c0961495857289dc4f43774948c8072d819e81d55df828a58abfaa62"
 dependencies = [
  "mago-allocator",
  "mago-database",
@@ -2616,9 +2617,9 @@ dependencies = [
 
 [[package]]
 name = "mago-syntax-core"
-version = "1.54.0"
+version = "1.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ddcd598691d4a9bff9c3f7d8b941cb656f46ef60bb02d7c74fd3b65d7e6760e"
+checksum = "7169378eb99f4664613c38805967f56d0ce120cf17e219677ba0df7e16178bd8"
 dependencies = [
  "mago-allocator",
  "mago-database",
