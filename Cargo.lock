@@ -4944,9 +4944,9 @@ dependencies = [
 
 [[package]]
 name = "sqruff-lib-core"
-version = "0.40.0"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdbd9d34c545d18dd806f286b47f88eb55aa0be76df213c580420a7293c4dd3f"
+checksum = "fc7a34e4fdff355157e1ec9a455ac5f140e1f2cab8de18f827d012e129920193"
 dependencies = [
  "enum_dispatch",
  "fancy-regex",
@@ -4957,6 +4957,7 @@ dependencies = [
  "nohash-hasher",
  "pretty_assertions",
  "regex-automata",
+ "smallvec",
  "smol_str",
  "strum",
  "strum_macros",
@@ -4965,9 +4966,9 @@ dependencies = [
 
 [[package]]
 name = "sqruff-lib-dialects"
-version = "0.40.0"
+version = "0.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeb5b3fe08edc8df724b3fab2919f5b23d5e755d3650d4da6628b15119bc7c22"
+checksum = "15d1a6afc2ec4cada6de6ce9931efdf7e77a97b5b8d6d749706626d747949498"
 dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.15.0",
