@@ -22,7 +22,7 @@ serde = { workspace = true }
 # `pulldown-cmark` is the Markdown parser backend. Default features are
 # disabled because the analyzer consumes parser events and byte offsets
 # directly; it never renders HTML.
-pulldown-cmark = { version = "=0.13.5", default-features = false }
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 
 [dev-dependencies]
 # Tests rely on `mehen-engine`'s `init_markdown` to register the
