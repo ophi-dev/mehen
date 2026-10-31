@@ -4016,15 +4016,15 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_edition"
-version = "0.0.359"
+version = "0.0.360"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e40783f9c3f80a882ca667747f49d1db912dd047c8512dadb66636a70bbe6d1e"
+checksum = "408235fd4b7b1f6d9865b84b5ba78be7d21428448559ed2a6701c3529cc1943d"
 
 [[package]]
 name = "ra_ap_parser"
-version = "0.0.359"
+version = "0.0.360"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f540df8cb5fdfbee3679149b1a2a9b9e631d414385ab1f17c4f2ae38ce491b3d"
+checksum = "20e36c55a9e53316f3f63fb9b0ffe34061ca6c491750f60f9d0aea12e977084a"
 dependencies = [
  "drop_bomb",
  "ra-ap-rustc_lexer",
@@ -4036,9 +4036,9 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_stdx"
-version = "0.0.359"
+version = "0.0.360"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5603480e6dc86c8e014bfa6ee88aa9b3d73d8fc48646eaaf3d7db155658c20ca"
+checksum = "73f65a0ded5521db034ec5c43f4fa881ddedd4224daf2c2832bf0bac997254c1"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
@@ -4052,9 +4052,9 @@ dependencies = [
 
 [[package]]
 name = "ra_ap_syntax"
-version = "0.0.359"
+version = "0.0.360"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02e3161a42822421820e060bf93a6e5e954f2a99e1594da4d1e46f8765b5570c"
+checksum = "5beb5708da710e050cf7bc886ba35c9e06e271d844d1aa4923c5ac5da665412d"
 dependencies = [
  "either",
  "itertools 0.15.0",
@@ -4068,6 +4068,7 @@ dependencies = [
  "smol_str",
  "tracing",
  "triomphe",
+ "unicode-ident",
 ]
 
 [[package]]
