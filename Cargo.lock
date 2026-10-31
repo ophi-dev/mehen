@@ -281,12 +281,25 @@ version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05832cdddc8f2650cc2cc187cc2e952b8c133a48eb055f35211f61ee81502d77"
 dependencies = [
- "attribute-derive-macro",
+ "attribute-derive-macro 0.10.5",
  "derive-where",
- "manyhow",
+ "manyhow 0.11.4",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "attribute-derive"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f9ef7a68684657ce9da341c934c73b63df7a3585a61e366d84c84ed5d3d167"
+dependencies = [
+ "attribute-derive-macro 0.11.0",
+ "manyhow 0.14.1",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -297,12 +310,28 @@ checksum = "0a7cdbbd4bd005c5d3e2e9c885e6fa575db4f4a3572335b974d8db853b6beb61"
 dependencies = [
  "collection_literals",
  "interpolator",
- "manyhow",
+ "manyhow 0.11.4",
  "proc-macro-utils",
  "proc-macro2",
  "quote",
- "quote-use",
+ "quote-use 0.8.4",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "attribute-derive-macro"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300d426e5e73549125bb8e4649bdd5508f82c94ddf898fb0517246e71dfb8e98"
+dependencies = [
+ "collection_literals",
+ "interpolator",
+ "manyhow 0.14.1",
+ "proc-macro-utils",
+ "proc-macro2",
+ "quote",
+ "quote-use 0.9.0",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -540,13 +569,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "chacha20"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "char_str"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "576ba56f6ca18ebb069d0d07260407171712aff4dfe15ee3f8982dc16a455bcf"
 dependencies = [
  "castaway",
- "get-size2 0.10.3",
+ "itoa",
+ "ryu",
+]
+
+[[package]]
+name = "char_str"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9cba78a5abb515610e10af297615434b019755b5d7be14e559ff5340dff50c4"
+dependencies = [
+ "castaway",
+ "get-size2 0.11.1",
  "itoa",
  "ryu",
 ]
@@ -639,7 +690,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.2.2",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -1086,20 +1137,20 @@ version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2b6d1e2f75c16bfbcd0f95d84f99858a6e2f885c2287d1f5c3a96e8444a34b4"
 dependencies = [
- "attribute-derive",
+ "attribute-derive 0.10.5",
  "quote",
  "syn 2.0.117",
 ]
 
 [[package]]
 name = "get-size-derive2"
-version = "0.10.3"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c736d226c32e496b8377813b52269e11ad3a48d8373b68862d0364f04fd1229d"
+checksum = "28f0daa179069133df60523e0f59d0a6bd2d3db9ccae01b630896d269c4a802e"
 dependencies = [
- "attribute-derive",
+ "attribute-derive 0.11.0",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -1117,12 +1168,12 @@ dependencies = [
 
 [[package]]
 name = "get-size2"
-version = "0.10.3"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b411f34418305908ab15a82ff78958c2a9aee9a272b2a2e663836b20a4e4b9d3"
+checksum = "050a5d07359ebfac7f0b74916d94cfa30575e45fdc7e9bfbb0f76d5d4203325a"
 dependencies = [
  "compact_str 0.10.0",
- "get-size-derive2 0.10.3",
+ "get-size-derive2 0.11.1",
  "hashbrown 0.17.1",
  "ordermap",
  "smallvec",
@@ -1503,7 +1554,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c91d8cffac8849493a82233811bd02b2b183b8cf39bf704de0fa0841b737595"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -2688,10 +2739,22 @@ version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b33efb3ca6d3b07393750d4030418d594ab1139cee518f0dc88db70fec873587"
 dependencies = [
- "manyhow-macros",
+ "manyhow-macros 0.11.4",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "manyhow"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1704b073316272a6785b70599f91f73b49022c2e290b065591ee6b9109ed8c7"
+dependencies = [
+ "manyhow-macros 0.14.1",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -2699,6 +2762,17 @@ name = "manyhow-macros"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46fce34d199b78b6e6073abf984c9cf5fd3e9330145a93ee0738a7443e371495"
+dependencies = [
+ "proc-macro-utils",
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "manyhow-macros"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31601db71f1f5fb6f831a18aa3052d13a62528ee4f2cba7e8c9a5e258d953725"
 dependencies = [
  "proc-macro-utils",
  "proc-macro2",
@@ -2992,9 +3066,9 @@ dependencies = [
  "mehen-core",
  "mehen-metrics",
  "mehen-report",
- "ruff_python_ast",
+ "ruff_python_ast 0.0.7",
  "ruff_python_parser",
- "ruff_text_size",
+ "ruff_text_size 0.0.7",
  "serde_json",
  "smol_str",
 ]
@@ -3403,7 +3477,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7d950ca161dc355eaf28f82b11345ed76c6e1f6eb1f4f4479e0323b9e2fbd0e"
 dependencies = [
  "num-traits",
- "rand",
+ "rand 0.8.6",
 ]
 
 [[package]]
@@ -3747,13 +3821,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "phf_codegen"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b585a510fb76fdebead6897982ef2a03a21d8e6cbcca904999742a4afc6ffe"
+dependencies = [
+ "phf_generator 0.14.0",
+ "phf_shared 0.14.0",
+]
+
+[[package]]
 name = "phf_generator"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
 dependencies = [
  "phf_shared 0.11.3",
- "rand",
+ "rand 0.8.6",
 ]
 
 [[package]]
@@ -3976,7 +4060,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9619db1197b497a36178cfc736dc96b271fe918875fbf1344c436a7e93d0321e"
 dependencies = [
  "quote",
- "quote-use-macros",
+ "quote-use-macros 0.8.4",
+]
+
+[[package]]
+name = "quote-use"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48356e493823dc3c1d7e9fc7b3ff204ecec48afbdd718fc4134091b88eb63f3d"
+dependencies = [
+ "quote",
+ "quote-use-macros 0.9.0",
 ]
 
 [[package]]
@@ -3989,6 +4083,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "quote-use-macros"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cf1c5de6a7cc231c71e03c77aa4c7019097859ea7029156b54d2894a8430704"
+dependencies = [
+ "proc-macro-utils",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -4097,7 +4203,17 @@ checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
  "libc",
  "rand_chacha",
- "rand_core",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
+dependencies = [
+ "chacha20",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -4107,7 +4223,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
- "rand_core",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -4118,6 +4234,12 @@ checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rayon"
@@ -4260,14 +4382,34 @@ dependencies = [
  "aho-corasick",
  "arrayvec",
  "bitflags",
- "char_str",
+ "char_str 0.0.2",
  "compact_str 0.10.0",
- "get-size2 0.10.3",
  "is-macro",
  "memchr",
- "ruff_python_trivia",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_python_trivia 0.0.7",
+ "ruff_source_file 0.0.7",
+ "ruff_text_size 0.0.7",
+ "rustc-hash 2.1.2",
+ "thin-vec",
+ "thiserror",
+]
+
+[[package]]
+name = "ruff_python_ast"
+version = "0.0.20"
+source = "git+https://github.com/astral-sh/ruff?tag=0.17.3#ba65abf8ba7bfbcc059f7fb9712be5ba9cab6abc"
+dependencies = [
+ "aho-corasick",
+ "arrayvec",
+ "bitflags",
+ "char_str 0.0.4",
+ "compact_str 0.10.0",
+ "get-size2 0.11.1",
+ "is-macro",
+ "memchr",
+ "ruff_python_trivia 0.0.20",
+ "ruff_source_file 0.0.20",
+ "ruff_text_size 0.0.20",
  "rustc-hash 2.1.2",
  "thin-vec",
  "thiserror",
@@ -4275,23 +4417,24 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_parser"
-version = "0.0.7"
-source = "git+https://github.com/astral-sh/ruff?tag=0.16.1#80790b348b5188e7fc253665540f442c6ec7dd05"
+version = "0.0.20"
+source = "git+https://github.com/astral-sh/ruff?tag=0.17.3#ba65abf8ba7bfbcc059f7fb9712be5ba9cab6abc"
 dependencies = [
  "bitflags",
  "bstr",
  "drop_bomb",
- "get-size2 0.10.3",
+ "get-size2 0.11.1",
+ "hashbrown 0.17.1",
  "memchr",
- "ruff_python_ast",
- "ruff_python_trivia",
- "ruff_text_size",
+ "ruff_python_ast 0.0.20",
+ "ruff_python_trivia 0.0.20",
+ "ruff_text_size 0.0.20",
+ "ruff_unicode_names2",
  "rustc-hash 2.1.2",
  "static_assertions",
  "thin-vec",
  "unicode-ident",
  "unicode-normalization",
- "unicode_names2 1.3.0",
 ]
 
 [[package]]
@@ -4300,10 +4443,24 @@ version = "0.0.7"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.1#80790b348b5188e7fc253665540f442c6ec7dd05"
 dependencies = [
  "itertools 0.15.0",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.7",
+ "ruff_text_size 0.0.7",
  "rustc-hash 2.1.2",
  "unicode-ident",
+]
+
+[[package]]
+name = "ruff_python_trivia"
+version = "0.0.20"
+source = "git+https://github.com/astral-sh/ruff?tag=0.17.3#ba65abf8ba7bfbcc059f7fb9712be5ba9cab6abc"
+dependencies = [
+ "itertools 0.15.0",
+ "memchr",
+ "ruff_source_file 0.0.20",
+ "ruff_text_size 0.0.20",
+ "rustc-hash 2.1.2",
+ "unicode-ident",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -4312,15 +4469,47 @@ version = "0.0.7"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.1#80790b348b5188e7fc253665540f442c6ec7dd05"
 dependencies = [
  "memchr",
- "ruff_text_size",
+ "ruff_text_size 0.0.7",
+]
+
+[[package]]
+name = "ruff_source_file"
+version = "0.0.20"
+source = "git+https://github.com/astral-sh/ruff?tag=0.17.3#ba65abf8ba7bfbcc059f7fb9712be5ba9cab6abc"
+dependencies = [
+ "memchr",
+ "ruff_text_size 0.0.20",
 ]
 
 [[package]]
 name = "ruff_text_size"
 version = "0.0.7"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.1#80790b348b5188e7fc253665540f442c6ec7dd05"
+
+[[package]]
+name = "ruff_text_size"
+version = "0.0.20"
+source = "git+https://github.com/astral-sh/ruff?tag=0.17.3#ba65abf8ba7bfbcc059f7fb9712be5ba9cab6abc"
 dependencies = [
- "get-size2 0.10.3",
+ "get-size2 0.11.1",
+]
+
+[[package]]
+name = "ruff_unicode_names2"
+version = "0.0.20"
+source = "git+https://github.com/astral-sh/ruff?tag=0.17.3#ba65abf8ba7bfbcc059f7fb9712be5ba9cab6abc"
+dependencies = [
+ "phf 0.14.0",
+ "ruff_unicode_names2_generator",
+]
+
+[[package]]
+name = "ruff_unicode_names2_generator"
+version = "0.0.20"
+source = "git+https://github.com/astral-sh/ruff?tag=0.17.3#ba65abf8ba7bfbcc059f7fb9712be5ba9cab6abc"
+dependencies = [
+ "phf_codegen 0.14.0",
+ "rand 0.10.3",
 ]
 
 [[package]]
@@ -5541,8 +5730,8 @@ checksum = "b91e5b84611016120197efd7dc93ef76774f4e084cd73c9fb3ea4a86c570c56e"
 dependencies = [
  "getopts",
  "log",
- "phf_codegen",
- "rand",
+ "phf_codegen 0.11.3",
+ "rand 0.8.6",
 ]
 
 [[package]]
@@ -5551,8 +5740,8 @@ version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1262662dc96937c71115228ce2e1d30f41db71a7a45d3459e98783ef94052214"
 dependencies = [
- "phf_codegen",
- "rand",
+ "phf_codegen 0.11.3",
+ "rand 0.8.6",
 ]
 
 [[package]]
