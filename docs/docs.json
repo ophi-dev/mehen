@@ -232,6 +232,7 @@
             "group": "SQL",
             "pages": [
               "metrics/sql/overview",
+              "metrics/sql/procedural",
               "metrics/sql/coverage",
               "metrics/sql/roadmap"
             ]

@@ -86,12 +86,15 @@ These `sql.*` keys are published today (raw metrics — research foundation §15
 | `sql.select.*` | `star_count`, `outer_star_count`, `expression_without_alias_count`, `output_alias_coverage`. |
 | `sql.identifier.*`, `sql.alias.*`, `sql.relation.*` | `unqualified_column_ratio`, `quoted_count`, `table_alias_count`, `ref_count`. |
 | `sql.object.*`, `sql.dml.*`, `sql.ddl.*`, `sql.dcl.*`, `sql.transaction.*` | Object-touch and migration-risk counts (`read_count`, `write_count`, `drop_count`, `truncate_count`, `update_without_where_count`, …). |
+| `sql.procedural.*` | Control-flow metrics for PL/SQL, T-SQL, MySQL, and BigQuery-scripting routines — see [Procedural SQL metrics](/metrics/sql/procedural). |
 | `sql.dialect.*` | `confidence`, `conflict_count`, `requested`, `directive_present`, `is_<dialect>`. |
 | `sql.parser.*` | `diagnostic_count`, `unparsable_segment_count`, `unparsable_line_count`, `unparsable_ratio`. |
 | `sql.halstead.*` | `distinct_operators`, `distinct_operands`, `total_operators`, `total_operands`, `vocabulary`, `length`, `volume`, `difficulty`, `effort`. |
 
-Procedural-SQL metrics (`sql.procedural.*` — cyclomatic/cognitive complexity for PL/SQL and T-SQL
-routines) remain on the [roadmap](/metrics/sql/roadmap).
+Statements are classified into normalized kinds (`select`, `insert`, `create_table_as`,
+`anonymous_block`, `procedural`, …) with per-kind counts. Routine definitions become
+function-shaped spaces carrying per-routine complexity — see
+[Procedural SQL metrics](/metrics/sql/procedural).
 
 ## Composite scores
 

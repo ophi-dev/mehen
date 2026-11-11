@@ -1097,3 +1097,2032 @@ fn directive_surfaces_on_comment_only_file() {
     assert!(diag_codes(&a).contains(&"sql.dialect.unknown".to_string()));
     assert_eq!(get(&a.root.metrics, "sql.dialect.directive_present"), 1.0);
 }
+
+// ── procedural SQL (research foundation §6.17, Phase 3) ───────────────
+
+/// PL/SQL routine with the full §6.17 construct set — every count below is
+/// hand-traced against the fixture (see the cyclomatic/cognitive breakdowns
+/// inline). The fixture parses fully under the Oracle dialect, so this
+/// exercises the typed-CST token path.
+#[test]
+fn plsql_procedural_family_counts() {
+    let m = metrics(include_str!("fixtures/plsql_procedure_control_flow.sql"));
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.block_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 1.0);
+    // IF + one ELSIF.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // WHILE … LOOP + numeric FOR … LOOP (each counted once, not twice for
+    // their body-opening LOOP keyword).
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.case_statement_count"), 0.0);
+    // EXCEPTION WHEN no_data_found / WHEN others.
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.return_count"), 1.0);
+    // raise_application_error + two bare RAISE.
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 3.0);
+    // EXECUTE IMMEDIATE.
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    // Cyclomatic (Sonar PL/SQL model): entry 1 + IF 1 + ELSIF 1 + AND 1
+    // + RAISE×3 + loops×2 + EXIT WHEN 1 + handlers×2 = 12.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 12.0);
+    // Cognitive: IF 1 + ELSIF 1 + ELSE 1 + boolean sequence 1 + WHILE 1
+    // + EXIT WHEN 1 + FOR 1 + handlers×2 = 9 (flat: nothing is nested).
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 9.0);
+    // Change risk: CREATE OR REPLACE (4) + dynamic SQL (5). The routine
+    // body's UPDATE is *not* file-level risk (it runs when called, not when
+    // the file is applied).
+    assert_eq!(get(&m, "sql.change_risk_score"), 9.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 0.0);
+    // The embedded UPDATE…WHERE gives the routine a small query-structural
+    // score, surfaced file-level as the max over routines.
+    assert!(get(&m, "sql.structural_complexity.max_embedded_query") > 0.0);
+}
+
+/// T-SQL routine exercising the token fallback path: sqruff parses the
+/// header and keyword-led IF statements but spills the WHILE/TRY-CATCH tail
+/// into top-level `Unparsable` runs (parser comparison §9). The procedural
+/// counts must survive that degradation — and the split body must NOT be
+/// reported as independently-executing batch DML (Codex P1): T-SQL batch
+/// semantics say the body extends to the next GO/EOF, so the keyword-led IF
+/// that sqruff splits off is a routine *continuation*, not migration risk.
+#[test]
+fn tsql_procedural_family_counts_through_unparsable_spill() {
+    let m = metrics(include_str!("fixtures/tsql_procedure_control_flow.sql"));
+    // The parse loses statement structure but not the token stream.
+    assert!(get(&m, "sql.parser.unparsable_segment_count") > 0.0);
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // IF @batch, IF @count = 5, IF error_number() = 208.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 3.0);
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 1.0);
+    // BEGIN CATCH.
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 1.0);
+    // THROW.
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // EXEC sp_executesql.
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.return_count"), 2.0);
+    // Proc body BEGIN + IF/ELSE blocks + WHILE block + TRY + CATCH.
+    assert_eq!(get(&m, "sql.procedural.block_count"), 6.0);
+    // Entry: the routine only — the keyword-led IF that sqruff splits into a
+    // sibling statement is reclassified as the routine's continuation, so it
+    // earns no separate anonymous-block entry. 1 entry + 3 IF + 1 WHILE
+    // + 1 CATCH + 1 THROW = 7.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 7.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 0.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.procedural"), 2.0);
+    // The body's UPDATE runs when the procedure is *called*, not when the
+    // file is applied — no file-level DML or object-touch risk (Codex P1).
+    assert_eq!(get(&m, "sql.dml.update_count"), 0.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 0.0);
+    // Change risk: dynamic SQL only.
+    assert_eq!(get(&m, "sql.change_risk_score"), 5.0);
+}
+
+/// An Oracle anonymous block *executes when the file is applied*, so its
+/// body DML/TCL feeds the DML counters, object touches, and change risk —
+/// unlike a routine definition's body (probed: `Statement >
+/// OracleBeginEndBlock`).
+#[test]
+fn anonymous_block_body_dml_counts_as_migration_risk() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               begin\n\
+                 update accounts set bal = 0;\n\
+                 commit;\n\
+               end;\n\
+               /\n";
+    let m = metrics(sql);
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_without_where_count"), 1.0);
+    assert_eq!(get(&m, "sql.transaction.control_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 1.0);
+    // Procedural entry for the block itself.
+    assert_eq!(get(&m, "sql.procedural.block_count"), 1.0);
+    assert!(get(&m, "sql.procedural.cyclomatic_complexity") >= 1.0);
+}
+
+/// Regression (dialect folding): sqruff's Oracle dialect emits its own
+/// `OracleUpdateStatement`/`OracleTableReference`/… kinds. Before the folding
+/// sets, top-level Oracle DML classified as `unknown` and appeared in no
+/// `sql.dml.*` / object-touch / change-risk metric.
+#[test]
+fn oracle_dml_classifies_and_feeds_object_touch() {
+    let sql = "-- sqlfluff:dialect:oracle\n\
+               update orders set status = 'X' where id = 1;\n\
+               insert into audit_log (id) values (1);\n\
+               delete from stale_rows;\n\
+               commit;\n";
+    let m = metrics(sql);
+    assert_eq!(get(&m, "sql.statement.kind_count.update"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.insert"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.delete"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.transaction_control"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.unknown"), 0.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.delete_without_where_count"), 1.0);
+    // orders + audit_log + stale_rows are written objects.
+    assert_eq!(get(&m, "sql.object.write_count"), 3.0);
+}
+
+// ── predicate keyword fixes ─────────────────────────────────────────────
+
+/// `NOT NULL` column constraints and `IF NOT EXISTS` guards are DDL, not
+/// predicate logic; `IS NOT NULL`, `NOT IN`, and `NOT EXISTS` predicates
+/// still count.
+#[test]
+fn not_count_excludes_ddl_contexts() {
+    let ddl = metrics("CREATE TABLE t (id INT NOT NULL, name TEXT NOT NULL)");
+    assert_eq!(get(&ddl, "sql.predicate.not_count"), 0.0);
+
+    let guard = metrics("-- sqlfluff:dialect:postgres\nCREATE TABLE IF NOT EXISTS t (id INT)");
+    assert_eq!(get(&guard, "sql.predicate.not_count"), 0.0);
+
+    let is_not_null = metrics("SELECT a FROM t WHERE a IS NOT NULL");
+    assert_eq!(get(&is_not_null, "sql.predicate.not_count"), 1.0);
+
+    let not_in = metrics("SELECT a FROM t WHERE a NOT IN (1, 2)");
+    assert_eq!(get(&not_in, "sql.predicate.not_count"), 1.0);
+
+    let not_exists = metrics("SELECT a FROM t WHERE NOT EXISTS (SELECT 1 FROM u)");
+    assert_eq!(get(&not_exists, "sql.predicate.not_count"), 1.0);
+}
+
+/// `sql.subquery.in_count` counts IN-subqueries, not raw `IN` keywords —
+/// a `FOR i IN 1..10 LOOP` header or a parameter direction never counts
+/// (only `IN` followed by a bracketed SELECT does).
+#[test]
+fn in_subquery_count_ignores_procedural_in_keywords() {
+    let m = metrics(include_str!("fixtures/plsql_procedure_control_flow.sql"));
+    // The fixture has a FOR … IN loop and no IN-subqueries.
+    assert_eq!(get(&m, "sql.subquery.in_count"), 0.0);
+
+    let predicate = metrics("SELECT a FROM t WHERE a IN (SELECT id FROM u)");
+    assert_eq!(get(&predicate, "sql.subquery.in_count"), 1.0);
+}
+
+// ── PR #257 review regressions (procedural state machine) ──────────────
+
+/// Homogeneous boolean chains cost one cognitive *sequence*, not one per
+/// operator — operands must not break the run (Codex P2, PR #257).
+#[test]
+fn boolean_sequences_charge_per_run_not_per_operator() {
+    let homogeneous = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           if a = 1 and b = 2 and c = 3 then\n\
+             null;\n\
+           end if;\n\
+         end;\n\
+         /\n",
+    );
+    // Cyclomatic: entry 1 + if 1 + two ANDs = 4.
+    assert_eq!(
+        get(&homogeneous, "sql.procedural.cyclomatic_complexity"),
+        4.0
+    );
+    // Cognitive: if 1 + ONE sequence for the AND-run = 2.
+    assert_eq!(
+        get(&homogeneous, "sql.procedural.cognitive_complexity"),
+        2.0
+    );
+
+    let mixed = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           if a = 1 and b = 2 or c = 3 then\n\
+             null;\n\
+           end if;\n\
+         end;\n\
+         /\n",
+    );
+    // Cognitive: if 1 + AND-run 1 + OR-run 1 = 3 (operator change re-charges).
+    assert_eq!(get(&mixed, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// `WHEN NOT <cond>` in a procedural CASE is a real branch; only the MERGE
+/// `WHEN [NOT] MATCHED` token shape is declaratively excluded (Codex P2,
+/// PR #257).
+#[test]
+fn case_when_not_condition_still_counts() {
+    // The Oracle grammar sends procedural CASE to Unparsable inside the
+    // block region — the token machine must still see both WHEN arms.
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           case when not done then null; when ready then null; end case;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.case_statement_count"), 1.0);
+    // Cyclomatic: entry + two WHEN arms. The Oracle grammar cannot parse
+    // procedural CASE, so the whole block degrades to a root `Unparsable`
+    // run — the `begin`-led run is a block-shaped standalone region and
+    // earns one anonymous entry, like its statement-backed equivalent
+    // (Codex P2, round 10).
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
+    // MERGE keeps its clauses out of the procedural family.
+    let merge = metrics(
+        "MERGE INTO t USING s ON t.id = s.id \
+         WHEN MATCHED THEN UPDATE SET c = 2 \
+         WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)",
+    );
+    assert_eq!(get(&merge, "sql.procedural.case_statement_count"), 0.0);
+    assert_eq!(get(&merge, "sql.procedural.cyclomatic_complexity"), 0.0);
+}
+
+/// Parenthesized conditions are ordinary statements (`IF (@x > 0)`), not the
+/// scalar `IF(…)` function — the discriminator is the parsed function-name
+/// shape, not the following `(` (Codex P2, PR #257).
+#[test]
+fn parenthesized_if_condition_counts_as_control_flow() {
+    let tsql = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if (@batch > 0)\n\
+         begin\n\
+           select 1;\n\
+         end\n",
+    );
+    assert_eq!(get(&tsql, "sql.procedural.if_count"), 1.0);
+
+    // The MySQL scalar IF() *function* in parsed SQL stays declarative.
+    let scalar = metrics("-- sqlfluff:dialect:mysql\nSELECT IF(x > 0, 1, 2) FROM t;\n");
+    assert_eq!(get(&scalar, "sql.procedural.if_count"), 0.0);
+}
+
+/// A T-SQL `WHILE … BEGIN … END` body carries the loop's nesting: the IF
+/// inside costs 1 + 1, exactly like its PL/SQL `WHILE … LOOP` equivalent
+/// (Codex P2, PR #257).
+#[test]
+fn tsql_while_begin_body_nests_its_contents() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         while @x > 0\n\
+         begin\n\
+           if @x = 5 break;\n\
+           set @x = @x - 1;\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    // Cognitive: while 1 + if (1 + 1 nesting) = 3.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// `DBMS_SQL.PARSE(…)` is dynamic SQL even though the parsed package
+/// qualifier lexes as a `NakedIdentifier` (Codex P2, PR #257).
+#[test]
+fn dbms_sql_package_reference_counts_as_dynamic_sql() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           dbms_sql.parse(c, 'drop table scratch', 1);\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    assert!(get(&m, "sql.change_risk_score") >= 5.0);
+}
+
+/// A genuinely top-level scripting block (no preceding routine definition)
+/// executes on apply — DDL inside it is migration risk (Codex P1, PR #257):
+/// `IF … THEN DROP TABLE t; END IF` must report the drop and its +8 risk
+/// term. BigQuery scripting parses block DDL into typed nodes; the T-SQL
+/// grammar loses `IF … BEGIN DROP …` bodies to `Unparsable` entirely, so
+/// there this remains parser-bound (flagged by `sql.parser.*`, never
+/// mis-counted).
+#[test]
+fn top_level_batch_block_ddl_counts_as_migration_risk() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         if cleanup then\n\
+           drop table stale_data;\n\
+           truncate table audit_log;\n\
+         end if;\n",
+    );
+    // BigQuery top-level scripting parses as a `MultiStatementSegment` whose
+    // *inner* statements are the file's top-level statements — the DDL
+    // classifies and risk-scores through the normal per-statement path…
+    assert_eq!(get(&m, "sql.ddl.drop_count"), 1.0);
+    assert_eq!(get(&m, "sql.ddl.truncate_count"), 1.0);
+    // Drop 8 + truncate 8, plus write objects.
+    assert!(get(&m, "sql.change_risk_score") >= 16.0);
+    // …while the scripting control flow around them is measured as a
+    // procedural region (entry + IF).
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+}
+
+/// Oracle `INSERT ALL` lists several statement-level `INTO` targets — every
+/// one is written, none is a read (Codex P2, PR #257). A plain
+/// `INSERT INTO … SELECT` keeps its source inside the SELECT, so widening
+/// inserts to all-targets cannot misclassify sources as writes.
+#[test]
+fn insert_all_destinations_are_all_write_targets() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         insert all\n\
+           into orders_archive (id) values (id)\n\
+           into orders_audit (id) values (id)\n\
+         select id from orders;\n",
+    );
+    assert_eq!(get(&m, "sql.object.write_count"), 2.0);
+    assert_eq!(get(&m, "sql.object.read_count"), 1.0);
+
+    let plain = metrics("INSERT INTO dst SELECT id FROM src");
+    assert_eq!(get(&plain, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&plain, "sql.object.read_count"), 1.0);
+}
+
+/// DCL inside a typed anonymous block (Oracle `BEGIN … END`) counts — the
+/// grant parses as an `AccessStatement` node there, unlike inside T-SQL
+/// keyword-led blocks where the tsql grammar loses it to `Unparsable`
+/// (Codex P1, PR #257).
+#[test]
+fn anonymous_block_dcl_counts_as_migration_risk() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           grant select on t to reporting;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.dcl.grant_revoke_count"), 1.0);
+    assert!(get(&m, "sql.change_risk_score") >= 5.0);
+}
+
+/// MySQL routine exercising the fragment path: the mysql grammar splits the
+/// body into per-branch typed statements (`IfThenStatement` ×4,
+/// `WhileStatement` ×2, `RepeatStatement` ×2) plus an `Unparsable` CASE run.
+/// All fragments reclassify as routine continuations — body DML is not
+/// migration-time DML — while the token machine counts control flow across
+/// them (CodeRabbit, PR #257).
+#[test]
+fn mysql_procedural_family_counts_across_fragments() {
+    let m = metrics(include_str!("fixtures/mysql_procedure_control_flow.sql"));
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // IF + ELSEIF.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // WHILE … DO + REPEAT … END REPEAT.
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    // CASE … END CASE (from the Unparsable run).
+    assert_eq!(get(&m, "sql.procedural.case_statement_count"), 1.0);
+    // SIGNAL.
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // PREPARE … FROM (the paired EXECUTE stmt does not double-count).
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    // Entry 1 + IF 1 + ELSEIF 1 + WHILE 1 + REPEAT 1 + CASE WHEN 1
+    // + SIGNAL 1 = 7.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 7.0);
+    // IF 1 + ELSEIF 1 + ELSE 1 + WHILE 1 + REPEAT 1 + CASE statement 1 = 6.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 6.0);
+    // Body fragments are routine continuations, not executing batches.
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 0.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 0.0);
+    // Change risk: dynamic SQL only.
+    assert_eq!(get(&m, "sql.change_risk_score"), 5.0);
+}
+
+/// BigQuery top-level scripting: `MultiStatementSegment`s directly under
+/// `File` are procedural regions (each with an entry path), while their
+/// inner statements stay the file's top-level statements — the UPDATE
+/// executes on apply and *does* count as migration DML, unlike a routine
+/// body's (CodeRabbit, PR #257).
+#[test]
+fn bigquery_scripting_family_counts() {
+    let m = metrics(include_str!("fixtures/bigquery_scripting.sql"));
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 0.0);
+    // IF + ELSEIF at top level, plus the IF nested in the WHILE.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 3.0);
+    // WHILE … END WHILE + FOR … IN … DO … END FOR.
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    // EXCEPTION WHEN ERROR THEN (inside the begin/exception block, which the
+    // bigquery grammar partially loses to Unparsable — the handler tokens
+    // survive).
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 1.0);
+    // RAISE USING MESSAGE.
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // EXECUTE IMMEDIATE.
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    // Entries: if/while/for scripting regions = 3, + the bare BEGIN…END
+    // scripting block (round 10) = 4; + IF 3 + loops 2 + handler 1
+    // + raise 1 = 11.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 11.0);
+    // IF 1 + ELSEIF 1 + ELSE 1 + WHILE 1 + nested IF 2 + FOR 1
+    // + handler 1 = 8.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 8.0);
+    // Top-level scripting DML executes on apply.
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    // The bare `BEGIN;`/`END;` scripting brackets are a block, not
+    // transaction control (Codex P1, round 10).
+    assert_eq!(get(&m, "sql.procedural.block_count"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.transaction.control_count"), 0.0);
+}
+
+// ── PR #257 round-2 review regressions ──────────────────────────────────
+
+/// A T-SQL `GO` batch separator ends the routine body by definition —
+/// whatever follows is a new, independently executing batch whose DDL is
+/// migration risk (Codex P1, PR #257 round 2).
+#[test]
+fn go_separator_resets_routine_continuation() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p @x int as\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         go\n\
+         if @cleanup = 1\n\
+         begin\n\
+           update stale set c = 1 where id = 1;\n\
+         end\n",
+    );
+    // The IF after GO is an anonymous batch, not a routine continuation.
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 1.0);
+}
+
+/// `DBMS_SQL.EXECUTE(c)` is one dynamic-SQL occurrence (counted at the
+/// package qualifier), not two — the qualified method must not also match
+/// the T-SQL `EXEC(…)` form (Codex P2, PR #257 round 2).
+#[test]
+fn qualified_dbms_sql_execute_counts_once() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           dbms_sql.parse(c, 'drop table t', 1);\n\
+           dbms_sql.execute(c);\n\
+         end;\n\
+         /\n",
+    );
+    // One per DBMS_SQL package usage: parse + execute.
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 2.0);
+}
+
+/// A control structure in a T-SQL ELSE body keeps the IF's nesting: the
+/// outer decision is still open there (Codex P2, PR #257 round 2).
+#[test]
+fn tsql_else_body_keeps_if_nesting() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         else\n\
+         begin\n\
+           if @b > 0 select 2;\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // Outer IF 1 + ELSE 1 + inner IF (1 + 1 nesting) = 4.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// A single-statement T-SQL loop body (no BEGIN/END) still nests its
+/// controlled statement (Codex P2, PR #257 round 2).
+#[test]
+fn tsql_single_statement_while_nests_its_body() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         while @x > 0 if @y > 0 set @x = @x - 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    // WHILE 1 + IF (1 + 1 nesting) = 3.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// `BEGIN DISTRIBUTED TRANSACTION` is transaction control, not a procedural
+/// block (Codex P2, PR #257 round 2).
+#[test]
+fn begin_distributed_transaction_is_not_a_block() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         begin distributed transaction;\n\
+         commit;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.block_count"), 0.0);
+}
+
+/// A top-level `EXEC('…')` batch is dynamic SQL even when sqruff leaves it
+/// wholly unparsable (Codex P1, PR #257 round 2).
+#[test]
+fn top_level_exec_string_batch_counts_as_dynamic_sql() {
+    let m = metrics("-- sqlfluff:dialect:tsql\nexec('drop table t');\n");
+    assert!(get(&m, "sql.parser.unparsable_segment_count") > 0.0);
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    assert!(get(&m, "sql.change_risk_score") >= 5.0);
+}
+
+/// Oracle `CREATE TABLE … REFERENCES parent` / `ALTER TABLE … REFERENCES`
+/// mutate only their subject; the referenced table is read, not written
+/// (Codex P2, PR #257 round 2).
+#[test]
+fn referenced_tables_in_ddl_are_reads_not_writes() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create table child (id number, parent_id number references parent(id));\n",
+    );
+    assert_eq!(get(&m, "sql.object.write_count"), 1.0);
+    assert_eq!(get(&m, "sql.object.read_count"), 1.0);
+}
+
+/// Oracle drop statements name their targets through `OracleFunctionName` /
+/// `ObjectReference` — those targets are written objects (Codex P2, PR #257
+/// round 2).
+#[test]
+fn oracle_drop_targets_are_written_objects() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         drop procedure my_proc;\n\
+         drop package my_pkg;\n\
+         drop synonym my_syn;\n",
+    );
+    assert_eq!(get(&m, "sql.ddl.drop_count"), 3.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 3.0);
+}
+
+// ── PR #257 round-3 review regressions ──────────────────────────────────
+
+/// Query constructs in body continuations (routine bodies sqruff splits
+/// into sibling statements) feed the routine's embedded-query score — the
+/// T-SQL fixture's UPDATE…WHERE lives in a continuation, so the file
+/// maximum must be nonzero (Codex P2, PR #257 round 3).
+#[test]
+fn continuation_queries_feed_embedded_score() {
+    let m = metrics(include_str!("fixtures/tsql_procedure_control_flow.sql"));
+    assert!(get(&m, "sql.structural_complexity.max_embedded_query") > 0.0);
+}
+
+/// Non-table/view CREATE forms inside an executing block count as creates
+/// (Codex P2, PR #257 round 3): `IF … THEN CREATE INDEX …` is migration
+/// DDL. BigQuery scripting exercises the typed path.
+#[test]
+fn anonymous_block_create_index_counts() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           execute immediate 'noop';\n\
+         end;\n\
+         /\n\
+         create index ix_orders on orders(batch_id);\n",
+    );
+    // The top-level CREATE INDEX classifies per-statement (create_other) …
+    assert_eq!(get(&m, "sql.ddl.create_count"), 1.0);
+
+    let block = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         if cleanup then\n\
+           create index ix on t(c);\n\
+         end if;\n",
+    );
+    // … and inside an executing scripting block the typed node counts too.
+    assert_eq!(get(&block, "sql.ddl.create_count"), 1.0);
+}
+
+// ── PR #257 round-4 review regressions ──────────────────────────────────
+
+/// A nested subprogram's signature `RETURN <type>` is not a return
+/// statement, even though the enclosing routine's body gate is already open
+/// (Codex P2, PR #257 round 4).
+#[test]
+fn nested_routine_header_return_type_is_not_a_return_statement() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure outer_p is\n\
+           function inner_f return number is\n\
+           begin\n\
+             return 1;\n\
+           end inner_f;\n\
+         begin\n\
+           null;\n\
+         end outer_p;\n\
+         /\n",
+    );
+    // Only inner_f's actual `return 1;` counts.
+    assert_eq!(get(&m, "sql.procedural.return_count"), 1.0);
+}
+
+/// Scanner state carries across a routine's split regions: the T-SQL
+/// fixture's outer `BEGIN` (first region) and its `IF … BEGIN` body
+/// (continuation) are nested, so the depth is 2 (Codex P2, PR #257
+/// round 4).
+#[test]
+fn carried_state_preserves_block_depth_across_split_regions() {
+    let m = metrics(include_str!("fixtures/tsql_procedure_control_flow.sql"));
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 2.0);
+}
+
+/// Fragment facts merge before scoring: max-shaped structural terms
+/// (expression depth, boolean depth, …) charge once per routine, not once
+/// per parser fragment. The MySQL fixture's four IF fragments and two loop
+/// fragments each carry expression depth 1 — merged, the routine scores
+/// 0.5 (one depth), not 2.5 (five) (Codex P2, PR #257 round 4).
+#[test]
+fn fragment_facts_merge_before_structural_scoring() {
+    let m = metrics(include_str!("fixtures/mysql_procedure_control_flow.sql"));
+    assert_eq!(get(&m, "sql.structural_complexity.max_embedded_query"), 0.5);
+}
+
+// ── PR #257 round-5 review regressions ──────────────────────────────────
+
+/// A top-level MySQL `PREPARE stmt FROM @sql` parses as an ordinary unknown
+/// statement (no `Unparsable` run) — the marker gate must still scan it as
+/// dynamic SQL (Codex P1, PR #257 round 5).
+#[test]
+fn top_level_prepare_counts_as_dynamic_sql() {
+    let m = metrics("-- sqlfluff:dialect:mysql\nprepare stmt from @sql;\n");
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+    assert!(get(&m, "sql.change_risk_score") >= 5.0);
+}
+
+/// A block-bound IF entering a single-statement ELSE closes at the else
+/// statement's terminator — a sibling IF afterwards is not nested under the
+/// completed decision (Codex P2, PR #257 round 5).
+#[test]
+fn single_statement_else_closes_its_if() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         else select 2;\n\
+         if @b > 0 select 3;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // IF 1 + ELSE 1 + sibling IF 1 (flat, not nested) = 3.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// Nested single-statement loops all complete at one terminator — a sibling
+/// IF afterwards carries no phantom loop nesting (Codex P2, PR #257
+/// round 5).
+#[test]
+fn nested_single_statement_loops_close_at_one_terminator() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         while @a > 0 while @b > 0 set @b = @b - 1;\n\
+         if @c > 0 select 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    // Outer WHILE 1 + inner WHILE (1+1) + sibling IF 1 (flat) = 4.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// A bare identifier named `dbms_sql` is not the package — only a qualified
+/// call counts (Codex P2, PR #257 round 5).
+#[test]
+fn bare_dbms_sql_identifier_is_not_dynamic_sql() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           select dbms_sql into v from t;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
+    // The qualified form still counts.
+    let qualified = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           dbms_sql.parse(c, 'x', 1);\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&qualified, "sql.procedural.dynamic_sql_count"), 1.0);
+}
+
+// ── PR #257 round-6 review regressions ──────────────────────────────────
+
+/// Under the T-SQL batch model, *every* statement after a routine
+/// definition belongs to the routine until `GO` — including ordinary DML
+/// that sqruff splits off the body (Codex P1, PR #257 round 6).
+#[test]
+fn tsql_dml_siblings_stay_procedural_until_go() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p @x int as\n\
+         select 1;\n\
+         update t set c = 1;\n\
+         go\n\
+         update standalone set c = 2 where id = 1;\n",
+    );
+    // The in-body UPDATE is not migration DML; the post-GO one is.
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_without_where_count"), 0.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.update"), 1.0);
+}
+
+/// An Oracle routine followed by plain DML keeps normal semantics — the
+/// until-GO continuation is a T-SQL batch rule only.
+#[test]
+fn oracle_dml_after_routine_stays_independent() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           null;\n\
+         end p;\n\
+         /\n\
+         update t set c = 1;\n",
+    );
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_without_where_count"), 1.0);
+}
+
+/// A single-statement then-body followed by ELSE keeps its IF open at a
+/// *contiguous* terminator (the `;`-before-ELSE lookahead). At top level the
+/// tsql grammar splits `IF …; ELSE IF …;` into an anonymous statement and an
+/// orphan `Unparsable` run, so the regions cannot share nesting state — both
+/// IFs and the ELSE still count, flat (Codex P2, PR #257 round 6; the
+/// nested-through-ELSE case within one region is covered by
+/// `tsql_else_body_keeps_if_nesting`).
+#[test]
+fn single_statement_then_body_keeps_if_open_for_else() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0 select 1;\n\
+         else if @b > 0 select 2;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // IF 1 + ELSE 1 + else-branch IF 2 (nested under @a — T-SQL `ELSE IF`
+    // is `else { if }`, and the split run resumes the parsed region's open
+    // IF stack, so the split shape now matches the parsed
+    // `… END ELSE IF …` shape instead of losing the nesting to the parser
+    // boundary; PR #257 round 12) = 4.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// An IF controlling a single-statement loop closes at the shared
+/// terminator — the sibling IF afterwards carries no phantom nesting
+/// (Codex P2, PR #257 round 6).
+#[test]
+fn if_over_single_statement_loop_closes_at_terminator() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0 while @b > 0 set @b = 0;\n\
+         if @c > 0 select 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // IF 1 + WHILE (1+1) + sibling IF 1 (flat) = 4.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// A dotted `dbms_sql.<col>` reference without a call is not dynamic SQL —
+/// only the qualified *call* shape counts (Codex P2, PR #257 round 6).
+#[test]
+fn dotted_dbms_sql_reference_without_call_is_not_dynamic_sql() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           select dbms_sql.foo into v from dbms_sql;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
+}
+
+/// T-SQL `IF NOT EXISTS (SELECT …)` is a genuine boolean negation; only
+/// `IF NOT EXISTS` inside CREATE/DROP statements is a DDL guard (Codex P2,
+/// PR #257 round 6).
+#[test]
+fn procedural_if_not_exists_counts_as_predicate_not() {
+    let procedural = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if not exists (select 1 from t)\n\
+         begin\n\
+           select 1;\n\
+         end\n",
+    );
+    assert_eq!(get(&procedural, "sql.predicate.not_count"), 1.0);
+
+    let guard = metrics("-- sqlfluff:dialect:postgres\nCREATE TABLE IF NOT EXISTS t (id INT)");
+    assert_eq!(get(&guard, "sql.predicate.not_count"), 0.0);
+}
+
+/// Oracle package-specification prototypes (`PROCEDURE p;` without a body)
+/// are declarations, not routines: no unit, no entry path, no coverage
+/// space (Codex P2, PR #257 round 6).
+#[test]
+fn oracle_spec_prototypes_are_not_routine_units() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace package pkg_spec is\n\
+           procedure p(x number);\n\
+           function f return number;\n\
+         end pkg_spec;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 0.0);
+    // A package *body* with implementations still yields units.
+    let body = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace package body pkg_impl is\n\
+           function f return number is\n\
+           begin\n\
+             return 1;\n\
+           end f;\n\
+         end pkg_impl;\n\
+         /\n",
+    );
+    assert_eq!(get(&body, "sql.procedural.routine_count"), 1.0);
+}
+
+// ── PR #257 round-7 review regressions ──────────────────────────────────
+
+/// An anonymous block that *declares* a nested procedure is still an
+/// executing block: its own DML is migration risk, and the nested
+/// definition's body stays excluded (Codex P1, PR #257 round 7).
+#[test]
+fn anonymous_block_with_nested_procedure_still_executes() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           procedure log_it is\n\
+           begin\n\
+             insert into audit_log (id) values (1);\n\
+           end log_it;\n\
+         begin\n\
+           update t set c = 0;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.procedural"), 0.0);
+    // The block's own UPDATE executes on apply…
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_without_where_count"), 1.0);
+    // …while the nested procedure's INSERT does not.
+    assert_eq!(get(&m, "sql.dml.insert_count"), 0.0);
+    // The nested procedure is still a routine unit.
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+}
+
+/// A routine's own body block never makes the definition look like an
+/// anonymous block (the shape walk skips routine-definition subtrees).
+#[test]
+fn routine_definition_is_not_an_anonymous_block() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           null;\n\
+         end p;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.statement.kind_count.procedural"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 0.0);
+}
+
+/// A BigQuery routine (`MultiStatementSegment` wrapping `CREATE PROCEDURE`
+/// without a top-level `Statement` node) earns exactly one entry — from the
+/// unit loop, not an extra anonymous-region entry (Codex P2, PR #257
+/// round 7).
+#[test]
+fn bigquery_routine_earns_a_single_entry() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         create procedure ds.p()\n\
+         begin\n\
+           if x > 0 then\n\
+             select 1;\n\
+           end if;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // Entry 1 + IF 1 = 2 (not 3).
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+}
+
+/// PostgreSQL idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` is a DDL
+/// guard, not a boolean negation (Codex P2, PR #257 round 7).
+#[test]
+fn alter_table_if_not_exists_guard_is_not_a_predicate_not() {
+    let m = metrics(
+        "-- sqlfluff:dialect:postgres\n\
+         ALTER TABLE t ADD COLUMN IF NOT EXISTS c INT;\n",
+    );
+    assert_eq!(get(&m, "sql.predicate.not_count"), 0.0);
+}
+
+/// T-SQL variable-form `EXEC @sql` executes dynamic SQL; a literal procedure
+/// call and return-value capture stay static (Codex P1, PR #257 round 7).
+#[test]
+fn variable_form_exec_counts_as_dynamic_sql() {
+    let dynamic = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           exec @sql;\n\
+         end\n",
+    );
+    assert_eq!(get(&dynamic, "sql.procedural.dynamic_sql_count"), 1.0);
+
+    let static_call = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           exec dbo.other_proc;\n\
+           exec @ret = dbo.third_proc;\n\
+         end\n",
+    );
+    assert_eq!(get(&static_call, "sql.procedural.dynamic_sql_count"), 0.0);
+}
+
+/// A bare `END` directly followed by a sibling `IF` is not the PL/SQL
+/// `END IF` closer — the block closes and the sibling IF counts (Codex P2,
+/// PR #257 round 7).
+#[test]
+fn bare_end_followed_by_sibling_if_keeps_the_if() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         if @b > 0 select 2;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // Both IFs flat: 1 + 1 = 2 cognitive.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 2.0);
+}
+
+// ── PR #257 round-8 review regressions ──────────────────────────────────
+
+/// BigQuery routine bodies surface as top-level statements (the grammar
+/// wraps `CREATE PROCEDURE` in a segment without a `Statement` node), but
+/// they run when the routine is *called*: no executing DML, touched
+/// objects, or missing-WHERE risk (Codex P1, PR #257 round 8).
+#[test]
+fn bigquery_routine_body_dml_is_not_migration_risk() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         create procedure ds.upd()\n\
+         begin\n\
+           update t set c = 1 where true;\n\
+           delete from u;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.dml.update_count"), 0.0);
+    assert_eq!(get(&m, "sql.dml.delete_count"), 0.0);
+    assert_eq!(get(&m, "sql.dml.delete_without_where_count"), 0.0);
+    assert_eq!(get(&m, "sql.object.write_count"), 0.0);
+}
+
+/// Variable-form `EXEC @sql` in a standalone T-SQL batch reaches through
+/// the unparsable-region marker gate (Codex P1, PR #257 round 8).
+#[test]
+fn variable_exec_reaches_through_the_region_gate() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         declare @sql nvarchar(max) = N'select 1';\n\
+         exec @sql;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 1.0);
+}
+
+/// `EXEC @status = @proc_var` executes a *variable* even though it captures
+/// a return value — only a literal procedure name on the right-hand side is
+/// a static call (CodeRabbit Major, PR #257 round 8). Covers both the
+/// parsed routine-body path and the marker-gated standalone path.
+#[test]
+fn exec_capture_of_a_variable_is_dynamic() {
+    let dynamic = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           exec @status = @proc_var;\n\
+         end\n",
+    );
+    assert_eq!(get(&dynamic, "sql.procedural.dynamic_sql_count"), 1.0);
+
+    let standalone = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         exec @status = @proc_var;\n",
+    );
+    assert_eq!(get(&standalone, "sql.procedural.dynamic_sql_count"), 1.0);
+
+    let static_call = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           exec @ret = dbo.other_proc;\n\
+         end\n",
+    );
+    assert_eq!(get(&static_call, "sql.procedural.dynamic_sql_count"), 0.0);
+}
+
+/// An IF whose single statement is a block-bodied loop closes when the
+/// block does: `IF @a > 0 WHILE @b > 0 BEGIN … END` leaves the IF unbound
+/// (the BEGIN bound the pending loop), and a sibling IF after the END must
+/// not nest under it (Codex P2, PR #257 round 8).
+#[test]
+fn if_over_block_bodied_loop_closes_at_the_block_end() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         while @b > 0\n\
+         begin\n\
+           set @b = @b - 1;\n\
+         end\n\
+         if @c > 0 select 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 1.0);
+    // IF@a +1, WHILE nested +2, sibling IF@c +1 (flat) = 4, not 5.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// The scalar conditional *function* `IF(expr, a, b)` inside an unparsable
+/// MySQL routine body is not control flow: its argument commas at paren
+/// depth 1 distinguish it from a parenthesized control condition
+/// (Codex P2, PR #257 round 8).
+#[test]
+fn scalar_if_call_in_unparsable_run_is_not_a_branch() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter //\n\
+         create procedure set_flag(in flag int, out result int)\n\
+         begin\n\
+           set result = if(flag > 0, 1, 0);\n\
+           if result = 1 then\n\
+             update t set c = 1 where id = 1;\n\
+           end if;\n\
+         end //\n",
+    );
+    // Only the procedural IF…THEN counts — the scalar IF() does not.
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+}
+
+/// Oracle call-spec routines (`AS LANGUAGE JAVA …`) have no
+/// `BEGIN…END` block but are executable definitions — they stay routine
+/// units; only bodyless declarations inside a package/type *specification*
+/// are prototypes (Codex P2, PR #257 round 8).
+#[test]
+fn oracle_call_spec_routine_is_still_a_unit() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace function get_balance (acct_id in number) return number\n\
+         as language java\n\
+         name 'Bank.getBalance(int) return float';\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+}
+
+// ── PR #257 round-9 review regressions ──────────────────────────────────
+
+/// A bare `END` closing a T-SQL block-bound loop directly followed by a
+/// sibling `WHILE` is not the compound `END WHILE` closer — the sibling
+/// loop counts (Codex P2, PR #257 round 9).
+#[test]
+fn bare_end_followed_by_sibling_while_keeps_the_loop() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         while @a > 0\n\
+         begin\n\
+           set @a = @a - 1;\n\
+         end\n\
+         while @b > 0 set @b = @b - 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 2.0);
+    // Two sibling loops, both flat: 1 + 1.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 2.0);
+}
+
+/// MySQL row-constructor conditions carry depth-1 commas —
+/// `IF (a, b) = (1, 2) THEN` is control flow, not the scalar `IF()`
+/// function: the statement shape (its own depth-0 `THEN`) decides
+/// (Codex P2, PR #257 round 9). A scalar call in condition position
+/// (`IF IF(x, 1, 0) = 1 THEN`) still stays an operand.
+#[test]
+fn row_comparison_if_condition_is_control_flow() {
+    let row = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter //\n\
+         create procedure check_pair(in a int, in b int)\n\
+         begin\n\
+           if (a, b) = (1, 2) then\n\
+             update t set c = 1 where id = a;\n\
+           end if;\n\
+         end //\n",
+    );
+    assert_eq!(get(&row, "sql.procedural.if_count"), 1.0);
+
+    let operand = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter //\n\
+         create procedure check_flag(in x int)\n\
+         begin\n\
+           if if(x > 0, 1, 0) = 1 then\n\
+             update t set c = 1 where id = x;\n\
+           end if;\n\
+         end //\n",
+    );
+    // The outer control IF counts once; the scalar IF() operand does not.
+    assert_eq!(get(&operand, "sql.procedural.if_count"), 1.0);
+}
+
+/// A nested subprogram declared under an outer routine's control flow gets
+/// a fresh cognitive-nesting baseline: its decisions don't inherit the
+/// caller's lexical depth (Codex P2, PR #257 round 9). File cognitive here
+/// is 2 (outer IF 1 + inner IF 1), not 3.
+#[test]
+fn nested_routine_resets_cognitive_nesting() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure outer_p is\n\
+         begin\n\
+           if 1 = 1 then\n\
+             declare\n\
+               procedure inner_p is\n\
+               begin\n\
+                 if 2 = 2 then\n\
+                   null;\n\
+                 end if;\n\
+               end inner_p;\n\
+             begin\n\
+               inner_p;\n\
+             end;\n\
+           end if;\n\
+         end outer_p;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 2.0);
+}
+
+// ── PR #257 round-10 review regressions ─────────────────────────────────
+
+/// A forward declaration (`PROCEDURE helper;`) never opens a body: its
+/// pending routine-body marker retires at the terminator, so a later
+/// ordinary nested `BEGIN` is not mislabeled a routine body and the outer
+/// decision's nesting still applies (Codex P2, PR #257 round 10).
+#[test]
+fn forward_declaration_does_not_leak_a_body_marker() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           procedure helper;\n\
+           procedure helper is begin null; end;\n\
+         begin\n\
+           if 1 = 1 then\n\
+             begin\n\
+               if 2 = 2 then\n\
+                 null;\n\
+               end if;\n\
+             end;\n\
+           end if;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // Outer IF 1 + inner IF (nested under the outer decision) 2 = 3 — the
+    // plain block under the IF is not a routine-body nesting baseline.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// BigQuery's bare scripting `BEGIN;`/`END;` statements are a block, not
+/// transaction control: no TCL risk, one anonymous entry, one block, and
+/// the DML between them executes on apply (Codex P1, PR #257 round 10).
+#[test]
+fn bigquery_bare_begin_is_a_scripting_block() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         begin\n\
+           update t set c = 1 where true;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.statement.kind_count.anonymous_block"), 1.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.transaction_control"), 0.0);
+    assert_eq!(get(&m, "sql.transaction.control_count"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.block_count"), 1.0);
+    // Entry only: 1.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+    // Top-level scripting DML executes on apply.
+    assert_eq!(get(&m, "sql.dml.update_count"), 1.0);
+    // The `END;` closer is a syntactic bracket, not a statement: it joins
+    // no statement count, no `unknown` kind, and no entropy (Codex P2,
+    // round 11). Two statements: the block opener and the UPDATE.
+    assert_eq!(get(&m, "sql.statement.count"), 2.0);
+    assert_eq!(get(&m, "sql.statement.kind_count.unknown"), 0.0);
+    assert_eq!(get(&m, "sql.statement.unparsed_count"), 0.0);
+}
+
+/// Boolean operators inside a routine *signature* (a package-spec prototype
+/// default such as `flag BOOLEAN := TRUE AND FALSE`) are declaration, not
+/// control flow (Codex P2, PR #257 round 10).
+#[test]
+fn signature_boolean_defaults_are_not_paths() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace package pkg_spec is\n\
+           procedure p(flag boolean := true and false);\n\
+         end pkg_spec;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// Procedural assignment expressions embed no query: a routine whose body
+/// is only `x := ((1 + 2) * 3);` publishes zero embedded-query structural
+/// complexity (Codex P2, PR #257 round 10).
+#[test]
+fn expression_only_routine_embeds_no_query() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure calc is\n\
+           x number;\n\
+         begin\n\
+           x := ((1 + 2) * 3);\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.structural_complexity.max_embedded_query"), 0.0);
+}
+
+/// A standalone block-shaped `Unparsable` run (T-SQL `BEGIN TRY … END
+/// CATCH` at file level) earns one anonymous entry, like its
+/// statement-backed equivalent (Codex P2, PR #257 round 10).
+#[test]
+fn standalone_try_catch_run_earns_an_entry() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         begin try\n\
+           select 1;\n\
+         end try\n\
+         begin catch\n\
+           throw;\n\
+         end catch\n",
+    );
+    // Entry 1 + catch handler 1 + throw 1 = 3.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+}
+
+// ── PR #257 round-11 review regressions ─────────────────────────────────
+
+/// A T-SQL control bound at `BEGIN TRY` closes at `END CATCH`, not at the
+/// first terminator inside the try body — the catch handler keeps the
+/// decision's nesting penalty and a sibling decision stays flat (Codex P2,
+/// PR #257 round 11).
+#[test]
+fn try_catch_binds_its_controlling_if() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0\n\
+         begin try\n\
+           select 1;\n\
+         end try\n\
+         begin catch\n\
+           select 2;\n\
+         end catch\n\
+         if @b > 0 select 3;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 1.0);
+    // IF@a 1 + catch under it 2 + sibling IF@b 1 = 4 (not 3: the `;` inside
+    // the try body must not close the bound IF).
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 4.0);
+}
+
+/// A `GO` separator severs fallback attribution: a standalone control block
+/// in the next batch keeps its own anonymous entry and does not attach to
+/// the routine defined before the separator (Codex P2, PR #257 round 11).
+#[test]
+fn go_boundary_severs_fallback_attribution() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure dbo.p as\n\
+         begin\n\
+           select 1;\n\
+         end\n\
+         go\n\
+         begin try\n\
+           select 2;\n\
+         end try\n\
+         begin catch\n\
+           throw;\n\
+         end catch\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // Routine entry 1 + standalone run: entry 1 + catch 1 + throw 1 = 4.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 4.0);
+}
+
+// ── PR #257 round-12 review regressions ─────────────────────────────────
+
+/// A whole T-SQL decision lost to a root `Unparsable` run still counts:
+/// leading control-position `IF` passes the marker gate (Codex P2, PR #257
+/// round 12), while `end if` debris (`if;`) and scalar `IF(…)` stay out.
+#[test]
+fn if_led_unparsable_run_is_admitted() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a = 1 throw 51000, 'oops', 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // Entry 1 + IF 1 + THROW 1 = 3.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
+}
+
+/// An `ELSE`-led spill resumes the anonymous region's open IF stack: the
+/// outer else's decision keeps one nesting level, and a deeper IF whose
+/// else already completed closes at the terminator so the second ELSE
+/// binds the outer IF (Codex P2, PR #257 round 12).
+#[test]
+fn else_spill_resumes_anonymous_state() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         if @a > 0 if @b > 0 select 1; else select 2; else if @c > 0 select 3;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 3.0);
+    // IF@a 1 + IF@b 2 + ELSE 1 + ELSE 1 + IF@c 2 (under @a's else) = 7.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 7.0);
+}
+
+/// An Oracle routine followed by an independent anonymous block that
+/// degrades to a root `Unparsable` run: the block keeps its own entry and
+/// paths — fallback attribution is reserved for the dialects whose
+/// grammars actually spill routine bodies into root runs (Codex P2,
+/// PR #257 round 12).
+#[test]
+fn oracle_block_after_routine_stays_independent() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           null;\n\
+         end;\n\
+         /\n\
+         begin\n\
+           case when 1 = 1 then null; end case;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // p's entry 1 + the block's entry 1 + CASE WHEN 1 = 3, with the block's
+    // paths staying file-level instead of attaching to p.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
+}
+
+/// A DECLARE-led anonymous block starts outside the body gate: declaration
+/// initializers (`flag BOOLEAN := TRUE AND FALSE`) are not paths — the
+/// block's `BEGIN` opens the body (Codex P2, PR #257 round 12).
+#[test]
+fn anonymous_declare_section_is_not_a_path() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           flag boolean := true and false;\n\
+         begin\n\
+           null;\n\
+         end;\n\
+         /\n",
+    );
+    // Entry only — the initializer's AND counts nothing.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+// ── PR #257 round-13 review regressions ─────────────────────────────────
+
+/// A package specification's IS introduces declarations, not an executable
+/// body: package-level initializers (`flag CONSTANT BOOLEAN := TRUE AND
+/// FALSE`) create no paths (Codex P2, PR #257 round 13).
+#[test]
+fn package_level_declarations_are_not_paths() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace package pkg_consts is\n\
+           flag constant boolean := true and false;\n\
+         end pkg_consts;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// `WHERE NOT NULL` is a genuine unary negation — the NOT-NULL suppression
+/// requires column-definition/constraint ancestry (Codex P2, PR #257
+/// round 13).
+#[test]
+fn where_not_null_is_a_predicate_negation() {
+    let predicate = metrics("SELECT * FROM t WHERE NOT NULL;\n");
+    assert_eq!(get(&predicate, "sql.predicate.not_count"), 1.0);
+
+    let constraint = metrics("CREATE TABLE t (id INT NOT NULL);\n");
+    assert_eq!(get(&constraint, "sql.predicate.not_count"), 0.0);
+}
+
+/// Nested bare BigQuery scripting blocks nest even though sqruff emits the
+/// brackets as sibling statements: the depth walk over the bracket stream
+/// reports the true maximum (Codex P2, PR #257 round 13).
+#[test]
+fn bigquery_nested_bare_blocks_report_their_depth() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         begin\n\
+           begin\n\
+             select 1;\n\
+           end;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.block_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 2.0);
+}
+
+// ── PR #257 round-14 review regressions ─────────────────────────────────
+
+/// A nested routine's END restores the body gate saved at its header:
+/// declarations *after* a local routine stay declarations, so their
+/// initializers create no paths (Codex P2, PR #257 round 14).
+#[test]
+fn declarations_after_a_nested_routine_stay_declarations() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           procedure p is\n\
+           begin\n\
+             null;\n\
+           end;\n\
+           flag boolean := true and false;\n\
+         begin\n\
+           null;\n\
+         end;\n\
+         /\n",
+    );
+    // Anonymous entry 1 + p's entry 1 — the initializer's AND is no path.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// Oracle editioning modifiers before a package header still arm the
+/// spec gate: `CREATE OR REPLACE EDITIONABLE PACKAGE … AS` introduces
+/// declarations, not a body (Codex P2, PR #257 round 14).
+#[test]
+fn editionable_package_spec_declarations_are_not_paths() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace editionable package pkg_ed as\n\
+           flag constant boolean := true and false;\n\
+         end pkg_ed;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// T-SQL Service Broker `BEGIN CONVERSATION …` opens no block scope: no
+/// block, no anonymous entry (Codex P2, PR #257 round 14).
+#[test]
+fn begin_conversation_is_not_a_block() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         begin conversation timer (@handle) timeout = 60;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.block_count"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 0.0);
+}
+
+/// A named exception *declaration* (`some_error EXCEPTION;`) is not a
+/// handler section: no synthetic block seeds, so the real BEGIN reports
+/// depth 1 (Codex P2, PR #257 round 14).
+#[test]
+fn exception_declaration_is_not_a_handler_section() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         declare\n\
+           some_error exception;\n\
+         begin\n\
+           raise some_error;\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.exception_handler_count"), 0.0);
+    // Entry 1 + RAISE 1.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+}
+
+// ── PR #257 round-15 review regressions ─────────────────────────────────
+
+/// A routine's IS/AS introduces its declaration section — initializers and
+/// cursor-query predicates there are not executable control flow; the body
+/// opens at the routine's BEGIN (Codex P2, PR #257 round 15).
+#[test]
+fn routine_declaration_sections_are_not_paths() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+           flag boolean := true and false;\n\
+           cursor c is select * from t where a = 1 and b = 2;\n\
+         begin\n\
+           null;\n\
+         end;\n\
+         /\n",
+    );
+    // Entry only — no declaration boolean counts.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// A standalone T-SQL raise batch lost to a root `Unparsable` run is
+/// measured like the same tokens inside a parsed block (Codex P2, PR #257
+/// round 15).
+#[test]
+fn standalone_raise_batches_are_measured() {
+    let throw = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         throw 51000, 'oops', 1;\n",
+    );
+    assert_eq!(get(&throw, "sql.procedural.raise_throw_count"), 1.0);
+    assert_eq!(get(&throw, "sql.procedural.cyclomatic_complexity"), 1.0);
+}
+
+/// The embedded-query metric is the worst *individual* query: two trivial
+/// SELECTs score like one, not like their sum (Codex P2, PR #257
+/// round 15).
+#[test]
+fn embedded_query_score_is_a_maximum_not_a_sum() {
+    let one = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p_one is\n\
+           v number;\n\
+         begin\n\
+           select 1 into v from dual;\n\
+         end;\n\
+         /\n",
+    );
+    let two = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p_two is\n\
+           v number;\n\
+         begin\n\
+           select 1 into v from dual;\n\
+           select 2 into v from dual;\n\
+         end;\n\
+         /\n",
+    );
+    let single = get(&one, "sql.structural_complexity.max_embedded_query");
+    assert!(single > 0.0);
+    assert_eq!(
+        get(&two, "sql.structural_complexity.max_embedded_query"),
+        single
+    );
+}
+
+// ── PR #257 round-16 review regressions ─────────────────────────────────
+
+/// T-SQL definitions that sqruff 0.40 leaves wholly unparsable (`CREATE
+/// FUNCTION … RETURNS int AS BEGIN … END`, `CREATE TRIGGER … AS SELECT`)
+/// still become routine units — recovered from the leading header token
+/// shape of the root run (Codex P1, PR #257 round 16).
+#[test]
+fn tsql_function_and_trigger_units_recover_from_parse_gaps() {
+    let function = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create function dbo.f(@x int) returns int\n\
+         as\n\
+         begin\n\
+           return @x;\n\
+         end\n",
+    );
+    assert_eq!(get(&function, "sql.procedural.routine_count"), 1.0);
+    // Entry + nothing else (the RETURN is a count, not a path).
+    assert_eq!(get(&function, "sql.procedural.cyclomatic_complexity"), 1.0);
+    assert_eq!(get(&function, "sql.procedural.return_count"), 1.0);
+
+    let trigger = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create trigger trg on t for insert\n\
+         as select 1;\n",
+    );
+    assert_eq!(get(&trigger, "sql.procedural.routine_count"), 1.0);
+}
+
+/// T-SQL `AS` opening the body retires the pending routine-body marker: a
+/// later `BEGIN` inside the body belongs to its control flow, not to the
+/// routine baseline — nested decisions keep their nesting (Codex P2,
+/// PR #257 round 16).
+#[test]
+fn tsql_as_body_does_not_leak_a_marker_to_inner_blocks() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure p as\n\
+         if @a = 1\n\
+         begin\n\
+           if @b = 1 select 1;\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.if_count"), 2.0);
+    // Entry 1 is cyclomatic; cognitive: IF@a 1 + IF@b 2 (nested) = 3.
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 3.0);
+}
+
+/// Nested bare BigQuery brackets are lexical blocks, not new entries: one
+/// connected scripting region earns one entry (Codex P2, PR #257
+/// round 16).
+#[test]
+fn nested_bigquery_bracket_is_not_a_second_entry() {
+    let m = metrics(
+        "-- sqlfluff:dialect:bigquery\n\
+         begin\n\
+           begin\n\
+             select 1;\n\
+           end;\n\
+         end;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.block_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.max_block_depth"), 2.0);
+    // One entry for the connected region.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+}
+
+/// An Oracle nested DECLARE section closes the body gate until its BEGIN:
+/// mid-body declaration initializers create no paths (Codex P2, PR #257
+/// round 16).
+#[test]
+fn nested_declare_section_closes_the_body_gate() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         begin\n\
+           declare\n\
+             flag boolean := true and false;\n\
+           begin\n\
+             null;\n\
+           end;\n\
+         end;\n\
+         /\n",
+    );
+    // Entry only — the nested declaration's AND is no path.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// A user function named `signal` is a call, not a raise statement — the
+/// raise family requires real keyword shape; Oracle's
+/// `RAISE_APPLICATION_ERROR` stays the deliberate call-shaped exception
+/// (Codex P2, PR #257 round 16).
+#[test]
+fn signal_named_function_call_is_not_a_raise() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           signal(1);\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 0.0);
+
+    let real = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           raise_application_error(-20001, 'boom');\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&real, "sql.procedural.raise_throw_count"), 1.0);
+}
+
+// ── PR #257 round-17 review regressions ─────────────────────────────────
+
+/// Standalone `ALTER FUNCTION|TRIGGER … AS …` definitions recover as
+/// routine units like their CREATE counterparts (Codex P1, PR #257
+/// round 17).
+#[test]
+fn tsql_alter_definitions_recover_as_units() {
+    let function = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         alter function dbo.f(@x int) returns int\n\
+         as\n\
+         begin\n\
+           return @x;\n\
+         end\n",
+    );
+    assert_eq!(get(&function, "sql.procedural.routine_count"), 1.0);
+
+    let trigger = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         alter trigger trg on t after insert\n\
+         as select 1;\n",
+    );
+    assert_eq!(get(&trigger, "sql.procedural.routine_count"), 1.0);
+}
+
+/// A recovered definition's body is scanned without needing a spill
+/// marker: a no-BEGIN trigger body's IF and RAISERROR count (Codex P1,
+/// PR #257 round 17).
+#[test]
+fn recovered_definition_body_scans_without_spill_markers() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create trigger trg on t after insert\n\
+         as if exists (select 1 from inserted where qty < 0)\n\
+           raiserror ('negative qty', 16, 1);\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.if_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // Entry 1 + IF 1 + RAISERROR 1.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 3.0);
+}
+
+/// A standalone `GOTO label;` batch is admitted to the scanner and charges
+/// its cognitive penalty (Codex P2, PR #257 round 17).
+#[test]
+fn standalone_goto_batch_is_measured() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         goto done;\n",
+    );
+    assert!(get(&m, "sql.procedural.cognitive_complexity") >= 1.0);
+}
+
+/// MySQL single-statement routine bodies (`CREATE PROCEDURE p() SIGNAL …`)
+/// recover as units with their body measured (Codex P1, PR #257
+/// round 17).
+#[test]
+fn mysql_single_statement_routine_recovers_as_a_unit() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p() signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+    // Entry 1 + SIGNAL 1.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+}
+
+// ── PR #257 round-18 review regressions ─────────────────────────────────
+
+/// Two separately recovered MySQL definitions stay independent: the second
+/// run never attaches to the first routine, so their spaces don't overlap
+/// and each keeps its own entry (Codex P2, PR #257 round 18). A parsed
+/// statement between them keeps the parse gaps distinct — adjacent
+/// unparsable definitions merge into one run, which recovers only the
+/// leading header (a documented limit of run-granularity recovery).
+#[test]
+fn recovered_definitions_stay_independent() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p1() signal sqlstate '45000';\n\
+         select 1;\n\
+         create procedure p2() signal sqlstate '45001';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 2.0);
+    // Two entries + two SIGNALs.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 4.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 2.0);
+}
+
+/// A recovered MySQL single-statement function counts its body-level
+/// RETURN: the signature ends at the parameter list's close (Codex P2,
+/// PR #257 round 18).
+#[test]
+fn mysql_single_statement_function_counts_its_return() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create function f(x int) returns int return x + 1;\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.return_count"), 1.0);
+}
+
+/// Backtick-quoted MySQL routine names recover like plain ones (Codex P2,
+/// PR #257 round 18).
+#[test]
+fn backtick_quoted_recovered_name_is_accepted() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure `p`() signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+}
+
+// ── PR #257 round-19 review regressions ─────────────────────────────────
+
+/// A standard MySQL `DELIMITER //` script recovers its definitions: the
+/// custom delimiter is a statement boundary before each header, including
+/// the very first one (Codex P1, PR #257 round 19).
+#[test]
+fn mysql_delimiter_script_recovers_definitions() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter //\n\
+         create procedure p1()\n\
+         begin\n\
+           signal sqlstate '45000';\n\
+         end//\n\
+         create procedure p2()\n\
+         begin\n\
+           signal sqlstate '45001';\n\
+         end//\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 2.0);
+}
+
+/// A MySQL `DEFINER = user@host` account expression spans several tokens —
+/// the header recognizer consumes it whole (Codex P1, PR #257 round 19).
+#[test]
+fn mysql_definer_account_expression_is_consumed() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create definer = `root`@`localhost` procedure p() signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+}
+
+/// A recovered definition's header tokens stay outside the body gate:
+/// `CREATE OR REPLACE …` counts no boolean for its `OR` (Codex P2, PR #257
+/// round 19).
+#[test]
+fn recovered_header_or_is_not_a_boolean_path() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create or replace procedure p() signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // Entry 1 + SIGNAL 1 — no boolean increment from the header's OR.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// MySQL `ALTER PROCEDURE p COMMENT …` alters metadata, not a body: no
+/// routine recovers from it (Codex P2, PR #257 round 19).
+#[test]
+fn mysql_alter_procedure_metadata_is_not_a_definition() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         alter procedure p comment 'new comment';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 0.0);
+}
+
+/// An Oracle package body lost to a parse gap recovers its member
+/// routines; the initialization section stays file-level (Codex P1,
+/// PR #257 round 19).
+#[test]
+fn oracle_package_body_parse_gap_recovers_members() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create package body pkg as\n\
+           procedure p is\n\
+           begin\n\
+             null;\n\
+           end p;\n\
+         begin\n\
+           null;\n\
+         end pkg;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // The member's entry only — NULL bodies add no paths.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 1.0);
+}
+
+// ── PR #257 round-20 review regressions ─────────────────────────────────
+
+/// MySQL parameter types with their own parens (`DECIMAL(10,2)`) don't end
+/// the signature early — the body gate opens at the *outer* parameter
+/// list's close, so a default expression's AND stays declaration syntax
+/// (Codex P2, PR #257 round 20).
+#[test]
+fn mysql_nested_parameter_parens_stay_in_the_signature() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p(x decimal(10,2), flag boolean default true and false)\n\
+         signal sqlstate '45000';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    // Entry 1 + SIGNAL 1 — the default's AND is no path.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 2.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// `dbms_sql` outside Oracle is an ordinary schema name, not the dynamic
+/// SQL package (Codex P2, PR #257 round 20).
+#[test]
+fn dbms_sql_qualifier_requires_the_oracle_dialect() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure p as\n\
+         begin\n\
+           select dbms_sql.foo();\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
+}
+
+// ── PR #257 round-21 review regressions ─────────────────────────────────
+
+/// A declared `DELIMITER %%` (arbitrary token, no punctuation whitelist)
+/// is a recovery boundary (Codex P1, PR #257 round 21).
+#[test]
+fn declared_delimiter_is_a_recovery_boundary() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         delimiter %%\n\
+         create procedure p()\n\
+         begin\n\
+           signal sqlstate '45000';\n\
+         end%%\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 1.0);
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 1.0);
+}
+
+/// The body gate resets at every recovered definition in a shared run: the
+/// second header's `OR` counts nothing (Codex P2, PR #257 round 21).
+#[test]
+fn body_gate_resets_between_recovered_definitions() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p() signal sqlstate '45000';\n\
+         select 1;\n\
+         create or replace procedure q() signal sqlstate '45001';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 2.0);
+    // Two entries + two SIGNALs — no boolean from q's header.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 4.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// `sp_executesql` outside T-SQL is an ordinary function name (Codex P2,
+/// PR #257 round 21).
+#[test]
+fn sp_executesql_requires_the_tsql_dialect() {
+    let m = metrics(
+        "-- sqlfluff:dialect:oracle\n\
+         create or replace procedure p is\n\
+         begin\n\
+           sp_executesql('value');\n\
+         end;\n\
+         /\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.dynamic_sql_count"), 0.0);
+}
+
+// ── PR #257 round-22 review regressions ─────────────────────────────────
+
+/// A call-shaped `raise_application_error(…)` outside Oracle is an
+/// ordinary UDF (Codex P2, PR #257 round 22).
+#[test]
+fn raise_application_error_requires_the_oracle_dialect() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure p as\n\
+         begin\n\
+           select dbo.raise_application_error(1);\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.raise_throw_count"), 0.0);
+}
+
+/// A call-shaped `loop(…)` is a UDF, not a loop keyword (Codex P2, PR #257
+/// round 22).
+#[test]
+fn loop_named_function_call_is_not_a_loop() {
+    let m = metrics(
+        "-- sqlfluff:dialect:tsql\n\
+         create procedure p as\n\
+         begin\n\
+           select dbo.loop(1);\n\
+         end\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.loop_count"), 0.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}
+
+/// A recovered MySQL unit ends at its own terminator: statements between
+/// definitions in a shared run stay outside every unit and outside the
+/// body gate (Codex P2, PR #257 round 22).
+#[test]
+fn intervening_statements_stay_outside_recovered_units() {
+    let m = metrics(
+        "-- sqlfluff:dialect:mysql\n\
+         create procedure p() signal sqlstate '45000';\n\
+         select true and false;\n\
+         create procedure q() signal sqlstate '45001';\n",
+    );
+    assert_eq!(get(&m, "sql.procedural.routine_count"), 2.0);
+    // Two entries + two SIGNALs; the SELECT's AND is not procedural body.
+    assert_eq!(get(&m, "sql.procedural.cyclomatic_complexity"), 4.0);
+    assert_eq!(get(&m, "sql.procedural.cognitive_complexity"), 0.0);
+}

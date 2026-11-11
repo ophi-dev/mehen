@@ -1,0 +1,139 @@
+---
+title: "Procedural SQL metrics"
+description: "Control-flow complexity for PL/SQL, T-SQL, MySQL, and BigQuery-scripting routines: cyclomatic and cognitive complexity, blocks, loops, exception handlers, and dynamic SQL."
+keywords: ["plsql complexity", "tsql complexity", "stored procedure metrics", "cyclomatic sql", "dynamic sql"]
+---
+
+Ordinary declarative SQL has no imperative control flow — that is why the
+[`sql.*` family](/metrics/sql/overview) is built around relational structure. Stored procedures,
+functions, triggers, and anonymous blocks are the exception: they *do* branch, loop, raise, and
+retry, so for exactly these regions mehen publishes a classic control-flow metric family,
+`sql.procedural.*`.
+
+Think of it as the boundary between two textbooks: a `SELECT` with ten joins is measured like a
+query (dataflow), while the `IF`/`LOOP`/`EXCEPTION` scaffolding around it is measured like a
+program (control flow). One file can contain both; the two families never double-count a
+construct — `CASE` *expressions* stay in `sql.case.*`, and only `CASE` **statements** (the ones
+closed by `END CASE`) count here.
+
+## What mehen emits
+
+| Key | Type | Description |
+|---|---|---|
+| `sql.procedural.routine_count` | int | Routine definitions: procedures, functions, triggers, incl. package/type-body members. |
+| `sql.procedural.block_count` | int | `BEGIN … END` block openers (plain, `TRY`, `CATCH`); transaction-control `BEGIN` excluded. |
+| `sql.procedural.max_block_depth` | int | Deepest `BEGIN … END` nesting. |
+| `sql.procedural.if_count` | int | `IF` statements plus `ELSIF`/`ELSEIF` branches. |
+| `sql.procedural.loop_count` | int | Loops of any flavor: `LOOP`, `WHILE`, `FOR … LOOP/DO`, `REPEAT`. |
+| `sql.procedural.case_statement_count` | int | Procedural `CASE` statements (`END CASE`), not CASE expressions. |
+| `sql.procedural.exception_handler_count` | int | PL/SQL `EXCEPTION WHEN … THEN` handlers and T-SQL `BEGIN CATCH`. |
+| `sql.procedural.return_count` | int | `RETURN` statements (a PL/SQL header's `RETURN <type>` is not one). |
+| `sql.procedural.raise_throw_count` | int | `RAISE`, `RAISE_APPLICATION_ERROR`, `THROW`, `RAISERROR`, `SIGNAL`, `RESIGNAL`. |
+| `sql.procedural.dynamic_sql_count` | int | `EXECUTE IMMEDIATE`, `sp_executesql`, `EXEC('…')`, `PREPARE … FROM`, `DBMS_SQL`. |
+| `sql.procedural.cyclomatic_complexity` | float | Control-flow paths, Sonar's PL/SQL increments (below). |
+| `sql.procedural.cognitive_complexity` | float | Comprehension burden with nesting penalties (below). |
+| `sql.structural_complexity.max_embedded_query` | float | The worst [structural complexity](/metrics/sql/overview#composite-scores) of the queries embedded in any single routine. |
+
+File-level keys aggregate the whole file. Each routine additionally becomes a function-shaped
+space carrying its own `sql.procedural.cyclomatic_complexity`, `sql.procedural.cognitive_complexity`,
+and embedded `sql.structural_complexity` — the numbers `mehen top-offenders` shows next to a
+routine name. Increments are attributed to the *innermost* enclosing routine, so a subprogram
+declared inside another routine's `DECLARE` section owns its own branches.
+
+## Cyclomatic complexity
+
+The increments follow SonarSource's documented PL/SQL model — each item adds one independent
+path:
+
+- the routine or anonymous block itself (the entry path);
+- each `IF` and each `ELSIF`/`ELSEIF` branch;
+- each loop (`LOOP`, `WHILE`, `FOR`, `REPEAT`);
+- each `WHEN` arm of a procedural `CASE` statement;
+- each exception handler (`WHEN … THEN` in an exception section, `BEGIN CATCH`);
+- each conditional jump: `EXIT WHEN` / `CONTINUE WHEN`;
+- each `RAISE`/`THROW`-family statement;
+- each boolean `AND`/`OR` inside a body (the `AND` of `BETWEEN … AND …` is range syntax, not a
+  boolean).
+
+One documented deviation from Sonar: `WHEN` arms of CASE **expressions** are not counted here,
+because they already belong to the declarative `sql.case.*` family — mehen keeps the two families
+disjoint where Sonar reports a single number.
+
+```sql
+create or replace procedure retry_orders(p_max number) is   -- +1 entry
+begin
+  for i in 1..p_max loop                                     -- +1 loop
+    if mod(i, 2) = 0 and i > 2 then                          -- +1 if, +1 AND
+      update orders set state = 'RETRY' where id = i;
+    elsif i = 1 then                                         -- +1 elsif
+      null;
+    end if;
+    exit when i > 10;                                        -- +1 exit when
+  end loop;
+exception
+  when others then                                           -- +1 handler
+    raise;                                                   -- +1 raise
+end;                                                         -- cyclomatic = 8
+```
+
+## Cognitive complexity
+
+Mirrors the spirit of [code cognitive complexity](/metrics/code/cognitive): what matters is not
+how many paths exist but how hard the flow is to follow.
+
+- Control structures (`IF`, loops, `CASE` statements, exception handlers) cost `1 + nesting`,
+  where nesting counts the enclosing control structures — a branch inside a loop inside a handler
+  costs 3.
+- Flat continuations (`ELSIF`, `ELSE`) cost 1 — they extend a decision the reader already holds.
+- `GOTO` costs 1 (a linear-flow break).
+- Boolean operator *sequences* cost 1 per run of like operators: `a AND b AND c` costs 1,
+  `a AND b OR c` costs 2. Individual operators do not re-charge.
+
+## How the measurement works
+
+mehen's parser (sqruff) gives typed procedural nodes for Oracle, keyword-led statements for
+T-SQL, and honest `Unparsable` runs where a dialect grammar gives up (MySQL routine bodies,
+T-SQL `TRY/CATCH` tails). All three shapes share one property: the *token stream stays
+classified* — comments lex as comments and string literals as literals even inside unparsable
+regions. The procedural scanner therefore runs one dialect-agnostic state machine over the
+classified tokens of procedural regions only (routine definitions, anonymous blocks, and
+unparsable runs that carry unambiguous procedural markers). A comment saying `-- exec this` or a
+literal `'goto'` can never count, and a broken `SELECT` never grows procedural metrics.
+
+The trade-off is honest degradation rather than false precision: when a dialect grammar loses a
+routine's body to an `Unparsable` sibling, the body's increments still count file-level but
+cannot always be attributed to the routine's space — and `sql.parser.unparsable_ratio` tells you
+exactly how much parse confidence the file has lost.
+
+## How to read it
+
+| `cyclomatic` per routine | Interpretation |
+|---|---|
+| 1–10 | Routine business logic. |
+| 11–20 | Worth a focused review; consider extracting helpers. |
+| 21+ | Likely untestable as a unit — decompose. |
+
+Dynamic SQL deserves separate attention regardless of complexity: each occurrence also adds a
+weighted term (+5) to [`sql.change_risk_score`](/metrics/sql/overview#composite-scores), because
+`EXECUTE IMMEDIATE`/`sp_executesql` moves logic outside what any static analyzer — or reviewer —
+can see.
+
+## References
+
+- SonarSource. *PL/SQL language reference — cyclomatic complexity increments.*
+  [Docs](https://docs.sonarsource.com/sonarqube-server/analyzing-source-code/languages/pl-sql).
+- SonarSource. *T-SQL language reference.*
+  [Docs](https://docs.sonarsource.com/sonarqube-server/analyzing-source-code/languages/t-sql).
+- Campbell, G. A. (2018). *Cognitive Complexity — A new way of measuring understandability.*
+  SonarSource white paper. [PDF](https://www.sonarsource.com/resources/cognitive-complexity/).
+- McCabe, T. J. (1976). *A Complexity Measure.* IEEE Transactions on Software Engineering.
+  [DOI](https://doi.org/10.1109/TSE.1976.233837).
+- Piattini, M. & Martínez, A. *Measuring for Database Programs Maintainability.*
+  [DOI](https://doi.org/10.1007/3-540-44469-6_7).
+
+## See also
+
+- [SQL metrics overview](/metrics/sql/overview) — the declarative `sql.*` families.
+- [Cognitive complexity](/metrics/code/cognitive) — the source-code analogue.
+- [Cyclomatic complexity](/metrics/code/cyclomatic) — the classic model this family adapts.
+- [SQL metrics roadmap](/metrics/sql/roadmap) — implementation phases.
