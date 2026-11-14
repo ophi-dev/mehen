@@ -2567,9 +2567,9 @@ dependencies = [
 
 [[package]]
 name = "mago-reporting"
-version = "1.58.2"
+version = "1.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5639aaee2b2467c43f608d14e3528fedfd3426af8f9eecec064a1b5b5686b594"
+checksum = "5b6fbaf03ed20c15962aab920b4bbcaf6ec4f1d9813d72bb5e12aafdd7d2eaaa"
 dependencies = [
  "ariadne",
  "blake3",
@@ -2599,9 +2599,9 @@ dependencies = [
 
 [[package]]
 name = "mago-syntax"
-version = "1.58.2"
+version = "1.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d36dc15d1cec650a36f6099ab4f7ec18fa8266f6f0677eed7831a55dfe95adc8"
+checksum = "4fbf1daffec31461650d52f48434a551d357f384e514130269f403aa232660e4"
 dependencies = [
  "mago-allocator",
  "mago-database",
